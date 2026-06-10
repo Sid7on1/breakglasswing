@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "components": {
+    "CognitiveLoop": {
+      "path": "src/core/cognitive.loop.ts",
+      "purpose": "The main event loop that processes tasks.",
+      "riskLevel": "CRITICAL"
+    },
+    "ActionRouter": {
+      "path": "src/actions/action.router.ts",
+      "purpose": "Routes validated tasks to physical executors.",
+      "riskLevel": "HIGH"
+    },
+    "ContextEngine": {
+      "path": "src/memory/context.engine.ts",
+      "purpose": "Provides LLM with memory injection.",
+      "riskLevel": "MEDIUM"
+    },
+    "Governor": {
+      "path": "src/governor/governor.ts",
+      "purpose": "Vetoes unsafe actions.",
+      "riskLevel": "CRITICAL"
+    }
+  }
+}

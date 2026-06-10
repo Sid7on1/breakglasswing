@@ -1,0 +1,10 @@
+[
+  {
+    "id": "dummy-calculator",
+    "capabilities": [
+      "math",
+      "logging"
+    ],
+    "installedAt": 1781095469420
+  }
+]
