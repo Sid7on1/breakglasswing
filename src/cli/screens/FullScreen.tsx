@@ -1,17 +1,19 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as path from 'path';
-import { Box, Text, useInput, useApp } from 'ink';
+import * as fs from 'fs';
+import * as os from 'os';
+import { Box, Static, Text, useInput, useApp } from 'ink';
 import { SkillLoader, DynamicPersona } from '../skills.loader';
 import { SimpleInput } from '../components/SimpleInput';
 import { cliEvents, LogEntry, MessageEntry } from '../events';
-import { AgentSpinner } from '../components/AgentSpinner';
+import { ToolCallLine } from '../components/ToolCallLine';
+import { WelcomeBanner } from '../components/WelcomeBanner';
 import { GlobalPrompter } from '../prompter';
 import { globalCommandRegistry, CommandResult, CommandContext } from '../commands/registry';
 import '../commands'; 
 import { Footer } from '../components/Footer';
 import { PermissionDialog } from '../components/PermissionDialog';
-import { Transcript } from '../components/Transcript';
-import { StatusLine } from '../components/StatusLine';
+import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
 import { LogView } from '../components/LogView';
 import { DiffView } from '../components/DiffView';
@@ -20,7 +22,6 @@ import { ThinkingText } from '../components/ThinkingText';
 import { InteractiveMenu, MenuOption } from '../components/InteractiveMenu';
 import { InteractivePrompt } from '../components/InteractivePrompt';
 import { getTheme, ThemeName } from '../themes';
-import { useAltScreen } from '../hooks/useAltScreen';
 import { TaskPipeline } from '../../task';
 import { CodebaseIndexer } from '../../graph/indexer';
 import { GraphStore } from '../../graph/graph.store';
@@ -60,13 +61,30 @@ interface FullScreenProps {
   };
 }
 
+const HISTORY_PATH = path.join(os.homedir(), '.breakglass', 'history.json');
+const HISTORY_LIMIT = 100;
+
+function loadPromptHistory(): string[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf-8'));
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string').slice(-HISTORY_LIMIT) : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePromptHistory(history: string[]) {
+  try {
+    fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true });
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history.slice(-HISTORY_LIMIT), null, 2));
+  } catch { /* history persistence is best-effort */ }
+}
+
 export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options }: FullScreenProps) {
   const { exit } = useApp();
   const theme = getTheme(options.theme);
 
   options.governor.mode = options.dangerouslySkipPermissions ? 'bypass' : 'interactive';
-
-  useAltScreen();
 
   const personasRef = React.useRef<Record<string, AgentPersona> | null>(null);
   if (!personasRef.current) {
@@ -126,8 +144,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const logCounterRef = useRef(1);
   const [input, setInput] = useState('');
   const [stashedInput, setStashedInput] = useState<string | null>(null);
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => loadPromptHistory());
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const lastCtrlC = useRef<number>(0);
   const [vetoQuestion, setVetoQuestion] = useState<string | null>(null);
   const [vetoOptions, setVetoOptions] = useState<string[]>([]);
   const [vetoResolver, setVetoResolver] = useState<((answer: string) => void) | null>(null);
@@ -145,6 +164,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [activeMenu, setActiveMenu] = useState<{ type: string, options: MenuOption[], title: string, onSelect?: (opt: MenuOption) => void | Promise<void> } | null>(null);
   const [activePrompt, setActivePrompt] = useState<{ title: string, placeholder?: string, isMasked?: boolean, onResolve: (val: string) => void } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  // Bumped by /clear: remounts the <Static> region so it forgets printed items
+  const [clearEpoch, setClearEpoch] = useState(0);
 
   const COMMAND_REGISTRY: [string, string][] = [
     ['/help', 'Show help'],
@@ -255,13 +276,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (char === 'f' && key.ctrl) {
       setIsSearching(true);
       setSearchQuery('');
+      setShowTranscript(false); // search operates on the logs panel
       cliEvents.emit('status', 'Search: type to filter logs');
       return;
     }
 
     if (char === 'o' && key.ctrl) {
       toggleView();
-      cliEvents.emit('status', showTranscript ? 'Showing logs' : 'Showing transcript');
+      cliEvents.emit('status', showTranscript ? 'Logs panel shown' : 'Logs panel hidden');
       return;
     }
 
@@ -269,10 +291,22 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if ((char === 'c' && key.ctrl) || (char === 'd' && key.ctrl)) {
+    if (char === 'd' && key.ctrl) {
       cliEvents.emit('shutdown');
       exit();
       process.exit(0);
+    }
+
+    if (char === 'c' && key.ctrl) {
+      // Require a double-press so a stray Ctrl+C doesn't kill a running task
+      const now = Date.now();
+      if (now - lastCtrlC.current < 2500) {
+        cliEvents.emit('shutdown');
+        exit();
+        process.exit(0);
+      }
+      lastCtrlC.current = now;
+      cliEvents.emit('status', 'Press Ctrl+C again to exit');
     }
   });
 
@@ -383,6 +417,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     }
     
     if (query === '/clear force') {
+      // Wipe the terminal (incl. scrollback) since Static content lives there
+      process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+      setClearEpoch((e) => e + 1);
       setLogs([]);
       setMessages([]);
       setInput('');
@@ -434,7 +471,11 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    setHistory((prev) => [...prev, query]);
+    setHistory((prev) => {
+      const next = [...prev.filter((h) => h !== query), query].slice(-HISTORY_LIMIT);
+      savePromptHistory(next);
+      return next;
+    });
     setHistoryIndex(-1);
 
     addLog('info', `❯ ${query}`);
@@ -480,7 +521,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     cliEvents.emit('message', { id: msgId, role: 'user', content: query, timestamp: new Date() } as MessageEntry);
     const routedAgent = routeQuery(query);
     const active = personasRef.current![routedAgent] || personasRef.current!.bimax;
+    const msgCountBefore = active.messages.length;
 
+    cliEvents.emit('thinking_clear');
     cliEvents.emit('spinner_state', 'responding', `Generating...`);
     if (routedAgent !== defaultAgent) {
       addLog('info', `Routing to ${routedAgent} (${routedAgent === 'hermes' ? 'read/search' : routedAgent === 'opencode' ? 'coding' : 'OS'})`);
@@ -495,7 +538,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setStreamMeta((prev) => ({ ...prev, elapsed: Math.floor((Date.now() - streamStart) / 1000) }));
     }, 1000);
 
-    let currentToolCalls: import('../events').ToolCallEntry[] = [];
+    const currentToolCalls: import('../events').ToolCallEntry[] = [];
     const onToolCall = (tc: import('../events').ToolCallEntry) => {
       currentToolCalls.push(tc);
       setStreamingToolCalls([...currentToolCalls]);
@@ -534,17 +577,25 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.emit('cost_update', totalChars);
       cliEvents.off('tool_call', onToolCall);
       cliEvents.off('tool_call_result', onToolCallResult);
+      cliEvents.emit('thinking_clear');
 
-      const msgs = active.messages;
-      const lastResp = [...msgs].reverse().find((m: any) => m.role === 'assistant');
-      if (lastResp) {
-        let cleanedContent = lastResp.content.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
-        cleanedContent = cleanedContent.replace(/<tool_call>[\s\S]*/, '').trim();
+      // Collect every assistant segment from this turn (multi-step tool loops
+      // produce several), so nothing the model said gets dropped.
+      const turnContent = active.messages
+        .slice(msgCountBefore)
+        .filter((m: any) => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim())
+        .map((m: any) => m.content.trim())
+        .join('\n\n')
+        .replace(/<think>[\s\S]*?<\/think>/g, '')
+        .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+        .replace(/<tool_call>[\s\S]*/, '')
+        .trim();
 
+      if (turnContent || currentToolCalls.length > 0) {
         cliEvents.emit('message', {
           id: `msg-${Date.now()}-resp`,
           role: 'assistant',
-          content: cleanedContent,
+          content: turnContent,
           toolCalls: currentToolCalls,
           timestamp: new Date(),
         } as import('../events').MessageEntry);
@@ -561,6 +612,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       clearInterval(metaTimer);
       cliEvents.off('tool_call', onToolCall);
       cliEvents.off('tool_call_result', onToolCallResult);
+      cliEvents.emit('thinking_clear');
       setStreamingText('');
       setStreamingToolCalls([]);
       setIsProcessing(false);
@@ -713,94 +765,56 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ? logs.filter((l) => l.text.toLowerCase().includes(searchQuery.toLowerCase()))
     : logs;
 
+  const staticItems: Array<{ kind: 'welcome'; id: string } | { kind: 'msg'; id: string; msg: MessageEntry }> = [
+    { kind: 'welcome', id: '__welcome__' },
+    ...messages.map((m) => ({ kind: 'msg' as const, id: m.id, msg: m })),
+  ];
+
   return (
     <>
-      <Box flexDirection="column" width="100%" height="100%" padding={1}>
-        <StatusLine
-          theme={theme}
-          model={options.model || 'default'}
-          governorBypassed={options.governor.mode === 'bypass'}
-          streamMeta={streamingText || streamingToolCalls.length > 0 ? streamMeta : undefined}
-        />
-
-        {showTranscript ? (
-          <Transcript messages={messages} theme={theme} searchQuery={isSearching ? searchQuery : ''} />
+      {/* Completed content is printed once into scrollback and never redrawn —
+          this is what prevents ghost frames on resize/overflow. */}
+      <Static key={`epoch-${clearEpoch}`} items={staticItems}>
+        {(item) => item.kind === 'welcome' ? (
+          <WelcomeBanner
+            key={item.id}
+            theme={theme}
+            model={options.model || 'default'}
+            agent={options.agent}
+            governorBypassed={options.governor.mode === 'bypass'}
+          />
         ) : (
-          <LogView logs={filteredLogs} theme={theme} searchQuery={isSearching ? searchQuery : ''} />
+          <MessageRow key={item.id} msg={item.msg} theme={theme} />
+        )}
+      </Static>
+
+      <Box flexDirection="column" width="100%" paddingX={1}>
+        {!showTranscript && (
+          <LogView logs={filteredLogs.slice(-12)} theme={theme} searchQuery={isSearching ? searchQuery : ''} />
         )}
 
         <Box flexDirection="column" paddingX={1} marginTop={1} minHeight={1}>
           {(isProcessing || streamingText || streamingToolCalls.length > 0) ? (
             <Box flexDirection="column" width="100%">
-              <Text bold color={theme.accent}>Assistant</Text>
-              
-              {isProcessing && !streamingText.trim() && (
-                <Box marginTop={1}>
-                  <ThinkingText theme={theme} />
+              {streamingToolCalls.length > 0 && (
+                <Box flexDirection="column" marginBottom={1}>
+                  {streamingToolCalls.map(call => (
+                    <ToolCallLine key={call.id} call={call} theme={theme} />
+                  ))}
                 </Box>
               )}
 
               {streamingText.trim() ? (
-                <Box marginTop={1}>
-                  <Markdown theme={theme}>{streamingText}</Markdown>
+                <Box flexDirection="row">
+                  <Text color={theme.accent}>● </Text>
+                  <Box flexDirection="column" flexGrow={1}>
+                    <Markdown theme={theme}>{streamingText}</Markdown>
+                  </Box>
                 </Box>
               ) : null}
-              
-              {streamingToolCalls.length > 0 && (
-                <Box flexDirection="column" marginTop={1}>
-                  {streamingToolCalls.map(call => {
-                    const isError = call.status === 'error';
-                    const isRunning = call.status !== 'success' && !isError;
-                    const statusColor = call.status === 'success' ? theme.success
-                      : isError ? theme.error
-                      : theme.warning;
 
-                    let displayCommand = '';
-                    try {
-                      const parsed = JSON.parse(call.input);
-                      if (call.toolName === 'BashTool' && parsed.command) {
-                        displayCommand = parsed.command;
-                      } else if ((call.toolName === 'WriteFileTool' || call.toolName === 'ReadFileTool') && parsed.filePath) {
-                        displayCommand = parsed.filePath.split('/').pop() || parsed.filePath;
-                      } else {
-                        displayCommand = call.input.substring(0, 60).replace(/\n/g, ' ');
-                      }
-                    } catch {
-                      displayCommand = call.input.substring(0, 60).replace(/\n/g, ' ');
-                    }
-
-                    const icon = call.toolName === 'BashTool' ? '⚡'
-                      : call.toolName === 'WriteFileTool' ? '📝'
-                      : call.toolName === 'ReadFileTool' ? '👀'
-                      : '🔧';
-
-                    return (
-                      <Box key={call.id} flexDirection="column" marginLeft={2}>
-                        <Box>
-                          <Text color={statusColor} bold>
-                            {'  ⎿ '}{icon} {call.toolName.replace('Tool', '')}
-                          </Text>
-                          <Text color={theme.subtle}>
-                            {' '}· {displayCommand}
-                          </Text>
-                          <Text color={theme.inactive}>
-                            {' '}{call.status === 'success' ? '✓' : isError ? '✗' : '...'}
-                          </Text>
-                          {isRunning && (
-                            <Box marginLeft={1}>
-                              <AgentSpinner theme={theme} />
-                            </Box>
-                          )}
-                        </Box>
-                        {isError && Boolean(call.output) && (
-                          <Box marginLeft={4} borderStyle="round" borderColor={theme.error} paddingX={1}>
-                            <Text color={theme.error}>{call.output.substring(0, 200)}</Text>
-                          </Box>
-                        )}
-                      </Box>
-                    );
-                  })}
-                </Box>
+              {isProcessing && !streamingText.trim() && (
+                <ThinkingText theme={theme} />
               )}
             </Box>
           ) : (
@@ -810,18 +824,18 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           )}
         </Box>
 
-        <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={theme.border}>
-          {Boolean(vetoQuestion) && (
-            <PermissionDialog
-              theme={theme}
-              question={vetoQuestion as string}
-              options={Array.isArray(vetoOptions) && vetoOptions.length > 0 ? vetoOptions : ['Yes', 'No', 'Always']}
-              onSubmit={handleVetoSubmit}
-              onCancel={handleVetoCancel}
-            />
-          )}
+        {Boolean(vetoQuestion) && (
+          <PermissionDialog
+            theme={theme}
+            question={vetoQuestion as string}
+            options={Array.isArray(vetoOptions) && vetoOptions.length > 0 ? vetoOptions : ['Yes', 'No', 'Always']}
+            onSubmit={handleVetoSubmit}
+            onCancel={handleVetoCancel}
+          />
+        )}
 
-          <Box flexDirection="column" paddingX={1} marginTop={1}>
+        <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder}>
+          <Box flexDirection="column" paddingX={1}>
             {suggestions.length > 0 && (
               <Box 
                 flexDirection="column" 
@@ -934,6 +948,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         model={options.model}
         agent={options.agent}
         verbose={options.verbose}
+        streamMeta={isProcessing || streamingText ? streamMeta : undefined}
       />
     </>
   );

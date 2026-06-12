@@ -51,9 +51,9 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       };
     } catch (e: any) {
       if (e.killed) {
-        throw new Error(`Command timed out after ${args.timeout ?? 30_000}ms: ${args.command}`);
+        throw new Error(`Command timed out after ${args.timeout ?? 30_000}ms: ${args.command}`, { cause: e });
       }
-      throw new Error(`Bash execution failed: ${e.message}`);
+      throw new Error(`Bash execution failed: ${e.message}`, { cause: e });
     }
   }
 }, governor);

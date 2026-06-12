@@ -1,7 +1,7 @@
 import { SkillLoader } from './skills.loader';
 
 let customRules: [RegExp, string][] = [];
-let builtInAgents: string[] = ['bimax', 'hermes', 'opencode', 'openclaw'];
+const builtInAgents: string[] = ['bimax', 'hermes', 'opencode', 'openclaw'];
 
 export function setCustomRoutingRules(rules: string[][]) {
   customRules = rules.map(([pattern, agent]) => [new RegExp(pattern, 'i'), agent]);

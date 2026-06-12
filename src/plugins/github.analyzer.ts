@@ -22,7 +22,7 @@ export class GithubAnalyzer {
       Logger.info(`[GithubAnalyzer] Parsed package.json: ${analysis.name} provides ${analysis.providesCapabilities.join(', ')}`);
       return analysis;
     } catch (e: any) {
-      throw new Error(`[GithubAnalyzer] Failed to read or parse package.json: ${e.message}. Is this a valid Node.js plugin?`);
+      throw new Error(`[GithubAnalyzer] Failed to read or parse package.json: ${e.message}. Is this a valid Node.js plugin?`, { cause: e });
     }
   }
 }

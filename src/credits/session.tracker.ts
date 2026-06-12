@@ -24,6 +24,8 @@ export class SessionTracker {
         }
       }
     }, 60000);
+    // Don't let the GC timer keep the process alive
+    this.gcInterval.unref();
   }
 
   pingSession(sessionId: string) {

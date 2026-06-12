@@ -205,7 +205,7 @@ export class StaticAnalyzer implements IStaticAnalyzer {
         }
       } else if (ts.isStatement(node) && !ts.isBlock(node)) {
         const stmtId = `stmt:${relPath}:${node.pos}`;
-        let stmtName = ts.SyntaxKind[node.kind];
+        const stmtName = ts.SyntaxKind[node.kind];
         
         this.addNode({
           id: stmtId,
@@ -261,7 +261,7 @@ export class StaticAnalyzer implements IStaticAnalyzer {
           if (importPath.startsWith('.')) {
             let resolvedExt = '';
             const absoluteImportDir = path.dirname(sourceFile.fileName);
-            let resolvedPath = path.resolve(absoluteImportDir, importPath);
+            const resolvedPath = path.resolve(absoluteImportDir, importPath);
             
             // Basic resolution (very simplified, usually TS Compiler API does this better)
             if (fs.existsSync(resolvedPath + '.ts')) resolvedExt = '.ts';

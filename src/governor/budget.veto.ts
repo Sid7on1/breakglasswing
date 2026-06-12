@@ -97,15 +97,11 @@ export class BudgetVeto {
         throw new GovernorVetoError('Budget limit exceeded.');
       }
       
-      try {
-        const { actualCostUsd, result } = await action();
-        this.currentDailySpend += actualCostUsd;
-        await this.savePersistentSpendAsync();
-        Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
-        return result;
-      } catch (e) {
-        throw e;
-      }
+      const { actualCostUsd, result } = await action();
+      this.currentDailySpend += actualCostUsd;
+      await this.savePersistentSpendAsync();
+      Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
+      return result;
     });
   }
 }

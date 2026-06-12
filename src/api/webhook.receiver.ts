@@ -6,6 +6,7 @@ import * as http from 'http';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { TaskPipeline } from '../task';
+import { ensureJwtSecret } from '../cli/env.loader';
 
 export class WebhookReceiver {
   private server?: http.Server;
@@ -65,8 +66,6 @@ export class WebhookReceiver {
         timestamp: new Date().toISOString()
       });
     });
-
-    const { ensureJwtSecret } = require('../cli/env.loader');
 
     const jwtMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
       const token = req.headers.authorization?.split(' ')[1];

@@ -14,7 +14,11 @@ export class ShortTermMemory {
   }
 
   getRecentContext(count: number = 10): Message[] {
-    return this.messages.slice(-count);
+    // System messages are always preserved; the remaining budget goes to the newest messages.
+    const systemMessages = this.messages.filter(m => m.role === 'system');
+    const otherMessages = this.messages.filter(m => m.role !== 'system');
+    const remaining = Math.max(0, count - systemMessages.length);
+    return [...systemMessages, ...otherMessages.slice(-remaining)];
   }
 
   private prune() {
@@ -46,6 +50,8 @@ export class ShortTermMemory {
       keepMessages.unshift(msg);
     }
 
-    this.messages = [...systemMessages, ...keepMessages];
+    // Enforce the message-count cap on top of the token budget
+    const maxOthers = Math.max(0, this.MAX_MESSAGES - systemMessages.length);
+    this.messages = [...systemMessages, ...keepMessages.slice(-maxOthers)];
   }
 }

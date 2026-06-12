@@ -4,6 +4,7 @@ import { Governor } from '../governor/governor';
 import { TaskPipeline } from '../task';
 import { CodebaseIndexer } from '../graph/indexer';
 import { GraphStore } from '../graph/graph.store';
+import { cliEvents, ToolCallEntry } from './events';
 
 export async function executePrintMode(prompt: string, options: {
   agent: string;
@@ -31,12 +32,33 @@ export async function executePrintMode(prompt: string, options: {
   const PersonaClass = personaMap[agent] || BiMaxPersona;
   const persona = new PersonaClass(toolRegistry, llmAdapter);
 
+  // Surface tool activity on stderr so stdout stays clean for piping
+  const onToolStart = (tc: ToolCallEntry) => {
+    if (options.printWithTools || options.verbose) {
+      process.stderr.write(`⏺ ${tc.toolName} ${tc.input.slice(0, 120)}\n`);
+    }
+  };
+  const onToolResult = (tc: ToolCallEntry) => {
+    if (options.printWithTools || options.verbose) {
+      const firstLine = (tc.output || '').split('\n')[0].slice(0, 120);
+      process.stderr.write(`  ⎿ ${tc.status === 'error' ? '✗' : '✓'} ${firstLine}\n`);
+    }
+  };
+  cliEvents.on('tool_call', onToolStart);
+  cliEvents.on('tool_call_result', onToolResult);
+
   const originalLog = console.log;
   console.log = (...args) => {
-    process.stdout.write(args.join(' ') + '\n');
+    process.stderr.write(args.join(' ') + '\n');
   };
-  const output = await persona.execute(prompt, (token: string) => {
-    process.stdout.write(token);
-  });
-  console.log = originalLog;
+  try {
+    await persona.execute(prompt, (token: string) => {
+      process.stdout.write(token);
+    });
+    process.stdout.write('\n');
+  } finally {
+    console.log = originalLog;
+    cliEvents.off('tool_call', onToolStart);
+    cliEvents.off('tool_call_result', onToolResult);
+  }
 }

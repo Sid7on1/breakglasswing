@@ -54,6 +54,9 @@ class AppEventEmitter extends EventEmitter {
 }
 
 export const cliEvents = new AppEventEmitter();
+// Several components subscribe per-render/per-turn; raise the cap so Node
+// doesn't print MaxListenersExceededWarning during long sessions.
+cliEvents.setMaxListeners(50);
 
 export type AgentState = 'idle' | 'thinking' | 'decomposing' | 'executing' | 'vetoing' | 'blocked' | 'responding';
 
@@ -94,7 +97,7 @@ export interface MessageEntry {
 // - veto_prompt: (question: string, options: string[], resolve: (answer: string) => void) => Triggers permission overlay
 // - veto_answer: (answer: string) => Governor veto response
 // - clear: () => Clears logs
-// - spinner_state: (state: AgentState, message?: string) => Updates the AgentSpinner
+// - spinner_state: (state: AgentState, message?: string) => Updates the footer status indicator
 // - search: (query: string) => Search transcript
 // - mode_change: (mode: string) => Mode change
 // - status: (text: string) => Status bar update
@@ -102,3 +105,7 @@ export interface MessageEntry {
 // - resume_stashed: () => Resume stashed prompt
 // - shutdown: () => Graceful shutdown
 // - diff: (diffText: string) => Display inline diff
+// - thinking: (text: string) => Model's internal reasoning stream (status display only)
+// - thinking_clear: () => Reset the thinking display between turns
+// - tool_call: (call: ToolCallEntry) => A tool started running
+// - tool_call_result: (call: ToolCallEntry) => A tool finished (status success/error)

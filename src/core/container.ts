@@ -89,7 +89,10 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   llmAdapter.setBudgetVeto(governor.budget);
 
   // Graph Engine (Playground)
-  const projectRoot = cfg.workspaceRoot || process.cwd();
+  // Always operate on the directory the CLI was launched from. A stale
+  // workspaceRoot persisted in config.json must not redirect indexing
+  // (it caused fatal boot crashes when it pointed outside the project).
+  const projectRoot = process.cwd();
   const graphStore = new GraphStore(path.join(projectRoot, '.breakglass/graph', 'playground.json'));
   await graphStore.loadFromDisk();
   

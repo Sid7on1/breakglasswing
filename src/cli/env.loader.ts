@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as readline from 'readline';
+import * as crypto from 'crypto';
 
 export function loadGlobalEnv(): void {
   const globalEnvPath = path.join(os.homedir(), '.breakglass', '.env');
@@ -63,7 +64,6 @@ export function saveApiKeyToEnv(envVar: string, key: string): void {
 export function ensureJwtSecret(): string {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
   
-  const crypto = require('crypto');
   const newSecret = crypto.randomBytes(32).toString('hex');
   saveApiKeyToEnv('JWT_SECRET', newSecret);
   process.env.JWT_SECRET = newSecret;

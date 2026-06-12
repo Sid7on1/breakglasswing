@@ -26,22 +26,39 @@ export function PermissionDialog({ theme, question, options, onSubmit, onCancel 
     if (key.escape) {
       onCancel();
     }
+    // Number hotkeys: 1..9 select directly
+    const num = parseInt(char, 10);
+    if (!isNaN(num) && num >= 1 && num <= options.length) {
+      onSubmit(options[num - 1]);
+    }
   });
 
   return (
-    <Box flexDirection="column" paddingX={1} paddingY={0}>
-      <Box>
-        <Text color={theme.permission} bold>{'>>'}</Text>
-        <Text color={theme.text}> {question.slice(0, 60)}</Text>
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={theme.permission}
+      paddingX={2}
+      paddingY={0}
+      marginX={1}
+    >
+      <Box marginTop={1}>
+        <Text color={theme.permission} bold>Permission required</Text>
       </Box>
-      <Box>
+      <Box marginTop={1}>
+        <Text color={theme.text}>{question}</Text>
+      </Box>
+      <Box flexDirection="column" marginTop={1} marginBottom={1}>
         {options.map((opt, i) => (
-          <Box key={opt} marginRight={2}>
-            <Text color={i === selectedIndex ? theme.permission : theme.subtle}>
-              {i === selectedIndex ? '[' : ' '}{opt}{i === selectedIndex ? ']' : ' '}
+          <Box key={opt}>
+            <Text color={i === selectedIndex ? theme.permission : theme.subtle} bold={i === selectedIndex}>
+              {i === selectedIndex ? '❯ ' : '  '}{i + 1}. {opt}
             </Text>
           </Box>
         ))}
+      </Box>
+      <Box marginBottom={1}>
+        <Text color={theme.subtle}>↑/↓ select · Enter confirm · 1-{options.length} quick pick · Esc cancel</Text>
       </Box>
     </Box>
   );

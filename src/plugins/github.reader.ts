@@ -34,13 +34,13 @@ export class GithubReader {
       } catch (err: any) {
         // Cleanup if validation fails
         await fs.rm(tempDir, { recursive: true, force: true });
-        throw new Error(`Integrity check failed: ${err.message}`);
+        throw new Error(`Integrity check failed: ${err.message}`, { cause: err });
       }
 
       Logger.info(`[GithubReader] ✅ Cloned and verified successfully into ${tempDir}`);
       return tempDir;
     } catch (e: any) {
-      throw new Error(`[GithubReader] Failed to clone or verify repo: ${e.message}`);
+      throw new Error(`[GithubReader] Failed to clone or verify repo: ${e.message}`, { cause: e });
     }
   }
 }

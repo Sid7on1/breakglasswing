@@ -2,7 +2,7 @@
   "name": "EvolutionSkill",
   "roleDescription": "You are the Evolutionary architect. Your job is Autonomous Self-Evolution. You analyze the current codebase, identify suboptimal patterns or incomplete components, and rewrite them. You must strictly obey the Architecture Guardian's constraints. Do not proceed with an evolution if the sandbox rejects it.",
   "allowedTools": [
-    "GraphTool",
+    "GraphQueryTool",
     "ReadFileTool",
     "WriteFileTool",
     "BashTool"

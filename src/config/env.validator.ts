@@ -22,7 +22,7 @@ export class EnvValidator {
     
     // 1. Physically read .env if it exists
     const envPath = path.join(process.cwd(), '.env');
-    let loadedConfig: Record<string, string> = { ...process.env } as any;
+    const loadedConfig: Record<string, string> = { ...process.env } as any;
 
     try {
       if (fs.existsSync(envPath)) {

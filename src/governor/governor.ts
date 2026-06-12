@@ -95,25 +95,20 @@ export class Governor implements IGovernor {
     const shouldAsk = isDestructiveTask || this.mode === 'strict';
 
     if (shouldAsk) {
-      try {
-        const label = taskType === 'FILE_WRITE' ? `Write ${payload.targetPath || payload.path || 'file'}`
-          : taskType === 'OS_COMMAND' ? `Run: ${(payload.command || '').slice(0, 60)}`
-          : `${taskType}`;
-          
-        const question = `Allow? ${label}`;
-        const answer = await GlobalPrompter.ask(question, ['Yes', 'No', 'Always Allow This Tool']);
-        
-        if (answer === 'No') {
-          throw new GovernorVetoError("User explicitly denied this action.");
-        }
-        
-        if (answer === 'Always Allow This Tool') {
-          this.addRule({ tool: taskType, effect: 'allow', persistent: true });
-          Logger.info(`[Governor] Added persistent allow rule for ${taskType}`);
-        }
-        
-      } catch (e: any) {
-        throw e; // re-throw GovernorVetoError
+      const label = taskType === 'FILE_WRITE' ? `Write ${payload.targetPath || payload.path || 'file'}`
+        : taskType === 'OS_COMMAND' ? `Run: ${(payload.command || '').slice(0, 60)}`
+        : `${taskType}`;
+
+      const question = `Allow? ${label}`;
+      const answer = await GlobalPrompter.ask(question, ['Yes', 'No', 'Always Allow This Tool']);
+
+      if (answer === 'No') {
+        throw new GovernorVetoError("User explicitly denied this action.");
+      }
+
+      if (answer === 'Always Allow This Tool') {
+        this.addRule({ tool: taskType, effect: 'allow', persistent: true });
+        Logger.info(`[Governor] Added persistent allow rule for ${taskType}`);
       }
     }
 

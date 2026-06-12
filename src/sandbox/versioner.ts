@@ -26,6 +26,6 @@ export class Versioner {
   async clearSnapshot(backupPath: string): Promise<void> {
     try {
       await fs.unlink(backupPath);
-    } catch (e) {}
+    } catch { /* snapshot already gone */ }
   }
 }

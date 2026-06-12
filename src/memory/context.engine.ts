@@ -36,9 +36,9 @@ export class ContextEngine {
     const availableTokensForShortTerm = this.MAX_TOKENS - (taskTokens + ltTokens + fixedPromptTokens);
     
     // 3. Slice Short-Term Context to fit budget
-    let recentMessages = this.shortTerm.getRecentContext(50);
+    const recentMessages = this.shortTerm.getRecentContext(50);
     let shortTermTokens = 0;
-    let allowedMessages = [];
+    const allowedMessages = [];
 
     // Traverse from newest to oldest
     for (let i = recentMessages.length - 1; i >= 0; i--) {

@@ -39,10 +39,10 @@ export class SessionStore {
         const data = await fs.readFile(path.join(SESSION_DIR, file), 'utf-8');
         const lines = data.split('\n').filter(l => l.trim());
         for (const line of lines) {
-          try { items.push(JSON.parse(line)); } catch {}
+          try { items.push(JSON.parse(line)); } catch { /* skip malformed line */ }
         }
       }
-    } catch {}
+    } catch { /* no session dir yet */ }
     return items;
   }
 
@@ -59,9 +59,9 @@ export class SessionStore {
       const data = await fs.readFile(path.join(SESSION_DIR, file), 'utf-8');
       const lines = data.split('\n').filter(l => l.trim());
       for (const line of lines) {
-        try { items.push(JSON.parse(line)); } catch {}
+        try { items.push(JSON.parse(line)); } catch { /* skip malformed line */ }
       }
-    } catch {}
+    } catch { /* session file missing or unreadable */ }
     return items;
   }
 }

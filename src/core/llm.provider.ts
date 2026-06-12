@@ -18,6 +18,7 @@ export interface ChatOptions {
 
 export type ChatEvent =
   | { type: 'token'; text: string }
+  | { type: 'thinking'; text: string } // Model's internal reasoning — never show as the reply
   | { type: 'tool_call'; id: string; name: string; args: string } // Note: args comes in as a string
   | { type: 'usage'; prompt: number; completion: number }
   | { type: 'error'; message: string; recoverable: boolean }

@@ -93,7 +93,7 @@ ${lastError ? `\nWARNING: Your previous attempt failed validation. Please correc
         Logger.warn(`[Decomposer] ⚠ Validation Failed on attempt ${attempt}. Injecting auto-correction.`);
         lastError = e.message;
         if (attempt >= maxRetries) {
-          throw new Error(`[Decomposer] FATAL: Failed to generate valid task graph after ${maxRetries} attempts. Last error: ${lastError}`);
+          throw new Error(`[Decomposer] FATAL: Failed to generate valid task graph after ${maxRetries} attempts. Last error: ${lastError}`, { cause: e });
         }
       }
     }

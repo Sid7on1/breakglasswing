@@ -38,7 +38,7 @@ export class CodebaseIndexer {
         if (stats.size > 100) { // arbitrary small size to check if it's empty
           needsIndexing = false;
         }
-      } catch (e) {}
+      } catch { /* stat failed — treat as needing indexing */ }
     }
 
     if (!force && !needsIndexing) {
@@ -49,16 +49,21 @@ export class CodebaseIndexer {
       this.graphStore.clear(); // Clear existing graph if forced
     }
 
-    console.log(`\n🤖 Hey bro, I notice this is a new codebase! I'm doing a physical AST index right now... this is gonna take a sec.`);
+    console.log(`Indexing codebase (AST)... this may take a moment.`);
     Logger.info(`[CodebaseIndexer] Triggering autonomous indexing for ${this.projectRoot}`);
-    
-    // 1. Physical Indexing
-    this.analyzer.analyzeProject();
-    await this.graphStore.saveToDisk();
-    
+
+    // 1. Physical Indexing — never let an unreadable/invalid tsconfig kill the boot
+    try {
+      this.analyzer.analyzeProject();
+      await this.graphStore.saveToDisk();
+    } catch (e: any) {
+      Logger.warn(`[CodebaseIndexer] Indexing skipped: ${e.message}`);
+      return;
+    }
+
     const nodeCount = this.graphStore.getGraph().nodes.size;
-    console.log(`\n✅ Physical indexing complete! Extracted ${nodeCount} nodes from the codebase.`);
-    
+    console.log(`Codebase index complete: ${nodeCount} nodes extracted.`);
+
     // 2. Interactive LLM Prompt
     if (process.stdout.isTTY) {
       await this.promptForSemanticIngestion(nodeCount);

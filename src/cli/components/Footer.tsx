@@ -8,9 +8,10 @@ interface FooterProps {
   model?: string;
   agent: string;
   verbose: boolean;
+  streamMeta?: { chars: number; elapsed: number };
 }
 
-export function Footer({ theme, model, agent, verbose }: FooterProps) {
+export function Footer({ theme, model, agent, verbose, streamMeta }: FooterProps) {
   const [status, setStatus] = useState('idle');
   const [statusText, setStatusText] = useState('Ready');
   const [mode, setMode] = useState<string | null>(null);
@@ -36,20 +37,25 @@ export function Footer({ theme, model, agent, verbose }: FooterProps) {
     };
   }, []);
 
+  const isIdle = status === 'idle';
+
   return (
     <Box marginTop={1} paddingX={1}>
-      <Text color={theme.border}>
-        {'\u2500'.repeat(4)}{' '}
+      <Text color={isIdle ? theme.subtle : theme.accent}>
+        {isIdle ? '✻' : '✶'}{' '}
       </Text>
-      <Text color={theme.inactive}>
-        {status} · {statusText}
+      <Text color={isIdle ? theme.subtle : theme.inactive}>
+        {statusText}
       </Text>
       <Box flexGrow={1} />
+      {streamMeta && streamMeta.chars > 0 && (
+        <Text color={theme.subtle}>{streamMeta.chars} chars · {streamMeta.elapsed}s{'  '}</Text>
+      )}
       <Text color={theme.subtle}>
-        /help · /config set skipPerms true{' '}
+        /help · Ctrl+O logs · Esc stash{'  '}
       </Text>
       <Text color={theme.inactive}>
-        {mode ? `${mode} · ` : ''}{model || 'default'} · {agent}
+        {mode ? `${mode} · ` : ''}{(model || 'default').split('/').pop()} · {agent}
         {verbose ? ` · ~${totalTokens}tok` : ''}
       </Text>
     </Box>

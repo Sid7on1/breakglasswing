@@ -17,9 +17,7 @@ describe('Governor', () => {
   let governor: Governor;
 
   beforeEach(async () => {
-    try {
-      await fs.rm(path.join(process.cwd(), '.breakglass/credits'), { recursive: true, force: true });
-    } catch (e) {}
+    await fs.rm(path.join(process.cwd(), '.breakglass/credits'), { recursive: true, force: true }).catch(() => undefined);
     const eventBus = new EventBus();
     governor = new Governor(eventBus);
   });

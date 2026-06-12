@@ -27,6 +27,8 @@ export function initPolicyEngine() {
         setTimeout(loadPolicy, 100); 
       }
     });
+    // Don't let the watcher keep the process alive
+    policyWatcher.unref();
   } catch (e) {
     // Ignore watch errors if platform doesn't support it
   }

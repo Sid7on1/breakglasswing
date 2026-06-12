@@ -3,6 +3,66 @@ import { Logger } from '../utils';
 import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 
+/**
+ * Streaming filter that separates <think>...</think> spans from visible content.
+ * Reasoning models (MiniMax, DeepSeek, QwQ...) interleave thinking inside content;
+ * without this the internal monologue leaks into the user-facing reply.
+ */
+export class ThinkTagFilter {
+  private pending = '';
+  private inThink = false;
+  private static readonly OPEN = '<think>';
+  private static readonly CLOSE = '</think>';
+
+  /** Returns visible text and thinking text extracted from this token. */
+  process(token: string): { text: string; thinking: string } {
+    this.pending += token;
+    let text = '';
+    let thinking = '';
+
+    for (;;) {
+      const tag = this.inThink ? ThinkTagFilter.CLOSE : ThinkTagFilter.OPEN;
+      const idx = this.pending.indexOf(tag);
+      if (idx !== -1) {
+        const before = this.pending.slice(0, idx);
+        if (this.inThink) thinking += before; else text += before;
+        this.pending = this.pending.slice(idx + tag.length);
+        this.inThink = !this.inThink;
+        continue;
+      }
+      // Hold back any suffix that could be the start of the tag split across chunks
+      const hold = this.partialTagSuffix(this.pending, tag);
+      const emit = this.pending.slice(0, this.pending.length - hold);
+      if (this.inThink) thinking += emit; else text += emit;
+      this.pending = this.pending.slice(this.pending.length - hold);
+      break;
+    }
+
+    return { text, thinking };
+  }
+
+  /** Flush whatever is held back (call when the stream ends). */
+  flush(): { text: string; thinking: string } {
+    const rest = this.pending;
+    this.pending = '';
+    if (this.inThink) return { text: '', thinking: rest };
+    return { text: rest, thinking: '' };
+  }
+
+  private partialTagSuffix(s: string, tag: string): number {
+    const max = Math.min(s.length, tag.length - 1);
+    for (let len = max; len > 0; len--) {
+      if (s.endsWith(tag.slice(0, len))) return len;
+    }
+    return 0;
+  }
+}
+
+/** Remove <think> spans from a complete (non-streamed) response. */
+export function stripThink(content: string): string {
+  return content.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^[\s\S]*<\/think>/, '').trim();
+}
+
 export class LlmAdapter implements LLMProvider {
   public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
   public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
@@ -69,7 +129,7 @@ export class LlmAdapter implements LLMProvider {
       }
       
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
-      const content = response.choices[0].message.content;
+      const content = stripThink(response.choices[0].message.content || "");
       return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) {
@@ -111,7 +171,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return { status: 200, content: response.choices[0].message.content || "", retryAfter: null };
+      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
@@ -151,7 +211,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return { status: 200, content: response.choices[0].message.content || "", retryAfter: null };
+      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
@@ -192,7 +252,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return JSON.parse(response.choices[0].message.content || "{}");
+      return JSON.parse(stripThink(response.choices[0].message.content || "") || "{}");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       this.apiKeyManager.reportKeyResult(kr.idx!, 500);
@@ -226,7 +286,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return response.choices[0].message.content || "";
+      return stripThink(response.choices[0].message.content || "");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       this.apiKeyManager.reportKeyResult(kr.idx!, 500);
@@ -305,28 +365,36 @@ export class LlmAdapter implements LLMProvider {
       }
 
       const stream: any = await client.chat.completions.create(requestOptions, { timeout: this.requestTimeout, signal: options.signal as any });
-      
+
       let activeToolCallId = '';
       let activeToolName = '';
       let activeToolArgs = '';
+      const thinkFilter = new ThinkTagFilter();
 
       const iterator = stream[Symbol.asyncIterator]();
       while (true) {
         const nextPromise = iterator.next();
-        const timeoutPromise = new Promise<any>((_, reject) => 
-          setTimeout(() => reject(new Error("Stream read timeout: API stopped responding mid-stream (15s idle)")), 15000)
+        const timeoutPromise = new Promise<any>((_, reject) =>
+          setTimeout(() => reject(new Error("Stream read timeout: no data from the API for 60s (check provider status / API key)")), 60000)
         );
-        
+
         const result = await Promise.race([nextPromise, timeoutPromise]);
         if (result.done) break;
-        
-        const chunk = result.value;
-        require('fs').appendFileSync('/Users/vishsiddharth/Desktop/minimax_debug.log', JSON.stringify(chunk) + '\\n');
 
-        // Yield tokens
+        const chunk = result.value;
+
+        // Reasoning channel (MiniMax/DeepSeek-style): never surface as the reply
+        const reasoning = chunk.choices[0]?.delta?.reasoning_content;
+        if (reasoning) {
+          yield { type: 'thinking', text: reasoning };
+        }
+
+        // Yield tokens, with inline <think> spans diverted to the thinking channel
         const token = chunk.choices[0]?.delta?.content;
         if (token) {
-          yield { type: 'token', text: token };
+          const { text, thinking } = thinkFilter.process(token);
+          if (thinking) yield { type: 'thinking', text: thinking };
+          if (text) yield { type: 'token', text };
         }
 
         // Handle tool calls streaming
@@ -356,6 +424,11 @@ export class LlmAdapter implements LLMProvider {
           }
         }
       }
+
+      // Flush any text held back by the think-tag filter
+      const tail = thinkFilter.flush();
+      if (tail.thinking) yield { type: 'thinking', text: tail.thinking };
+      if (tail.text) yield { type: 'token', text: tail.text };
 
       // Yield the final tool call
       if (activeToolCallId) {

@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { ThemeColors } from '../themes';
-// @ts-ignore
 import fuzzysort from 'fuzzysort';
 
 export interface MenuOption {

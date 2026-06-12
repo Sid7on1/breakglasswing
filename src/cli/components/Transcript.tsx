@@ -1,9 +1,11 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { MessageEntry, ToolCallEntry } from '../events';
+import { MessageEntry } from '../events';
 import { ThemeColors } from '../themes';
 import { SearchHighlight } from './SearchHighlight';
 import { Markdown } from './Markdown';
+import { ToolCallLine } from './ToolCallLine';
+import { HelpDashboard, StatsDashboard, DataTableDashboard } from './Dashboards';
 
 interface TranscriptProps {
   messages: MessageEntry[];
@@ -11,54 +13,63 @@ interface TranscriptProps {
   searchQuery: string;
 }
 
-function ToolCallBlock({ call, theme }: { call: ToolCallEntry; theme: ThemeColors }) {
-  const isError = call.status === 'error';
-  const statusColor = call.status === 'success' ? theme.success
-    : isError ? theme.error
-    : theme.warning;
+interface MessageRowProps {
+  msg: MessageEntry;
+  theme: ThemeColors;
+  searchQuery?: string;
+}
 
-  let displayCommand = '';
-  try {
-    const parsed = JSON.parse(call.input);
-    if (call.toolName === 'BashTool' && parsed.command) {
-      displayCommand = parsed.command;
-    } else if ((call.toolName === 'WriteFileTool' || call.toolName === 'ReadFileTool') && parsed.filePath) {
-      displayCommand = parsed.filePath.split('/').pop() || parsed.filePath;
-    } else {
-      displayCommand = call.input.substring(0, 60).replace(/\n/g, ' ');
-    }
-  } catch {
-    displayCommand = call.input.substring(0, 60).replace(/\n/g, ' ');
-  }
-
-  const icon = call.toolName === 'BashTool' ? '⚡'
-    : call.toolName === 'WriteFileTool' ? '📝'
-    : call.toolName === 'ReadFileTool' ? '👀'
-    : '🔧';
-
+/** Renders one transcript entry. Used inside Ink's <Static> region. */
+export function MessageRow({ msg, theme, searchQuery = '' }: MessageRowProps) {
   return (
-    <Box flexDirection="column" marginLeft={2}>
-      <Box>
-        <Text color={statusColor} bold>
-          {'  ⎿ '}{icon} {call.toolName.replace('Tool', '')}
-        </Text>
-        <Text color={theme.subtle}>
-          {' '}· {displayCommand}
-        </Text>
-        <Text color={theme.inactive}>
-          {' '}{call.status === 'success' ? '✓' : call.status === 'error' ? '✗' : '...'}
-        </Text>
-      </Box>
-      {isError && call.output && (
-        <Box marginLeft={4} borderStyle="round" borderColor={theme.error} paddingX={1}>
-          <Text color={theme.error}>{call.output.substring(0, 200)}</Text>
+    <Box flexDirection="column" marginTop={1} paddingX={1}>
+      {msg.role === 'user' ? (
+        <Box flexDirection="row">
+          <Text color={theme.accent} bold>❯ </Text>
+          <Text color={theme.inactive}>{typeof msg.content === 'string' ? msg.content : ''}</Text>
+        </Box>
+      ) : msg.role === 'assistant' ? (
+        <Box flexDirection="column">
+          {msg.toolCalls && msg.toolCalls.length > 0 && (
+            <Box flexDirection="column" marginBottom={1}>
+              {msg.toolCalls.map((tc) => (
+                <ToolCallLine key={tc.id} call={tc} theme={theme} />
+              ))}
+            </Box>
+          )}
+          {typeof msg.content === 'string' && msg.content.trim() ? (
+            <Box flexDirection="row">
+              <Text color={theme.accent}>● </Text>
+              <Box flexDirection="column" flexGrow={1}>
+                <Markdown theme={theme}>{msg.content}</Markdown>
+              </Box>
+            </Box>
+          ) : null}
+        </Box>
+      ) : (
+        <Box>
+          {msg.uiComponent === 'HelpDashboard' ? (
+            <HelpDashboard theme={theme} payload={msg.payload} />
+          ) : msg.uiComponent === 'StatsDashboard' ? (
+            <StatsDashboard theme={theme} payload={msg.payload} />
+          ) : msg.uiComponent === 'DataTableDashboard' ? (
+            <DataTableDashboard theme={theme} payload={msg.payload} />
+          ) : (
+            <Text color={
+              msg.level === 'error' ? theme.error :
+              msg.level === 'success' ? theme.success :
+              msg.level === 'warn' ? theme.warning :
+              msg.level === 'info' ? theme.info :
+              theme.inactive
+            }>
+              <SearchHighlight text={msg.content as string} query={searchQuery} theme={theme} />
+            </Text>
+          )}
         </Box>
       )}
     </Box>
   );
 }
-
-import { HelpDashboard, StatsDashboard, DataTableDashboard } from './Dashboards';
 
 export function Transcript({ messages, theme, searchQuery }: TranscriptProps) {
   if (messages.length === 0) return null;
@@ -66,53 +77,7 @@ export function Transcript({ messages, theme, searchQuery }: TranscriptProps) {
   return (
     <Box flexDirection="column">
       {messages.map((msg) => (
-        <Box
-          key={msg.id}
-          flexDirection="column"
-          marginTop={1}
-          paddingX={1}
-          paddingY={1}
-        >
-          {msg.role === 'user' ? (
-            <Box paddingX={1} paddingTop={1} flexDirection="column">
-              <Markdown theme={theme}>{typeof msg.content === 'string' ? msg.content : ''}</Markdown>
-            </Box>
-          ) : msg.role === 'assistant' ? (
-            <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} paddingBottom={1} width="100%">
-              <Text bold color={theme.accent}>Assistant</Text>
-              <Box marginTop={1}>
-                <Markdown theme={theme}>{typeof msg.content === 'string' ? msg.content : ''}</Markdown>
-              </Box>
-              {msg.toolCalls && msg.toolCalls.length > 0 && (
-                <Box flexDirection="column" marginTop={1}>
-                  {msg.toolCalls.map((tc) => (
-                    <ToolCallBlock key={tc.id} call={tc} theme={theme} />
-                  ))}
-                </Box>
-              )}
-            </Box>
-          ) : (
-            <Box>
-              {msg.uiComponent === 'HelpDashboard' ? (
-                <HelpDashboard theme={theme} payload={msg.payload} />
-              ) : msg.uiComponent === 'StatsDashboard' ? (
-                <StatsDashboard theme={theme} payload={msg.payload} />
-              ) : msg.uiComponent === 'DataTableDashboard' ? (
-                <DataTableDashboard theme={theme} payload={msg.payload} />
-              ) : (
-                <Text color={
-                  msg.level === 'error' ? theme.error :
-                  msg.level === 'success' ? theme.success :
-                  msg.level === 'warn' ? theme.warning :
-                  msg.level === 'info' ? theme.accent :
-                  theme.inactive
-                } bold={['error', 'success', 'warn'].includes(msg.level || '')}>
-                  <SearchHighlight text={msg.content as string} query={searchQuery} theme={theme} />
-                </Text>
-              )}
-            </Box>
-          )}
-        </Box>
+        <MessageRow key={msg.id} msg={msg} theme={theme} searchQuery={searchQuery} />
       ))}
     </Box>
   );

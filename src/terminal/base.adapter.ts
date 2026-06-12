@@ -1,5 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { Logger } from '../utils';
+import { cliEvents } from '../cli/events';
 
 /**
  * Base adapter that all CLI tool adapters must extend.
@@ -56,8 +57,14 @@ export abstract class BaseAdapter {
     const delimiter = `__CMD_DONE_${Date.now()}__`;
     let outputBuffer = "";
 
-    return new Promise((resolve, reject) => {
-      let onStdErr: (data: Buffer) => void;
+    return new Promise((resolve) => {
+      // Handle stderr to prevent buffer deadlocks and show errors live
+      const onStdErr = (data: Buffer) => {
+        const text = data.toString().trimEnd();
+        if (text) {
+          cliEvents.emit('log', `\x1b[31m[${this.toolName} ERROR]\x1b[0m ${text}`);
+        }
+      };
 
       // 1. Setup deadlock timeout guard
       const timeoutGuard = setTimeout(async () => {
@@ -86,21 +93,11 @@ export abstract class BaseAdapter {
           resolve(cleanOutput);
         } else {
           // Stream live output to UI
-          const cliEvents = require('../../cli/events').cliEvents;
           cliEvents.emit('log', `\x1b[90m[${this.toolName}]\x1b[0m ${text.trimEnd()}`);
         }
       };
 
       this.child!.stdout.on('data', onData);
-
-      // Handle stderr to prevent buffer deadlocks and show errors live
-      onStdErr = (data: Buffer) => {
-        const text = data.toString().trimEnd();
-        if (text) {
-          const cliEvents = require('../../cli/events').cliEvents;
-          cliEvents.emit('log', `\x1b[31m[${this.toolName} ERROR]\x1b[0m ${text}`);
-        }
-      };
       this.child!.stderr.on('data', onStdErr);
 
       // 3. Inject command via stdin (Mitigated TERM-001 by base64 wrapping)

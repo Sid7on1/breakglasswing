@@ -129,7 +129,11 @@ async function main() {
 
   const hasTsConfig = fs.existsSync('tsconfig.json');
   if (config.autoIndex !== false && hasTsConfig) {
-    await codebaseIndexer.autoIndex();
+    try {
+      await codebaseIndexer.autoIndex();
+    } catch (e: any) {
+      console.warn(`Codebase indexing failed (continuing without index): ${e.message}`);
+    }
   } else if (config.autoIndex !== false && !hasTsConfig) {
     console.log('No tsconfig.json found — skipping codebase index. Run bimax from a project directory to enable AST indexing.');
   }

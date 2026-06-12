@@ -1,36 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { Text } from 'ink';
+import { Box, Text } from 'ink';
+import { cliEvents } from '../events';
 import { ThemeColors } from '../themes';
 
 const PHRASES = [
-  "Thinking...", "Architecting...", "Baking...", "Beaming...", 
-  "Bootstrapping...", "Brewing...", "Calculating...", "Cascading...",
-  "Catapulting...", "Cerebrating...", "Channeling...", "Choreographing...",
-  "Churning...", "Coalescing...", "Cogitating...", "Combobulating...",
-  "Composing...", "Computing...", "Concocting...", "Considering...",
-  "Contemplating...", "Cooking...", "Crafting...", "Creating...",
-  "Crunching...", "Crystallizing...", "Cultivating...", "Deciphering...",
-  "Deliberating...", "Determining...", "Discombobulating...", "Doing...",
-  "Ebbing...", "Effecting...", "Elucidating...", "Embellishing...",
-  "Enchanting...", "Envisioning...", "Evaporating...", "Fermenting...",
-  "Finagling...", "Flambéing...", "Flowing...", "Flummoxing...",
-  "Fluttering...", "Forging...", "Forming...", "Generating...",
-  "Germinating...", "Harmonizing...", "Hashing...", "Hatching...",
-  "Ideating...", "Imagining...", "Improvising...", "Incubating...",
-  "Inferring...", "Infusing...", "Ionizing...", "Kneading...",
-  "Levitating...", "Manifesting...", "Marinating...", "Metamorphosing...",
-  "Misting...", "Mulling...", "Mustering...", "Musing...", "Nebulizing...",
-  "Nesting...", "Noodling...", "Nucleating...", "Orbiting...",
-  "Orchestrating...", "Osmosing...", "Percolating...", "Perusing...",
-  "Philosophising...", "Photosynthesizing...", "Pollinating...", "Pondering...",
-  "Pontificating...", "Precipitating...", "Processing...", "Propagating...",
-  "Puzzling...", "Quantumizing...", "Recombobulating...", "Reticulating...",
-  "Ruminating...", "Sautéing...", "Seasoning...", "Simmering...",
-  "Sketching...", "Spinning...", "Sprouting...", "Stewing...", "Sublimating...",
-  "Swirling...", "Synthesizing...", "Tempering...", "Thundering...",
-  "Tinkering...", "Transfiguring...", "Transmuting...", "Undulating...",
-  "Unfurling...", "Unravelling...", "Warping...", "Whirring...",
-  "Working...", "Wrangling..."
+  'Thinking', 'Architecting', 'Brewing', 'Calculating', 'Cogitating',
+  'Composing', 'Computing', 'Considering', 'Crafting', 'Crunching',
+  'Deciphering', 'Deliberating', 'Forging', 'Hatching', 'Inferring',
+  'Mulling', 'Musing', 'Orchestrating', 'Pondering', 'Processing',
+  'Puzzling', 'Ruminating', 'Synthesizing', 'Tinkering', 'Wrangling',
 ];
 
 interface ThinkingTextProps {
@@ -39,32 +17,40 @@ interface ThinkingTextProps {
 
 export function ThinkingText({ theme }: ThinkingTextProps) {
   const [index, setIndex] = useState(() => Math.floor(Math.random() * PHRASES.length));
-  const [elapsedMs, setElapsedMs] = useState(0);
+  const [dots, setDots] = useState('');
+  const [snippet, setSnippet] = useState('');
 
-  // Cycle phrases every 2.5s
   useEffect(() => {
-    const interval = setInterval(() => {
+    const phraseTimer = setInterval(() => {
       setIndex((prev) => (prev + 1) % PHRASES.length);
     }, 2500);
-    return () => clearInterval(interval);
+    const dotTimer = setInterval(() => {
+      setDots((d) => (d.length >= 3 ? '' : d + '.'));
+    }, 350);
+    return () => { clearInterval(phraseTimer); clearInterval(dotTimer); };
   }, []);
 
-  // Update color interpolation every 50ms
+  // Show the tail of the model's live reasoning stream, single line
   useEffect(() => {
-    const start = Date.now();
-    const interval = setInterval(() => {
-      setElapsedMs(Date.now() - start);
-    }, 50);
-    return () => clearInterval(interval);
+    let buffer = '';
+    const onThinking = (text: string) => {
+      buffer = (buffer + text).slice(-300);
+      const clean = buffer.replace(/\s+/g, ' ').trim();
+      setSnippet(clean.length > 72 ? '…' + clean.slice(-72) : clean);
+    };
+    const onClear = () => { buffer = ''; setSnippet(''); };
+    cliEvents.on('thinking', onThinking);
+    cliEvents.on('thinking_clear', onClear);
+    return () => {
+      cliEvents.off('thinking', onThinking);
+      cliEvents.off('thinking_clear', onClear);
+    };
   }, []);
 
-  // Transition from Orange (255, 153, 51) to Red (255, 51, 51) over 5000ms
-  const progress = Math.min(1, elapsedMs / 5000);
-  const r = 255;
-  const g = Math.round(153 - (102 * progress));
-  const b = 51;
-
-  const hexColor = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-
-  return <Text color={hexColor} bold italic> {PHRASES[index]}</Text>;
+  return (
+    <Box flexDirection="row">
+      <Text color={theme.accentShimmer} bold>✻ {PHRASES[index]}{dots.padEnd(3, ' ')}</Text>
+      {snippet ? <Text color={theme.subtle} italic> {snippet}</Text> : null}
+    </Box>
+  );
 }

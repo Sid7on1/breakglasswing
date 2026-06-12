@@ -29,10 +29,11 @@ export class ActionRouter {
     Logger.info(`\n[ActionRouter] Routing Task ${task.id} (Category: ${task.category.toUpperCase()})`);
     
     switch (task.category) {
-      case 'cron':
+      case 'cron': {
         const schedule = task.metadata?.schedule || '* * * * *';
         this.cronEngine.start(task.id, task.payload, schedule);
         break;
+      }
       case 'webhook':
         this.webhookEngine.listen(task.id, task.payload);
         break;

@@ -2,6 +2,7 @@ import Docker from 'dockerode';
 import { Logger } from '../utils';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { SafetyPolicy } from '../governor/policy.engine';
 
 export class PluginSandbox {
   private docker = new Docker();
@@ -70,7 +71,6 @@ export class PluginSandbox {
       }
 
       // 2. Remove the plugin directory from disk
-      const { SafetyPolicy } = require('../governor/policy.engine');
       const absolutePath = path.resolve(pluginDir);
       const canonicalWorkspace = path.resolve(SafetyPolicy.allowedWorkspace);
       
