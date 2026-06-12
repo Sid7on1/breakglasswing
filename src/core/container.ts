@@ -4,14 +4,17 @@
  * replacing scattered `new` calls inside the Orchestrator.
  */
 
+import { SandboxManager } from '../sandbox';
+import { CognitiveLoop } from './cognitive.loop';
 import { EnvValidator } from '../config';
 import { TelemetryEngine } from '../telemetry';
+import { MemoryMonitor } from '../telemetry/memory.monitor';
 import { DatabaseConnection } from '../storage';
 import { WebhookReceiver } from '../api';
 import { AuthAutomator } from '../auth';
 import { ActionRouter } from '../actions';
 import { ContextEngine, ShortTermMemory, LongTermMemory, VectorStore } from '../memory';
-import { CognitiveLoop } from './cognitive.loop';
+
 import { Governor } from '../governor/governor';
 import { Orchestrator, OrchestratorDeps } from './orchestrator';
 import { Bootloader } from './bootloader';
@@ -20,11 +23,36 @@ import { EventBus } from './event.bus';
 import { Logger } from '../utils/logger';
 import { GraphStore } from '../graph/graph.store';
 import { GraphObserver } from '../graph/graph.observer';
+import { CodebaseIndexer } from '../graph/indexer';
+import { StaticAnalyzer } from '../graph/static.analyzer';
+import { SemanticAugmenter } from '../graph/semantic.augmenter';
 import { GenomeRepository } from '../genome/genome.repository';
 import { ArchitectureGuardian } from '../genome/guardian';
+import { TaskPipeline } from '../task';
+import { Coordinator } from './coordinator';
+import { WorkerAgent } from './worker.agent';
 import * as path from 'path';
 
-export function createContainer(): { orchestrator: Orchestrator, bootloader: Bootloader } {
+import { YoloClassifier } from '../security/yolo.classifier';
+import { ApiKeyManager } from '../credits/api.key.manager';
+import { LlmAdapter } from '../core/llm.adapter';
+
+import { ToolRegistry } from '../tools/tool.registry';
+import { createBashTool } from '../tools/implementations/bash.tool';
+import { createCdTool } from '../tools/implementations/cd.tool';
+import { createReadFileTool, createWriteFileTool, createDeleteTool } from '../tools/implementations/file.tool';
+import { createGraphQueryTool } from '../tools/implementations/graph.tool';
+import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
+import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
+import { createRegisterAgentTool } from '../tools/implementations/register.tool';
+import { createAskUserTool } from '../tools/implementations/ask_user.tool';
+
+import { CliConfig } from '../cli/config';
+import { buildKeyPool } from '../cli/provider';
+
+export async function createContainer(config?: Partial<CliConfig>): Promise<{ orchestrator: Orchestrator, bootloader: Bootloader, coordinator: Coordinator, workerAgent: WorkerAgent, governor: Governor, toolRegistry: ToolRegistry, graphStore: GraphStore, llmAdapter: LlmAdapter, codebaseIndexer: CodebaseIndexer, taskPipeline: TaskPipeline }> {
+  const cfg = config || {};
+
   // Config
   const validator = new EnvValidator();
 
@@ -37,38 +65,79 @@ export function createContainer(): { orchestrator: Orchestrator, bootloader: Boo
 
   // Infra
   const telemetry = new TelemetryEngine();
+  const memoryMonitor = new MemoryMonitor(eventBus);
+  memoryMonitor.start();
   const db = new DatabaseConnection();
   const api = new WebhookReceiver(eventBus);
   const auth = new AuthAutomator();
 
+  // API Manager & LLM
+  const apiKeyManager = new ApiKeyManager(buildKeyPool());
+  const llmAdapter = new LlmAdapter(apiKeyManager);
+  llmAdapter.applyConfig({
+    model: cfg.model,
+    timeout: cfg.timeout,
+    temperature: cfg.temperature,
+    maxTokens: cfg.maxTokens,
+  });
+
+  // Yolo Classifier
+  const yolo = new YoloClassifier(llmAdapter);
+
   // Governor
-  const governor = new Governor(eventBus);
+  const governor = new Governor(eventBus, yolo);
+  llmAdapter.setBudgetVeto(governor.budget);
 
   // Graph Engine (Playground)
-  const projectRoot = process.cwd();
-  const graphStore = new GraphStore(path.join(projectRoot, '.breakglass_graph', 'playground.json'));
+  const projectRoot = cfg.workspaceRoot || process.cwd();
+  const graphStore = new GraphStore(path.join(projectRoot, '.breakglass/graph', 'playground.json'));
+  await graphStore.loadFromDisk();
   
-  // Genome & Evolution
-  const genomeRepo = new GenomeRepository(projectRoot);
-  // We trigger reload asynchronously, but in DI it's okay for now
-  genomeRepo.reload().catch(e => Logger.error('Failed to load genome repo'));
-  const architectureGuardian = new ArchitectureGuardian(projectRoot, genomeRepo);
-
-  // Graph Observer
-  const graphObserver = new GraphObserver(eventBus, graphStore, projectRoot);
-  graphObserver.start();
-
-  // Actions
-  const actionRouter = new ActionRouter(eventBus, graphStore);
-
   // Memory
   const shortTerm = new ShortTermMemory();
   const vectorStore = new VectorStore();
   const longTerm = new LongTermMemory(vectorStore);
   const contextEngine = new ContextEngine(shortTerm, longTerm);
 
-  // Brain
-  const loop = new CognitiveLoop(actionRouter, db, contextEngine, governor, eventBus);
+  // Tools
+  const toolRegistry = new ToolRegistry();
+  toolRegistry.register(createReadFileTool(governor));
+  toolRegistry.register(createWriteFileTool(governor));
+  toolRegistry.register(createDeleteTool(governor));
+  toolRegistry.register(createBashTool(governor));
+  toolRegistry.register(createCdTool(governor));
+  toolRegistry.register(createGraphQueryTool(governor, graphStore));
+  toolRegistry.register(createMemoryQueryTool(governor, vectorStore));
+  toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));
+  toolRegistry.register(createRegisterAgentTool(governor, toolRegistry));
+  toolRegistry.register(createAskUserTool(governor, llmAdapter));
+  
+  // Genome & Evolution
+  const genomeRepo = new GenomeRepository(projectRoot);
+  genomeRepo.reload().catch(e => Logger.error('Failed to load genome repo'));
+  const guardian = new ArchitectureGuardian(projectRoot, genomeRepo);
+
+  const semanticAugmenter = new SemanticAugmenter(graphStore, llmAdapter, projectRoot);
+  if (cfg.skipSemanticMetadata) semanticAugmenter.enabled = false;
+
+  const staticAnalyzer = new StaticAnalyzer(projectRoot, graphStore, cfg.excludeFromIndex);
+  const codebaseIndexer = new CodebaseIndexer(projectRoot, graphStore, staticAnalyzer, semanticAugmenter);
+  if (cfg.autoIndex === false) codebaseIndexer.enabled = false;
+
+  // Graph Observer
+  const graphObserver = new GraphObserver(eventBus, graphStore, projectRoot, semanticAugmenter);
+  graphObserver.start();
+
+  // Actions
+  const actionRouter = new ActionRouter(eventBus, graphStore);
+
+  // Background Skills migrated to JSON Format
+
+  // Brain - Replaced by Coordinator & WorkerAgent architecture
+  const workerAgent = new WorkerAgent(actionRouter, db, contextEngine, governor, eventBus, llmAdapter, toolRegistry);
+  workerAgent.start(); // Start listening for WORKER_DISPATCH for standalone tasks
+
+  const coordinator = new Coordinator(eventBus, db, actionRouter, contextEngine, governor, llmAdapter, toolRegistry);
 
   // Compose the deps
   const bootloader = new Bootloader({
@@ -80,13 +149,20 @@ export function createContainer(): { orchestrator: Orchestrator, bootloader: Boo
     shutdown
   });
 
+  const cognitiveLoop = new CognitiveLoop(actionRouter, db, contextEngine, governor, eventBus);
+
   const orchestratorDeps: OrchestratorDeps = {
     actionRouter,
-    loop,
+    loop: cognitiveLoop,
     shutdown
   };
 
+  const taskPipeline = new TaskPipeline(eventBus, llmAdapter);
+  // We need to pass taskPipeline to WebhookReceiver, but it's already created.
+  // Actually, we can just assign it to the property.
+  (api as any).taskPipeline = taskPipeline;
+
   const orchestrator = new Orchestrator(orchestratorDeps);
 
-  return { orchestrator, bootloader };
+  return { orchestrator, bootloader, coordinator, workerAgent, governor, toolRegistry, graphStore, llmAdapter, codebaseIndexer, taskPipeline };
 }

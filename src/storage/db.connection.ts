@@ -8,7 +8,7 @@ import { IDatabase } from '../core/interfaces';
 
 export class DatabaseConnection implements IDatabase {
   private connected = false;
-  private readonly DB_DIR = path.join(process.cwd(), '.breakglass_db');
+  private readonly DB_DIR = path.join(process.cwd(), '.breakglass/db');
   private readonly WAL_FILE = path.join(this.DB_DIR, 'events.jsonl');
   private readonly MAX_WAL_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
   private mutex = new Mutex();
@@ -22,7 +22,7 @@ export class DatabaseConnection implements IDatabase {
       // Ensure file exists
       await fs.appendFile(this.WAL_FILE, '');
       this.connected = true;
-      Logger.info(`[Database] Write-Ahead Log (WAL) successfully mounted at .breakglass_db/events.jsonl`);
+      Logger.info(`[Database] Write-Ahead Log (WAL) successfully mounted at .breakglass/db/events.jsonl`);
     } catch (e: any) {
       Logger.error(`[Database] FATAL: Failed to mount local storage: ${e.message}`);
       throw new DatabaseError(`Failed to mount local storage: ${e.message}`, false);
@@ -50,6 +50,29 @@ export class DatabaseConnection implements IDatabase {
         Logger.info(`[Database] Physically persisted event to storage.`);
       } catch (e: any) {
         Logger.error(`[Database] Failed to write to WAL: ${e.message}`);
+      }
+    });
+  }
+
+  async getRawEvents(limit: number = 100): Promise<any[]> {
+    if (!this.connected) return [];
+    try {
+      const data = await fs.readFile(this.WAL_FILE, 'utf-8');
+      const lines = data.split('\n').filter(l => l.trim().length > 0);
+      return lines.slice(-limit).map(l => JSON.parse(l));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async purgeOldEvents(): Promise<void> {
+    if (!this.connected) return;
+    await this.mutex.runExclusive(async () => {
+      try {
+        await fs.writeFile(this.WAL_FILE, '');
+        Logger.info(`[Database] Purged old events from WAL.`);
+      } catch (e: any) {
+        Logger.error(`[Database] Failed to purge WAL: ${e.message}`);
       }
     });
   }

@@ -57,9 +57,14 @@ export abstract class BaseAdapter {
     let outputBuffer = "";
 
     return new Promise((resolve, reject) => {
+      let onStdErr: (data: Buffer) => void;
+
       // 1. Setup deadlock timeout guard
       const timeoutGuard = setTimeout(async () => {
         Logger.error(`[${this.toolName}-${this.id}] ❌ DEADLOCK DETECTED! Command hung for >${this.EXECUTION_TIMEOUT_MS}ms. Sending SIGKILL.`);
+        if (this.child) {
+          this.child.stderr.removeListener('data', onStdErr);
+        }
         await this.killSession();
         await this.spawnSession(); // Resurrection
         this.isBusy = false;
@@ -74,14 +79,29 @@ export abstract class BaseAdapter {
         if (outputBuffer.includes(delimiter)) {
           clearTimeout(timeoutGuard);
           this.child!.stdout.removeListener('data', onData);
+          this.child!.stderr.removeListener('data', onStdErr);
           
           const cleanOutput = outputBuffer.replace(delimiter, '').trim();
           this.isBusy = false;
           resolve(cleanOutput);
+        } else {
+          // Stream live output to UI
+          const cliEvents = require('../../cli/events').cliEvents;
+          cliEvents.emit('log', `\x1b[90m[${this.toolName}]\x1b[0m ${text.trimEnd()}`);
         }
       };
 
       this.child!.stdout.on('data', onData);
+
+      // Handle stderr to prevent buffer deadlocks and show errors live
+      onStdErr = (data: Buffer) => {
+        const text = data.toString().trimEnd();
+        if (text) {
+          const cliEvents = require('../../cli/events').cliEvents;
+          cliEvents.emit('log', `\x1b[31m[${this.toolName} ERROR]\x1b[0m ${text}`);
+        }
+      };
+      this.child!.stderr.on('data', onStdErr);
 
       // 3. Inject command via stdin (Mitigated TERM-001 by base64 wrapping)
       const b64Cmd = Buffer.from(command).toString('base64');

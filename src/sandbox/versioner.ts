@@ -3,7 +3,7 @@ import * as path from 'path';
 import { Logger } from '../utils';
 
 export class Versioner {
-  private readonly BACKUP_DIR = '.breakglass_backup';
+  private readonly BACKUP_DIR = '.breakglass/backup';
 
   async snapshot(filePath: string): Promise<string> {
     await fs.mkdir(this.BACKUP_DIR, { recursive: true });

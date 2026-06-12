@@ -14,12 +14,13 @@ export interface ActionTask {
 }
 
 export class ActionRouter {
-  public cronEngine = new CronExecutor();
+  public cronEngine: CronExecutor;
   public webhookEngine = new WebhookExecutor();
   public triggerEngine: TriggerExecutor;
   public graphEngine: GraphExecutor;
 
   constructor(private eventBus: IEventBus, private graphStore: IGraphStore) {
+    this.cronEngine = new CronExecutor(this.eventBus);
     this.triggerEngine = new TriggerExecutor(this.eventBus);
     this.graphEngine = new GraphExecutor(this.graphStore);
   }

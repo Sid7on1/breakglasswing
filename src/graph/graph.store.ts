@@ -15,6 +15,16 @@ export class GraphStore implements IGraphStore {
 
   constructor(private storagePath: string) {}
 
+  public setStoragePath(newPath: string) {
+    this.storagePath = newPath;
+  }
+
+  public clear() {
+    this.data = { nodes: new Map(), edges: [] };
+    this.edgesFrom.clear();
+    this.edgesTo.clear();
+  }
+
   public setGraph(graph: GraphData) {
     this.data = graph;
     this.rebuildIndices();

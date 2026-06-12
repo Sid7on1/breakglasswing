@@ -5,9 +5,19 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 
 export class SemanticAugmenter {
+  public enabled: boolean = true;
+
   constructor(private graphStore: GraphStore, private llmAdapter: LlmAdapter, private projectRoot: string) {}
 
+  public setProjectRoot(newRoot: string) {
+    this.projectRoot = newRoot;
+  }
+
   public async augmentGraph(limit?: number): Promise<void> {
+    if (!this.enabled) {
+      Logger.info(`[SemanticAugmenter] Skipped — disabled by config.`);
+      return;
+    }
     const graph = this.graphStore.getGraph();
     let augmentedCount = 0;
 

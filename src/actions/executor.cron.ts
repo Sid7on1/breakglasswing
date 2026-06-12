@@ -1,10 +1,12 @@
 import { Logger } from '../utils';
 import { CronExpressionParser } from 'cron-parser';
 
+import { IEventBus } from '../core/interfaces';
+
 export class CronExecutor {
   private timers: Map<string, NodeJS.Timeout> = new Map();
 
-  constructor() {
+  constructor(private eventBus?: IEventBus) {
     Logger.info(`[CronExecutor] Background daemon booted. Standing by for cron schedules.`);
   }
 
@@ -24,7 +26,11 @@ export class CronExecutor {
 
       const timer = setTimeout(() => {
         Logger.info(`[CronExecutor] ⏰ TICK! Executing Task ${taskId} (Schedule: ${schedule})`);
-        // The event bus routing logic goes here in the real system
+        
+        if (this.eventBus && payload && payload.event) {
+           this.eventBus.emit(payload.event, payload.data);
+        }
+
         this.scheduleNext(taskId, payload, schedule);
       }, delay);
 

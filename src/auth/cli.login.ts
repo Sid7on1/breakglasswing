@@ -1,20 +1,25 @@
 import { Logger } from '../utils/logger';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import jwt from 'jsonwebtoken';
+import { ensureJwtSecret } from '../cli/env.loader';
 
 export class AuthAutomator {
-  private readonly AUTH_DIR = path.join(process.cwd(), '.breakglass_auth');
+  private readonly AUTH_DIR = path.join(os.homedir(), '.breakglass', 'auth');
   private readonly TOKEN_FILE = path.join(this.AUTH_DIR, 'session.jwt');
-  private readonly JWT_SECRET = process.env.JWT_SECRET || crypto.randomUUID(); // Fallback to random if not set to prevent deterministic attacks
+  private readonly JWT_SECRET = ensureJwtSecret();
+
+  constructor() {
+    if (!fsSync.existsSync(this.AUTH_DIR)) {
+      fsSync.mkdirSync(this.AUTH_DIR, { recursive: true });
+    }
+  }
 
   async ensureAuthenticated(cliTool: string) {
     Logger.info(`[AuthAutomator] Checking cryptographic authentication state for ${cliTool}...`);
     
-    if (!process.env.JWT_SECRET) {
-      Logger.warn(`[AuthAutomator] SECURITY WARNING: JWT_SECRET not set in environment. A random temporary secret is being used!`);
-    }
-
     try {
       // 1. Check if token exists physically
       const stat = await fs.stat(this.TOKEN_FILE);

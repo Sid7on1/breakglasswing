@@ -5,7 +5,7 @@ export class CognitiveGraph {
   constructor(private store: GraphStore) {}
 
   public registerGoal(goalId: string, description: string) {
-    this.store.getGraph().nodes.set(goalId, {
+    this.store.addNode({
       id: goalId,
       name: `Goal: ${description.substring(0, 20)}...`,
       type: 'GOAL',
@@ -15,14 +15,14 @@ export class CognitiveGraph {
   }
 
   public registerTask(goalId: string, taskId: string, description: string) {
-    this.store.getGraph().nodes.set(taskId, {
+    this.store.addNode({
       id: taskId,
       name: `Task: ${description.substring(0, 20)}...`,
       type: 'TASK',
       filePath: ''
     });
     
-    this.store.getGraph().edges.push({
+    this.store.addEdge({
       sourceId: goalId,
       targetId: taskId,
       type: 'SPAWNS'
@@ -33,7 +33,7 @@ export class CognitiveGraph {
   public registerCapabilityRequirement(taskId: string, capabilityName: string) {
     const capId = `cap:${capabilityName}`;
     if (!this.store.getNode(capId)) {
-      this.store.getGraph().nodes.set(capId, {
+      this.store.addNode({
         id: capId,
         name: capabilityName,
         type: 'CAPABILITY',
@@ -41,7 +41,7 @@ export class CognitiveGraph {
       });
     }
 
-    this.store.getGraph().edges.push({
+    this.store.addEdge({
       sourceId: taskId,
       targetId: capId,
       type: 'REQUIRES'

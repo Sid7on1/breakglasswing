@@ -1,14 +1,24 @@
 import { Governor } from '../governor/governor';
 import { GovernorVetoError } from '../core/errors';
 import { EventBus } from '../core/event.bus';
+import { GlobalPrompter } from '../cli/prompter';
 import * as path from 'path';
+import * as fs from 'fs/promises';
+
+jest.mock('../cli/prompter', () => ({
+  GlobalPrompter: {
+    ask: jest.fn().mockResolvedValue('y'),
+    isBusy: jest.fn().mockReturnValue(false),
+    register: jest.fn(),
+  }
+}));
 
 describe('Governor', () => {
   let governor: Governor;
 
   beforeEach(async () => {
     try {
-      await require('fs/promises').rm(path.join(process.cwd(), '.breakglass_credits'), { recursive: true, force: true });
+      await fs.rm(path.join(process.cwd(), '.breakglass/credits'), { recursive: true, force: true });
     } catch (e) {}
     const eventBus = new EventBus();
     governor = new Governor(eventBus);

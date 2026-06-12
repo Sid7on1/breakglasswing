@@ -3,28 +3,40 @@ import { IEventBus } from '../core/interfaces';
 import { StaticAnalyzer } from './static.analyzer';
 import { GraphStore } from './graph.store';
 import { ImpactEngine } from './impact.engine';
+import { SemanticAugmenter } from './semantic.augmenter';
 import * as path from 'path';
 
 export class GraphObserver {
   private analyzer: StaticAnalyzer;
   private impactEngine: ImpactEngine;
 
+  private debouncedHandlers: Map<string, (path: string) => void> = new Map();
+  private cleanupInterval: NodeJS.Timeout;
+
   constructor(
     private eventBus: IEventBus, 
     private store: GraphStore,
-    private projectRoot: string
+    private projectRoot: string,
+    private semanticAugmenter: SemanticAugmenter
   ) {
     this.analyzer = new StaticAnalyzer(this.projectRoot, this.store);
     this.impactEngine = new ImpactEngine(this.store);
+    
+    this.cleanupInterval = setInterval(() => {
+      this.debouncedHandlers.clear();
+    }, 60000);
+    this.cleanupInterval.unref();
   }
-
-  private debouncedHandlers: Map<string, (path: string) => void> = new Map();
 
   public start() {
     Logger.info(`[GraphObserver] Starting autonomous file observer...`);
     
     this.eventBus.on('FILE_WRITE', (payload: { filePath: string }) => {
       if (!this.debouncedHandlers.has(payload.filePath)) {
+        if (this.debouncedHandlers.size >= 1000) {
+          const firstKey = this.debouncedHandlers.keys().next().value;
+          if (firstKey) this.debouncedHandlers.delete(firstKey);
+        }
         this.debouncedHandlers.set(
           payload.filePath, 
           debounce((path: string) => this.handleFileChange(path), 500) // 500ms debounce
@@ -44,6 +56,10 @@ export class GraphObserver {
     try {
       this.analyzer.analyzeSingleFile(absolutePath);
       await this.store.saveToDisk();
+      
+      // Augment the single file node semantics (limit to 5 API calls per save)
+      await this.semanticAugmenter.augmentGraph(5);
+      
       this.impactEngine.clearCache();
 
       // 2. Blast Radius Calculation

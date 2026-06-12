@@ -16,7 +16,7 @@ export interface VectorDocument {
 export class VectorStore {
   private store: VectorDocument[] = [];
   private embedder = new EmbeddingsGenerator();
-  private readonly STORE_PATH = path.join(process.cwd(), '.breakglass_memory', 'vectors.json');
+  private readonly STORE_PATH = path.join(process.cwd(), '.breakglass/memory', 'vectors.json');
   private rwMutex = new Mutex();
 
   constructor() {

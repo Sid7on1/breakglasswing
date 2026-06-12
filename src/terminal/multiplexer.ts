@@ -49,12 +49,13 @@ export class TerminalMultiplexer {
     }
 
     // Execute immediately
-    const output = await session.execute(command);
-    
-    // Process queue now that we are free
-    this.processQueue(toolName, session);
-    
-    return output;
+    try {
+      const output = await session.execute(command);
+      return output;
+    } finally {
+      // Process queue now that we are free
+      this.processQueue(toolName, session);
+    }
   }
 
   private async processQueue(toolName: string, session: BaseAdapter) {

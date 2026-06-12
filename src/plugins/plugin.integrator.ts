@@ -4,7 +4,7 @@ import { PluginRegistry } from './registry';
 import { Logger } from '../utils';
 
 export class PluginIntegrator {
-  private readonly INSTALLED_DIR = path.join(process.cwd(), '.breakglass_plugins', 'installed');
+  private readonly INSTALLED_DIR = path.join(process.cwd(), '.breakglass/plugins', 'installed');
 
   constructor(private registry: PluginRegistry) {}
 

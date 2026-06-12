@@ -23,10 +23,7 @@ export class ShutdownCoordinator implements IShutdownCoordinator {
       });
     });
 
-    process.on('uncaughtException', async (err) => {
-      Logger.error(`\n[Shutdown] Uncaught Exception: ${err.message}`);
-      await this.gracefulShutdown('uncaughtException');
-    });
+
   }
 
   private async gracefulShutdown(reason: string) {

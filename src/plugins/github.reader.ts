@@ -10,7 +10,7 @@ export class GithubReader {
   async fetchRepo(url: string): Promise<string> {
     Logger.info(`[GithubReader] Fetching repository: ${url}`);
     
-    const rootDir = path.join(process.cwd(), '.breakglass_plugins_staging');
+    const rootDir = path.join(process.cwd(), '.breakglass/plugins_staging');
     await fs.mkdir(rootDir, { recursive: true });
     
     const pluginId = `plugin_${Date.now()}`;

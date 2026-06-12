@@ -25,7 +25,7 @@ export class ArchitectureGuardian implements IArchitectureGuardian {
     // We create a temporary graph just for this file
     const store = new GraphStore(':memory:');
     const analyzer = new StaticAnalyzer(this.projectRoot, store);
-    analyzer.analyzeProject(); // For MVP, we re-parse. In production, we'd parse just the file.
+    analyzer.analyzeSingleFile(candidateFilePath); // Parse only the candidate file to avoid O(N^2) lag
 
     const relPath = path.relative(this.projectRoot, candidateFilePath);
     const classId = `class:${relPath}:${componentName}`;

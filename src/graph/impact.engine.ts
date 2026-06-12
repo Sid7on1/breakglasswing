@@ -69,7 +69,7 @@ export class ImpactEngine implements IImpactEngine {
       if (node.type === 'FUNCTION') functions++;
       if (node.type === 'CLASS') classes++;
       
-      const riskScore = node.metadata?.riskScore || 0;
+      const riskScore = (node as any).metadata?.riskScore || 0;
       if (riskScore > maxRisk) {
         maxRisk = riskScore;
       }

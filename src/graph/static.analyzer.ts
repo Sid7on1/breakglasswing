@@ -1,6 +1,7 @@
 import * as ts from 'typescript';
 import * as path from 'path';
 import * as fs from 'fs';
+import { minimatch } from 'minimatch';
 import { IGraphStore, GraphNode, GraphEdge, NodeType, EdgeType } from './models';
 import { Logger } from '../utils';
 
@@ -11,8 +12,29 @@ export interface IStaticAnalyzer {
 
 export class StaticAnalyzer implements IStaticAnalyzer {
   private typeChecker!: ts.TypeChecker;
+  private excludeMatchers: ((filePath: string) => boolean)[] = [];
 
-  constructor(private projectRoot: string, private store: IGraphStore) {}
+  constructor(
+    private projectRoot: string,
+    private store: IGraphStore,
+    excludePatterns: string[] = []
+  ) {
+    this.setExcludePatterns(excludePatterns);
+  }
+
+  public setExcludePatterns(patterns: string[]) {
+    this.excludeMatchers = patterns.map(p => (filePath: string) => minimatch(filePath, p));
+  }
+
+  private isExcluded(filePath: string): boolean {
+    if (this.excludeMatchers.length === 0) return false;
+    const relPath = this.getRelativePath(filePath);
+    return this.excludeMatchers.some(match => match(relPath));
+  }
+
+  public setProjectRoot(newRoot: string) {
+    this.projectRoot = newRoot;
+  }
 
   public analyzeProject(): void {
     Logger.info(`[StaticAnalyzer] Initializing TS Program for: ${this.projectRoot}`);
@@ -28,7 +50,9 @@ export class StaticAnalyzer implements IStaticAnalyzer {
     const program = ts.createProgram(parsedConfig.fileNames, parsedConfig.options);
     this.typeChecker = program.getTypeChecker();
 
-    const sourceFiles = program.getSourceFiles().filter(sf => !sf.isDeclarationFile);
+    const sourceFiles = program.getSourceFiles()
+      .filter(sf => !sf.isDeclarationFile)
+      .filter(sf => !this.isExcluded(sf.fileName));
 
     Logger.info(`[StaticAnalyzer] Parsing ${sourceFiles.length} source files...`);
 

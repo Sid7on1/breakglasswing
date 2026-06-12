@@ -10,7 +10,7 @@ export interface PluginManifest {
 
 export class PluginRegistry {
   private plugins: Map<string, PluginManifest> = new Map();
-  private readonly REGISTRY_PATH = path.join(process.cwd(), '.breakglass_plugins', 'registry.json');
+  private readonly REGISTRY_PATH = path.join(process.cwd(), '.breakglass/plugins', 'registry.json');
 
   constructor() {
     this.loadRegistry().catch(console.error);

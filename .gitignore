@@ -1,1 +1,8 @@
 .evolution_worktrees/
+.env
+coverage/
+dist/
+.breakglass/
+src/**/evolve_staging_*
+*.backup_*
+node_modules/

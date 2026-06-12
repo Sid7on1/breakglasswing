@@ -4,6 +4,7 @@ interface QueueItem {
   command: string;
   resolve: (value: string) => void;
   reject: (reason?: any) => void;
+  timeoutHandle: NodeJS.Timeout;
 }
 
 export class CommandQueue {
@@ -12,12 +13,33 @@ export class CommandQueue {
   enqueue(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
       Logger.warn(`[CommandQueue] Terminals busy. Pushing task to queue. (Queue depth: ${this.queue.length + 1})`);
-      this.queue.push({ command, resolve, reject });
+      
+      const timeout = setTimeout(() => {
+        // Remove from queue
+        this.queue = this.queue.filter(q => q.resolve !== resolve);
+        reject(new Error("CommandQueue timeout: Session never became available after 60s"));
+      }, 60000);
+
+      const wrappedResolve = (value: string) => {
+        clearTimeout(timeout);
+        resolve(value);
+      };
+
+      const wrappedReject = (reason?: any) => {
+        clearTimeout(timeout);
+        reject(reason);
+      };
+
+      this.queue.push({ command, resolve: wrappedResolve, reject: wrappedReject, timeoutHandle: timeout });
     });
   }
 
   dequeue(): QueueItem | undefined {
-    return this.queue.shift();
+    const item = this.queue.shift();
+    if (item) {
+      clearTimeout(item.timeoutHandle);
+    }
+    return item;
   }
 
   isEmpty(): boolean {

@@ -23,5 +23,12 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+# Create non-root user for security
+RUN addgroup -g 1001 breakglass && \
+    adduser -u 1001 -G breakglass -s /bin/sh -D breakglass && \
+    chown -R breakglass:breakglass /app
+
+USER breakglass
+
 # Start agent
 CMD ["npm", "start"]

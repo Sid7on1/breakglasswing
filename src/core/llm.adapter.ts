@@ -1,108 +1,393 @@
 import OpenAI from 'openai';
 import { Logger } from '../utils';
-import { ApiKeyManager } from '../credits/api.key.manager';
+import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
+import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 
-export class LlmAdapter {
+export class LlmAdapter implements LLMProvider {
+  public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
+  public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
+  public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
+  public maxTokens: number = parseInt(process.env.BGW_MAX_TOKENS || '4096', 10);
+
+  private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
+
   constructor(private apiKeyManager: ApiKeyManager) {}
 
+  public setBudgetVeto(budgetVeto: any) {
+    this.budgetVeto = budgetVeto;
+  }
+
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number }) {
+    if (cfg.model) this.defaultModel = cfg.model;
+    if (cfg.timeout) this.requestTimeout = cfg.timeout;
+    if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
+    if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
+  }
+
+  private createClient(keyResult: KeyResult): OpenAI {
+    return new OpenAI({ apiKey: keyResult.keyStr || '', baseURL: keyResult.baseURL || 'https://integrate.api.nvidia.com/v1', maxRetries: 3 });
+  }
+
+  private pickModel(keyResult: KeyResult): string {
+    return keyResult.model || this.defaultModel;
+  }
+
+  private async getKey(): Promise<KeyResult> {
+    const kr = await this.apiKeyManager.getNextKey();
+    if (!kr.keyStr || kr.idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
+    if (kr.waitTimeSecs > 0) {
+      Logger.warn(`[LlmAdapter] All keys exhausted! Sleeping ${kr.waitTimeSecs.toFixed(1)}s...`);
+      await new Promise(resolve => setTimeout(resolve, kr.waitTimeSecs * 1000));
+    }
+    return kr;
+  }
+
   async generateTinyPlans(userPrompt: string, systemContext: string) {
-    Logger.info(`[LlmAdapter] Dispatching request to NVIDIA NIM...`);
-    Logger.info(`[LlmAdapter] Payload size: ${userPrompt.length + systemContext.length} chars`);
-
-    // 1. Get the optimal key from the Load Balancer
-    const { keyStr, idx, waitTimeSecs } = this.apiKeyManager.getNextKey();
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
     
-    if (!keyStr || idx === null) {
-      throw new Error(`[LlmAdapter] FATAL: No API keys configured in the ApiKeyManager.`);
+    // Budget checking heuristics: ~100 tokens out, 50 in for tiny plans
+    const estimatedTokens = 150;
+    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002; // Very rough estimate
+    if (this.budgetVeto) {
+      await this.budgetVeto.checkVeto(estimatedCostUsd);
     }
-
-    // 2. Intelligent Sleep Threading if ALL keys are rate-limited
-    if (waitTimeSecs > 0) {
-      Logger.warn(`[LlmAdapter] All keys exhausted! Thread sleeping for ${waitTimeSecs.toFixed(1)}s to cool down...`);
-      await new Promise(resolve => setTimeout(resolve, waitTimeSecs * 1000));
-    }
-
-    // 3. Dynamically instantiate the client for this specific request
-    const client = new OpenAI({ 
-      apiKey: keyStr,
-      baseURL: 'https://integrate.api.nvidia.com/v1'
-    });
-
+    
     try {
       const response = await client.chat.completions.create({
-        model: 'meta/llama3-70b-instruct',
+        model: this.pickModel(kr),
         messages: [
           { role: 'system', content: systemContext },
           { role: 'user', content: userPrompt }
         ]
-      }, {
-        timeout: 15000 // 15 second timeout 
-      });
-
-      // Report Success!
-      this.apiKeyManager.reportKeyResult(idx, 200);
-
-      const content = response.choices[0].message.content;
-      Logger.info(`[LlmAdapter] Success! Received payload from NVIDIA NIM using Key #${idx + 1}.`);
-      return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
+      }, { timeout: this.requestTimeout });
       
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      }
+      
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const content = response.choices[0].message.content;
+      return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
     } catch (error: any) {
+      if (this.budgetVeto) {
+        await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      }
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
       let status = 500;
-      let retryAfter = null;
-
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        status = 408; // Request Timeout
-      } else if (error.status) {
-        status = error.status;
-      }
-
-      if (error.headers && error.headers['retry-after']) {
-        retryAfter = parseFloat(error.headers['retry-after']);
-      } else if (status === 429) {
-        retryAfter = 5; // Default 5s backoff for rate limits missing headers
-      }
-
-      // Report Failure back to the mathematical back-off engine
-      this.apiKeyManager.reportKeyResult(idx, status, retryAfter);
-
+      let retryAfter: number | null = null;
+      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
+      else if (error.status) status = error.status;
+      if (error.headers?.['retry-after']) retryAfter = parseFloat(error.headers['retry-after']);
+      else if (status === 429) retryAfter = 5;
+      this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfter);
       return { status, data: null, retryAfter, error };
     }
   }
+
+  async generateXmlCompletion(userPrompt: string, systemContext: string, maxTokens: number = 64) {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedCostUsd = (maxTokens / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: maxTokens,
+        temperature: 0.0
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return { status: 200, content: response.choices[0].message.content || "", retryAfter: null };
+    } catch (error: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
+      let status = 500;
+      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
+      else if (error.status) status = error.status;
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      return { status, content: "", retryAfter: null, error };
+    }
+  }
+
+  async generateChatResponse(messages: any[], systemContext: string) {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          ...messages
+        ],
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (usage) {
+        Logger.info(`[LlmAdapter] Token Usage - Prompt: ${usage.prompt_tokens} | Completion: ${usage.completion_tokens} | Total: ${usage.total_tokens}`);
+        if (this.budgetVeto) {
+          const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+          await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+        }
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return { status: 200, content: response.choices[0].message.content || "", retryAfter: null };
+    } catch (error: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
+      let status = 500;
+      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
+      else if (error.status) status = error.status;
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      return { status, content: "", retryAfter: null, error };
+    }
+  }
+
   async generateSemanticMetadata(nodeId: string, nodeName: string, type: string, codeSnippet: string) {
     const systemContext = `You are a structural semantic analyzer. Return a JSON object with:
     - purpose (string, max 15 words)
     - criticality (string: 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL')
     - riskScore (number: 0 to 100)
     Based on the following code snippet.`;
-    
     const userPrompt = `Node ID: ${nodeId}\nNode Name: ${nodeName}\nType: ${type}\nCode:\n${codeSnippet}`;
-    
-    // We can reuse the same infrastructure
-    const { keyStr, idx, waitTimeSecs } = this.apiKeyManager.getNextKey();
-    if (!keyStr || idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
-    if (waitTimeSecs > 0) {
-      await new Promise(resolve => setTimeout(resolve, waitTimeSecs * 1000));
-    }
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedCostUsd = (200 / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
-    const client = new OpenAI({ apiKey: keyStr, baseURL: 'https://integrate.api.nvidia.com/v1' });
     try {
       const response = await client.chat.completions.create({
-        model: 'meta/llama3-70b-instruct',
+        model: this.pickModel(kr),
         messages: [
           { role: 'system', content: systemContext },
           { role: 'user', content: userPrompt }
         ],
         response_format: { type: "json_object" }
-      }, { timeout: 15000 });
-
-      this.apiKeyManager.reportKeyResult(idx, 200);
-      const content = response.choices[0].message.content;
-      return JSON.parse(content || "{}");
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return JSON.parse(response.choices[0].message.content || "{}");
     } catch (e: any) {
-      this.apiKeyManager.reportKeyResult(idx, 500);
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
       Logger.error(`[LlmAdapter] Failed semantic analysis for ${nodeId}`);
       return null;
+    }
+  }
+
+  async chatCompletion(messages: any[], systemContext?: string): Promise<string> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const finalMessages = systemContext
+        ? [{ role: 'system', content: systemContext }, ...messages]
+        : messages;
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: finalMessages,
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return response.choices[0].message.content || "";
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
+      throw e;
+    }
+  }
+
+  async *generateChatResponseStream(
+    messages: any[],
+    systemContext?: string,
+  ): AsyncGenerator<string> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const finalMessages = systemContext
+        ? [{ role: 'system', content: systemContext }, ...messages]
+        : messages;
+      const stream = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: finalMessages,
+        stream: true,
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      for await (const chunk of stream) {
+        const token = chunk.choices[0]?.delta?.content || '';
+        if (token) yield token;
+      }
+      if (this.budgetVeto) await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      let status = 500;
+      if (e instanceof OpenAI.APIConnectionTimeoutError || e.code === 'ECONNABORTED' || e.message.includes('timeout')) status = 408;
+      else if (e.status) status = e.status;
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      throw e;
+    }
+  }
+
+  async *chat(messages: Message[], options: ChatOptions): AsyncGenerator<ChatEvent> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
+    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const finalMessages: any[] = options.system
+        ? [{ role: 'system', content: options.system }, ...messages]
+        : messages;
+
+      const requestOptions: any = {
+        model: this.pickModel(kr),
+        messages: finalMessages,
+        stream: true,
+        stream_options: { include_usage: true },
+        temperature: options.temperature ?? this.temperature,
+        max_tokens: options.maxTokens ?? this.maxTokens,
+      };
+
+      if (options.tools && options.tools.length > 0) {
+        requestOptions.tools = options.tools.map((t: any) => ({
+          type: 'function',
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.input_schema || t.parameters
+          }
+        }));
+        requestOptions.tool_choice = 'auto';
+      }
+
+      const stream: any = await client.chat.completions.create(requestOptions, { timeout: this.requestTimeout, signal: options.signal as any });
+      
+      let activeToolCallId = '';
+      let activeToolName = '';
+      let activeToolArgs = '';
+
+      const iterator = stream[Symbol.asyncIterator]();
+      while (true) {
+        const nextPromise = iterator.next();
+        const timeoutPromise = new Promise<any>((_, reject) => 
+          setTimeout(() => reject(new Error("Stream read timeout: API stopped responding mid-stream (15s idle)")), 15000)
+        );
+        
+        const result = await Promise.race([nextPromise, timeoutPromise]);
+        if (result.done) break;
+        
+        const chunk = result.value;
+        require('fs').appendFileSync('/Users/vishsiddharth/Desktop/minimax_debug.log', JSON.stringify(chunk) + '\\n');
+
+        // Yield tokens
+        const token = chunk.choices[0]?.delta?.content;
+        if (token) {
+          yield { type: 'token', text: token };
+        }
+
+        // Handle tool calls streaming
+        const toolCalls = chunk.choices[0]?.delta?.tool_calls;
+        if (toolCalls && toolCalls.length > 0) {
+          for (const tc of toolCalls) {
+            if (tc.id) {
+              // Yield previous tool call if any
+              if (activeToolCallId) {
+                yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+              }
+              activeToolCallId = tc.id;
+              activeToolName = tc.function?.name || '';
+              activeToolArgs = tc.function?.arguments || '';
+            } else if (tc.function?.arguments) {
+              activeToolArgs += tc.function.arguments;
+            }
+          }
+        }
+        
+        // Handle usage if present in the stream (requires stream_options in some models)
+        if (chunk.usage) {
+          yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
+          if (this.budgetVeto) {
+            const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
+            await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+          }
+        }
+      }
+
+      // Yield the final tool call
+      if (activeToolCallId) {
+        yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+      }
+
+      yield { type: 'done' };
+      
+      // If we didn't get usage, just release the reservation and record 0 (or estimate)
+      if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd); // Rough fallback
+      }
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      let status = 500;
+      let recoverable = false;
+      
+      if (e instanceof OpenAI.APIConnectionTimeoutError || e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
+        status = 408;
+      } else if (e.status) {
+        status = e.status;
+      }
+      
+      // If context length exceeded, we can compact and retry
+      if (e.message?.includes('maximum context length') || e.code === 'context_length_exceeded' || status === 413) {
+        recoverable = true;
+      }
+      
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      yield { type: 'error', message: e.message, recoverable };
     }
   }
 }

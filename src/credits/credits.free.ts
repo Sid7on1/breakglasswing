@@ -1,12 +1,14 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Logger } from '../utils';
+import { Mutex } from 'async-mutex';
 
 export class FreeCreditsTracker {
   private dailyQuota = 10;
   private currentUsage = 0;
   private lastResetDate = '';
-  private readonly QUOTA_PATH = path.join(process.cwd(), '.breakglass_credits', 'quota.json');
+  private readonly QUOTA_PATH = path.join(process.cwd(), '.breakglass/credits', 'quota.json');
+  private mutex = new Mutex();
 
   constructor() {
     this.loadQuota().catch(() => {});
@@ -18,29 +20,31 @@ export class FreeCreditsTracker {
   }
 
   private async loadQuota() {
-    try {
-      const data = await fs.readFile(this.QUOTA_PATH, 'utf-8');
-      const payload = JSON.parse(data);
-      
-      const today = this.getLocalDate();
-      if (payload.lastResetDate === today) {
-        this.currentUsage = payload.currentUsage;
-        this.lastResetDate = payload.lastResetDate;
-      } else {
-        // New day, reset quota
-        this.currentUsage = 0;
-        this.lastResetDate = today;
-        await this.saveQuota();
-        Logger.info(`[FreeTier] Local midnight passed. Free quota reset to 0.`);
+    return await this.mutex.runExclusive(async () => {
+      try {
+        const data = await fs.readFile(this.QUOTA_PATH, 'utf-8');
+        const payload = JSON.parse(data);
+        
+        const today = this.getLocalDate();
+        if (payload.lastResetDate === today) {
+          this.currentUsage = payload.currentUsage;
+          this.lastResetDate = payload.lastResetDate;
+        } else {
+          // New day, reset quota
+          this.currentUsage = 0;
+          this.lastResetDate = today;
+          await this.saveQuotaInternal();
+          Logger.info(`[FreeTier] Local midnight passed. Free quota reset to 0.`);
+        }
+      } catch (e) {
+        // Initialize fresh
+        this.lastResetDate = this.getLocalDate();
+        await this.saveQuotaInternal();
       }
-    } catch (e) {
-      // Initialize fresh
-      this.lastResetDate = this.getLocalDate();
-      await this.saveQuota();
-    }
+    });
   }
 
-  private async saveQuota() {
+  private async saveQuotaInternal() {
     try {
       await fs.mkdir(path.dirname(this.QUOTA_PATH), { recursive: true });
       await fs.writeFile(this.QUOTA_PATH, JSON.stringify({
@@ -50,6 +54,12 @@ export class FreeCreditsTracker {
     } catch (e) {
       Logger.error(`[FreeTier] Failed to write quota to disk.`);
     }
+  }
+
+  private async saveQuota() {
+    return await this.mutex.runExclusive(async () => {
+      await this.saveQuotaInternal();
+    });
   }
 
   async canUseFreeTier(): Promise<boolean> {

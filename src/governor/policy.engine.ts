@@ -10,7 +10,9 @@ export const SafetyPolicy = {
   forbiddenRegex: [/id_rsa/i, /\.key$/i, /\.pem$/i, /\.env$/i, /password/i, /secret/i]
 };
 
-const POLICY_FILE = path.join(process.cwd(), '.breakglass_policy.json');
+const POLICY_FILE = path.join(process.cwd(), '.breakglass/policy.json');
+
+let policyWatcher: fs.FSWatcher | null = null;
 
 export function initPolicyEngine() {
   if (fs.existsSync(POLICY_FILE)) {
@@ -19,14 +21,21 @@ export function initPolicyEngine() {
 
   // Watch for runtime changes (GOV-004)
   try {
-    fs.watch(process.cwd(), (eventType, filename) => {
-      if (filename === '.breakglass_policy.json') {
+    policyWatcher = fs.watch(process.cwd(), (eventType, filename) => {
+      if (filename === '.breakglass/policy.json') {
         // Debounce or just load directly
         setTimeout(loadPolicy, 100); 
       }
     });
   } catch (e) {
     // Ignore watch errors if platform doesn't support it
+  }
+}
+
+export function destroyPolicyEngine() {
+  if (policyWatcher) {
+    policyWatcher.close();
+    policyWatcher = null;
   }
 }
 

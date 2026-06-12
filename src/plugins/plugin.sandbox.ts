@@ -70,7 +70,15 @@ export class PluginSandbox {
       }
 
       // 2. Remove the plugin directory from disk
+      const { SafetyPolicy } = require('../governor/policy.engine');
       const absolutePath = path.resolve(pluginDir);
+      const canonicalWorkspace = path.resolve(SafetyPolicy.allowedWorkspace);
+      
+      if (!absolutePath.toLowerCase().startsWith(canonicalWorkspace.toLowerCase())) {
+         Logger.error(`[PluginSandbox] CRITICAL SECURITY ALERT: Prevented path traversal attack during plugin uninstallation. Attempted to wipe: ${absolutePath}`);
+         return false;
+      }
+
       await fs.rm(absolutePath, { recursive: true, force: true });
       Logger.info(`[PluginSandbox] Removed plugin directory: ${absolutePath}`);
 

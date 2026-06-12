@@ -44,13 +44,13 @@ export class WebhookExecutor {
       }
     });
 
-    this.server.listen(8080, () => {
-      Logger.info(`[WebhookExecutor] Native Node.js HTTP Daemon bound to port 8080.`);
+    this.server.listen(8081, () => {
+      Logger.info(`[WebhookExecutor] Native Node.js HTTP Daemon bound to port 8081.`);
     });
     
     this.server.on('error', (e: any) => {
       if (e.code === 'EADDRINUSE') {
-        Logger.warn(`[WebhookExecutor] Port 8080 is in use, assuming server is already running globally.`);
+        Logger.warn(`[WebhookExecutor] Port 8081 is in use, assuming server is already running globally.`);
       } else {
         Logger.error(`[WebhookExecutor] Server error: ${e.message}`);
       }

@@ -29,11 +29,13 @@ export interface IGraphStore {
   setGraph(graph: GraphData): void;
   getGraph(): GraphData;
   getNode(id: string): GraphNode | undefined;
-  getEdgesFrom(sourceId: string): GraphEdge[];
-  getEdgesTo(targetId: string): GraphEdge[];
+  getEdgesFrom(nodeId: string): GraphEdge[];
+  getEdgesTo(nodeId: string): GraphEdge[];
   addNode(node: GraphNode): void;
   removeNode(id: string): void;
   addEdge(edge: GraphEdge): void;
   saveToDisk(): Promise<void>;
   loadFromDisk(): Promise<void>;
+  clear(): void;
+  setStoragePath(newPath: string): void;
 }

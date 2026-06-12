@@ -19,20 +19,11 @@ export class TaskPipeline {
   private decomposer: TaskDecomposer;
   private classifier: TaskClassifier;
   private mapper: TaskMapper;
-  private keyManager: ApiKeyManager;
 
-  constructor(private eventBus: IEventBus) {
-    let keysArray: string[] = [];
-    try {
-      keysArray = JSON.parse(process.env.OPENAI_API_KEYS_ARRAY || '["sk-mock"]');
-    } catch (e) {
-      keysArray = ['sk-mock'];
-    }
-    
-    this.keyManager = new ApiKeyManager(keysArray);
-    const llm = new LlmAdapter(this.keyManager);
-    this.decomposer = new TaskDecomposer(llm);
-    this.classifier = new TaskClassifier(llm);
+
+  constructor(private eventBus: IEventBus, private llmAdapter: LlmAdapter) {
+    this.decomposer = new TaskDecomposer(this.llmAdapter);
+    this.classifier = new TaskClassifier(this.llmAdapter);
     this.mapper = new TaskMapper();
   }
 

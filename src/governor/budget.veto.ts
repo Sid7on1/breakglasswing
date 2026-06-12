@@ -8,11 +8,12 @@ import { Mutex } from 'async-mutex';
 
 export class BudgetVeto {
   private currentDailySpend: number = 0;
+  private reservedSpend: number = 0;
   private readonly spendFilePath: string;
   private budgetMutex = new Mutex();
 
   constructor() {
-    const creditsDir = path.join(process.cwd(), '.breakglass_credits');
+    const creditsDir = path.join(process.cwd(), '.breakglass/credits');
     this.spendFilePath = path.join(creditsDir, 'spend.json');
 
     // Use sync fs here because constructor cannot be async easily
@@ -64,9 +65,10 @@ export class BudgetVeto {
     await fs.writeFile(this.spendFilePath, JSON.stringify(data, null, 2), 'utf8');
   }
 
-  async recordSpend(amountUsd: number): Promise<void> {
+  async recordSpend(actualCostUsd: number, estimatedCostUsd: number = 0): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
-      this.currentDailySpend += amountUsd;
+      this.reservedSpend = Math.max(0, this.reservedSpend - estimatedCostUsd);
+      this.currentDailySpend += actualCostUsd;
       await this.savePersistentSpendAsync();
       Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
     });
@@ -74,9 +76,35 @@ export class BudgetVeto {
 
   async checkVeto(estimatedCostUsd: number): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
+      if (this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
+        Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
+        throw new GovernorVetoError('Budget limit exceeded.');
+      }
+      this.reservedSpend += estimatedCostUsd;
+    });
+  }
+
+  async releaseReservation(estimatedCostUsd: number): Promise<void> {
+    await this.budgetMutex.runExclusive(async () => {
+      this.reservedSpend = Math.max(0, this.reservedSpend - estimatedCostUsd);
+    });
+  }
+
+  async executeWithBudget<T>(estimatedCostUsd: number, action: () => Promise<{ actualCostUsd: number, result: T }>): Promise<T> {
+    return await this.budgetMutex.runExclusive(async () => {
       if (this.currentDailySpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
         throw new GovernorVetoError('Budget limit exceeded.');
+      }
+      
+      try {
+        const { actualCostUsd, result } = await action();
+        this.currentDailySpend += actualCostUsd;
+        await this.savePersistentSpendAsync();
+        Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
+        return result;
+      } catch (e) {
+        throw e;
       }
     });
   }
