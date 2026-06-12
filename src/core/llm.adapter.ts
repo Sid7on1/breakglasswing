@@ -370,6 +370,7 @@ export class LlmAdapter implements LLMProvider {
       let activeToolName = '';
       let activeToolArgs = '';
       const thinkFilter = new ThinkTagFilter();
+      let usageRecorded = false;
 
       const iterator = stream[Symbol.asyncIterator]();
       while (true) {
@@ -421,6 +422,7 @@ export class LlmAdapter implements LLMProvider {
           if (this.budgetVeto) {
             const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
             await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+            usageRecorded = true;
           }
         }
       }
@@ -436,9 +438,10 @@ export class LlmAdapter implements LLMProvider {
       }
 
       yield { type: 'done' };
-      
-      // If we didn't get usage, just release the reservation and record 0 (or estimate)
-      if (this.budgetVeto) {
+
+      // Only fall back to the estimate if the stream never reported real usage,
+      // otherwise we would double-count the spend already recorded above.
+      if (this.budgetVeto && !usageRecorded) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd); // Rough fallback
       }
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);

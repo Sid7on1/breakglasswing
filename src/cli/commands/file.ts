@@ -41,9 +41,22 @@ globalCommandRegistry.register({
     }
 
     const file = args[0];
-    const search = args.slice(1, -1).join(' ').replace(/^"|"$/g, '');
-    const replace = args[args.length - 1].replace(/^"|"$/g, '');
-    
+    // The registry tokenizes on whitespace, so multi-word quoted strings arrive split
+    // across several args (with their quote chars preserved). Rejoin and pull out the
+    // two quoted segments so `"hello world"` survives intact.
+    const rest = args.slice(1).join(' ');
+    const quoted = rest.match(/"([^"]*)"/g);
+    let search: string;
+    let replace: string;
+    if (quoted && quoted.length >= 2) {
+      search = quoted[0].slice(1, -1);
+      replace = quoted[1].slice(1, -1);
+    } else {
+      // Fallback for unquoted single-token search/replace
+      search = args.slice(1, -1).join(' ').replace(/^"|"$/g, '');
+      replace = args[args.length - 1].replace(/^"|"$/g, '');
+    }
+
     const ok = await editFileLines(file, search, replace);
     return { type: 'message', level: ok ? 'success' : 'error', content: ok ? `Edited ${file}` : `No match found in ${file}` };
   }

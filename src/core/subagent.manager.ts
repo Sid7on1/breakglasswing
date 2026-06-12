@@ -49,9 +49,17 @@ export class SubAgentManager {
         this.activeWorkers.delete(taskId);
         if (code !== 0) {
           reject(new Error(`Worker stopped with exit code ${code}`));
+        } else {
+          // Worker exited cleanly but never posted a 'success' message — settle the
+          // promise so the caller is never left hanging. No-op if already resolved.
+          resolve('Worker exited cleanly with no explicit result.');
         }
       });
     });
+  }
+
+  public activeCount(): number {
+    return this.activeWorkers.size;
   }
 
   public killWorker(taskId: string): void {

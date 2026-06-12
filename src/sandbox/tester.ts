@@ -13,9 +13,9 @@ export class Tester {
     
     try {
       if (ext === '.js') {
-         await execAsync(`node --check ${filePath}`);
+         await execAsync(`node --check "${filePath}"`);
       } else if (ext === '.ts') {
-         await execAsync(`npx tsc --noEmit --esModuleInterop ${filePath}`);
+         await execAsync(`npx tsc --noEmit --esModuleInterop "${filePath}"`);
       }
       
       Logger.info(`[Tester] ✅ Dynamic Regression Passed.`);

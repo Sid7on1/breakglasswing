@@ -75,12 +75,20 @@ export class BashStaticAnalyzer {
   private assessWriteRisk(tokens: string[]): 'low' | 'medium' | 'high' {
     const cmd = tokens.join(' ');
     
-    // High risk: rm -rf, especially to root or home
-    if (cmd.includes('rm -rf') || cmd.includes('rm -r -f') || cmd.includes('rm -f -r')) {
-      if (tokens.some(t => t === '/' || t === '~' || t === '/*')) {
-        return 'high';
-      }
-      return 'medium';
+    // Recursive+force delete: high risk when aimed at root, home, an absolute path,
+    // a parent dir, or anything containing a glob; medium otherwise. Detect the flags
+    // regardless of ordering or whether they are combined (e.g. -rf, -fr, -r -f).
+    const isRecursiveForce =
+      /\brm\b/.test(cmd) &&
+      /-[a-z]*r[a-z]*/.test(cmd) &&
+      /-[a-z]*f[a-z]*/.test(cmd);
+    if (isRecursiveForce) {
+      const dangerous = tokens.some(t =>
+        t === '/' || t === '~' || t === '.' || t === '..' ||
+        t.startsWith('/') || t.startsWith('~') ||
+        t.includes('*') || t.includes('..')
+      );
+      return dangerous ? 'high' : 'medium';
     }
 
     return 'low';

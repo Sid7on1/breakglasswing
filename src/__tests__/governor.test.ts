@@ -39,6 +39,13 @@ describe('Governor', () => {
       await expect(governor.approveTaskExecution('FILE_WRITE', { targetPath: invalidPath }))
         .rejects.toThrow(GovernorVetoError);
     });
+
+    it('blocks sibling directories that share the workspace prefix', async () => {
+      // e.g. workspace is /work and the target is /work-evil/x.txt — must be rejected
+      const siblingPath = process.cwd() + '-evil' + path.sep + 'x.txt';
+      await expect(governor.approveTaskExecution('FILE_WRITE', { targetPath: siblingPath }))
+        .rejects.toThrow(GovernorVetoError);
+    });
   });
 
   describe('BudgetVeto', () => {
