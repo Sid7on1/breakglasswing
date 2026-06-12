@@ -18,8 +18,10 @@ export class FileSystemVeto {
     const normalized = path.normalize(realPath).toLowerCase();
     const canonicalWorkspace = path.resolve(SafetyPolicy.allowedWorkspace).toLowerCase();
 
-    // 1. Must be inside workspace
-    if (!normalized.startsWith(canonicalWorkspace)) {
+    // 1. Must be inside workspace (separator-aware to prevent sibling-prefix escapes,
+    //    e.g. /home/user/workspace-evil must NOT pass for workspace /home/user/workspace)
+    const withSep = canonicalWorkspace.endsWith(path.sep) ? canonicalWorkspace : canonicalWorkspace + path.sep;
+    if (normalized !== canonicalWorkspace && !normalized.startsWith(withSep)) {
       Logger.error(`[Governor: Veto] File operation blocked. Target is outside the allowed workspace: ${realPath}`);
       throw new GovernorVetoError('Path outside workspace boundary.');
     }

@@ -23,8 +23,10 @@ export class FileSystemAdapter {
       realPath = absolutePath;
     }
     
-    // Explicitly prevent directory traversal attacks (e.g. `../../../etc/passwd` or via symlinks)
-    if (!realPath.startsWith(this.workspaceRoot)) {
+    // Explicitly prevent directory traversal attacks (e.g. `../../../etc/passwd` or via symlinks).
+    // Separator-aware so a sibling dir like `${workspaceRoot}-evil` cannot pass the prefix test.
+    const rootWithSep = this.workspaceRoot.endsWith(path.sep) ? this.workspaceRoot : this.workspaceRoot + path.sep;
+    if (realPath !== this.workspaceRoot && !realPath.startsWith(rootWithSep)) {
       const err = `[Security Error] Path Traversal Attack Blocked! Attempted to access outside workspace: ${realPath}`;
       Logger.error(err);
       throw new Error(err);

@@ -68,11 +68,16 @@ export class FreeCreditsTracker {
   }
 
   async recordUsage(): Promise<void> {
-    if (this.currentUsage < this.dailyQuota) {
-      this.currentUsage++;
-      await this.saveQuota();
-      Logger.info(`[FreeTier] Used 1 free credit. (${this.currentUsage}/${this.dailyQuota} used today)`);
-    }
+    // Check-and-increment must be atomic so concurrent calls cannot both pass the
+    // quota check and over-spend. saveQuotaInternal is used (not saveQuota) because
+    // the mutex is not reentrant.
+    await this.mutex.runExclusive(async () => {
+      if (this.currentUsage < this.dailyQuota) {
+        this.currentUsage++;
+        await this.saveQuotaInternal();
+        Logger.info(`[FreeTier] Used 1 free credit. (${this.currentUsage}/${this.dailyQuota} used today)`);
+      }
+    });
   }
 
   getRemaining(): number {

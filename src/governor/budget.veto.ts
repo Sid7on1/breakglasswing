@@ -92,7 +92,7 @@ export class BudgetVeto {
 
   async executeWithBudget<T>(estimatedCostUsd: number, action: () => Promise<{ actualCostUsd: number, result: T }>): Promise<T> {
     return await this.budgetMutex.runExclusive(async () => {
-      if (this.currentDailySpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
+      if (this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
         throw new GovernorVetoError('Budget limit exceeded.');
       }

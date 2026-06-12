@@ -9,8 +9,6 @@ import { SubAgentManager, globalSubAgentManager } from '../../core/subagent.mana
 import { randomUUID } from 'crypto';
 
 export function createSpawnSubagentTool(governor: IGovernor, registry: ToolRegistry, llmAdapter: LlmAdapter): BuiltTool {
-  let spawnCount = 0;
-
   return buildTool({
     name: 'SpawnSubagentTool',
     description: `Spawns an asynchronous, parallel sub-agent as a native WorkerThread to handle a delegated task.
@@ -42,12 +40,13 @@ Use this tool when a user request is too massive or complex to be completed in a
       required: ['agentType', 'prompt']
     },
     execute: async (args: { agentType: string, prompt: string, maxSubAgents?: number }, context?: any) => {
+      // Gate on the number of currently-running sub-agents rather than a cumulative
+      // counter. A lifetime counter would permanently brick spawning after the limit;
+      // counting active workers self-resets as workers finish.
       const maxSpawns = args.maxSubAgents || 5;
-      if (spawnCount >= maxSpawns) {
-        return `Error: Spawn limit reached for this turn (${maxSpawns}). Wait for results before spawning more.`;
+      if (globalSubAgentManager.activeCount() >= maxSpawns) {
+        return `Error: Concurrent sub-agent limit reached (${maxSpawns}). Wait for running sub-agents to finish before spawning more.`;
       }
-
-      spawnCount++;
 
       const currentCwd = context?.cwd || process.cwd();
       const parentMode = (governor as any).mode; // Pass the permission bridge
