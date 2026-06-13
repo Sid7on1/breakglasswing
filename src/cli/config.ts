@@ -23,6 +23,7 @@ export interface CliConfig {
   workspaceRoot: string;
   autoAgentDecisions: boolean;
   diffApproval: boolean;
+  blastGate: boolean; // G5: confirm edits touching HIGH/CRITICAL graph symbols (off by default)
   selfCritic: boolean;
   allowSelfEvolution: boolean;
   reasoningEffort?: string; // off by default; 'low'|'medium'|'high' to speed up thinking models
@@ -47,6 +48,7 @@ const DEFAULTS: CliConfig = {
   workspaceRoot: process.cwd(),
   autoAgentDecisions: false,
   diffApproval: false,
+  blastGate: false,
   selfCritic: false,
   allowSelfEvolution: false,
 };

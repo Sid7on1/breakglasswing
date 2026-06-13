@@ -5,6 +5,8 @@ import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
+import { checkBlastRadius } from '../../cli/blastGate';
+import { sliceLineRange } from '../file-range';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -49,15 +51,9 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
       const content = await fs.readFile(fullPath, 'utf8');
       
       if (args.startLine !== undefined || args.endLine !== undefined) {
-        const lines = content.split('\n');
-        const start = Math.max(1, args.startLine || 1);
-        const end = Math.min(lines.length, args.endLine || lines.length);
-        
-        if (start > end) {
-          return `Error: startLine (${start}) cannot be greater than endLine (${end}).`;
-        }
-        
-        return lines.slice(start - 1, end).map((line, idx) => `${start + idx}: ${line}`).join('\n');
+        const { text, error } = sliceLineRange(content, args.startLine, args.endLine);
+        if (error) return `Error: ${error}`;
+        return text;
       }
       
       return content;
@@ -99,6 +95,10 @@ Use this tool to write new code, update configuration files, or generate artifac
     const exists = await fs.access(fullPath).then(() => true).catch(() => false);
     if (exists && !args.overwrite) {
       throw new Error(`File already exists: ${args.path}. Pass overwrite: true to replace it.`);
+    }
+    // Blast-radius gate — only meaningful when overwriting an existing, indexed file.
+    if (exists && !(await checkBlastRadius(fullPath))) {
+      return `Write to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`;
     }
     // Inline diff approval (no-op unless enabled and an interactive approver is registered).
     const prior = exists ? await fs.readFile(fullPath, 'utf-8').catch(() => '') : '';

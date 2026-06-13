@@ -5,6 +5,7 @@ import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
+import { checkBlastRadius } from '../../cli/blastGate';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -92,6 +93,11 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     const updated = args.replaceAll
       ? content.split(args.oldString).join(args.newString)
       : content.replace(args.oldString, args.newString);
+
+    // Blast-radius gate (no-op unless enabled + interactive + the file owns a HIGH/CRITICAL symbol).
+    if (!(await checkBlastRadius(fullPath))) {
+      return `Edit to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`;
+    }
 
     // Inline diff approval (no-op unless enabled and an interactive approver is registered).
     const approved = await requestDiffApproval(`Edit ${args.path}`, unifiedDiff(content, updated, args.path));

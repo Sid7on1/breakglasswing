@@ -46,7 +46,7 @@ import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
-import { createGraphQueryTool } from '../tools/implementations/graph.tool';
+import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
@@ -124,6 +124,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createWebFetchTool(governor));
   toolRegistry.register(createCdTool(governor));
   toolRegistry.register(createGraphQueryTool(governor, graphStore));
+  toolRegistry.register(createGraphContextTool(governor, graphStore));
   toolRegistry.register(createMemoryQueryTool(governor, vectorStore));
   toolRegistry.register(createRememberTool(governor, globalProjectMemory));
   toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));

@@ -6,7 +6,15 @@ export interface GraphNode {
   name: string;
   type: NodeType;
   filePath?: string; // Where this node lives
-  
+
+  // Source location (1-based, inclusive). Populated by the static analyzers so the agent
+  // can read just this symbol's source instead of the whole file. Optional for backward
+  // compatibility: graphs serialized before this existed simply lack the fields until
+  // they are re-indexed.
+  startLine?: number;
+  endLine?: number;
+  signature?: string; // The declaration's first line (e.g. `function foo(a: number): void`)
+
   // Semantic Metadata (Populated by LLM in Phase 2)
   purpose?: string;
   criticality?: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';

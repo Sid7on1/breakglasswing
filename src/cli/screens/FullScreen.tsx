@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { Box, Static, Text, useInput, useApp } from 'ink';
+import { Box, Static, Text, useInput, useApp, useStdout } from 'ink';
 import { SkillLoader, DynamicPersona } from '../skills.loader';
 import { SimpleInput } from '../components/SimpleInput';
 import { cliEvents, LogEntry, MessageEntry } from '../events';
@@ -22,9 +22,11 @@ import { ThinkingText } from '../components/ThinkingText';
 import { InteractiveMenu, MenuOption } from '../components/InteractiveMenu';
 import { InteractivePrompt } from '../components/InteractivePrompt';
 import { getTheme, ThemeName } from '../themes';
+import { tailToHeight } from '../streaming.viewport';
 import { TaskPipeline } from '../../task';
 import { CodebaseIndexer } from '../../graph/indexer';
 import { GraphStore } from '../../graph/graph.store';
+import { expandAtMentions, suggestAtSymbols } from '../atMention';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { Governor } from '../../governor/governor';
@@ -39,6 +41,7 @@ import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents, regist
 import { getProviders, getProvider, setProvider, getCurrentProvider, buildKeyPool } from '../provider';
 import { saveConfig, getConfig } from '../config';
 import { registerDiffApprover, setDiffApprovalEnabled } from '../diffApproval';
+import { registerBlastConfirmer, registerBlastGraphStore, setBlastGateEnabled } from '../blastGate';
 import { setSelfCriticEnabled } from '../selfCritic';
 import { globalWatcherManager } from '../watchers';
 import { saveApiKeyToEnv } from '../env.loader';
@@ -155,6 +158,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [vetoQuestion, setVetoQuestion] = useState<string | null>(null);
   const [vetoOptions, setVetoOptions] = useState<string[]>([]);
   const [vetoResolver, setVetoResolver] = useState<((answer: string) => void) | null>(null);
+  const { stdout } = useStdout();
   const [messages, setMessages] = useState<MessageEntry[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -249,11 +253,20 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         .map(([cmd, desc]) => `${cmd}  ${desc}`);
       setSuggestions(matches);
       setSuggestionIndex(matches.length > 0 ? 0 : -1);
-    } else {
-      setSuggestions([]);
-      setSuggestionIndex(-1);
+      return;
     }
-  }, []);
+    // @symbol autocomplete: complete the `@<partial>` token currently being typed from
+    // graph node names (G4). Resolves symbols, not files — more precise than @file.
+    const atMatch = value.match(/(?:^|\s)@([A-Za-z0-9_.]*)$/);
+    if (atMatch) {
+      const matches = suggestAtSymbols(graphStore, atMatch[1]).map(n => `@${n}  symbol`);
+      setSuggestions(matches);
+      setSuggestionIndex(matches.length > 0 ? 0 : -1);
+      return;
+    }
+    setSuggestions([]);
+    setSuggestionIndex(-1);
+  }, [graphStore]);
 
   const addLog = useCallback((level: LogEntry['level'], text: string) => {
     const id = logCounterRef.current++;
@@ -388,6 +401,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       });
     }));
 
+    // Blast-radius gate (G5): confirm edits that touch HIGH/CRITICAL symbols. Off by default;
+    // the graph store powers the impact calculation. Only registered in this interactive UI,
+    // so workers/print mode auto-allow.
+    try { setBlastGateEnabled(!!getConfig().blastGate); } catch { /* config not loaded */ }
+    registerBlastGraphStore(graphStore);
+    registerBlastConfirmer((message) => new Promise<boolean>((resolve) => {
+      cliEvents.emit('veto_prompt', message, ['Proceed', 'Cancel'], (ans: string) => {
+        resolve(/^(proceed|y)/i.test((ans || '').trim()));
+      });
+    }));
+
     // Background watchers: wake the agent on file change / schedule. Skip while a turn
     // is already running, and use the budget governor as a circuit breaker.
     globalWatcherManager.registerNotifier((msg) => addSystemMessage('info', msg));
@@ -427,6 +451,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.off('veto_prompt', handleVeto);
       cliEvents.off('diff', handleDiff);
       registerDiffApprover(null);
+      registerBlastConfirmer(null);
+      registerBlastGraphStore(null);
       console.log = originalLog;
       console.warn = originalWarn;
       console.error = originalError;
@@ -456,9 +482,16 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (suggestions.length > 0 && suggestionIndex >= 0) {
       const selected = suggestions[suggestionIndex].split('  ')[0];
       const autoExecute = COMMAND_REGISTRY.map(cmd => cmd[0]);
-      
+
       setSuggestions([]);
       setSuggestionIndex(-1);
+
+      // @symbol completion: replace the trailing `@<partial>` with the chosen symbol and
+      // keep editing (never auto-submit on an @ pick).
+      if (selected.startsWith('@')) {
+        setInput(rawQuery.replace(/@[A-Za-z0-9_.]*$/, selected + ' '));
+        return;
+      }
 
       if (autoExecute.includes(selected) && rawQuery !== selected) {
         setInput('');
@@ -634,8 +667,23 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     let tokenBuffer = '';
     let lastRenderTime = Date.now();
 
+    // Expand any @symbol mentions into appended source before handing off to the agent.
+    // The displayed message/history keep the user's original text; the agent sees the
+    // expanded prompt. Best-effort — fall back to the raw query on any failure.
+    let agentQuery = query;
     try {
-      await active.execute(query, (token: string) => {
+      const expansion = await expandAtMentions(query, graphStore, process.cwd());
+      agentQuery = expansion.text;
+      if (expansion.resolved.length > 0) {
+        addLog('info', `Injected ${expansion.resolved.length} @symbol${expansion.resolved.length > 1 ? 's' : ''}: ${expansion.resolved.map(t => '@' + t).join(', ')}`);
+        if (expansion.unresolved.length > 0) {
+          addLog('warn', `Unresolved @mention(s): ${expansion.unresolved.map(t => '@' + t).join(', ')} — not in the graph (try /index).`);
+        }
+      }
+    } catch { /* @-expansion is best-effort */ }
+
+    try {
+      await active.execute(agentQuery, (token: string) => {
         totalChars += token.length;
         tokenBuffer += token;
         
@@ -884,14 +932,30 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 </Box>
               )}
 
-              {streamingText.trim() ? (
-                <Box flexDirection="row">
-                  <Text color={theme.accent}>● </Text>
-                  <Box flexDirection="column" flexGrow={1}>
-                    <Markdown theme={theme}>{streamingText}</Markdown>
+              {streamingText.trim() ? (() => {
+                // Keep the live preview shorter than the viewport so Ink can always
+                // redraw it in place; the full formatted answer is committed to
+                // <Static> when the turn completes. Reserve rows for the tool-call
+                // lines, prompt, footer and surrounding margins.
+                const rows = stdout?.rows || 24;
+                const cols = stdout?.columns || 80;
+                const reserved = 10 + streamingToolCalls.length;
+                const budget = Math.max(4, rows - reserved);
+                const { text: preview, truncated } = tailToHeight(streamingText, budget, cols - 4);
+                return (
+                  <Box flexDirection="column">
+                    {truncated && (
+                      <Text color={theme.subtle}>… (streaming — full reply appears when complete)</Text>
+                    )}
+                    <Box flexDirection="row">
+                      <Text color={theme.accent}>● </Text>
+                      <Box flexDirection="column" flexGrow={1}>
+                        <Markdown theme={theme}>{preview}</Markdown>
+                      </Box>
+                    </Box>
                   </Box>
-                </Box>
-              ) : null}
+                );
+              })() : null}
 
               {isProcessing && !streamingText.trim() && (
                 <ThinkingText theme={theme} />
