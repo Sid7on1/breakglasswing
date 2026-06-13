@@ -35,6 +35,11 @@ export interface UIState {
   } | null;
 }
 
+export interface TodoEntry {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
 export interface AppState {
   ui: UIState;
   messages: MessageEntry[];
@@ -45,6 +50,7 @@ export interface AppState {
   streamingText: string;
   streamingToolCalls: ToolCallEntry[];
   streamMeta: { chars: number; elapsed: number };
+  todos: TodoEntry[];
 }
 
 export const appStore = createStore<AppState>({
@@ -61,7 +67,8 @@ export const appStore = createStore<AppState>({
   vetoResolver: null,
   streamingText: '',
   streamingToolCalls: [],
-  streamMeta: { chars: 0, elapsed: 0 }
+  streamMeta: { chars: 0, elapsed: 0 },
+  todos: []
 });
 
 // Helper action to emit a log (similar to old EventBus)

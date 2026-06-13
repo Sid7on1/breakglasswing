@@ -23,6 +23,11 @@ export interface BuiltTool {
 const TASK_TYPE_MAP: Record<string, string> = {
   BashTool: 'OS_COMMAND',
   WriteFileTool: 'FILE_WRITE',
+  // Edits are writes: they must pass the same workspace/path vetting.
+  EditFileTool: 'FILE_WRITE',
+  // Deletes were previously unmapped (generic TOOL_EXECUTION), which skipped
+  // both the filesystem veto and the interactive permission prompt.
+  DeleteTool: 'FILE_DELETE',
 };
 
 /**

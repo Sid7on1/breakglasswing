@@ -36,6 +36,8 @@ class AppEventEmitter extends EventEmitter {
           if (idx !== -1) arr[idx] = tc; else arr.push(tc);
           return { streamingToolCalls: arr };
         });
+      } else if (event === 'todo_update') {
+        appStore.setState({ todos: args[0] || [] });
       } else if (event === 'tool_call_result') {
         const tc = args[0];
         appStore.setState(prev => {
