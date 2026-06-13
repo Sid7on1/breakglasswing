@@ -924,18 +924,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder}>
           <Box flexDirection="column" paddingX={1}>
             {suggestions.length > 0 && (
-              <Box 
-                flexDirection="column" 
-                marginBottom={1} 
-                borderStyle="round" 
-                borderColor={theme.borderFocus}
-                paddingX={1}
-                width={70}
-              >
-                <Text color={theme.subtle} bold>Command Palette [↑/↓ to navigate, Enter to select]</Text>
-                <Box marginBottom={1}>
-                  <Text color={theme.subtle}>{'—'.repeat(65)}</Text>
-                </Box>
+              <Box flexDirection="column" marginBottom={1}>
                 {(() => {
                   const windowSize = 6;
                   let startIdx = 0;
@@ -950,16 +939,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                   }
                   return suggestions.slice(startIdx, startIdx + windowSize).map((s, idx) => {
                     const actualIdx = startIdx + idx;
+                    const selected = actualIdx === suggestionIndex;
                     const parts = s.split('  ');
                     const cmd = parts[0];
                     const desc = parts.slice(1).join('  ');
                     return (
                       <Box key={cmd} flexDirection="row">
                         <Box width={2}>
-                          <Text color={actualIdx === suggestionIndex ? theme.accent : theme.subtle}>{actualIdx === suggestionIndex ? '❯' : ' '}</Text>
+                          <Text color={theme.accent}>{selected ? '❯' : ' '}</Text>
                         </Box>
                         <Box width={15}>
-                          <Text color={theme.accent} bold={actualIdx === suggestionIndex}>{cmd}</Text>
+                          <Text color={selected ? theme.accent : theme.inactive} bold={selected}>{cmd}</Text>
                         </Box>
                         <Box flexGrow={1}>
                           <Text color={theme.subtle}>{desc}</Text>
