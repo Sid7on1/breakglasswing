@@ -13,6 +13,7 @@ export interface ChatOptions {
   tools?: any[]; // We'll pass the JSON Schema tool definitions here
   temperature?: number;
   maxTokens?: number;
+  reasoningEffort?: string; // 'low' | 'medium' | 'high' — when set, sent as reasoning_effort
   signal?: AbortSignal;
 }
 

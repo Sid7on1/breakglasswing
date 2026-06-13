@@ -12,10 +12,14 @@ export interface SubAgentConfig {
 export class SubAgentManager {
   private activeWorkers = new Map<string, Worker>();
   private workerScriptPath: string;
+  // A sub-agent that hangs (stalled stream, infinite loop) must not block the parent
+  // forever. Configurable; defaults to 10 minutes — generous for slow reasoning models.
+  private readonly workerTimeoutMs: number;
 
-  constructor() {
-    // Determine path to the worker entrypoint
-    this.workerScriptPath = path.resolve(__dirname, '../cli/worker.entry.js');
+  // opts is a test seam: production callers use the default worker entrypoint and timeout.
+  constructor(opts?: { workerScriptPath?: string; timeoutMs?: number }) {
+    this.workerScriptPath = opts?.workerScriptPath ?? path.resolve(__dirname, '../cli/worker.entry.js');
+    this.workerTimeoutMs = opts?.timeoutMs ?? parseInt(process.env.BGW_WORKER_TIMEOUT_MS || '600000', 10);
   }
 
   public spawnWorker(taskId: string, config: SubAgentConfig): Promise<string> {
@@ -28,31 +32,47 @@ export class SubAgentManager {
 
       this.activeWorkers.set(taskId, worker);
 
+      // Watchdog: terminate and reject if the worker produces no result in time. Cleared
+      // the moment the promise settles so a healthy worker never trips it.
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        Logger.error(`[SubAgentManager] Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms. Terminating.`);
+        this.activeWorkers.delete(taskId);
+        worker.terminate().catch(() => { /* best-effort */ });
+        reject(new Error(`Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms`));
+      }, this.workerTimeoutMs);
+
+      const finalize = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.activeWorkers.delete(taskId);
+        fn();
+      };
+
       worker.on('message', (message) => {
         if (message.type === 'success') {
-          this.activeWorkers.delete(taskId);
-          resolve(message.result);
+          finalize(() => resolve(message.result));
         } else if (message.type === 'error') {
-          this.activeWorkers.delete(taskId);
-          reject(new Error(message.error));
+          finalize(() => reject(new Error(message.error)));
         } else if (message.type === 'log') {
           Logger.info(`[Worker ${taskId}] ${message.content}`);
         }
       });
 
       worker.on('error', (err) => {
-        this.activeWorkers.delete(taskId);
-        reject(err);
+        finalize(() => reject(err));
       });
 
       worker.on('exit', (code) => {
-        this.activeWorkers.delete(taskId);
         if (code !== 0) {
-          reject(new Error(`Worker stopped with exit code ${code}`));
+          finalize(() => reject(new Error(`Worker stopped with exit code ${code}`)));
         } else {
           // Worker exited cleanly but never posted a 'success' message — settle the
-          // promise so the caller is never left hanging. No-op if already resolved.
-          resolve('Worker exited cleanly with no explicit result.');
+          // promise so the caller is never left hanging. No-op if already settled.
+          finalize(() => resolve('Worker exited cleanly with no explicit result.'));
         }
       });
     });

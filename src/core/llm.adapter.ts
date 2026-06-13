@@ -63,11 +63,45 @@ export function stripThink(content: string): string {
   return content.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^[\s\S]*<\/think>/, '').trim();
 }
 
+/**
+ * Pull a JSON value out of a model response that may wrap it in a markdown code
+ * fence or surrounding prose (e.g. "Here's a JSON array: ```json [...] ```").
+ * Returns the first balanced array/object found, or the trimmed input unchanged.
+ */
+export function extractJson(content: string): string {
+  let s = content.trim();
+  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) s = fenced[1].trim();
+  const start = s.search(/[[{]/);
+  if (start === -1) return s;
+  const open = s[start];
+  const close = open === '[' ? ']' : '}';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) return s.slice(start, i + 1);
+  }
+  return s.slice(start);
+}
+
 export class LlmAdapter implements LLMProvider {
   public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
   public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
   public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
   public maxTokens: number = parseInt(process.env.BGW_MAX_TOKENS || '4096', 10);
+  // How long to wait for the next streamed chunk before assuming the stream stalled.
+  // Configurable because slow reasoning models (minimax) can legitimately pause between
+  // chunks longer than the original hardcoded 60s.
+  public streamReadTimeoutMs = parseInt(process.env.BGW_STREAM_TIMEOUT_MS || '60000', 10);
+  // Optional reasoning budget for thinking models (e.g. minimax). Off by default —
+  // when set ('low'|'medium'|'high'), sent as reasoning_effort to trade depth for speed.
+  public reasoningEffort?: string = process.env.BGW_REASONING_EFFORT || undefined;
 
   private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
 
@@ -77,11 +111,12 @@ export class LlmAdapter implements LLMProvider {
     this.budgetVeto = budgetVeto;
   }
 
-  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number }) {
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string }) {
     if (cfg.model) this.defaultModel = cfg.model;
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
     if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
+    if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
   }
 
   private createClient(keyResult: KeyResult): OpenAI {
@@ -129,7 +164,8 @@ export class LlmAdapter implements LLMProvider {
       }
       
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
-      const content = stripThink(response.choices[0].message.content || "");
+      // Models often wrap the plan in a markdown fence or prose; extract the raw JSON before parsing.
+      const content = extractJson(stripThink(response.choices[0].message.content || ""));
       return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) {
@@ -337,6 +373,10 @@ export class LlmAdapter implements LLMProvider {
     const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
     const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+    // Declared outside the try so the catch can tell whether the reservation was
+    // already settled by a mid-stream usage report — otherwise an error after the
+    // usage chunk would release the same reservation twice (under-counting spend).
+    let usageRecorded = false;
 
     try {
       const finalMessages: any[] = options.system
@@ -364,22 +404,35 @@ export class LlmAdapter implements LLMProvider {
         requestOptions.tool_choice = 'auto';
       }
 
+      // Optional reasoning budget — only sent when explicitly configured, so default
+      // behavior is unchanged. Lets thinking models (minimax) trade depth for speed.
+      const effort = options.reasoningEffort ?? this.reasoningEffort;
+      if (effort) requestOptions.reasoning_effort = effort;
+
       const stream: any = await client.chat.completions.create(requestOptions, { timeout: this.requestTimeout, signal: options.signal as any });
 
       let activeToolCallId = '';
       let activeToolName = '';
       let activeToolArgs = '';
       const thinkFilter = new ThinkTagFilter();
-      let usageRecorded = false;
 
       const iterator = stream[Symbol.asyncIterator]();
       while (true) {
         const nextPromise = iterator.next();
-        const timeoutPromise = new Promise<any>((_, reject) =>
-          setTimeout(() => reject(new Error("Stream read timeout: no data from the API for 60s (check provider status / API key)")), 60000)
-        );
+        // Guard against a silently stalled stream. The timer MUST be cleared once the
+        // chunk arrives, or every chunk leaks a 60s timer (and a later unhandled
+        // rejection) — a long reasoning stream would spawn hundreds of them.
+        let timeoutHandle: ReturnType<typeof setTimeout>;
+        const timeoutPromise = new Promise<any>((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`Stream read timeout: no data from the API for ${Math.round(this.streamReadTimeoutMs / 1000)}s (check provider status / API key)`)), this.streamReadTimeoutMs);
+        });
 
-        const result = await Promise.race([nextPromise, timeoutPromise]);
+        let result: any;
+        try {
+          result = await Promise.race([nextPromise, timeoutPromise]);
+        } finally {
+          clearTimeout(timeoutHandle!);
+        }
         if (result.done) break;
 
         const chunk = result.value;
@@ -416,14 +469,16 @@ export class LlmAdapter implements LLMProvider {
           }
         }
         
-        // Handle usage if present in the stream (requires stream_options in some models)
-        if (chunk.usage) {
+        // Handle usage if present in the stream (requires stream_options in some models).
+        // Guard against a provider sending more than one usage chunk: record once, or
+        // the reservation would be released repeatedly.
+        if (chunk.usage && !usageRecorded) {
           yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
           if (this.budgetVeto) {
             const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
             await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
-            usageRecorded = true;
           }
+          usageRecorded = true;
         }
       }
 
@@ -447,7 +502,9 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       
     } catch (e: any) {
-      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      // Only release if a mid-stream usage report hasn't already settled the
+      // reservation, otherwise we would release it a second time.
+      if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       let status = 500;
       let recoverable = false;
       

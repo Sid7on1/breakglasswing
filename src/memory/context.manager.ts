@@ -32,6 +32,18 @@ export class ContextManager {
     return messages;
   }
 
+  /**
+   * A `tool` message is only valid immediately after the assistant `tool_calls`
+   * that produced it. When a compaction window starts partway through a tool
+   * exchange, the leading `tool` messages are orphaned and the API rejects the
+   * request — so drop them until the window begins on a user/assistant message.
+   */
+  private dropLeadingOrphanToolMessages(messages: Message[]): Message[] {
+    let start = 0;
+    while (start < messages.length && messages[start].role === 'tool') start++;
+    return messages.slice(start);
+  }
+
   private estimateTokens(messages: Message[]): number {
     try {
       const text = messages.map(m => m.content).join('\n');
@@ -47,12 +59,16 @@ export class ContextManager {
    */
   async compact(messages: Message[]): Promise<Message[]> {
     const systemMessages = messages.filter(m => m.role === 'system');
-    
-    // Preserve the last 15 messages (recent context, tool calls, results)
-    const recentMessages = messages.filter(m => m.role !== 'system').slice(-15);
-    
-    // Identify messages to summarize
-    const olderMessages = messages.filter(m => 
+
+    // Preserve the last 15 messages (recent context, tool calls, results). Trim any
+    // leading orphan tool results so the window can't begin with a `tool` message
+    // whose parent assistant tool_calls was cut — the API rejects that pairing.
+    const recentMessages = this.dropLeadingOrphanToolMessages(
+      messages.filter(m => m.role !== 'system').slice(-15)
+    );
+
+    // Identify messages to summarize (anything not kept, including trimmed orphans)
+    const olderMessages = messages.filter(m =>
       m.role !== 'system' && !recentMessages.includes(m)
     );
 
@@ -99,8 +115,11 @@ export class ContextManager {
       // Cut window more aggressively
       this.currentTokens = this.MAX_TOKENS; // force it
       const systemMessages = messages.filter(m => m.role === 'system');
-      const recentMessages = messages.filter(m => m.role !== 'system').slice(-5); // Only keep last 5 instead of 15
-      
+      // Keep last 5 instead of 15, but never begin on an orphaned tool result.
+      const recentMessages = this.dropLeadingOrphanToolMessages(
+        messages.filter(m => m.role !== 'system').slice(-5)
+      );
+
       const compacted = [...systemMessages, { role: 'system', content: '[Older messages aggressively compacted due to API context limits]' } as Message, ...recentMessages];
       return compacted;
     }

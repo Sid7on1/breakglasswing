@@ -1,16 +1,26 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { Logger } from '../utils';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export class WorktreeManager {
   private baseWorktreePath: string;
 
   constructor(private projectRoot: string) {
     this.baseWorktreePath = path.join(this.projectRoot, '.evolution_worktrees');
+  }
+
+  /**
+   * Run git with arguments passed as an array (no shell). Branch names, commit
+   * messages and paths are LLM/user-derived, so they must never be interpolated
+   * into a shell string — execFile keeps them as literal argv entries.
+   */
+  private async git(args: string[], cwd: string = this.projectRoot): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+    return stdout;
   }
 
   private async ensureBaseDir() {
@@ -32,7 +42,7 @@ export class WorktreeManager {
     
     try {
       // -b creates a new branch starting at baseCommit
-      await execAsync(`git worktree add -b ${branchName} "${worktreePath}" ${baseCommit}`, { cwd: this.projectRoot });
+      await this.git(['worktree', 'add', '-b', branchName, worktreePath, baseCommit]);
       Logger.info(`[WorktreeManager] Worktree created successfully.`);
       return { worktreePath };
     } catch (error: any) {
@@ -49,20 +59,19 @@ export class WorktreeManager {
     Logger.info(`[WorktreeManager] Removing worktree at ${worktreePath}...`);
 
     try {
-      const forceFlag = force ? '--force' : '';
-      await execAsync(`git worktree remove ${forceFlag} "${worktreePath}"`, { cwd: this.projectRoot });
-      
-      const branchForceFlag = force ? '-D' : '-d';
-      await execAsync(`git branch ${branchForceFlag} ${branchName}`, { cwd: this.projectRoot });
-      
+      const removeArgs = force ? ['worktree', 'remove', '--force', worktreePath] : ['worktree', 'remove', worktreePath];
+      await this.git(removeArgs);
+
+      await this.git(['branch', force ? '-D' : '-d', branchName]);
+
       Logger.info(`[WorktreeManager] Worktree and branch removed successfully.`);
     } catch (error: any) {
       Logger.warn(`[WorktreeManager] Failed to remove worktree cleanly: ${error.message}. Attempting fallback prune...`);
       // Fallback: manually delete the directory and prune git worktrees
       try {
         await fs.rm(worktreePath, { recursive: true, force: true });
-        await execAsync(`git worktree prune`, { cwd: this.projectRoot });
-        await execAsync(`git branch -D ${branchName}`, { cwd: this.projectRoot });
+        await this.git(['worktree', 'prune']);
+        await this.git(['branch', '-D', branchName]);
       } catch (fallbackError) {
         // Ignore fallback errors
       }
@@ -74,7 +83,7 @@ export class WorktreeManager {
    */
   public async hasChanges(worktreePath: string): Promise<boolean> {
     try {
-      const { stdout } = await execAsync(`git status --porcelain`, { cwd: worktreePath });
+      const stdout = await this.git(['status', '--porcelain'], worktreePath);
       return stdout.trim().length > 0;
     } catch (error: any) {
       Logger.error(`[WorktreeManager] Failed to check for changes: ${error.message}`);
@@ -87,8 +96,8 @@ export class WorktreeManager {
    */
   public async commitChanges(worktreePath: string, message: string): Promise<void> {
     try {
-      await execAsync(`git add -A`, { cwd: worktreePath });
-      await execAsync(`git commit -m "${message}"`, { cwd: worktreePath });
+      await this.git(['add', '-A'], worktreePath);
+      await this.git(['commit', '-m', message], worktreePath);
       Logger.info(`[WorktreeManager] Committed changes in ${worktreePath}`);
     } catch (error: any) {
       Logger.error(`[WorktreeManager] Failed to commit changes: ${error.message}`);
@@ -102,7 +111,7 @@ export class WorktreeManager {
   public async mergeWorktree(branchName: string): Promise<void> {
     Logger.info(`[WorktreeManager] Merging worktree branch ${branchName} into main...`);
     try {
-      await execAsync(`git merge ${branchName}`, { cwd: this.projectRoot });
+      await this.git(['merge', branchName]);
       Logger.info(`[WorktreeManager] Merge successful.`);
     } catch (error: any) {
       Logger.error(`[WorktreeManager] Merge failed: ${error.message}`);

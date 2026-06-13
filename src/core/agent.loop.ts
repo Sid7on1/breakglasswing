@@ -1,4 +1,6 @@
 import { LLMProvider, Message, ChatEvent } from './llm.provider';
+import { responseSanitizer } from './response.sanitizer';
+import { extractTextToolCalls } from './tool.call.parser';
 import { ToolRegistry } from '../tools/tool.registry';
 import { IGovernor } from './interfaces';
 import { Logger } from '../utils';
@@ -25,7 +27,10 @@ export class AgentLoop {
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
     const maxIter = options?.maxIterations ?? 30;
-    
+    // Bounds the regenerate-on-empty correction below to a single retry, so a model
+    // that keeps emitting pure filler can never spin the loop.
+    let pureFillerRetried = false;
+
     for (let i = 0; i < maxIter; i++) {
       // 1. Auto-Compact if reaching capacity
       this.messages = await this.contextManager.checkAndCompact(this.messages);
@@ -64,6 +69,25 @@ export class AgentLoop {
 
       // Discard the partial turn and let the outer loop re-ask with compacted context
       if (retryAfterCompaction) continue;
+
+      // Enforce the output contract: strip leaked tool-meta filler before it can
+      // land in the reply or the history, and learn whether the turn was nothing but.
+      const sanitized = responseSanitizer.sanitize(currentContent);
+      currentContent = sanitized.text;
+
+      // Recover any tool call the model wrote as plain-text JSON instead of via the
+      // function-calling API. Gated on real tool names, so user JSON is never run.
+      if (toolCalls.length === 0 && currentContent) {
+        const recovered = extractTextToolCalls(currentContent, (n) => !!this.tools.getTool(n));
+        if (recovered.toolCalls.length > 0) {
+          toolCalls.push(...recovered.toolCalls);
+          // The visible text was just a malformed invocation wrapper ("The final
+          // answer is {json}"); drop it — the real prose answer arrives after the
+          // tool returns and the loop runs again.
+          currentContent = '';
+          Logger.warn(`[AgentLoop] Recovered ${toolCalls.length} tool call(s) the model emitted as text.`);
+        }
+      }
 
       if (currentContent) {
         this.messages.push({ role: 'assistant', content: currentContent });
@@ -151,6 +175,20 @@ export class AgentLoop {
         
         // Loop continues so LLM can react to tool results
       } else {
+        // A turn with no tool call that collapsed to pure filler gave the user
+        // nothing. Rather than silently ending on an empty reply, nudge the model
+        // once to answer directly and let the loop run again. Guarded against spin.
+        if (sanitized.wasPureFiller && !pureFillerRetried) {
+          pureFillerRetried = true;
+          this.messages.push({
+            role: 'user',
+            content:
+              'Your previous reply contained no answer — only a remark about tool usage. ' +
+              'Respond now with the actual answer to the request. If no tool is needed, ' +
+              'give the answer directly; do not mention tools or function calls.',
+          });
+          continue;
+        }
         // No tool calls, task complete
         return;
       }

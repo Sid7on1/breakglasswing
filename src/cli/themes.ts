@@ -67,7 +67,7 @@ export function resolveTheme(setting: string): ThemeName {
   if (['dark', 'light', 'dark-ansi', 'light-ansi', 'dark-daltonized', 'light-daltonized', 'bimax', 'dracula', 'catppuccin', 'gruvbox', 'nord'].includes(setting)) {
     return setting as ThemeName;
   }
-  return 'bimax'; // Make Bimax the default theme!
+  return 'dark'; // Default to the warm, low-chrome dark theme; all themes stay available via /theme
 }
 
 function isSystemDark(): boolean {

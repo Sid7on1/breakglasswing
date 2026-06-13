@@ -174,6 +174,29 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   // Bumped by /clear: remounts the <Static> region so it forgets printed items
   const [clearEpoch, setClearEpoch] = useState(0);
 
+  // Ink 3 leaves ghost box-frames after a terminal resize: it erases the previous
+  // live frame using the OLD width, so wrapped lines don't line up. On resize we
+  // wipe the terminal and remount <Static> (via clearEpoch) so the whole transcript
+  // re-prints cleanly at the new width. Debounced to the trailing edge so a
+  // drag-resize repaints once it settles rather than on every intermediate size.
+  useEffect(() => {
+    const out = process.stdout;
+    if (!out.isTTY) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const onResize = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        out.write('\x1b[2J\x1b[3J\x1b[H');
+        setClearEpoch((e) => e + 1);
+      }, 80);
+    };
+    out.on('resize', onResize);
+    return () => {
+      clearTimeout(timer);
+      out.off('resize', onResize);
+    };
+  }, []);
+
   const COMMAND_REGISTRY: [string, string][] = [
     ['/help', 'Show help'],
     ['/sessions', 'List saved sessions'],
@@ -901,18 +924,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder}>
           <Box flexDirection="column" paddingX={1}>
             {suggestions.length > 0 && (
-              <Box 
-                flexDirection="column" 
-                marginBottom={1} 
-                borderStyle="round" 
-                borderColor={theme.borderFocus}
-                paddingX={1}
-                width={70}
-              >
-                <Text color={theme.subtle} bold>Command Palette [↑/↓ to navigate, Enter to select]</Text>
-                <Box marginBottom={1}>
-                  <Text color={theme.subtle}>{'—'.repeat(65)}</Text>
-                </Box>
+              <Box flexDirection="column" marginBottom={1}>
                 {(() => {
                   const windowSize = 6;
                   let startIdx = 0;
@@ -927,16 +939,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                   }
                   return suggestions.slice(startIdx, startIdx + windowSize).map((s, idx) => {
                     const actualIdx = startIdx + idx;
+                    const selected = actualIdx === suggestionIndex;
                     const parts = s.split('  ');
                     const cmd = parts[0];
                     const desc = parts.slice(1).join('  ');
                     return (
                       <Box key={cmd} flexDirection="row">
                         <Box width={2}>
-                          <Text color={actualIdx === suggestionIndex ? theme.accent : theme.subtle}>{actualIdx === suggestionIndex ? '❯' : ' '}</Text>
+                          <Text color={theme.accent}>{selected ? '❯' : ' '}</Text>
                         </Box>
                         <Box width={15}>
-                          <Text color={theme.accent} bold={actualIdx === suggestionIndex}>{cmd}</Text>
+                          <Text color={selected ? theme.accent : theme.inactive} bold={selected}>{cmd}</Text>
                         </Box>
                         <Box flexGrow={1}>
                           <Text color={theme.subtle}>{desc}</Text>
