@@ -67,7 +67,7 @@ export class VectorStore {
     });
   }
 
-  async semanticSearch(query: string, limit: number = 3): Promise<VectorDocument[]> {
+  async semanticSearch(query: string, limit: number = 3, minScore: number = 0.25): Promise<VectorDocument[]> {
     Logger.info(`[VectorStore] Running offline semantic search for query: "${query.substring(0, 30)}..."`);
     await this.loadStore(); // This is protected internally
     
@@ -95,8 +95,8 @@ export class VectorStore {
     
     scoredDocs.forEach(d => Logger.info(`[VectorStore] Score for ${d.doc.id}: ${d.score.toFixed(3)}`));
 
-    // Filter out terrible matches (Threshold 0.25 for high confidence)
-    const topMatches = scoredDocs.filter(item => item.score > 0.25).slice(0, limit);
+    // Filter out terrible matches (caller-tunable confidence threshold)
+    const topMatches = scoredDocs.filter(item => item.score > minScore).slice(0, limit);
     
     return topMatches.map(item => item.doc);
   }

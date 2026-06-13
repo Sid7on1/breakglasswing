@@ -37,9 +37,13 @@ import { writeWithBackup, undoLast, previewDiff, editFileLines, getBackups } fro
 import { runTypeCheck, runLint, formatErrors } from '../lintFixLoop';
 import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents, registerAgent } from '../agentRouter';
 import { getProviders, getProvider, setProvider, getCurrentProvider, buildKeyPool } from '../provider';
-import { saveConfig } from '../config';
+import { saveConfig, getConfig } from '../config';
+import { registerDiffApprover, setDiffApprovalEnabled } from '../diffApproval';
+import { setSelfCriticEnabled } from '../selfCritic';
+import { globalWatcherManager } from '../watchers';
 import { saveApiKeyToEnv } from '../env.loader';
 import { globalSubAgentManager } from '../../core/subagent.manager';
+import { globalCheckpointManager } from '../../sandbox/checkpoint.manager';
 
 interface FullScreenProps {
   taskPipeline: TaskPipeline;
@@ -110,6 +114,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   useEffect(() => {
     return () => {
       globalSubAgentManager.killAll();
+      globalWatcherManager.stopAll();
     };
   }, []);
 
@@ -164,6 +169,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [activeMenu, setActiveMenu] = useState<{ type: string, options: MenuOption[], title: string, onSelect?: (opt: MenuOption) => void | Promise<void> } | null>(null);
   const [activePrompt, setActivePrompt] = useState<{ title: string, placeholder?: string, isMasked?: boolean, onResolve: (val: string) => void } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const isProcessingRef = useRef(false);
+  useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
   // Bumped by /clear: remounts the <Static> region so it forgets printed items
   const [clearEpoch, setClearEpoch] = useState(0);
 
@@ -191,6 +198,21 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ['/cost', 'Session cost'],
     ['/context', 'Session context'],
     ['/governor', 'Toggle Governor (on/off)'],
+    ['/plan', 'Read-only plan mode (propose, don\'t change)'],
+    ['/checkpoint', 'Snapshot the working tree'],
+    ['/rewind', 'Restore an earlier checkpoint'],
+    ['/swarm', 'Parallel worktree sub-agent swarm'],
+    ['/impact', 'Blast-radius preview for a symbol'],
+    ['/ask', 'Ask the architecture (graph-backed)'],
+    ['/replay', 'Export this session as markdown'],
+    ['/diff-approval', 'Review agent edits before they apply'],
+    ['/remember', 'Save a durable project memory'],
+    ['/self-critic', 'Agent reviews & fixes its own work'],
+    ['/heal', 'Run tests; auto-fix failures in a worktree'],
+    ['/watch', 'Watch a file/schedule and wake the agent'],
+    ['/council', 'Run a task across multiple AI CLIs; keep winner'],
+    ['/speculate', 'Try distinct approaches in parallel; compare'],
+    ['/evolve', 'Gated self-evolution of BiMax\'s own source'],
     ['/index', 'Build local AST codebase index'],
     ['/index-ai', 'Run Semantic AI index (Costs API credits)'],
     ['/exit', 'Exit'],
@@ -333,6 +355,30 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
 
     const handleDiff = (diff: string) => setDiffText(diff);
 
+    // Inline diff approval: show the proposed change and gate the write on Accept/Reject.
+    try { setDiffApprovalEnabled(!!getConfig().diffApproval); setSelfCriticEnabled(!!getConfig().selfCritic); } catch { /* config not loaded */ }
+    registerDiffApprover((summary, diff) => new Promise<boolean>((resolve) => {
+      setDiffText(diff);
+      cliEvents.emit('veto_prompt', `Apply change? (${summary})`, ['Accept', 'Reject'], (ans: string) => {
+        setDiffText(null);
+        resolve(/^(accept|y)/i.test((ans || '').trim()));
+      });
+    }));
+
+    // Background watchers: wake the agent on file change / schedule. Skip while a turn
+    // is already running, and use the budget governor as a circuit breaker.
+    globalWatcherManager.registerNotifier((msg) => addSystemMessage('info', msg));
+    globalWatcherManager.setCircuitBreaker(async () => {
+      try { await options.governor.budget.checkVeto(0); return true; } catch { return false; }
+    });
+    globalWatcherManager.registerRunner((action) => {
+      if (isProcessingRef.current) {
+        addSystemMessage('info', `👁️ Watcher action skipped (agent busy): ${action}`);
+        return;
+      }
+      handleSubmit(action);
+    });
+
     cliEvents.on('log', handleLog);
     cliEvents.on('message', handleMessage);
     cliEvents.on('veto_prompt', handleVeto);
@@ -357,6 +403,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.off('message', handleMessage);
       cliEvents.off('veto_prompt', handleVeto);
       cliEvents.off('diff', handleDiff);
+      registerDiffApprover(null);
       console.log = originalLog;
       console.warn = originalWarn;
       console.error = originalError;
@@ -444,6 +491,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           cwd: process.cwd(),
           options,
           codebaseIndexer,
+          graphStore,
           saveConfig,
           addSystemMessage,
           setActiveMenu,
@@ -517,6 +565,15 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       }
     }
 
+    // Time Machine: auto-snapshot the working tree before each turn so any change
+    // the agent makes this turn can be rewound with /rewind. Best-effort, git-only.
+    if (options.governor.mode !== 'plan') {
+      try {
+        const snap = query.length > 50 ? query.slice(0, 50) + '…' : query;
+        globalCheckpointManager.create(`before: ${snap}`, true);
+      } catch { /* checkpointing is best-effort */ }
+    }
+
     const msgId = `msg-${Date.now()}`;
     cliEvents.emit('message', { id: msgId, role: 'user', content: query, timestamp: new Date() } as MessageEntry);
     const routedAgent = routeQuery(query);
@@ -566,7 +623,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           tokenBuffer = '';
           lastRenderTime = now;
         }
-      }, { maxIterations: options.maxToolIterations });
+      }, { maxIterations: options.maxToolIterations, planMode: options.governor.mode === 'plan' });
 
       if (tokenBuffer) {
         setStreamingText((prev) => prev + tokenBuffer);
@@ -823,6 +880,13 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
             </Box>
           )}
         </Box>
+
+        {Boolean(diffText) && (
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder} paddingX={1}>
+            <Text color={theme.subtle}>Proposed change:</Text>
+            <DiffView diffText={diffText as string} theme={theme} />
+          </Box>
+        )}
 
         {Boolean(vetoQuestion) && (
           <PermissionDialog

@@ -65,6 +65,11 @@ export async function previewDiff(filePath: string): Promise<string> {
   } catch (e: any) { return `(diff failed: ${e.message})`; }
 }
 
+/** Public unified-diff helper used for inline diff approval previews. */
+export function unifiedDiff(oldText: string, newText: string, label: string): string {
+  return generateDiff(oldText, newText, label);
+}
+
 function generateDiff(oldText: string, newText: string, label: string): string {
   const oldLines = oldText.split('\n');
   const newLines = newText.split('\n');

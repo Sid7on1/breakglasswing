@@ -22,6 +22,9 @@ export interface CliConfig {
   customRoutingRules: string[][];
   workspaceRoot: string;
   autoAgentDecisions: boolean;
+  diffApproval: boolean;
+  selfCritic: boolean;
+  allowSelfEvolution: boolean;
 }
 
 const DEFAULTS: CliConfig = {
@@ -42,6 +45,9 @@ const DEFAULTS: CliConfig = {
   customRoutingRules: [],
   workspaceRoot: process.cwd(),
   autoAgentDecisions: false,
+  diffApproval: false,
+  selfCritic: false,
+  allowSelfEvolution: false,
 };
 
 let cached: CliConfig | null = null;

@@ -14,6 +14,7 @@ export interface CommandContext {
   cwd: string;
   options: any; // The global cli options
   codebaseIndexer?: any; // To support /index commands
+  graphStore?: any; // Dependency graph, for /impact and /ask
   saveConfig: (updates: any) => Promise<any>;
   addSystemMessage: (level: 'info' | 'success' | 'error', msg: string) => void;
   setActiveMenu: (menu: any) => void;

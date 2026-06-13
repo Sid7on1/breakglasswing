@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { backupFile } from '../../cli/fileEditor';
+import { backupFile, unifiedDiff } from '../../cli/fileEditor';
+import { requestDiffApproval } from '../../cli/diffApproval';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -91,6 +92,10 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     const updated = args.replaceAll
       ? content.split(args.oldString).join(args.newString)
       : content.replace(args.oldString, args.newString);
+
+    // Inline diff approval (no-op unless enabled and an interactive approver is registered).
+    const approved = await requestDiffApproval(`Edit ${args.path}`, unifiedDiff(content, updated, args.path));
+    if (!approved) return `Edit to ${args.path} rejected by user. No changes were made.`;
 
     // Snapshot first so /undo and /diff-file work on every agent edit.
     await backupFile(fullPath);

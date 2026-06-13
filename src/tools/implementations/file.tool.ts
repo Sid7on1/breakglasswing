@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { backupFile } from '../../cli/fileEditor';
+import { backupFile, unifiedDiff } from '../../cli/fileEditor';
+import { requestDiffApproval } from '../../cli/diffApproval';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -99,6 +100,13 @@ Use this tool to write new code, update configuration files, or generate artifac
     if (exists && !args.overwrite) {
       throw new Error(`File already exists: ${args.path}. Pass overwrite: true to replace it.`);
     }
+    // Inline diff approval (no-op unless enabled and an interactive approver is registered).
+    const prior = exists ? await fs.readFile(fullPath, 'utf-8').catch(() => '') : '';
+    const approved = await requestDiffApproval(
+      exists ? `Overwrite ${args.path}` : `Create ${args.path}`,
+      unifiedDiff(prior, args.content, args.path)
+    );
+    if (!approved) return `Write to ${args.path} rejected by user. No changes were made.`;
     // Snapshot overwrites so /undo and /diff-file can restore the prior version.
     if (exists) await backupFile(fullPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
