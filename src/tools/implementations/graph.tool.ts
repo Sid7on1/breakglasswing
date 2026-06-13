@@ -2,36 +2,9 @@ import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { GraphStore } from '../../graph/graph.store';
 import { ImpactEngine } from '../../graph/impact.engine';
-import { GraphNode } from '../../graph/models';
-
-function fmtNode(n: GraphNode): string {
-  const crit = n.criticality ? ` [${n.criticality}${n.riskScore != null ? ` risk=${n.riskScore}` : ''}]` : '';
-  const where = n.filePath ? ` (${n.filePath})` : '';
-  return `${n.type} ${n.name}${crit}${where} — id=${n.id}`;
-}
-
-function searchNodes(store: GraphStore, keyword: string, limit = 25): GraphNode[] {
-  const kw = keyword.toLowerCase();
-  const hits: GraphNode[] = [];
-  for (const node of store.getGraph().nodes.values()) {
-    const hay = `${node.name} ${node.id} ${node.purpose || ''} ${node.filePath || ''}`.toLowerCase();
-    if (hay.includes(kw)) hits.push(node);
-    if (hits.length >= limit * 3) break;
-  }
-  // Prefer functions/classes over files, and higher criticality first.
-  const critRank: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
-  hits.sort((a, b) => (critRank[b.criticality || ''] || 0) - (critRank[a.criticality || ''] || 0));
-  return hits.slice(0, limit);
-}
-
-/** Resolve a query token to a node id: exact id, then unique keyword match. */
-function resolveNodeId(store: GraphStore, token: string): { id?: string; ambiguous?: GraphNode[] } {
-  if (store.getNode(token)) return { id: token };
-  const matches = searchNodes(store, token, 6);
-  if (matches.length === 1) return { id: matches[0].id };
-  if (matches.length === 0) return {};
-  return { ambiguous: matches };
-}
+import { fmtNode, searchNodes, resolveNodeId } from '../../graph/node.search';
+import { readSymbolSource } from '../../graph/symbol.source';
+import { planContext } from '../../graph/context.planner';
 
 export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore) => buildTool({
   name: 'GraphQueryTool',
@@ -42,6 +15,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
 - \`GET_DEPENDENTS <node>\` — who depends on this symbol (reverse deps). If you change a signature you MUST update these.
 - \`GET_DEPENDENCIES <node>\` — what this symbol depends on (forward deps).
 - \`BLAST_RADIUS <node>\` — downstream reach + highest criticality if you modify this node. Run this before signature-changing edits.
+- \`READ_SYMBOL <node>\` — return ONLY that symbol's source (its exact line range), with a header (file, signature, criticality). Prefer this over reading a whole file when you just need one function/class.
 - \`<node>\` (bare) — the node plus its direct edges.
 
 \`<node>\` may be an exact node id or a unique keyword; ambiguous keywords return candidates to disambiguate.`,
@@ -54,7 +28,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     },
     required: ['query']
   },
-  execute: async (args: { query: string }) => {
+  execute: async (args: { query: string }, context?: any) => {
     const raw = (args.query || '').trim();
     if (!raw) return 'Error: empty query.';
 
@@ -63,7 +37,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
       return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
     }
 
-    const verbs = ['SEARCH_NODES', 'GET_DEPENDENTS', 'GET_DEPENDENCIES', 'BLAST_RADIUS'];
+    const verbs = ['SEARCH_NODES', 'GET_DEPENDENTS', 'GET_DEPENDENCIES', 'BLAST_RADIUS', 'READ_SYMBOL'];
     const firstSpace = raw.indexOf(' ');
     const maybeVerb = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toUpperCase();
     const verb = verbs.includes(maybeVerb) ? maybeVerb : null;
@@ -108,6 +82,23 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
       ].filter(Boolean).join('\n');
     }
 
+    if (verb === 'READ_SYMBOL') {
+      const resolved = resolveNodeId(graphStore, target);
+      if (resolved.ambiguous) {
+        return `"${target}" is ambiguous. Candidates:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
+      }
+      if (!resolved.id) return `No node found for "${target}". Try SEARCH_NODES ${target}.`;
+      const node = graphStore.getNode(resolved.id)!;
+      const { text, error } = await readSymbolSource(node, context?.cwd || process.cwd());
+      if (error) return `Error reading ${node.id}: ${error}`;
+      const header = [
+        `// ${node.type} ${node.name}${node.criticality ? ` [${node.criticality}${node.riskScore != null ? ` risk=${node.riskScore}` : ''}]` : ''}`,
+        `// ${node.filePath}:${node.startLine}-${node.endLine}`,
+        node.signature ? `// ${node.signature}` : '',
+      ].filter(Boolean).join('\n');
+      return `${header}\n${text}`;
+    }
+
     // Bare node id / keyword.
     const resolved = resolveNodeId(graphStore, target);
     if (resolved.ambiguous) {
@@ -117,5 +108,44 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     const node = graphStore.getNode(resolved.id)!;
     const edges = graph.edges.filter(e => e.sourceId === resolved.id || e.targetId === resolved.id);
     return JSON.stringify({ node, edges }, null, 2);
+  }
+}, governor);
+
+export const createGraphContextTool = (governor: IGovernor, graphStore: GraphStore) => buildTool({
+  name: 'GraphContextTool',
+  description: `Assembles a MINIMAL, token-budgeted context pack for editing a specific symbol, using the dependency graph — so you load exactly what you need instead of dumping whole files into context.
+
+# Usage
+- \`PLAN_CONTEXT <node|keyword>\` (or just \`<node|keyword>\`) — returns the target symbol's FULL source plus the SIGNATURES of its direct callers (who depends on it) and callees/types (what it uses).
+
+Prefer this over ReadFileTool whenever you are about to modify an existing function/class: it shows you the call-site contract you must preserve and the things that break, at a fraction of the tokens.`,
+  isDestructive: false,
+  isConcurrencySafe: true,
+  schema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'PLAN_CONTEXT <target>, or a bare node id/keyword (e.g. "handlePayment").' }
+    },
+    required: ['query']
+  },
+  execute: async (args: { query: string }, context?: any) => {
+    const raw = (args.query || '').trim();
+    if (!raw) return 'Error: empty query.';
+
+    if (graphStore.getGraph().nodes.size === 0) {
+      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
+    }
+
+    const firstSpace = raw.indexOf(' ');
+    const maybeVerb = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toUpperCase();
+    const target = maybeVerb === 'PLAN_CONTEXT' ? raw.slice(firstSpace + 1).trim() : raw;
+    if (!target) return 'Error: PLAN_CONTEXT needs a target symbol (e.g. PLAN_CONTEXT handlePayment).';
+
+    const cwd = context?.cwd || process.cwd();
+    const pack = await planContext(graphStore, target, { cwd });
+    if ('error' in pack) {
+      return `${pack.error} Try GraphQueryTool SEARCH_NODES ${target}.`;
+    }
+    return pack.text;
   }
 }, governor);

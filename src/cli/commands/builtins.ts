@@ -1,10 +1,30 @@
 import { Command, globalCommandRegistry } from './registry';
+import { setBlastGateEnabled, isBlastGateEnabled } from '../blastGate';
 
 globalCommandRegistry.register({
   name: '/governor',
   description: 'Toggle Governor Mode',
   category: 'Configuration',
   execute: async (args, context) => {
+    // /governor blast-gate [on|off] — confirm edits that touch HIGH/CRITICAL graph symbols.
+    if ((args[0] || '').toLowerCase() === 'blast-gate') {
+      const sub = (args[1] || '').toLowerCase();
+      if (sub === 'on' || sub === 'off') {
+        const on = sub === 'on';
+        setBlastGateEnabled(on);
+        await context.saveConfig({ blastGate: on });
+        return { type: 'message', level: 'success', content: `Blast-radius edit gate is ${on ? 'ON — edits touching HIGH/CRITICAL symbols will ask for confirmation' : 'OFF'}.` };
+      }
+      return {
+        type: 'menu',
+        title: `Blast-radius edit gate (currently ${isBlastGateEnabled() ? 'ON' : 'OFF'})`,
+        options: [
+          { label: '[ ON ]', value: '/governor blast-gate on', desc: 'Confirm edits to HIGH/CRITICAL symbols, showing downstream impact' },
+          { label: '[ OFF ]', value: '/governor blast-gate off', desc: 'Apply edits without the blast-radius check' },
+        ],
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
     if (args.length === 0) {
       return {
         type: 'menu',

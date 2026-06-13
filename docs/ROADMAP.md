@@ -112,6 +112,42 @@ external CLIs aren't available in CI). New slash commands: `/plan`, `/checkpoint
 `/watch`, `/council`, `/speculate`, `/evolve`. New tools: `MultiEditTool`, `RememberTool`, and
 the upgraded `GraphQueryTool`.
 
+## Graph-Native Context Engine — shipped this cycle
+
+The flagship differentiator: the live code graph is now the agent's **context engine**, not a
+side oracle. Instead of dumping whole files into the LLM, the agent navigates to the precise
+symbol and injects only that — fewer tokens, sharper focus. Built feature-by-feature, each
+landed green (build + jest) before the next.
+
+- [x] **G1 — Symbol line-ranges.** Every CLASS/FUNCTION/METHOD/VARIABLE node carries
+  `startLine`/`endLine` (1-based) + a `signature`. _Files:_ `src/graph/models.ts`,
+  `src/graph/static.analyzer.ts` (`locOf`). The primitive everything else builds on.
+- [x] **G2 — `READ_SYMBOL`.** Graph verb that returns just one symbol's source (line-numbered,
+  with a file/signature/criticality header) instead of a whole file. Shared line-slicer
+  extracted to `src/tools/file-range.ts` (`sliceLineRange`), used by `ReadFileTool` too.
+- [x] **G3 — Graph-guided context pack.** `src/graph/context.planner.ts` (`planContext`) +
+  `GraphContextTool` (`PLAN_CONTEXT`): target body + caller/callee **signatures**, token-budgeted
+  and criticality-ranked. Persona nudge prefers it over whole-file reads. Asserted token drop vs
+  whole-file read. Sub-agents (`/swarm`, `/speculate`) inherit it.
+- [x] **G4 — `@symbol` mentions.** `src/cli/atMention.ts` (pure parse + async expand) wired into
+  the prompt submit path + `@`-autocomplete sourced from graph node names. Symbol-precise,
+  better than `@file`.
+- [x] **G5 — Blast-radius edit gate.** `src/cli/blastGate.ts` on edit/multiedit/write: before an
+  edit lands on a file owning a HIGH/CRITICAL symbol, surface its blast radius and confirm.
+  Interactive-only (workers/print auto-allow); `/governor blast-gate on|off`, **off by default**.
+- [x] **M1 — tree-sitter multi-language backend.** `src/graph/treesitter.analyzer.ts`
+  (`web-tree-sitter` WASM, grammars from `tree-sitter-wasms`) indexes non-TS/JS languages
+  (Python first) into the same graph model with line ranges + CONTAINS/CALLS edges. `indexer.ts`
+  runs it as an additive pass, so the whole engine (READ_SYMBOL, packs, @mentions, gate) works on
+  Python repos. Adding a language is config thereafter.
+
+Shared-logic extractions made along the way (no duplication): `src/graph/node.search.ts`
+(`resolveNodeId`/`searchNodes`/`fmtNode`) and `src/graph/symbol.source.ts` (one file-read+slice
+path for READ_SYMBOL, the planner, and @mentions).
+
+**Next cycle (scoped, not built):** MCP client (+ expose BiMax's graph as an MCP server), optional
+LSP enrichment over the tree-sitter graph, custom slash commands + hooks.
+
 ## Fast-follow / hardening ideas (not yet built)
 
 - A unit-test pass for the new orchestrators once the repo's `tsc`/`jest` baseline is green (the

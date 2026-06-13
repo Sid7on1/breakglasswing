@@ -7,7 +7,7 @@ export class HermesPersona extends AgentPersona {
     super({
       name: 'Hermes',
       roleDescription: 'Fast communication, search, and execution agent. You read files, query the graph, and run bash commands.',
-      allowedTools: ['ReadFileTool', 'GraphQueryTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['ReadFileTool', 'GraphQueryTool', 'GraphContextTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool']
     }, registry, llmAdapter);
   }
 }
@@ -17,7 +17,7 @@ export class OpenCodePersona extends AgentPersona {
     super({
       name: 'OpenCode',
       roleDescription: 'Deep coding agent. You modify files and read the graph, but you do not run destructive OS commands natively.',
-      allowedTools: ['ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'GraphContextTool', 'ChangeDirectoryTool', 'AskUserTool']
     }, registry, llmAdapter);
   }
 }
@@ -37,7 +37,7 @@ export class BiMaxPersona extends AgentPersona {
     super({
       name: 'BiMax CLI',
       roleDescription: 'The God-Mode Orchestrator. You are BiMax, the primary chat and vibe-coding agent. You have access to every tool and can spawn sub-agents if needed. When a user installs a new CLI tool (via curl | bash, npm install -g, brew install, etc.), use RegisterAgentTool to register it as a new agent persona.',
-      allowedTools: ['BashTool', 'ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['BashTool', 'ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'GraphContextTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool']
     }, registry, llmAdapter);
   }
 }

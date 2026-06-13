@@ -121,6 +121,19 @@ export class StaticAnalyzer implements IStaticAnalyzer {
     return path.relative(this.projectRoot, absolutePath);
   }
 
+  /**
+   * Source location of an AST node as 1-based, inclusive line numbers, plus the
+   * declaration's first line as a short signature. Lets the graph point the agent at the
+   * exact span of a symbol so it can read just that symbol instead of the whole file.
+   */
+  private locOf(node: ts.Node, sourceFile: ts.SourceFile): { startLine: number; endLine: number; signature: string } {
+    const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+    const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+    const firstLine = node.getText(sourceFile).split('\n')[0].trim();
+    const signature = firstLine.length > 200 ? firstLine.slice(0, 197) + '...' : firstLine;
+    return { startLine: start.line + 1, endLine: end.line + 1, signature };
+  }
+
   private extractNodes(sourceFile: ts.SourceFile) {
     const relPath = this.getRelativePath(sourceFile.fileName);
     const fileNodeId = `file:${relPath}`;
@@ -141,7 +154,8 @@ export class StaticAnalyzer implements IStaticAnalyzer {
           id: classId,
           name: className,
           type: 'CLASS',
-          filePath: relPath
+          filePath: relPath,
+          ...this.locOf(node, sourceFile)
         });
         
         // Edge from File to Class
@@ -156,7 +170,8 @@ export class StaticAnalyzer implements IStaticAnalyzer {
               id: methodId,
               name: methodName,
               type: 'FUNCTION',
-              filePath: relPath
+              filePath: relPath,
+              ...this.locOf(member, sourceFile)
             });
             this.addEdge({ sourceId: classId, targetId: methodId, type: 'CONTAINS' });
           }
@@ -169,7 +184,8 @@ export class StaticAnalyzer implements IStaticAnalyzer {
           id: funcId,
           name: funcName,
           type: 'FUNCTION',
-          filePath: relPath
+          filePath: relPath,
+          ...this.locOf(node, sourceFile)
         });
 
         // Edge from File to Function
@@ -195,7 +211,8 @@ export class StaticAnalyzer implements IStaticAnalyzer {
           id: varId,
           name: varName,
           type: 'VARIABLE',
-          filePath: relPath
+          filePath: relPath,
+          ...this.locOf(node, sourceFile)
         });
 
         const parentId = this.findNearestContainerId(node.parent, relPath, fileNodeId);

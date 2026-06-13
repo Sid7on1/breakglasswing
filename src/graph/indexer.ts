@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { StaticAnalyzer } from './static.analyzer';
+import { TreeSitterAnalyzer } from './treesitter.analyzer';
 import { SemanticAugmenter } from './semantic.augmenter';
 import { GraphStore } from './graph.store';
 import { Logger } from '../utils';
@@ -21,6 +22,20 @@ export class CodebaseIndexer {
     this.projectRoot = newRoot;
     this.analyzer.setProjectRoot(newRoot);
     this.augmenter.setProjectRoot(newRoot);
+  }
+
+  /**
+   * Multi-language AST pass: index non-TS/JS files (Python, …) via tree-sitter into the same
+   * graph. Additive and best-effort — runs after the TS analyzer and never throws upward, so
+   * a repo with no tsconfig still gets a graph from its other languages.
+   */
+  private async runTreeSitterPass(): Promise<void> {
+    try {
+      const tsa = new TreeSitterAnalyzer(this.projectRoot, this.graphStore, this.excludePatterns);
+      await tsa.analyzeProject();
+    } catch (e: any) {
+      Logger.warn(`[CodebaseIndexer] tree-sitter pass skipped: ${e.message}`);
+    }
   }
 
   public async autoIndex(force: boolean = false): Promise<void> {
@@ -52,16 +67,21 @@ export class CodebaseIndexer {
     console.log(`Indexing codebase (AST)... this may take a moment.`);
     Logger.info(`[CodebaseIndexer] Triggering autonomous indexing for ${this.projectRoot}`);
 
-    // 1. Physical Indexing — never let an unreadable/invalid tsconfig kill the boot
+    // 1. Physical Indexing — never let an unreadable/invalid tsconfig kill the boot. The TS
+    // pass and the tree-sitter pass are independent: a failure in one must not skip the other.
     try {
       this.analyzer.analyzeProject();
-      await this.graphStore.saveToDisk();
     } catch (e: any) {
-      Logger.warn(`[CodebaseIndexer] Indexing skipped: ${e.message}`);
-      return;
+      Logger.warn(`[CodebaseIndexer] TS AST pass skipped: ${e.message}`);
     }
+    await this.runTreeSitterPass();
+    await this.graphStore.saveToDisk();
 
     const nodeCount = this.graphStore.getGraph().nodes.size;
+    if (nodeCount === 0) {
+      Logger.warn(`[CodebaseIndexer] No indexable source found in ${this.projectRoot}.`);
+      return;
+    }
     console.log(`Codebase index complete: ${nodeCount} nodes extracted.`);
 
     // 2. Interactive LLM Prompt
@@ -99,7 +119,12 @@ export class CodebaseIndexer {
   public async buildAstIndex(): Promise<number> {
     Logger.info(`[CodebaseIndexer] Manually triggering AST indexing for ${this.projectRoot}`);
     this.graphStore.clear();
-    this.analyzer.analyzeProject();
+    try {
+      this.analyzer.analyzeProject();
+    } catch (e: any) {
+      Logger.warn(`[CodebaseIndexer] TS AST pass skipped: ${e.message}`);
+    }
+    await this.runTreeSitterPass();
     await this.graphStore.saveToDisk();
     return this.graphStore.getGraph().nodes.size;
   }

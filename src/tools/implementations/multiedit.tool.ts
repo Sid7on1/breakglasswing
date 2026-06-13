@@ -5,6 +5,7 @@ import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
+import { checkBlastRadius } from '../../cli/blastGate';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -97,6 +98,13 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       if (occ > 1 && !e.replaceAll) return `Error: edit #${i + 1} (${e.path}): oldString appears ${occ} times — add context or set replaceAll: true.`;
       const updated = e.replaceAll ? content.split(e.oldString).join(e.newString) : content.replace(e.oldString, e.newString);
       working.set(full, updated);
+    }
+
+    // Blast-radius gate — check every distinct file; a decline anywhere aborts the whole batch.
+    for (const full of order) {
+      if (!(await checkBlastRadius(full))) {
+        return `MultiEdit cancelled — declined at the blast-radius gate for ${path.relative(cwd, full)}. No changes were made.`;
+      }
     }
 
     // Inline diff approval — show the whole batch as one diff; reject is all-or-nothing.
