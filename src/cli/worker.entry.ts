@@ -15,6 +15,7 @@ import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool, createWriteFileTool, createDeleteTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
+import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createCdTool } from '../tools/implementations/cd.tool';
 import { createGraphQueryTool } from '../tools/implementations/graph.tool';
 import { GraphStore } from '../graph/graph.store';
@@ -45,6 +46,7 @@ async function runWorker() {
     toolRegistry.register(createDeleteTool(governor));
     toolRegistry.register(createGrepTool(governor));
     toolRegistry.register(createGlobTool(governor));
+    toolRegistry.register(createWebFetchTool(governor));
     toolRegistry.register(createCdTool(governor));
     toolRegistry.register(createGraphQueryTool(governor, graphStore));
 

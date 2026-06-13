@@ -44,6 +44,7 @@ import { createReadFileTool, createWriteFileTool, createDeleteTool } from '../to
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
+import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createGraphQueryTool } from '../tools/implementations/graph.tool';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
@@ -115,6 +116,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createGrepTool(governor));
   toolRegistry.register(createGlobTool(governor));
   toolRegistry.register(createTodoWriteTool(governor));
+  toolRegistry.register(createWebFetchTool(governor));
   toolRegistry.register(createCdTool(governor));
   toolRegistry.register(createGraphQueryTool(governor, graphStore));
   toolRegistry.register(createMemoryQueryTool(governor, vectorStore));

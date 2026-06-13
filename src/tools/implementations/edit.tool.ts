@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
+import { backupFile } from '../../cli/fileEditor';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -91,6 +92,8 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
       ? content.split(args.oldString).join(args.newString)
       : content.replace(args.oldString, args.newString);
 
+    // Snapshot first so /undo and /diff-file work on every agent edit.
+    await backupFile(fullPath);
     await fs.writeFile(fullPath, updated, 'utf8');
 
     const n = args.replaceAll ? occurrences : 1;

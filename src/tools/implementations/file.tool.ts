@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
+import { backupFile } from '../../cli/fileEditor';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -98,6 +99,8 @@ Use this tool to write new code, update configuration files, or generate artifac
     if (exists && !args.overwrite) {
       throw new Error(`File already exists: ${args.path}. Pass overwrite: true to replace it.`);
     }
+    // Snapshot overwrites so /undo and /diff-file can restore the prior version.
+    if (exists) await backupFile(fullPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, args.content, 'utf-8');
     return `Successfully wrote to ${args.path}`;
