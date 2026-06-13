@@ -31,7 +31,8 @@ globalCommandRegistry.register({
     for (const m of messages) {
       const who = m.role === 'user' ? '🧑 User' : m.role === 'assistant' ? '🤖 BiMax' : 'ℹ️ System';
       const ts = m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : '';
-      lines.push(`### ${who}${ts ? ` · ${ts}` : ''}`, ``, (m.content || '').trim() || '_(empty)_', ``);
+      const text = typeof m.content === 'string' ? m.content.trim() : '';
+      lines.push(`### ${who}${ts ? ` · ${ts}` : ''}`, ``, text || '_(empty)_', ``);
     }
 
     const outDir = path.join(context.cwd, '.breakglass', 'replays');

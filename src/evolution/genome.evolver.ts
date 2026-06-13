@@ -97,6 +97,9 @@ export class GenomeEvolver {
       if (!report.changed) {
         report.detail = 'The agent made no changes.';
         this.log('warn', report.detail);
+        // Remove the worktree BEFORE deleting the branch — git refuses to delete a
+        // branch that is still checked out by a worktree.
+        try { this.git(['worktree', 'remove', '--force', worktreePath]); } catch { /* ignore */ }
         try { this.git(['branch', '-D', branch]); report.branch = undefined; } catch { /* ignore */ }
         return report;
       }

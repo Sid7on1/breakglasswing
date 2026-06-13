@@ -174,6 +174,29 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   // Bumped by /clear: remounts the <Static> region so it forgets printed items
   const [clearEpoch, setClearEpoch] = useState(0);
 
+  // Ink 3 leaves ghost box-frames after a terminal resize: it erases the previous
+  // live frame using the OLD width, so wrapped lines don't line up. On resize we
+  // wipe the terminal and remount <Static> (via clearEpoch) so the whole transcript
+  // re-prints cleanly at the new width. Debounced to the trailing edge so a
+  // drag-resize repaints once it settles rather than on every intermediate size.
+  useEffect(() => {
+    const out = process.stdout;
+    if (!out.isTTY) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const onResize = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        out.write('\x1b[2J\x1b[3J\x1b[H');
+        setClearEpoch((e) => e + 1);
+      }, 80);
+    };
+    out.on('resize', onResize);
+    return () => {
+      clearTimeout(timer);
+      out.off('resize', onResize);
+    };
+  }, []);
+
   const COMMAND_REGISTRY: [string, string][] = [
     ['/help', 'Show help'],
     ['/sessions', 'List saved sessions'],

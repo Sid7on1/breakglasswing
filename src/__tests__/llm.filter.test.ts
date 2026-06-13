@@ -1,4 +1,4 @@
-import { ThinkTagFilter, stripThink } from '../core/llm.adapter';
+import { ThinkTagFilter, stripThink, extractJson } from '../core/llm.adapter';
 
 describe('ThinkTagFilter', () => {
   function run(chunks: string[]): { text: string; thinking: string } {
@@ -62,5 +62,31 @@ describe('stripThink', () => {
 
   it('leaves normal content alone', () => {
     expect(stripThink('{"a":1}')).toBe('{"a":1}');
+  });
+});
+
+describe('extractJson', () => {
+  it('unwraps a ```json fenced block', () => {
+    expect(extractJson('```json\n[{"id":"a"}]\n```')).toBe('[{"id":"a"}]');
+  });
+
+  it('unwraps a plain ``` fenced block', () => {
+    expect(extractJson('```\n{"a":1}\n```')).toBe('{"a":1}');
+  });
+
+  it('strips surrounding prose and returns the first balanced array', () => {
+    expect(extractJson('Here is a JSON array: [{"id":"x"}] hope it helps!')).toBe('[{"id":"x"}]');
+  });
+
+  it('does not stop at a bracket inside a string literal', () => {
+    expect(extractJson('[{"name":"a]b"}]')).toBe('[{"name":"a]b"}]');
+  });
+
+  it('leaves clean JSON unchanged', () => {
+    expect(extractJson('{"a":1}')).toBe('{"a":1}');
+  });
+
+  it('round-trips through JSON.parse for a fenced array', () => {
+    expect(JSON.parse(extractJson('```json\n[{"id":"t1","deps":[]}]\n```'))).toEqual([{ id: 't1', deps: [] }]);
   });
 });

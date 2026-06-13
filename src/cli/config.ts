@@ -25,6 +25,7 @@ export interface CliConfig {
   diffApproval: boolean;
   selfCritic: boolean;
   allowSelfEvolution: boolean;
+  reasoningEffort?: string; // off by default; 'low'|'medium'|'high' to speed up thinking models
 }
 
 const DEFAULTS: CliConfig = {

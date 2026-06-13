@@ -86,6 +86,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
     timeout: cfg.timeout,
     temperature: cfg.temperature,
     maxTokens: cfg.maxTokens,
+    reasoningEffort: cfg.reasoningEffort,
   });
 
   // Yolo Classifier
