@@ -1,5 +1,6 @@
 import '../cli/commands/meta';
 import '../cli/commands/builtins';
+import '../cli/commands/session';
 import { globalCommandRegistry } from '../cli/commands/registry';
 
 // Regression tests for the slash-menu fixes: /model must apply the model live (adapter +
@@ -13,12 +14,13 @@ function mockCtx() {
   const saveConfig = jest.fn().mockResolvedValue(undefined);
   const addSystemMessage = jest.fn();
   const executeCommand = jest.fn();
+  const setActivePrompt = jest.fn();
   return {
     cwd: '/tmp',
-    options: { model: 'old/model', llmAdapter: { applyConfig } },
+    options: { model: 'old/model', theme: 'dark', llmAdapter: { applyConfig }, governor: { mode: 'interactive' } },
     saveConfig, addSystemMessage, executeCommand,
-    setActiveMenu: jest.fn(), setActivePrompt: jest.fn(),
-    _spies: { applyConfig, saveConfig, addSystemMessage, executeCommand },
+    setActiveMenu: jest.fn(), setActivePrompt,
+    _spies: { applyConfig, saveConfig, addSystemMessage, executeCommand, setActivePrompt },
   } as any;
 }
 
@@ -64,5 +66,64 @@ describe('/config (hub fix)', () => {
     const res = await getCmd('/config').execute(['theme'], ctx);
     expect(res.type).toBe('menu');
     expect(res.options.map((o: any) => o.value)).toContain('/config set theme dark');
+  });
+
+  it('hub labels reflect live state and include the verbose/notify toggles', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/config').execute([], ctx);
+    const values = res.options.map((o: any) => o.value);
+    expect(values).toEqual(expect.arrayContaining(['/config verbose', '/config notify']));
+    const model = res.options.find((o: any) => o.value === '/model');
+    expect(model.desc).toContain('old/model'); // live current model, not hardcoded
+  });
+
+  it('`/config verbose` is a runnable on/off menu', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/config').execute(['verbose'], ctx);
+    expect(res.type).toBe('menu');
+    expect(res.options.map((o: any) => o.value)).toEqual(['/config set verbose true', '/config set verbose false']);
+  });
+
+  it('`/config set verbose true` applies live + persists', async () => {
+    const ctx = mockCtx();
+    await getCmd('/config').execute(['set', 'verbose', 'true'], ctx);
+    expect(ctx.options.verbose).toBe(true);
+    expect(ctx._spies.saveConfig).toHaveBeenCalledWith({ verbose: true });
+  });
+});
+
+describe('/model custom entry', () => {
+  it('the custom option opens a prompt that applies the typed id', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/model').execute([], ctx);
+    expect(res.options.map((o: any) => o.value)).toContain('__custom__');
+    res.onSelect({ value: '__custom__' });
+    expect(ctx._spies.setActivePrompt).toHaveBeenCalled();
+    // Drive the prompt's resolver as the TUI would on Enter.
+    const prompt = ctx._spies.setActivePrompt.mock.calls[0][0];
+    prompt.onResolve('vendor/some-model');
+    expect(ctx._spies.applyConfig).toHaveBeenCalledWith({ model: 'vendor/some-model' });
+    expect(ctx.options.model).toBe('vendor/some-model');
+  });
+});
+
+describe('/provider & /keys (interactive)', () => {
+  it('/provider returns a picker with an onSelect (no typing required)', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/provider').execute([], ctx);
+    expect(res.type).toBe('menu');
+    expect(typeof res.onSelect).toBe('function');
+    expect(res.options.length).toBeGreaterThan(0);
+  });
+
+  it('/keys onSelect opens a masked prompt for the chosen provider', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/keys').execute([], ctx);
+    expect(res.type).toBe('menu');
+    expect(typeof res.onSelect).toBe('function');
+    res.onSelect({ value: res.options[0].value });
+    expect(ctx._spies.setActivePrompt).toHaveBeenCalled();
+    const prompt = ctx._spies.setActivePrompt.mock.calls[0][0];
+    expect(prompt.isMasked).toBe(true);
   });
 });
