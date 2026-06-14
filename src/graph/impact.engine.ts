@@ -69,7 +69,9 @@ export class ImpactEngine implements IImpactEngine {
       if (node.type === 'FUNCTION') functions++;
       if (node.type === 'CLASS') classes++;
       
-      const riskScore = (node as any).metadata?.riskScore || 0;
+      // riskScore is a top-level GraphNode field (set by the semantic augmenter); the older
+      // metadata.riskScore path was always undefined, so highestRiskScore was silently always 0.
+      const riskScore = node.riskScore ?? (node as any).metadata?.riskScore ?? 0;
       if (riskScore > maxRisk) {
         maxRisk = riskScore;
       }

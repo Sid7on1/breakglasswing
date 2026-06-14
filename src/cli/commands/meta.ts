@@ -1,6 +1,8 @@
 import { globalCommandRegistry } from './registry';
 import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents } from '../agentRouter';
 import { getCurrentProvider } from '../provider';
+import { globalMcpManager } from '../../mcp/manager';
+import { globalSkillService } from '../../skills/skill.service';
 
 globalCommandRegistry.register({
   name: '/routes',
@@ -126,6 +128,8 @@ globalCommandRegistry.register({
         { label: 'Theme', value: '/config theme', desc: context.options.theme },
         { label: 'Verbose Logging', value: '/config verbose', desc: context.options.verbose ? 'On' : 'Off' },
         { label: 'Permissions', value: '/config skipPerms', desc: context.options.governor?.mode === 'bypass' ? 'Bypassed' : 'Strict' },
+        { label: 'MCP servers', value: '/mcp', desc: `${globalMcpManager.list().length} connected` },
+        { label: 'Agent skills', value: '/skills', desc: `${globalSkillService.list().length} installed` },
       ]
     };
   }

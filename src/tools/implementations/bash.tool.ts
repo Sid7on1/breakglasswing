@@ -36,10 +36,17 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
     required: ['command']
   },
   execute: async (args: { command: string, timeout?: number }, context?: any) => {
+    // Coerce the model-supplied timeout. LLMs frequently emit it as a string,
+    // a float, or an out-of-range value, which makes Node's exec throw
+    // ERR_OUT_OF_RANGE ("timeout ... must be an unsigned integer") and derails
+    // the whole task. Clamp to a finite integer in [0, 600000]ms.
+    const rawTimeout = Number(args.timeout);
+    const timeoutMs = Number.isFinite(rawTimeout)
+      ? Math.min(Math.max(0, Math.floor(rawTimeout)), 600_000)
+      : 30_000;
     try {
       const currentCwd = context?.cwd || process.cwd();
       const cmd = args.command.replace(/^~(?=\/|$)/, os.homedir());
-      const timeoutMs = args.timeout ?? 30_000;
       // When sandboxing is on (B3), run the command under sandbox-exec via execFile so the
       // profile + the command pass as discrete argv (no shell re-quoting). Otherwise run it
       // through the shell exactly as before.
@@ -55,7 +62,7 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       };
     } catch (e: any) {
       if (e.killed) {
-        throw new Error(`Command timed out after ${args.timeout ?? 30_000}ms: ${args.command}`, { cause: e });
+        throw new Error(`Command timed out after ${timeoutMs}ms: ${args.command}`, { cause: e });
       }
       throw new Error(`Bash execution failed: ${e.message}`, { cause: e });
     }

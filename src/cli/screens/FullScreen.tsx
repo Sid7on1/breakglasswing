@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -25,6 +25,7 @@ import { LogView } from '../components/LogView';
 import { DiffView } from '../components/DiffView';
 import { SearchHighlight } from '../components/SearchHighlight';
 import { ThinkingText } from '../components/ThinkingText';
+import { WorkingIndicator } from '../components/WorkingIndicator';
 import { InteractiveMenu, MenuOption } from '../components/InteractiveMenu';
 import { InteractivePrompt } from '../components/InteractivePrompt';
 import { getTheme, ThemeName } from '../themes';
@@ -32,6 +33,9 @@ import { tailToHeight } from '../streaming.viewport';
 import { TaskPipeline } from '../../task';
 import { CodebaseIndexer } from '../../graph/indexer';
 import { GraphStore } from '../../graph/graph.store';
+import { CodebaseMapPanel } from '../components/CodebaseMapPanel';
+import { summarizeGraph, isCodebase } from '../../graph/graph.summary';
+import { estimateTokens } from '../../graph/context.planner';
 import { expandAtMentions, suggestAtSymbols } from '../atMention';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
@@ -157,6 +161,31 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   ]);
   const logCounterRef = useRef(1);
   const [input, setInput] = useState('');
+  // Pasted multi-line blobs are collapsed to a short "[Pasted text #N +L lines]" chip in the
+  // visible input (Claude-Code style) and expanded back to the real text on submit.
+  const pastesRef = useRef<Map<string, string>>(new Map());
+  const pasteCounterRef = useRef(0);
+  const [pasteCount, setPasteCount] = useState(0);
+  const handlePaste = useCallback((text: string): string => {
+    const id = ++pasteCounterRef.current;
+    const lines = text.split('\n').length;
+    const placeholder = `[Pasted text #${id} +${lines} lines]`;
+    pastesRef.current.set(placeholder, text);
+    setPasteCount(pastesRef.current.size);
+    return placeholder;
+  }, []);
+  const expandPastes = useCallback((s: string): string => {
+    if (pastesRef.current.size === 0) return s;
+    let out = s;
+    for (const [ph, real] of pastesRef.current.entries()) out = out.split(ph).join(real);
+    return out;
+  }, []);
+  const clearPastes = useCallback(() => {
+    if (pastesRef.current.size === 0 && pasteCounterRef.current === 0) return;
+    pastesRef.current.clear();
+    pasteCounterRef.current = 0;
+    setPasteCount(0);
+  }, []);
   const [stashedInput, setStashedInput] = useState<string | null>(null);
   const [history, setHistory] = useState<string[]>(() => loadPromptHistory());
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -176,6 +205,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [streamMeta, setStreamMeta] = useState({ elapsed: 0, chars: 0 });
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(-1);
+  // Mirror the suggestion state in refs so handleSubmit always reads the *current* values.
+  // handleSubmit is handed to menus as `context.executeCommand`; that closure can be invoked
+  // long after it was captured, when the stale `suggestions`/`suggestionIndex` it closed over
+  // would otherwise hijack the command (e.g. selecting "Provider" in /config ran "/config"
+  // again because the captured closure still saw the "/config" suggestion).
+  const suggestionsRef = useRef<string[]>([]);
+  const suggestionIndexRef = useRef(-1);
+  useEffect(() => {
+    suggestionsRef.current = suggestions;
+    suggestionIndexRef.current = suggestionIndex;
+  }, [suggestions, suggestionIndex]);
   const [activeMenu, setActiveMenu] = useState<{ type: string, options: MenuOption[], title: string, onSelect?: (opt: MenuOption) => void | Promise<void> } | null>(null);
   const [activePrompt, setActivePrompt] = useState<{ title: string, placeholder?: string, isMasked?: boolean, onResolve: (val: string) => void } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -183,6 +223,20 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   useEffect(() => { isProcessingRef.current = isProcessing; }, [isProcessing]);
   // Bumped by /clear: remounts the <Static> region so it forgets printed items
   const [clearEpoch, setClearEpoch] = useState(0);
+
+  // Codebase-map panel + live token meter, driven by config and toggled from /config.
+  const readFlag = (k: 'showMapPanel' | 'showTokenMeter') => {
+    try { return getConfig()[k] !== false; } catch { return true; }
+  };
+  const [showMapPanel, setShowMapPanel] = useState(() => readFlag('showMapPanel'));
+  const [showTokenMeter, setShowTokenMeter] = useState(() => readFlag('showTokenMeter'));
+  // Bumped whenever the graph is (re)built so the map summary recomputes.
+  const [graphVersion, setGraphVersion] = useState(0);
+  const graphSummary = useMemo(() => summarizeGraph(graphStore), [graphStore, graphVersion]);
+  // Live "tokens that will be sent" = system prompt + conversation history + current draft.
+  const [systemPromptTokens, setSystemPromptTokens] = useState(0);
+  const [historyTokens, setHistoryTokens] = useState(0);
+  const onboardingStartedRef = useRef(false);
 
   // Ink 3 leaves ghost box-frames after a terminal resize: it erases the previous
   // live frame using the OLD width, so wrapped lines don't line up. On resize we
@@ -236,6 +290,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ['/rewind', 'Restore an earlier checkpoint'],
     ['/swarm', 'Parallel worktree sub-agent swarm'],
     ['/impact', 'Blast-radius preview for a symbol'],
+    ['/map', 'Top-level codebase map overview'],
     ['/ask', 'Ask the architecture (graph-backed)'],
     ['/replay', 'Export this session as markdown'],
     ['/diff-approval', 'Review agent edits before they apply'],
@@ -249,6 +304,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ['/evolve', 'Gated self-evolution of BiMax\'s own source'],
     ['/index', 'Build local AST codebase index'],
     ['/index-ai', 'Run Semantic AI index (Costs API credits)'],
+    ['/mcp', 'List / add / remove MCP servers'],
+    ['/skills', 'List / create Agent Skills'],
     ['/exit', 'Exit'],
   ];
 
@@ -343,6 +400,18 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setSearchQuery('');
       setShowTranscript(false); // search operates on the logs panel
       cliEvents.emit('status', 'Search: type to filter logs');
+      return;
+    }
+
+    if (char === 'p' && key.ctrl) {
+      // Preview the full text behind the "[Pasted text #N …]" chips in the current input.
+      if (pastesRef.current.size === 0) {
+        cliEvents.emit('status', 'No pasted text to preview');
+      } else {
+        for (const [ph, real] of pastesRef.current.entries()) {
+          addSystemMessage('info', `${ph}\n${real}`);
+        }
+      }
       return;
     }
 
@@ -508,12 +577,146 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     } as MessageEntry);
   }, []);
 
+  // Re-read the map-panel / token-meter flags when a /config toggle fires (saveConfig only
+  // updates the cache; this is how the live UI reflects the change without a restart).
+  useEffect(() => {
+    const onConfigChanged = () => {
+      setShowMapPanel(readFlag('showMapPanel'));
+      setShowTokenMeter(readFlag('showTokenMeter'));
+    };
+    const onGraphChanged = () => setGraphVersion((v) => v + 1);
+    cliEvents.on('config_changed', onConfigChanged);
+    cliEvents.on('graph_changed', onGraphChanged);
+    return () => {
+      cliEvents.off('config_changed', onConfigChanged);
+      cliEvents.off('graph_changed', onGraphChanged);
+    };
+  }, []);
+
+  // Token meter: system-prompt size is recomputed only when the agent/plan-mode changes
+  // (rebuilding it every keystroke would be wasteful); history size tracks the transcript.
+  useEffect(() => {
+    try {
+      const persona = personasRef.current?.[defaultAgent] || personasRef.current?.bimax;
+      const sys = persona?.getSystemPrompt({ planMode: options.governor.mode === 'plan' }) || '';
+      setSystemPromptTokens(estimateTokens(sys));
+    } catch { /* best-effort */ }
+  }, [defaultAgent, options.governor.mode]);
+
+  useEffect(() => {
+    let sum = 0;
+    for (const m of messages) {
+      if (typeof m.content === 'string') sum += estimateTokens(m.content);
+    }
+    setHistoryTokens(sum);
+  }, [messages]);
+
+  // First-run onboarding: when launched inside a real codebase with no map graph yet, offer to
+  // build the map graph, then the AI graph — and nudge toward minimal feature use. Driven through
+  // the Ink menu infra (never readline). Gated on API keys existing (the AI graph needs them).
+  const finishOnboarding = useCallback(() => {
+    saveConfig({ onboardingComplete: true }).catch(() => { /* best-effort */ });
+    addSystemMessage('info', 'Tip: heavy features (/swarm, /council, /speculate, /evolve) cost API credits — enable them only when needed from /config. Use @symbol mentions and /impact to keep me grounded in the real code instead of guessing.');
+  }, [addSystemMessage]);
+
+  const offerAiGraph = useCallback(() => {
+    const nodeCount = graphStore.getGraph().nodes.size;
+    setActiveMenu({
+      type: 'onboarding',
+      title: 'Add the AI graph? (semantic layer: purpose + risk per symbol)',
+      options: [
+        { label: '[ Build AI graph ]', value: 'build', desc: `Makes ~${nodeCount} API calls — richer impact analysis` },
+        { label: '[ Skip ]', value: 'skip', desc: 'You can run /index-ai later' },
+      ],
+      onSelect: async (opt: MenuOption) => {
+        setActiveMenu(null);
+        if (opt.value === 'build') {
+          addSystemMessage('info', 'Building AI graph (semantic ingestion)…');
+          try {
+            await codebaseIndexer.buildSemanticIndex();
+            cliEvents.emit('graph_changed');
+            addSystemMessage('success', 'AI graph built — the map now carries purpose + risk metadata.');
+          } catch (e: any) {
+            addSystemMessage('error', `AI indexing failed: ${e.message}`);
+          }
+        }
+        finishOnboarding();
+      },
+    });
+  }, [addSystemMessage, finishOnboarding, graphStore]);
+
+  const startOnboarding = useCallback(() => {
+    setActiveMenu({
+      type: 'onboarding',
+      title: 'New codebase detected — build the map graph?',
+      options: [
+        { label: '[ Build map graph ]', value: 'build', desc: 'AST index so I navigate to the exact symbol instead of guessing' },
+        { label: '[ Skip ]', value: 'skip', desc: 'You can run /index later' },
+      ],
+      onSelect: async (opt: MenuOption) => {
+        setActiveMenu(null);
+        if (opt.value === 'build') {
+          addSystemMessage('info', 'Building map graph (AST index)…');
+          try {
+            const count = await codebaseIndexer.buildAstIndex();
+            cliEvents.emit('graph_changed');
+            addSystemMessage('success', `Map graph built — ${count} nodes indexed.`);
+            offerAiGraph();
+            return;
+          } catch (e: any) {
+            addSystemMessage('error', `Indexing failed: ${e.message}`);
+          }
+        } else {
+          addSystemMessage('info', 'Skipped the map graph. Build it anytime: /config → Build map graph (or run /index). The agent works without it, just less precisely.');
+        }
+        finishOnboarding();
+      },
+    });
+  }, [addSystemMessage, finishOnboarding, offerAiGraph]);
+
+  useEffect(() => {
+    // Manual re-run from /config onboard — re-offer regardless of the saved flag.
+    const onRerun = () => {
+      if (buildKeyPool().length === 0) {
+        addSystemMessage('warn', 'Add an API key first (/keys), then re-run onboarding.');
+        return;
+      }
+      onboardingStartedRef.current = true;
+      startOnboarding();
+    };
+    cliEvents.on('rerun_onboarding', onRerun);
+
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const shouldAutoOffer = (() => {
+      if (onboardingStartedRef.current) return false;
+      try { if (getConfig().onboardingComplete) return false; } catch { return false; }
+      if (!isCodebase(process.cwd())) return false;
+      return graphStore.getGraph().nodes.size === 0;
+    })();
+    if (shouldAutoOffer) {
+      timer = setTimeout(() => {
+        // Defer so the mandatory-API-key menu (fired at 500ms) takes precedence; the AI-graph
+        // step needs keys anyway. If keys are still missing, leave onboarding for next launch.
+        if (done || onboardingStartedRef.current) return;
+        if (buildKeyPool().length === 0) return;
+        onboardingStartedRef.current = true;
+        startOnboarding();
+      }, 900);
+    }
+    return () => { done = true; if (timer) clearTimeout(timer); cliEvents.off('rerun_onboarding', onRerun); };
+  }, [startOnboarding, graphStore, addSystemMessage]);
+
   const handleSubmit = async (rawQuery: string) => {
-    let query = rawQuery;
-    
-    // Process suggestion selection if active
-    if (suggestions.length > 0 && suggestionIndex >= 0) {
-      const selected = suggestions[suggestionIndex].split('  ')[0];
+    // Expand any "[Pasted text #N …]" chips back into the real pasted content before processing.
+    let query = expandPastes(rawQuery);
+
+    // Process suggestion selection if active. Read from refs (not the closed-over state) so a
+    // stale handleSubmit captured by a menu's executeCommand can't resurrect an old suggestion.
+    const curSuggestions = suggestionsRef.current;
+    const curSuggestionIndex = suggestionIndexRef.current;
+    if (curSuggestions.length > 0 && curSuggestionIndex >= 0) {
+      const selected = curSuggestions[curSuggestionIndex].split('  ')[0];
       const autoExecute = COMMAND_REGISTRY.map(cmd => cmd[0]);
 
       setSuggestions([]);
@@ -538,6 +741,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     setSuggestions([]);
     setSuggestionIndex(-1);
     if (!query.trim()) return;
+    // Committed to submit — the pasted blobs are now baked into `query`; reset the chip store.
+    clearPastes();
 
     if (query === '/clear') {
       setActiveMenu({
@@ -556,6 +761,11 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       // Wipe the terminal (incl. scrollback) since Static content lives there
       process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
       setClearEpoch((e) => e + 1);
+      // Reset each agent's LLM conversation memory too — otherwise old turns (e.g. earlier
+      // MCP experiments) keep bleeding into new requests, making the agent "resume" stale tasks.
+      if (personasRef.current) {
+        for (const p of Object.values(personasRef.current)) p.messages = [];
+      }
       setLogs([]);
       setMessages([]);
       setInput('');
@@ -589,7 +799,6 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         };
         
         const result = await globalCommandRegistry.execute(query, context);
-        
         if (result.type === 'message') {
           addSystemMessage(result.level, result.content);
         } else if (result.type === 'menu') {
@@ -935,6 +1144,11 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ...messages.map((m) => ({ kind: 'msg' as const, id: m.id, msg: m })),
   ];
 
+  // Pre-send token estimate (system prompt + history + current draft). Cheap: the heavy parts
+  // are memoized; only the draft is re-measured per keystroke.
+  const tokenEstimate = systemPromptTokens + historyTokens + estimateTokens(input);
+  const mapPanelVisible = showMapPanel && graphSummary.nodeCount > 0;
+
   return (
     <>
       {/* Completed content is printed once into scrollback and never redrawn —
@@ -976,7 +1190,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 // lines, prompt, footer and surrounding margins.
                 const rows = stdout?.rows || 24;
                 const cols = stdout?.columns || 80;
-                const reserved = 10 + streamingToolCalls.length;
+                const reserved = 10 + streamingToolCalls.length
+                  + (mapPanelVisible ? 9 : 0) + (showTokenMeter ? 1 : 0);
                 const budget = Math.max(4, rows - reserved);
                 const { text: preview, truncated } = tailToHeight(streamingText, budget, cols - 4);
                 return (
@@ -990,6 +1205,11 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                         <Markdown theme={theme}>{preview}</Markdown>
                       </Box>
                     </Box>
+                    {isProcessing && (
+                      <Box marginTop={1}>
+                        <WorkingIndicator theme={theme} />
+                      </Box>
+                    )}
                   </Box>
                 );
               })() : null}
@@ -1020,6 +1240,16 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
             onSubmit={handleVetoSubmit}
             onCancel={handleVetoCancel}
           />
+        )}
+
+        {mapPanelVisible && (
+          <CodebaseMapPanel theme={theme} summary={graphSummary} />
+        )}
+
+        {showTokenMeter && (
+          <Box justifyContent="flex-end" paddingX={1}>
+            <Text color={theme.subtle}>~{tokenEstimate.toLocaleString()} tok will be sent</Text>
+          </Box>
         )}
 
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder}>
@@ -1069,6 +1299,13 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 </Text>
               </Box>
             )}
+            {pasteCount > 0 && !isSearching && (
+              <Box>
+                <Text color={theme.subtle}>
+                  ⎘ {pasteCount} pasted block{pasteCount > 1 ? 's' : ''} · Ctrl+P to preview · expands on send
+                </Text>
+              </Box>
+            )}
             {activeMenu ? (
               <InteractiveMenu
                 theme={theme}
@@ -1076,7 +1313,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 options={activeMenu.options}
                 onSelect={handleMenuSelect}
                 onCancel={handleMenuCancel}
-                enableSearch={activeMenu.type === 'help'}
+                enableSearch={activeMenu.type === 'help' || activeMenu.type === 'menu'}
               />
             ) : activePrompt ? (
               <InteractivePrompt
@@ -1111,9 +1348,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 )}
                 <SimpleInput
                   value={isSearching ? searchQuery : input}
-                  onChange={isSearching ? setSearchQuery : (val: string) => { setInput(val); updateSuggestions(val); }}
+                  onChange={isSearching ? setSearchQuery : (val: string) => {
+                    setInput(val);
+                    updateSuggestions(val);
+                    // If the user deleted all paste chips, drop the stored blobs + hint.
+                    if (pastesRef.current.size > 0 && ![...pastesRef.current.keys()].some(ph => val.includes(ph))) {
+                      clearPastes();
+                    }
+                  }}
                   onSubmit={isSearching ? () => { setIsSearching(false); setSearchQuery(''); } : handleSubmit}
                   focus={!vetoQuestion && !activeMenu && !activePrompt}
+                  onPaste={isSearching ? undefined : handlePaste}
                 />
               </Box>
             )}

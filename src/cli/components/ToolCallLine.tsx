@@ -19,19 +19,28 @@ const TOOL_LABELS: Record<string, string> = {
   BashTool: 'Bash',
   ReadFileTool: 'Read',
   WriteFileTool: 'Write',
+  EditFileTool: 'Edit',
+  MultiEditTool: 'MultiEdit',
   DeleteTool: 'Delete',
+  CreateDirectoryTool: 'mkdir',
   ChangeDirectoryTool: 'cd',
+  GrepTool: 'Grep',
+  GlobTool: 'Glob',
+  WebFetchTool: 'Fetch',
+  TodoWriteTool: 'Todo',
   GraphQueryTool: 'Graph',
   MemoryQueryTool: 'Memory',
   SpawnSubagentTool: 'Subagent',
   RegisterAgentTool: 'RegisterAgent',
   AskUserTool: 'Ask',
+  SkillTool: 'Skill',
+  McpManageTool: 'MCP',
 };
 
 function summarizeInput(call: ToolCallEntry): string {
   try {
     const parsed = JSON.parse(call.input);
-    const candidate = parsed.command || parsed.filePath || parsed.path || parsed.query || parsed.question || parsed.directory;
+    const candidate = parsed.command || parsed.filePath || parsed.path || parsed.pattern || parsed.glob || parsed.url || parsed.query || parsed.question || parsed.directory || parsed.name || parsed.action;
     if (typeof candidate === 'string') {
       return candidate.length > 70 ? candidate.slice(0, 67) + '…' : candidate;
     }

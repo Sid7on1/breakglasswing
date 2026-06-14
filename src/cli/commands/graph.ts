@@ -1,6 +1,7 @@
 import { globalCommandRegistry } from './registry';
 import { ImpactEngine } from '../../graph/impact.engine';
 import { GraphNode } from '../../graph/models';
+import { summarizeGraph } from '../../graph/graph.summary';
 
 function fmtNode(n: GraphNode): string {
   const crit = n.criticality ? ` [${n.criticality}]` : '';
@@ -48,6 +49,31 @@ globalCommandRegistry.register({
       level: 'info',
       content: `Blast radius for ${id} — ${sev}\n- Impacted nodes: ${r.totalImpactedNodes} (files ${r.impactedFiles}, functions ${r.impactedFunctions}, classes ${r.impactedClasses})\n- Highest downstream criticality: ${r.highestRiskScore}`
     };
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/map',
+  description: 'Top-level codebase map overview',
+  category: 'Code & Intelligence',
+  execute: async (args, context) => {
+    const store = context.graphStore;
+    if (!store || store.getGraph().nodes.size === 0) {
+      return { type: 'message', level: 'error', content: 'No map graph yet. Run /index to build it.' };
+    }
+    const s = summarizeGraph(store);
+    const lines = [
+      `Codebase Map — ${s.nodeCount} nodes, ${s.fileCount} files`,
+      `AI graph: ${s.aiGraphBuilt ? '✓ built' : '✗ not built — run /index-ai'}`,
+    ];
+    if (s.topModules.length) {
+      lines.push('TOP MODULES (by risk/criticality):');
+      for (const m of s.topModules) {
+        const tag = m.criticality ? ` [${m.criticality}${m.riskScore != null ? ` risk=${m.riskScore}` : ''}]` : '';
+        lines.push(`  • ${m.name}${m.filePath ? ` (${m.filePath})` : ''}${tag}`);
+      }
+    }
+    return { type: 'message', level: 'info', content: lines.join('\n') };
   }
 });
 

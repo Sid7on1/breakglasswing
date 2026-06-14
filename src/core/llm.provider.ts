@@ -22,7 +22,9 @@ export type ChatEvent =
   | { type: 'thinking'; text: string } // Model's internal reasoning — never show as the reply
   | { type: 'tool_call'; id: string; name: string; args: string } // Note: args comes in as a string
   | { type: 'usage'; prompt: number; completion: number }
-  | { type: 'error'; message: string; recoverable: boolean }
+  // `kind` tells the agent loop *how* to recover: 'context' → compact and retry;
+  // 'transient' → bounded re-ask (new key / re-sampled output). Absent when fatal.
+  | { type: 'error'; message: string; recoverable: boolean; kind?: 'context' | 'transient' }
   | { type: 'done' };
 
 export interface LLMProvider {

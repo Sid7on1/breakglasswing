@@ -12,16 +12,21 @@ import { Governor } from '../governor/governor';
 import { HermesPersona, OpenCodePersona, OpenClawPersona, BiMaxPersona } from './personas/implementations';
 import { AgentPersona } from './personas/base.persona';
 import { createBashTool } from '../tools/implementations/bash.tool';
-import { createReadFileTool, createWriteFileTool, createDeleteTool } from '../tools/implementations/file.tool';
+import { createReadFileTool, createWriteFileTool, createDeleteTool, createMakeDirTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
+import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createCdTool } from '../tools/implementations/cd.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
 import { createGitTool } from '../tools/implementations/git.tool';
 import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
+import { createSkillTool } from '../tools/implementations/skill.tool';
+import { createMcpManageTool } from '../tools/implementations/mcp.tool';
+import { globalSkillService } from '../skills/skill.service';
+import { globalMcpManager } from '../mcp/manager';
 import { globalProjectMemory } from '../memory/project.memory';
 import { GraphStore } from '../graph/graph.store';
 
@@ -50,8 +55,10 @@ async function runWorker() {
     toolRegistry.register(createEditFileTool(governor));
     toolRegistry.register(createMultiEditTool(governor));
     toolRegistry.register(createDeleteTool(governor));
+    toolRegistry.register(createMakeDirTool(governor));
     toolRegistry.register(createGrepTool(governor));
     toolRegistry.register(createGlobTool(governor));
+    toolRegistry.register(createTodoWriteTool(governor));
     toolRegistry.register(createWebFetchTool(governor));
     toolRegistry.register(createCdTool(governor));
     toolRegistry.register(createGraphQueryTool(governor, graphStore));
@@ -59,6 +66,9 @@ async function runWorker() {
     toolRegistry.register(createGitTool(governor));
     toolRegistry.register(createLspQueryTool(governor, graphStore));
     toolRegistry.register(createRememberTool(governor, globalProjectMemory));
+    globalSkillService.load(config.cwd || process.cwd());
+    toolRegistry.register(createSkillTool(governor, globalSkillService));
+    toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
 
     // 2. Instantiate Persona
     let agent: AgentPersona;

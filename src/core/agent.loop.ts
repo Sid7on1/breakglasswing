@@ -30,6 +30,11 @@ export class AgentLoop {
     // Bounds the regenerate-on-empty correction below to a single retry, so a model
     // that keeps emitting pure filler can never spin the loop.
     let pureFillerRetried = false;
+    // Bounds re-asks after a transient provider/model error (stalled stream, 5xx, a
+    // single malformed tool-call emission) so a deterministically-failing turn can't
+    // spin the loop, while a flaky one still gets a fresh attempt (new key / re-sample).
+    let transientRetries = 0;
+    const MAX_TRANSIENT_RETRIES = 2;
 
     for (let i = 0; i < maxIter; i++) {
       // 1. Auto-Compact if reaching capacity
@@ -41,7 +46,9 @@ export class AgentLoop {
 
       const toolCalls: { id: string; name: string; args: string }[] = [];
       let currentContent = '';
-      let retryAfterCompaction = false;
+      // Set when the partial turn must be discarded and re-asked (after compaction or
+      // a transient-error retry); triggers the `continue` below.
+      let discardTurn = false;
 
       for await (const event of generator) {
         if (event.type === 'token') {
@@ -55,10 +62,17 @@ export class AgentLoop {
         } else if (event.type === 'usage') {
           this.contextManager.updateTokens(event.prompt);
         } else if (event.type === 'error') {
-          if (event.recoverable) {
+          if (event.recoverable && event.kind === 'context') {
             yield `\n[AgentLoop] Recoverable API Error: ${event.message}. Attempting reactive compaction...\n`;
             this.messages = await this.contextManager.reactiveCompact(this.messages, new Error(event.message));
-            retryAfterCompaction = true;
+            discardTurn = true;
+            break;
+          } else if (event.recoverable && event.kind === 'transient' && transientRetries < MAX_TRANSIENT_RETRIES) {
+            // A stalled stream or a single bad model emission — discard the partial
+            // turn and re-ask. A fresh chat() call rotates the API key and re-samples.
+            transientRetries++;
+            yield `\n[AgentLoop] Transient API error (${event.message}). Retrying (${transientRetries}/${MAX_TRANSIENT_RETRIES})...\n`;
+            discardTurn = true;
             break;
           } else {
             yield `\n[AgentLoop] API Error: ${event.message}\n`;
@@ -67,8 +81,10 @@ export class AgentLoop {
         }
       }
 
-      // Discard the partial turn and let the outer loop re-ask with compacted context
-      if (retryAfterCompaction) continue;
+      // Discard the partial turn and let the outer loop re-ask (after compaction or a
+      // transient retry). Any tokens already streamed to stdout are intentionally not
+      // persisted to history, so the message log stays well-formed.
+      if (discardTurn) continue;
 
       // Enforce the output contract: strip leaked tool-meta filler before it can
       // land in the reply or the history, and learn whether the turn was nothing but.

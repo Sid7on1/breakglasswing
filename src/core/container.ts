@@ -40,15 +40,17 @@ import { LlmAdapter } from '../core/llm.adapter';
 import { ToolRegistry } from '../tools/tool.registry';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createCdTool } from '../tools/implementations/cd.tool';
-import { createReadFileTool, createWriteFileTool, createDeleteTool } from '../tools/implementations/file.tool';
+import { createReadFileTool, createWriteFileTool, createDeleteTool, createMakeDirTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
-import { loadMcpServers } from '../mcp/config';
-import { registerMcpTools } from '../mcp/client';
+import { globalMcpManager } from '../mcp/manager';
+import { createMcpManageTool } from '../tools/implementations/mcp.tool';
+import { createSkillTool } from '../tools/implementations/skill.tool';
+import { globalSkillService } from '../skills/skill.service';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
@@ -121,6 +123,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createEditFileTool(governor));
   toolRegistry.register(createMultiEditTool(governor));
   toolRegistry.register(createDeleteTool(governor));
+  toolRegistry.register(createMakeDirTool(governor));
   toolRegistry.register(createBashTool(governor));
   toolRegistry.register(createGrepTool(governor));
   toolRegistry.register(createGlobTool(governor));
@@ -136,14 +139,20 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createAskUserTool(governor, llmAdapter));
   toolRegistry.register(createGitTool(governor));
   toolRegistry.register(createLspQueryTool(governor, graphStore));
+  // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
+  globalSkillService.load(projectRoot);
+  toolRegistry.register(createSkillTool(governor, globalSkillService));
+  // Agent-driven MCP setup: gated by the Governor (the tool is destructive → user confirms).
+  toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
 
-  // External MCP servers (A3): register their tools alongside native ones. Opt-in via
+  // External MCP servers: register their tools alongside native ones. Opt-in via
   // .bimax/mcp.json; absent config = zero overhead. Best-effort — a server that fails to
-  // start is skipped, never blocking boot.
-  const mcpServers = loadMcpServers(projectRoot);
-  if (mcpServers.length > 0) {
-    await registerMcpTools(mcpServers, toolRegistry, governor);
-  }
+  // start is skipped, never blocking boot. Connections are retained for runtime /mcp management.
+  // NOT awaited: a slow/hung remote server must never freeze startup — tools register
+  // asynchronously as each server comes up.
+  globalMcpManager
+    .connectAll(toolRegistry, governor, projectRoot)
+    .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
 
   // Genome & Evolution
   const genomeRepo = new GenomeRepository(projectRoot);

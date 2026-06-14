@@ -3,6 +3,7 @@ import { buildTool } from '../tool.factory';
 import { cliEvents } from '../../cli/events';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { getConfig } from '../../cli/config';
+import { detectDegenerateAsk } from '../ask-guard';
 
 export const createAskUserTool = (governor: IGovernor, llmAdapter: LlmAdapter) => buildTool({
   name: 'AskUserTool',
@@ -28,6 +29,17 @@ The execution will pause until the user selects one of the provided options. The
     required: ['question', 'options']
   },
   execute: async (args: { question: string, options: string[] }) => {
+    // Refuse degenerate / gratuitous prompts (greetings, identity, single-option "decisions").
+    // The model must answer the user directly instead of blocking the session on a fake choice.
+    const degenerate = detectDegenerateAsk(args.question, args.options);
+    if (degenerate) {
+      cliEvents.emit('log', { level: 'info', text: `[AskUserTool] Refused degenerate prompt: ${degenerate}` } as any);
+      return `AskUserTool was not used: ${degenerate}. This input does not need a user decision — ` +
+        `answer the user directly in plain text now (greetings, "who are you", explanations, or anything ` +
+        `you can resolve yourself). Only use AskUserTool when you are genuinely blocked on a choice the ` +
+        `user must make, with a clear question and at least 2 distinct options.`;
+    }
+
     const config = getConfig();
     if (config.autoAgentDecisions) {
       cliEvents.emit('log', { level: 'info', text: `[AskUserTool] Auto-Agent-Decisions is ON. Delegating question to LLM Supervisor...` } as any);

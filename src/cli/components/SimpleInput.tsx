@@ -8,9 +8,12 @@ export interface SimpleInputProps {
   focus: boolean;
   placeholder?: string;
   mask?: boolean;
+  // When a multi-line paste arrives, the parent can swap the raw blob for a short placeholder
+  // chip (Claude-Code style). Return the text to actually insert into the visible input.
+  onPaste?: (text: string) => string;
 }
 
-export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mask }: SimpleInputProps) {
+export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mask, onPaste }: SimpleInputProps) {
   const [cursorOffset, setCursorOffset] = useState(0);
   
   // Use a ref to track the latest value synchronously for rapid typing/pasting
@@ -76,11 +79,18 @@ export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mas
       // Ignore ansi escape codes that leak through
       if (char.includes('\u001b')) return;
 
+      // A chunk containing newlines is a multi-line paste — collapse it to a placeholder chip
+      // (via the parent) so the raw blob never gets rendered and overflows the input border.
+      let toInsert = char;
+      if (onPaste && (char.includes('\n') || char.includes('\r'))) {
+        toInsert = onPaste(char.replace(/\r\n?/g, '\n'));
+      }
+
       const curVal = internalValueRef.current;
       const beforeCursor = curVal.slice(0, curVal.length - cursorOffset);
       const afterCursor = curVal.slice(curVal.length - cursorOffset);
-      
-      const newVal = beforeCursor + char + afterCursor;
+
+      const newVal = beforeCursor + toInsert + afterCursor;
       internalValueRef.current = newVal;
       onChange(newVal);
     }

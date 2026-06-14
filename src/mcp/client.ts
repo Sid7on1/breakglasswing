@@ -9,6 +9,84 @@ import { McpServerSpec } from './config';
 // boundary and keep the SDK objects loosely typed inside this module only.
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
+const { SSEClientTransport } = require('@modelcontextprotocol/sdk/client/sse.js');
+
+/** Reject if a promise doesn't settle within `ms` — so a hung server never blocks boot/add. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
+/**
+ * Open a transport+client for a spec. Local (stdio) specs launch a command; remote specs
+ * connect to a URL — trying Streamable HTTP first, then falling back to SSE (older hosted
+ * servers only speak SSE). Returns a connected client or throws.
+ */
+async function openClient(spec: McpServerSpec): Promise<any> {
+  const client = new Client({ name: 'bimax', version: '1.0.0' }, { capabilities: {} });
+
+  if (spec.url) {
+    const url = new URL(spec.url);
+    const headers = spec.headers || undefined;
+    const reqInit = headers ? { requestInit: { headers } } : undefined;
+    // Honor an explicit transport choice; otherwise prefer HTTP and fall back to SSE.
+    if (spec.type === 'sse') {
+      await withTimeout(client.connect(new SSEClientTransport(url, reqInit)), 30000, `MCP '${spec.name}' (SSE)`);
+      return client;
+    }
+    try {
+      await withTimeout(client.connect(new StreamableHTTPClientTransport(url, reqInit)), 30000, `MCP '${spec.name}' (HTTP)`);
+      return client;
+    } catch (httpErr: any) {
+      Logger.warn(`[MCP] '${spec.name}' HTTP transport failed (${httpErr.message}); trying SSE.`);
+      const sseClient = new Client({ name: 'bimax', version: '1.0.0' }, { capabilities: {} });
+      await withTimeout(sseClient.connect(new SSEClientTransport(url, reqInit)), 30000, `MCP '${spec.name}' (SSE)`);
+      return sseClient;
+    }
+  }
+
+  // `stderr: 'pipe'` is critical: the SDK default is 'inherit', which dumps the child server's
+  // stderr straight into our Ink TUI (corrupting the display). Piping keeps it off the terminal,
+  // and we drain it into the logger — and into the failure reason when a server exits on startup.
+  const transport = new StdioClientTransport({
+    command: spec.command,
+    args: spec.args || [],
+    env: { ...process.env, ...(spec.env || {}) },
+    stderr: 'pipe',
+  });
+
+  const stderrChunks: string[] = [];
+  const drainStderr = () => {
+    try {
+      const s: any = (transport as any).stderr;
+      if (s && typeof s.on === 'function') {
+        s.on('data', (d: Buffer) => {
+          const text = d.toString();
+          stderrChunks.push(text);
+          Logger.warn(`[MCP:${spec.name}] ${text.trim()}`);
+        });
+      }
+    } catch { /* best-effort */ }
+  };
+
+  try {
+    await withTimeout(client.connect(transport), 30000, `MCP '${spec.name}' (stdio)`);
+    drainStderr(); // keep future stderr out of the terminal and in the log
+    return client;
+  } catch (e: any) {
+    drainStderr();
+    await new Promise(r => setTimeout(r, 50)); // let buffered stderr flush
+    const detail = stderrChunks.join('').trim();
+    if (detail) {
+      const lastLines = detail.split('\n').filter(Boolean).slice(-3).join(' ');
+      throw new Error(`${e?.message || e} — server said: ${lastLines}`);
+    }
+    throw e;
+  }
+}
 
 export interface ConnectedMcp {
   name: string;
@@ -38,16 +116,11 @@ function contentToString(result: any): string {
 export async function connectAndRegister(
   spec: McpServerSpec,
   registry: ToolRegistry,
-  governor: IGovernor
+  governor: IGovernor,
+  onError?: (message: string) => void,
 ): Promise<ConnectedMcp | null> {
   try {
-    const transport = new StdioClientTransport({
-      command: spec.command,
-      args: spec.args || [],
-      env: { ...process.env, ...(spec.env || {}) },
-    });
-    const client = new Client({ name: 'bimax', version: '1.0.0' }, { capabilities: {} });
-    await client.connect(transport);
+    const client = await openClient(spec);
 
     const listed = await client.listTools();
     const toolNames: string[] = [];
@@ -70,7 +143,9 @@ export async function connectAndRegister(
     Logger.info(`[MCP] Connected '${spec.name}' — registered ${toolNames.length} tool(s).`);
     return { name: spec.name, client, toolNames };
   } catch (e: any) {
-    Logger.warn(`[MCP] Failed to connect '${spec.name}': ${e.message}`);
+    const msg = e?.message || String(e);
+    Logger.warn(`[MCP] Failed to connect '${spec.name}': ${msg}`);
+    onError?.(msg);
     return null;
   }
 }

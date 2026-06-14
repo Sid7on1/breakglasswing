@@ -55,3 +55,55 @@ describe('AgentLoop — recovers and executes a text-emitted tool call', () => {
     expect(loop.messages.some(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.includes('"name"'))).toBe(false);
   });
 });
+
+/**
+ * A transient provider/model error (stalled stream, 5xx, one malformed tool-call
+ * emission) must not kill the task: the loop discards the partial turn and re-asks,
+ * up to a bound. Past the bound it surfaces the error instead of spinning.
+ */
+describe('AgentLoop — retries transient errors then gives up', () => {
+  it('re-asks after a transient error and completes on the next attempt', async () => {
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        if (call === 1) {
+          yield { type: 'error', message: '400 Unterminated string', recoverable: true, kind: 'transient' };
+        } else {
+          yield { type: 'token', text: 'Recovered and answered.' };
+          yield { type: 'done' };
+        }
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'hi' }], 'sys', { maxIterations: 5 })) {
+      out += t;
+    }
+
+    expect(call).toBe(2); // retried exactly once
+    expect(out).toContain('Retrying (1/2)');
+    expect(out).toContain('Recovered and answered.');
+  });
+
+  it('aborts after exhausting the transient retry budget', async () => {
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        yield { type: 'error', message: 'Stream read timeout', recoverable: true, kind: 'transient' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'hi' }], 'sys', { maxIterations: 10 })) {
+      out += t;
+    }
+
+    // Initial attempt + 2 retries, then the fatal surface — never an infinite spin.
+    expect(call).toBe(3);
+    expect(out).toContain('API Error');
+  });
+});

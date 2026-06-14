@@ -2,8 +2,11 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
+import { createWriteFileTool } from '../tools/implementations/file.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
+import { createBashTool } from '../tools/implementations/bash.tool';
+import { detectDegenerateAsk } from '../tools/ask-guard';
 import { IGovernor } from '../core/interfaces';
 
 // Governor stub: approve everything so we exercise the tool logic itself.
@@ -145,5 +148,115 @@ describe('TodoWriteTool', () => {
     });
     expect(res).toContain('0/1 done');
     expect(res).not.toContain('bad-status');
+  });
+});
+
+describe('BashTool — timeout coercion', () => {
+  const tool = createBashTool(governor);
+
+  // The model frequently emits `timeout` as a string / float / negative / out-of-range
+  // value; before coercion these threw ERR_OUT_OF_RANGE in Node's exec and derailed the
+  // whole task. Each of these must run cleanly and return the command's stdout.
+  it.each([
+    ['string', '300000' as any],
+    ['float', 300000.5 as any],
+    ['negative', -5 as any],
+    ['huge (> 2^31)', 9e12 as any],
+    ['undefined', undefined],
+  ])('runs the command when timeout is a %s value', async (_label, timeout) => {
+    const res: any = await tool.execute({ command: 'echo coerced_ok', timeout }, { cwd: dir });
+    expect(res.stdout).toContain('coerced_ok');
+  });
+});
+
+describe('Flattened-file corruption guard', () => {
+  const writeTool = createWriteFileTool(governor);
+  const editTool = createEditFileTool(governor);
+
+  // A realistic multi-line source file (>5 lines) and the corrupted one-line version a weak
+  // model produces by dropping every newline. Same code, no line breaks → breaks compile.
+  const multiline = [
+    'export class JWTRule {',
+    "  private static readonly PATTERNS = ['jwt.sign', 'jwt.verify', 'jwt.decode'];",
+    '  public evaluate(graph) {',
+    '    const verdicts = [];',
+    '    for (const node of graph.nodes()) { verdicts.push(node); }',
+    '    return verdicts;',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const flattened = multiline.replace(/\n/g, ' ');
+
+  it('WriteFileTool refuses a flattened full-file overwrite and leaves the file intact', async () => {
+    const file = path.join(dir, 'rule.ts');
+    await fs.writeFile(file, multiline);
+    const res = await writeTool.execute({ path: file, content: flattened, overwrite: true }, { cwd: dir });
+    expect(res).toContain('refused');
+    expect(await fs.readFile(file, 'utf8')).toBe(multiline); // unchanged
+  });
+
+  it('WriteFileTool refuses a truncating overwrite that drops most of the file', async () => {
+    // The exact corruption seen against ArchMind: a 9-line file overwritten with a tiny stub
+    // (JSDoc + first line) carrying a literal "\n" instead of a real newline.
+    const file = path.join(dir, 'rule2.ts');
+    await fs.writeFile(file, multiline);
+    const truncated = '/** Detects competing JWT impls. */\\nexport class JWTRule {';
+    const res = await writeTool.execute({ path: file, content: truncated, overwrite: true }, { cwd: dir });
+    expect(res).toContain('refused');
+    expect(await fs.readFile(file, 'utf8')).toBe(multiline); // unchanged
+  });
+
+  it('EditFileTool refuses a whole-file oldString→flattened newString', async () => {
+    const file = path.join(dir, 'rule3.ts');
+    await fs.writeFile(file, multiline);
+    const res = await editTool.execute({ path: file, oldString: multiline, newString: flattened }, { cwd: dir });
+    expect(res).toContain('refused');
+    expect(await fs.readFile(file, 'utf8')).toBe(multiline); // unchanged
+  });
+
+  it('does NOT block a legitimate multi-line overwrite (the correct edit)', async () => {
+    const file = path.join(dir, 'rule4.ts');
+    await fs.writeFile(file, multiline);
+    const next = '/** JWT rule. */\n' + multiline; // add a real JSDoc line, keep structure
+    const res = await writeTool.execute({ path: file, content: next, overwrite: true }, { cwd: dir });
+    expect(res).toContain('Successfully wrote');
+    expect(await fs.readFile(file, 'utf8')).toBe(next);
+  });
+
+  it('does NOT block a genuinely small file (< 6 lines) being replaced', async () => {
+    const file = path.join(dir, 'small.ts');
+    await fs.writeFile(file, 'export const a = 1;\nexport const b = 2;\n'); // 2 lines, short
+    const stub = 'export const a = 1;\n';
+    const res = await writeTool.execute({ path: file, content: stub, overwrite: true }, { cwd: dir });
+    expect(res).toContain('Successfully wrote');
+  });
+});
+
+describe('Degenerate AskUserTool guard', () => {
+  it('refuses the "who are you?" case (garbage question, no valid options)', () => {
+    // Exact shape seen in the wild: question "I", options missing → rendered as Ask(I).
+    expect(detectDegenerateAsk('I', undefined)).not.toBeNull();
+  });
+
+  it('refuses a greeting with a single trivial option', () => {
+    // "hi" → Ask(...) with one option ["Continue"]: not a real either/or decision.
+    expect(detectDegenerateAsk('Hey! What are we building today?', ['Continue'])).not.toBeNull();
+  });
+
+  it('refuses an empty question even with valid options', () => {
+    expect(detectDegenerateAsk('', ['Overwrite', 'Cancel'])).not.toBeNull();
+  });
+
+  it('refuses when options collapse to fewer than 2 distinct values', () => {
+    expect(detectDegenerateAsk('Overwrite the file?', ['Yes', 'yes', ' Yes '])).not.toBeNull();
+  });
+
+  it('refuses a non-array options value', () => {
+    expect(detectDegenerateAsk('Proceed?', 'Yes' as any)).not.toBeNull();
+  });
+
+  it('ALLOWS a genuine collision decision (clear question + 2+ distinct options)', () => {
+    expect(detectDegenerateAsk("The folder 'math' already exists. What should I do?", ['Overwrite', 'Cancel', 'Tell me what else to do'])).toBeNull();
   });
 });

@@ -1,4 +1,5 @@
 import { globalCommandRegistry } from './registry';
+import { cliEvents } from '../events';
 import { runTypeCheck, runLint, formatErrors } from '../lintFixLoop';
 
 globalCommandRegistry.register({
@@ -24,6 +25,7 @@ globalCommandRegistry.register({
     context.addSystemMessage('info', 'Building AST codebase index...');
     try {
       const count = await context.codebaseIndexer.buildAstIndex();
+      cliEvents.emit('graph_changed');
       return { type: 'message', level: 'success', content: `AST Indexing complete! Extracted ${count} nodes.` };
     } catch (err: any) {
       return { type: 'message', level: 'error', content: `Indexing failed: ${err.message}` };
@@ -54,6 +56,7 @@ globalCommandRegistry.register({
     context.addSystemMessage('info', 'Running Semantic AI index...');
     try {
       await context.codebaseIndexer.buildSemanticIndex();
+      cliEvents.emit('graph_changed');
       return { type: 'message', level: 'success', content: 'Semantic AI Indexing complete! The graph now has full semantic intelligence.' };
     } catch (err: any) {
       return { type: 'message', level: 'error', content: `Semantic indexing failed: ${err.message}` };

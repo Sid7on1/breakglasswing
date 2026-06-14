@@ -4,6 +4,40 @@ import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 
 /**
+ * Classify an error thrown while streaming a chat completion so the agent loop knows
+ * whether — and how — to recover. Pure (no side effects) so it can be unit-tested.
+ *
+ * - `context`  : the prompt overflowed the model window → compact and retry.
+ * - `transient`: a stalled/timed-out stream, a 5xx, or the provider rejecting a single
+ *   bad model emission (malformed tool-call JSON, multiple tool calls, out-of-range arg).
+ *   A fresh attempt (new key, re-sampled output) almost always succeeds.
+ * - otherwise  : fatal (auth, malformed request, …) — surface and stop.
+ */
+export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient' } {
+  const msg = String(e?.message ?? '');
+  let status = 500;
+  if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(msg)) {
+    status = 408;
+  } else if (e?.status) {
+    status = e.status;
+  }
+
+  // Context overflow: recoverable by compaction.
+  if (/maximum context length/i.test(msg) || e?.code === 'context_length_exceeded' || status === 413) {
+    return { status, recoverable: true, kind: 'context' };
+  }
+
+  // Transient: stalled streams, server errors, or a one-off bad model emission the
+  // provider rejected. Bounded by the loop's retry cap, so this can be liberal.
+  const transientMsg = /Unterminated string|Expecting value|is out of range|single tool-call|tool call/i.test(msg);
+  if (status === 408 || status >= 500 || transientMsg) {
+    return { status, recoverable: true, kind: 'transient' };
+  }
+
+  return { status, recoverable: false };
+}
+
+/**
  * Streaming filter that separates <think>...</think> spans from visible content.
  * Reasoning models (MiniMax, DeepSeek, QwQ...) interleave thinking inside content;
  * without this the internal monologue leaks into the user-facing reply.
@@ -402,6 +436,15 @@ export class LlmAdapter implements LLMProvider {
           }
         }));
         requestOptions.tool_choice = 'auto';
+        // NVIDIA NIM and several other OpenAI-compatible backends reject any
+        // assistant turn that emits more than one tool call ("This model only
+        // supports single tool-calls at once!"), which hard-aborts the task.
+        // The agent loop already executes tool calls sequentially, so constrain
+        // the model to one call per turn by default. Opt back in with
+        // BGW_PARALLEL_TOOL_CALLS=true for providers that support it.
+        if (process.env.BGW_PARALLEL_TOOL_CALLS !== 'true') {
+          requestOptions.parallel_tool_calls = false;
+        }
       }
 
       // Optional reasoning budget — only sent when explicitly configured, so default
@@ -505,22 +548,10 @@ export class LlmAdapter implements LLMProvider {
       // Only release if a mid-stream usage report hasn't already settled the
       // reservation, otherwise we would release it a second time.
       if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
-      let status = 500;
-      let recoverable = false;
-      
-      if (e instanceof OpenAI.APIConnectionTimeoutError || e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
-        status = 408;
-      } else if (e.status) {
-        status = e.status;
-      }
-      
-      // If context length exceeded, we can compact and retry
-      if (e.message?.includes('maximum context length') || e.code === 'context_length_exceeded' || status === 413) {
-        recoverable = true;
-      }
-      
+
+      const { status, recoverable, kind } = classifyStreamError(e);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
-      yield { type: 'error', message: e.message, recoverable };
+      yield { type: 'error', message: e.message, recoverable, kind };
     }
   }
 }

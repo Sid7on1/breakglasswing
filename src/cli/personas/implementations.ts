@@ -7,7 +7,7 @@ export class HermesPersona extends AgentPersona {
     super({
       name: 'Hermes',
       roleDescription: 'Fast communication, search, and execution agent. You read files, query the graph, and run bash commands.',
-      allowedTools: ['ReadFileTool', 'GraphQueryTool', 'GraphContextTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WebFetchTool', 'GraphQueryTool', 'GraphContextTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
     }, registry, llmAdapter);
   }
 }
@@ -17,7 +17,7 @@ export class OpenCodePersona extends AgentPersona {
     super({
       name: 'OpenCode',
       roleDescription: 'Deep coding agent. You modify files and read the graph, but you do not run destructive OS commands natively.',
-      allowedTools: ['ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
     }, registry, llmAdapter);
   }
 }
@@ -27,7 +27,7 @@ export class OpenClawPersona extends AgentPersona {
     super({
       name: 'OpenClaw',
       roleDescription: 'Deep OS execution and testing agent. You execute raw bash commands and edit files.',
-      allowedTools: ['BashTool', 'WriteFileTool', 'ReadFileTool', 'DeleteTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['BashTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'ReadFileTool', 'DeleteTool', 'CreateDirectoryTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
     }, registry, llmAdapter);
   }
 }
@@ -37,7 +37,7 @@ export class BiMaxPersona extends AgentPersona {
     super({
       name: 'BiMax CLI',
       roleDescription: 'The God-Mode Orchestrator. You are BiMax, the primary chat and vibe-coding agent. You have access to every tool and can spawn sub-agents if needed. When a user installs a new CLI tool (via curl | bash, npm install -g, brew install, etc.), use RegisterAgentTool to register it as a new agent persona.',
-      allowedTools: ['BashTool', 'ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool']
+      allowedTools: ['BashTool', 'ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'WebFetchTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool', 'McpManageTool']
     }, registry, llmAdapter);
   }
 }

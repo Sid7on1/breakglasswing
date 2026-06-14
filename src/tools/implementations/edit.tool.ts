@@ -6,6 +6,7 @@ import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
+import { detectCorruptWrite } from '../write-guard';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -93,6 +94,14 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     const updated = args.replaceAll
       ? content.split(args.oldString).join(args.newString)
       : content.replace(args.oldString, args.newString);
+
+    // Guard against the "flattened file" corruption (e.g. a whole-file oldString replaced by a
+    // newline-stripped newString). Refuse before touching disk.
+    const flat = detectCorruptWrite(content, updated, fullPath);
+    if (flat) {
+      return `Edit to ${args.path} refused: ${flat}. No changes were made. ` +
+        `Make a smaller, surgical edit and keep newline characters intact in newString.`;
+    }
 
     // Blast-radius gate (no-op unless enabled + interactive + the file owns a HIGH/CRITICAL symbol).
     if (!(await checkBlastRadius(fullPath))) {

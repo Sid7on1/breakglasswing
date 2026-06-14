@@ -20,6 +20,8 @@ globalCommandRegistry.register({
         { label: '/model', value: '/model', desc: 'Show current model', category: 'Configuration' },
         { label: '/provider', value: '/provider', desc: 'Switch provider', category: 'Configuration' },
         { label: '/agents', value: '/agents', desc: 'List agent personas', category: 'Configuration' },
+        { label: '/mcp', value: '/mcp', desc: 'List/add/remove MCP servers', category: 'Configuration' },
+        { label: '/skills', value: '/skills', desc: 'List/create Agent Skills', category: 'Configuration' },
         { label: '/routes', value: '/routes', desc: 'List/add/remove routes', category: 'Configuration' },
         { label: '/governor', value: '/governor', desc: 'Toggle Governor', category: 'Configuration' },
         { label: '/agent-decisions', value: '/agent-decisions', desc: 'Toggle Auto Agent Decisions', category: 'Configuration' },

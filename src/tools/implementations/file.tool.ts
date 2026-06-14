@@ -7,6 +7,7 @@ import { backupFile, unifiedDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { sliceLineRange } from '../file-range';
+import { detectCorruptWrite } from '../write-guard';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -77,7 +78,8 @@ Use this tool to write new code, update configuration files, or generate artifac
 - **Directory Creation:** If the parent directories do not exist, the tool will automatically create them for you.
 - **Do NOT create empty directories:** Do NOT use this tool if you only want to create a new folder/directory. This tool creates FILES. If you need to create an empty directory, use \`BashTool\` with \`mkdir\`.
 - **Overwriting:** By default, writing to an existing file will fail to prevent accidental data loss. To explicitly replace an existing file, you must pass \`overwrite: true\`. 
-- **Modifying Code:** Do NOT attempt to rewrite entire 1000-line files if you only need to change one line. Instead, use the \`BashTool\` with \`sed\` or wait for the dedicated \`FileEditTool\`.
+- **Modifying existing code:** Do NOT rewrite a whole file to change part of it. Use \`EditFileTool\` for a surgical oldString→newString replacement — it is safer and avoids accidentally dropping newlines. A full-file overwrite that collapses a multi-line file to one line will be REFUSED.
+- **Multi-line content:** Always emit real newline characters between lines. Never flatten code onto a single line.
 - **Validation:** After writing a complex script or TypeScript file, immediately use the \`BashTool\` to run a syntax check (e.g., \`npx tsc --noEmit\`) to verify your write didn't introduce syntax errors.`,
   isDestructive: true,
   schema: {
@@ -107,6 +109,15 @@ Use this tool to write new code, update configuration files, or generate artifac
       unifiedDiff(prior, args.content, args.path)
     );
     if (!approved) return `Write to ${args.path} rejected by user. No changes were made.`;
+    // Guard against the "flattened file" corruption (model strips newlines on a full-file
+    // overwrite). Refuse before touching disk and steer the model to a surgical edit.
+    if (exists) {
+      const flat = detectCorruptWrite(prior, args.content, fullPath);
+      if (flat) {
+        return `Write to ${args.path} refused: ${flat}. No changes were made. ` +
+          `To modify an existing file use EditFileTool (surgical oldString→newString) and keep real newline characters in multi-line content.`;
+      }
+    }
     // Snapshot overwrites so /undo and /diff-file can restore the prior version.
     if (exists) await backupFile(fullPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
@@ -135,11 +146,49 @@ Use this tool whenever the user explicitly asks you to delete, remove, or trash 
   execute: async (args: { path: string }, context?: any) => {
     const currentCwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, currentCwd);
+    // Verify the target actually exists BEFORE deleting. fs.rm with `force: true`
+    // silently treats a missing path as success, which would let us report
+    // "Successfully deleted" for a path that never existed (e.g. a bare name
+    // resolved against the wrong cwd). Fail loudly instead so the caller can retry.
+    const exists = await fs.access(fullPath).then(() => true).catch(() => false);
+    if (!exists) {
+      return `Error: Nothing to delete — no file or directory found at ${fullPath} (resolved from "${args.path}" relative to ${currentCwd}). Nothing was changed. If the target lives elsewhere, pass its absolute path.`;
+    }
     try {
       await fs.rm(fullPath, { recursive: true, force: true });
-      return `Successfully deleted ${args.path}`;
+      return `Successfully deleted ${fullPath}`;
     } catch (e: any) {
       return `Failed to delete ${args.path}: ${e.message}`;
     }
+  }
+}, governor);
+
+export const createMakeDirTool = (governor: IGovernor) => buildTool({
+  name: 'CreateDirectoryTool',
+  description: `Creates a new, empty directory (folder) on the local file system.
+
+Use this tool whenever the user asks you to create, make, or add a new *folder* or *directory*. Do NOT use WriteFileTool for this — that tool writes FILES, not folders.
+
+# Instructions
+- **Supports \`~/\` and \`~/Desktop/...\` paths** — the home directory is resolved automatically.
+- **Recursive:** Parent directories are created automatically if they are missing (like \`mkdir -p\`).
+- **Idempotent:** If the directory already exists, this succeeds without error.`,
+  isDestructive: false,
+  schema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Path of the directory to create (supports ~/ for home dir)' }
+    },
+    required: ['path']
+  },
+  execute: async (args: { path: string }, context?: any) => {
+    const currentCwd = context?.cwd || process.cwd();
+    const fullPath = resolvePath(args.path, currentCwd);
+    const stat = await fs.stat(fullPath).catch(() => null);
+    if (stat && stat.isFile()) {
+      return `Error: A file already exists at ${fullPath}, so a directory with that name cannot be created. Delete the file first if you meant to replace it with a folder.`;
+    }
+    await fs.mkdir(fullPath, { recursive: true });
+    return `Successfully created directory ${fullPath}`;
   }
 }, governor);
