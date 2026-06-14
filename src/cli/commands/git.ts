@@ -1,5 +1,6 @@
 import { globalCommandRegistry } from './registry';
 import { getGitStatus, gitDiff, gitLog } from '../git';
+import { setGitAutoCommitEnabled, isGitAutoCommitEnabled } from '../../tools/git.autocommit';
 
 globalCommandRegistry.register({
   name: '/git',
@@ -51,5 +52,29 @@ globalCommandRegistry.register({
   execute: async (args, context) => {
     const log = gitLog(context.cwd, 10);
     return { type: 'message', level: 'info', content: log };
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/autocommit',
+  description: 'Auto-commit each agent edit',
+  category: 'Source Control',
+  execute: async (args, context) => {
+    const sub = (args[0] || '').toLowerCase();
+    if (sub === 'on' || sub === 'off') {
+      const on = sub === 'on';
+      setGitAutoCommitEnabled(on);
+      await context.saveConfig({ gitAutoCommit: on });
+      return { type: 'message', level: 'success', content: `Git auto-commit is ${on ? 'ON — each successful edit is committed automatically' : 'OFF'}.` };
+    }
+    return {
+      type: 'menu',
+      title: `Git auto-commit (currently ${isGitAutoCommitEnabled() ? 'ON' : 'OFF'})`,
+      options: [
+        { label: '[ ON ]', value: '/autocommit on', desc: 'Commit after every agent edit (Aider-style)' },
+        { label: '[ OFF ]', value: '/autocommit off', desc: 'Commit only when you ask' },
+      ],
+      onSelect: (opt: any) => context.executeCommand(opt.value),
+    };
   }
 });

@@ -10,7 +10,13 @@ import { ToolCallLine } from '../components/ToolCallLine';
 import { WelcomeBanner } from '../components/WelcomeBanner';
 import { GlobalPrompter } from '../prompter';
 import { globalCommandRegistry, CommandResult, CommandContext } from '../commands/registry';
-import '../commands'; 
+import '../commands';
+import { loadCustomCommands } from '../commands/custom.loader';
+import { loadHooksConfig } from '../../tools/hooks.loader';
+import { registerPostHook } from '../../tools/hooks';
+import { setGitAutoCommitEnabled, gitAutoCommitHook, GIT_AUTOCOMMIT_TOOLS } from '../../tools/git.autocommit';
+import { setVerifyEnabled, verifyHook, registerVerifyGraphStore, VERIFY_TOOLS } from '../../sandbox/verify.loop';
+import { setSandboxEnabled } from '../../sandbox/exec.sandbox';
 import { Footer } from '../components/Footer';
 import { PermissionDialog } from '../components/PermissionDialog';
 import { MessageRow } from '../components/Transcript';
@@ -233,6 +239,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ['/ask', 'Ask the architecture (graph-backed)'],
     ['/replay', 'Export this session as markdown'],
     ['/diff-approval', 'Review agent edits before they apply'],
+    ['/autocommit', 'Auto-commit each agent edit (on/off)'],
     ['/remember', 'Save a durable project memory'],
     ['/self-critic', 'Agent reviews & fixes its own work'],
     ['/heal', 'Run tests; auto-fix failures in a worktree'],
@@ -411,6 +418,32 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         resolve(/^(proceed|y)/i.test((ans || '').trim()));
       });
     }));
+
+    // Load user-defined slash commands from .bimax/commands/*.md (project + home). A1.
+    try {
+      const custom = loadCustomCommands();
+      if (custom.length > 0) addLog('info', `Loaded ${custom.length} custom command(s): ${custom.join(' ')}`);
+    } catch { /* custom commands are best-effort */ }
+
+    // Load shell hooks from .bimax/hooks.json (A2). Best-effort.
+    try {
+      const nHooks = loadHooksConfig();
+      if (nHooks > 0) addLog('info', `Loaded ${nHooks} tool hook(s) from .bimax/hooks.json`);
+    } catch { /* hooks are best-effort */ }
+
+    // Git auto-commit (B1): a built-in PostToolUse hook on edit tools, gated on the live flag
+    // (off by default). Interactive only — registered here, so workers/print never auto-commit.
+    try { setGitAutoCommitEnabled(!!getConfig().gitAutoCommit); } catch { /* config not loaded */ }
+    registerPostHook(GIT_AUTOCOMMIT_TOOLS, gitAutoCommitHook);
+
+    // Auto edit→verify→fix loop (B2): typecheck edited files and feed failures back. Off by
+    // default; graph store scopes which files are worth checking. Interactive only.
+    try { setVerifyEnabled(!!getConfig().autoVerify); } catch { /* config not loaded */ }
+    registerVerifyGraphStore(graphStore);
+    registerPostHook(VERIFY_TOOLS, verifyHook);
+
+    // Bash sandbox (B3): restrict shell file-writes to the workspace when enabled. Off by default.
+    try { setSandboxEnabled(!!getConfig().sandboxBash); } catch { /* config not loaded */ }
 
     // Background watchers: wake the agent on file change / schedule. Skip while a turn
     // is already running, and use the budget governor as a circuit breaker.
@@ -860,6 +893,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       options.autoAgentDecisions = isAuto;
       saveConfig({ autoAgentDecisions: isAuto });
       addSystemMessage('success', isAuto ? 'Auto Agent Decisions ENABLED. Ambiguities will be auto-resolved.' : 'Auto Agent Decisions DISABLED.');
+    } else if (typeof option.value === 'string' && option.value.startsWith('/')) {
+      // Command-result menus (type 'menu') whose options are slash commands — e.g. the
+      // /config hub routing to /model, /governor, /autocommit — run the chosen command.
+      handleSubmit(option.value);
     }
   };
 

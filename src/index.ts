@@ -85,6 +85,14 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function main() {
+  // `bimax mcp` — serve the project's code graph over MCP stdio (A4). Must intercept before
+  // any other boot so "mcp" isn't treated as a prompt, and before normal logging starts.
+  if (program.args[0] === 'mcp') {
+    const { runGraphMcpStdioServer } = await import('./mcp/server');
+    await runGraphMcpStdioServer(process.cwd());
+    return;
+  }
+
   const config = await loadConfig();
   if (config.customRoutingRules.length > 0) {
     setCustomRoutingRules(config.customRoutingRules);

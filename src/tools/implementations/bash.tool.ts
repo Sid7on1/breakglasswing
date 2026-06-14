@@ -1,10 +1,12 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
+import { sandboxArgv } from '../../sandbox/exec.sandbox';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_CHARS = 50_000;
 
 export const createBashTool = (governor: IGovernor) => buildTool({
@@ -38,11 +40,13 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       const currentCwd = context?.cwd || process.cwd();
       const cmd = args.command.replace(/^~(?=\/|$)/, os.homedir());
       const timeoutMs = args.timeout ?? 30_000;
-      const { stdout, stderr } = await execAsync(cmd, {
-        cwd: currentCwd,
-        timeout: timeoutMs,
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-      });
+      // When sandboxing is on (B3), run the command under sandbox-exec via execFile so the
+      // profile + the command pass as discrete argv (no shell re-quoting). Otherwise run it
+      // through the shell exactly as before.
+      const sbArgv = sandboxArgv(cmd, currentCwd);
+      const { stdout, stderr } = sbArgv
+        ? await execFileAsync('sandbox-exec', sbArgv, { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 })
+        : await execAsync(cmd, { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
       const out = stdout.trim();
       const err = stderr.trim();
       return {

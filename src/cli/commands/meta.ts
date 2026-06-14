@@ -63,22 +63,36 @@ globalCommandRegistry.register({
   description: 'Show current model',
   category: 'Configuration',
   execute: async (args, context) => {
-    if (args.length === 0) {
-      return {
-        type: 'menu',
-        title: 'Select Model',
-        options: [
-          { label: 'Llama 3.1 70B (Nvidia)', value: 'meta/llama-3.1-70b-instruct' },
-          { label: 'Llama 3.3 70B (Nvidia)', value: 'meta/llama-3.3-70b-instruct' },
-          { label: 'GPT-4o (OpenAI)', value: 'gpt-4o' },
-          { label: 'Claude 3.5 Sonnet (Anthropic)', value: 'claude-3-5-sonnet-20241022' },
-          { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash' },
-          { label: 'DeepSeek Chat', value: 'deepseek-chat' },
-          { label: 'MiniMax 2.7', value: 'minimax/minimax-m2.7' }
-        ]
-      };
+    // Apply a model selection live: update the running adapter, the session options (for the
+    // status bar), and persist to config. Used by the picker's onSelect and `/model <id>`.
+    const applyModel = (model: string) => {
+      try { context.options.llmAdapter?.applyConfig({ model }); } catch { /* adapter optional */ }
+      context.options.model = model;
+      context.saveConfig({ model });
+      context.addSystemMessage('success', `Model switched to ${model}`);
+    };
+
+    if (args.length >= 1) {
+      // `/model <id>` direct set.
+      applyModel(args.join(' ').trim());
+      return { type: 'none' };
     }
-    return { type: 'message', level: 'info', content: `Current model: ${context.options.model || 'meta/llama-3.1-70b-instruct'}` };
+
+    return {
+      type: 'menu',
+      title: `Select Model (current: ${context.options.model || 'default'})`,
+      options: [
+        { label: 'MiniMax M3 (Nvidia)', value: 'minimaxai/minimax-m3', desc: 'Default — strong reasoning' },
+        { label: 'Llama 3.1 70B (Nvidia)', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls' },
+        { label: 'Llama 3.3 70B (Nvidia)', value: 'meta/llama-3.3-70b-instruct', desc: 'Newer Llama' },
+        { label: 'GPT-4o (OpenAI)', value: 'gpt-4o', desc: 'Needs OPENAI_API_KEY' },
+        { label: 'Claude 3.5 Sonnet (Anthropic)', value: 'claude-3-5-sonnet-20241022', desc: 'Needs ANTHROPIC_API_KEY' },
+        { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs Google key' },
+        { label: 'DeepSeek Chat', value: 'deepseek-chat' },
+        { label: 'MiniMax 2.7', value: 'minimax/minimax-m2.7' },
+      ],
+      onSelect: (opt: any) => applyModel(opt.value),
+    };
   }
 });
 

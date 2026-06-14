@@ -24,6 +24,9 @@ export interface CliConfig {
   autoAgentDecisions: boolean;
   diffApproval: boolean;
   blastGate: boolean; // G5: confirm edits touching HIGH/CRITICAL graph symbols (off by default)
+  gitAutoCommit: boolean; // B1: auto-commit each successful edit (off by default)
+  autoVerify: boolean; // B2: typecheck after edits + feed errors back (off by default)
+  sandboxBash: boolean; // B3: run BashTool under macOS sandbox-exec (off by default)
   selfCritic: boolean;
   allowSelfEvolution: boolean;
   reasoningEffort?: string; // off by default; 'low'|'medium'|'high' to speed up thinking models
@@ -31,7 +34,7 @@ export interface CliConfig {
 
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
-  model: 'meta/llama-3.1-70b-instruct',
+  model: 'minimaxai/minimax-m3',
   timeout: 120000,
   temperature: 0.7,
   maxTokens: 4096,
@@ -49,6 +52,9 @@ const DEFAULTS: CliConfig = {
   autoAgentDecisions: false,
   diffApproval: false,
   blastGate: false,
+  gitAutoCommit: false,
+  autoVerify: false,
+  sandboxBash: false,
   selfCritic: false,
   allowSelfEvolution: false,
 };
