@@ -1,5 +1,18 @@
 import { execSync } from 'child_process';
 
+/**
+ * True if `cwd` is inside a git work tree. Unlike getGitStatus, this works on a freshly
+ * `git init`-ed repo with no commits yet (unborn HEAD), so it's the right repo-existence
+ * check for the GitTool / auto-commit.
+ */
+export function isGitRepo(cwd: string): boolean {
+  try {
+    return execSync('git rev-parse --is-inside-work-tree', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
 export interface GitStatus {
   branch: string;
   modified: string[];
@@ -26,8 +39,13 @@ export function getGitStatus(cwd: string): GitStatus | null {
       else if (staged === 'D') deleted.push(file);
       else if (line[1] !== ' ') unstaged.push(file);
     }
-    const branchOut = execSync('git rev-list --left-right --count HEAD...@{upstream}', { cwd, encoding: 'utf-8' }).trim();
-    const [ahead, behind] = branchOut.includes('\t') ? branchOut.split('\t').map(Number) : [0, 0];
+    // Ahead/behind only exist when the branch has an upstream; a local-only repo has none,
+    // so isolate this lookup — its failure must not void the whole status.
+    let ahead = 0, behind = 0;
+    try {
+      const branchOut = execSync('git rev-list --left-right --count HEAD...@{upstream}', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+      if (branchOut.includes('\t')) [ahead, behind] = branchOut.split('\t').map(Number);
+    } catch { /* no upstream — leave ahead/behind at 0 */ }
     return { branch, modified, added, deleted, unstaged, ahead, behind };
   } catch { return null; }
 }

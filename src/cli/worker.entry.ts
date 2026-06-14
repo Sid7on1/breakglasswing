@@ -19,6 +19,8 @@ import { createGrepTool, createGlobTool } from '../tools/implementations/search.
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createCdTool } from '../tools/implementations/cd.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
+import { createGitTool } from '../tools/implementations/git.tool';
+import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
 import { GraphStore } from '../graph/graph.store';
@@ -54,6 +56,8 @@ async function runWorker() {
     toolRegistry.register(createCdTool(governor));
     toolRegistry.register(createGraphQueryTool(governor, graphStore));
     toolRegistry.register(createGraphContextTool(governor, graphStore));
+    toolRegistry.register(createGitTool(governor));
+    toolRegistry.register(createLspQueryTool(governor, graphStore));
     toolRegistry.register(createRememberTool(governor, globalProjectMemory));
 
     // 2. Instantiate Persona

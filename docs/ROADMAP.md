@@ -145,8 +145,38 @@ Shared-logic extractions made along the way (no duplication): `src/graph/node.se
 (`resolveNodeId`/`searchNodes`/`fmtNode`) and `src/graph/symbol.source.ts` (one file-read+slice
 path for READ_SYMBOL, the planner, and @mentions).
 
-**Next cycle (scoped, not built):** MCP client (+ expose BiMax's graph as an MCP server), optional
-LSP enrichment over the tree-sitter graph, custom slash commands + hooks.
+## Ecosystem Parity Cycle — shipped
+
+Closes the biggest gaps versus Claude Code / opencode / Cursor / Aider, each fused with the
+graph where it helps. Default model also switched to `minimaxai/minimax-m3`. Anything that
+changes turn behavior is **off by default** (matching the G5 blast-gate philosophy).
+
+- [x] **A1 — Custom slash commands.** `.bimax/commands/*.md` (project + home) become `/<name>`
+  prompt templates with `$ARGUMENTS`/`$1…` substitution. `src/cli/commands/custom.loader.ts`.
+- [x] **A2 — Tool hooks (Pre/PostToolUse).** Run handlers around every tool at the `buildTool`
+  chokepoint: Pre can block (like a veto), Post can react and **append to the result**.
+  `src/tools/hooks.ts` + `.bimax/hooks.json` shell-hook loader. Foundation for B1/B2.
+- [x] **A3 — MCP client.** Connect external MCP servers (stdio) and register their tools as
+  `mcp__<server>__<tool>`, governed like natives. `src/mcp/{config,client}.ts`, `.bimax/mcp.json`.
+- [x] **A4 — MCP server.** `bimax mcp` exposes the graph (`search_nodes`/`read_symbol`/
+  `plan_context`/`blast_radius`) so **other agents can query BiMax's graph**. `src/mcp/server.ts`.
+- [x] **B1 — Git-native GitTool.** Agent-callable `status/diff/log/add/commit` with generated
+  messages (no push); opt-in auto-commit-per-edit via `/autocommit`. `src/tools/implementations/git.tool.ts`.
+- [x] **B2 — Auto edit→verify→fix loop.** PostToolUse hook typechecks edited files
+  (`tsc --noEmit`/`node --check`, blast-radius-scoped) and feeds errors back for self-repair.
+  `/governor verify`, off by default. `src/sandbox/verify.loop.ts`.
+- [x] **B3 — Sandboxed BashTool.** macOS `sandbox-exec` profile restricting shell writes to the
+  workspace + temp. `/governor sandbox`, off by default. `src/sandbox/exec.sandbox.ts`.
+- [x] **C1 — LSP enrichment.** `LspQueryTool` — compiler-grade `DIAGNOSTICS <file>` and precise
+  `REFERENCES <symbol>` (graph-resolved) via a stdio LSP client; degrades cleanly when no server
+  is installed. `src/lsp/{registry,client}.ts`.
+
+New deps (pinned/probed like [[treesitter-abi-pin]]): `@modelcontextprotocol/sdk` (A3/A4),
+`vscode-jsonrpc` (C1).
+
+**Next cycle (scoped, not built):** multimodal/image input, web search, mid-turn steering, session
+export. (Semantic code search was considered and dropped — the existing embedder is lexical, not a
+real differentiator.)
 
 ## Fast-follow / hardening ideas (not yet built)
 

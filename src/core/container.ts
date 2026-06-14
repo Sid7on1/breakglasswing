@@ -47,12 +47,16 @@ import { createGrepTool, createGlobTool } from '../tools/implementations/search.
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
+import { loadMcpServers } from '../mcp/config';
+import { registerMcpTools } from '../mcp/client';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
 import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
 import { createRegisterAgentTool } from '../tools/implementations/register.tool';
 import { createAskUserTool } from '../tools/implementations/ask_user.tool';
+import { createGitTool } from '../tools/implementations/git.tool';
+import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 
 import { CliConfig } from '../cli/config';
 import { buildKeyPool } from '../cli/provider';
@@ -130,7 +134,17 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));
   toolRegistry.register(createRegisterAgentTool(governor, toolRegistry));
   toolRegistry.register(createAskUserTool(governor, llmAdapter));
-  
+  toolRegistry.register(createGitTool(governor));
+  toolRegistry.register(createLspQueryTool(governor, graphStore));
+
+  // External MCP servers (A3): register their tools alongside native ones. Opt-in via
+  // .bimax/mcp.json; absent config = zero overhead. Best-effort — a server that fails to
+  // start is skipped, never blocking boot.
+  const mcpServers = loadMcpServers(projectRoot);
+  if (mcpServers.length > 0) {
+    await registerMcpTools(mcpServers, toolRegistry, governor);
+  }
+
   // Genome & Evolution
   const genomeRepo = new GenomeRepository(projectRoot);
   genomeRepo.reload().catch(e => Logger.error('Failed to load genome repo'));
