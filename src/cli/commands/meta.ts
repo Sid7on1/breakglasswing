@@ -78,9 +78,22 @@ globalCommandRegistry.register({
       return { type: 'none' };
     }
 
+    // Open a masked-free prompt so the user can type any model id their provider supports.
+    const promptCustomModel = () => {
+      context.setActivePrompt({
+        title: 'Enter a model id (e.g. provider/model-name)',
+        onResolve: (val: string) => {
+          const id = (val || '').trim();
+          if (id) applyModel(id);
+          else context.addSystemMessage('info', 'No model id entered — nothing changed.');
+        },
+      });
+    };
+
+    const current = context.options.model || 'default';
     return {
       type: 'menu',
-      title: `Select Model (current: ${context.options.model || 'default'})`,
+      title: `Select Model (current: ${current})`,
       options: [
         { label: 'MiniMax M3 (Nvidia)', value: 'minimaxai/minimax-m3', desc: 'Default — strong reasoning' },
         { label: 'Llama 3.1 70B (Nvidia)', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls' },
@@ -90,8 +103,9 @@ globalCommandRegistry.register({
         { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs Google key' },
         { label: 'DeepSeek Chat', value: 'deepseek-chat' },
         { label: 'MiniMax 2.7', value: 'minimax/minimax-m2.7' },
+        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports' },
       ],
-      onSelect: (opt: any) => applyModel(opt.value),
+      onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustomModel() : applyModel(opt.value)),
     };
   }
 });

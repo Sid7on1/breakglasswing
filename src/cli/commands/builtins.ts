@@ -2,6 +2,9 @@ import { Command, globalCommandRegistry } from './registry';
 import { setBlastGateEnabled, isBlastGateEnabled } from '../blastGate';
 import { setVerifyEnabled, isVerifyEnabled } from '../../sandbox/verify.loop';
 import { setSandboxEnabled, isSandboxEnabled, sandboxAvailable } from '../../sandbox/exec.sandbox';
+import { isGitAutoCommitEnabled } from '../../tools/git.autocommit';
+import { isDiffApprovalEnabled } from '../diffApproval';
+import { isSelfCriticEnabled } from '../selfCritic';
 
 globalCommandRegistry.register({
   name: '/governor',
@@ -95,21 +98,41 @@ globalCommandRegistry.register({
   category: 'Configuration',
   execute: async (args, context) => {
     if (args.length === 0) {
+      // Reflect live state in every label so the hub is a true control panel (no hardcoding).
+      const onOff = (v: boolean) => (v ? 'ON' : 'OFF');
       return {
         type: 'menu',
         title: 'Settings — pick one to configure',
         options: [
-          { label: 'Model', value: '/model', desc: 'Choose the LLM model (applies live)' },
-          { label: 'Theme', value: '/config theme', desc: 'Color theme' },
+          { label: 'Model', value: '/model', desc: `Current: ${context.options.model || 'default'}` },
+          { label: 'Theme', value: '/config theme', desc: `Current: ${context.options.theme || 'auto'}` },
           { label: 'Provider', value: '/provider', desc: 'Switch AI provider' },
           { label: 'API Keys', value: '/keys', desc: 'Add / replace API keys' },
-          { label: 'Governor (permissions)', value: '/governor', desc: 'Approve actions vs. auto-allow' },
-          { label: 'Blast-radius gate', value: '/governor blast-gate', desc: 'Confirm edits to critical symbols (off)' },
-          { label: 'Auto-verify edits', value: '/governor verify', desc: 'Typecheck + self-repair after edits (off)' },
-          { label: 'Bash sandbox', value: '/governor sandbox', desc: 'Restrict shell writes to workspace (off)' },
-          { label: 'Auto-commit', value: '/autocommit', desc: 'Commit after each agent edit (off)' },
-          { label: 'Diff approval', value: '/diff-approval', desc: 'Review edits before they apply (off)' },
-          { label: 'Self-critic', value: '/self-critic', desc: 'Agent reviews its own work (off)' },
+          { label: 'Governor (permissions)', value: '/governor', desc: `Currently ${context.options.governor?.mode === 'bypass' ? 'OFF (auto-approve)' : 'ON (approvals)'}` },
+          { label: 'Blast-radius gate', value: '/governor blast-gate', desc: `Confirm edits to critical symbols — ${onOff(isBlastGateEnabled())}` },
+          { label: 'Auto-verify edits', value: '/governor verify', desc: `Typecheck + self-repair after edits — ${onOff(isVerifyEnabled())}` },
+          { label: 'Bash sandbox', value: '/governor sandbox', desc: `Restrict shell writes to workspace — ${onOff(isSandboxEnabled())}` },
+          { label: 'Auto-commit', value: '/autocommit', desc: `Commit after each agent edit — ${onOff(isGitAutoCommitEnabled())}` },
+          { label: 'Diff approval', value: '/diff-approval', desc: `Review edits before they apply — ${onOff(isDiffApprovalEnabled())}` },
+          { label: 'Self-critic', value: '/self-critic', desc: `Agent reviews its own work — ${onOff(isSelfCriticEnabled())}` },
+          { label: 'Verbose logging', value: '/config verbose', desc: `Detailed logs — ${onOff(!!context.options.verbose)}` },
+          { label: 'Notification bell', value: '/config notify', desc: `Terminal bell on turn end — ${onOff(!!context.options.notificationBell)}` },
+        ],
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
+
+    // /config verbose | /config notify — boolean toggles, menu-driven like the governor flags.
+    if ((args[0] === 'verbose' || args[0] === 'notify') && args.length === 1) {
+      const isVerbose = args[0] === 'verbose';
+      const cur = isVerbose ? !!context.options.verbose : !!context.options.notificationBell;
+      const cmd = isVerbose ? '/config set verbose' : '/config set notificationBell';
+      return {
+        type: 'menu',
+        title: `${isVerbose ? 'Verbose logging' : 'Notification bell'} (currently ${cur ? 'ON' : 'OFF'})`,
+        options: [
+          { label: '[ ON ]', value: `${cmd} true`, desc: isVerbose ? 'Show detailed internal logs' : 'Ring the terminal bell when a turn finishes' },
+          { label: '[ OFF ]', value: `${cmd} false`, desc: isVerbose ? 'Quieter output' : 'No bell' },
         ],
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
@@ -150,7 +173,10 @@ globalCommandRegistry.register({
       } else {
         return { type: 'message', level: 'error', content: `Unknown key: ${key}. Keys: theme, verbose, skipPerms, model, notificationBell, maxToolIterations` };
       }
-      
+
+      // Mirror into the running session so the change takes effect immediately (and the
+      // settings hub reflects it without a restart), then persist.
+      Object.assign(context.options, updates);
       await context.saveConfig(updates);
       return { type: 'message', level: 'success', content: `Config saved: ${key}=${val}` };
     }
