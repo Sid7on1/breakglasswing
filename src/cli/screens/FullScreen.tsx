@@ -261,7 +261,18 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     const out = process.stdout;
     if (!out.isTTY) return;
     let timer: ReturnType<typeof setTimeout>;
+    let lastClear = 0;
     const onResize = () => {
+      // Reset Ink's frame tracking IMMEDIATELY (throttled) on each resize event. During streaming
+      // the live frame re-renders on every token; without an immediate reset, each of those
+      // mid-drag repaints paints against the stale pre-resize layout and tears the screen. Clearing
+      // now makes the next streamed frame paint fresh at the new width. The trailing wipe + <Static>
+      // remount below then re-prints the whole transcript cleanly once the drag settles.
+      const now = Date.now();
+      if (now - lastClear > 40) {
+        try { getInkInstance()?.clear(); } catch { /* instance optional */ }
+        lastClear = now;
+      }
       clearTimeout(timer);
       timer = setTimeout(() => {
         try { getInkInstance()?.clear(); } catch { /* instance optional */ }
