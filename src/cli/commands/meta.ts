@@ -1,6 +1,7 @@
 import { globalCommandRegistry } from './registry';
 import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents } from '../agentRouter';
 import { getCurrentProvider } from '../provider';
+import { cliEvents } from '../events';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
@@ -73,12 +74,14 @@ globalCommandRegistry.register({
       try { context.options.llmAdapter?.applyConfig({ model }); } catch { /* adapter optional */ }
       context.options.model = model;
       context.saveConfig({ model });
+      cliEvents.emit('config_changed'); // refresh the live UI (token meter + model display)
       context.addSystemMessage('success', `Coding model → ${model}`);
     };
     const applyLite = (model: string) => {
       try { context.options.llmAdapter?.applyConfig({ liteModel: model }); } catch { /* adapter optional */ }
       (context.options as any).liteModel = model;
       context.saveConfig({ liteModel: model });
+      cliEvents.emit('config_changed');
       context.addSystemMessage('success', `Lite model → ${model}`);
     };
     const promptCustom = (apply: (m: string) => void) => {

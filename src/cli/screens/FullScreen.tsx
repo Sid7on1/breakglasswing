@@ -820,7 +820,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           cwd: process.cwd(),
           // Inject the live active persona so commands like /context can read the real system
           // prompt (options.persona is null at startup; the actual instances live in personasRef).
-          options: { ...options, persona: personasRef.current?.[defaultAgent] || personasRef.current?.bimax },
+          // Mutate the SHARED options object (don't spread a copy) so commands that set primitives
+          // like options.model persist — a spread copy silently dropped those (stale /model display).
+          options: Object.assign(options, { persona: personasRef.current?.[defaultAgent] || personasRef.current?.bimax }),
           codebaseIndexer,
           graphStore,
           saveConfig,
@@ -1222,7 +1224,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 // lines, prompt, footer and surrounding margins.
                 const rows = stdout?.rows || 24;
                 const cols = stdout?.columns || 80;
-                const reserved = 10 + streamingToolCalls.length
+                const reserved = 11 + streamingToolCalls.length // +1 for the always-on model line
                   + (mapPanelVisible ? 9 : 0) + (showTokenMeter ? 1 : 0);
                 const budget = Math.max(4, rows - reserved);
                 const { text: preview, truncated } = tailToHeight(streamingText, budget, cols - 4);
@@ -1278,11 +1280,15 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           <CodebaseMapPanel theme={theme} summary={graphSummary} />
         )}
 
-        {showTokenMeter && (
-          <Box justifyContent="flex-end" paddingX={1}>
-            <Text color={theme.subtle}>~{tokenEstimate.toLocaleString()} tok will be sent</Text>
-          </Box>
-        )}
+        {/* Always-on status line above the input: current coding model (so a /model change is
+            instantly visible here), the lite model, and the live token estimate. */}
+        <Box justifyContent="flex-end" paddingX={1}>
+          <Text color={theme.subtle}>
+            {(options.model || 'default').split('/').pop()}
+            {(() => { try { const l = getConfig().liteModel; return l ? ` (lite: ${l.split('/').pop()})` : ''; } catch { return ''; } })()}
+            {showTokenMeter ? ` · ~${tokenEstimate.toLocaleString()} tok` : ''}
+          </Text>
+        </Box>
 
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={theme.promptBorder}>
           <Box flexDirection="column" paddingX={1}>
