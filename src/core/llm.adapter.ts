@@ -140,6 +140,9 @@ export class LlmAdapter implements LLMProvider {
   // the loop → far faster investigation). Default ON; disable for backends that reject multi-tool
   // turns (e.g. NVIDIA NIM) via config or BGW_PARALLEL_TOOL_CALLS=false.
   public parallelToolCalls: boolean = process.env.BGW_PARALLEL_TOOL_CALLS !== 'false';
+  // The LITE model — used for cheap auxiliary calls (history summaries, self-critic, ask-user
+  // auto-decisions). Falls back to the main (coding) model when unset. Set via /model lite.
+  public liteModel?: string = process.env.BGW_LITE_MODEL || undefined;
 
   private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
 
@@ -149,20 +152,22 @@ export class LlmAdapter implements LLMProvider {
     this.budgetVeto = budgetVeto;
   }
 
-  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean }) {
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
     if (cfg.model) this.defaultModel = cfg.model;
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
     if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
     if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
     if (cfg.parallelToolCalls !== undefined) this.parallelToolCalls = cfg.parallelToolCalls;
+    if (cfg.liteModel !== undefined) this.liteModel = cfg.liteModel || undefined;
   }
 
   private createClient(keyResult: KeyResult): OpenAI {
     return new OpenAI({ apiKey: keyResult.keyStr || '', baseURL: keyResult.baseURL || 'https://integrate.api.nvidia.com/v1', maxRetries: 3 });
   }
 
-  private pickModel(keyResult: KeyResult): string {
+  private pickModel(keyResult: KeyResult, lite?: boolean): string {
+    if (lite && this.liteModel) return this.liteModel;
     return keyResult.model || this.defaultModel;
   }
 
@@ -336,7 +341,7 @@ export class LlmAdapter implements LLMProvider {
     }
   }
 
-  async chatCompletion(messages: any[], systemContext?: string): Promise<string> {
+  async chatCompletion(messages: any[], systemContext?: string, opts?: { lite?: boolean }): Promise<string> {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
@@ -348,7 +353,7 @@ export class LlmAdapter implements LLMProvider {
         ? [{ role: 'system', content: systemContext }, ...messages]
         : messages;
       const response = await client.chat.completions.create({
-        model: this.pickModel(kr),
+        model: this.pickModel(kr, opts?.lite),
         messages: finalMessages,
         temperature: this.temperature,
         max_tokens: this.maxTokens,
@@ -423,7 +428,7 @@ export class LlmAdapter implements LLMProvider {
         : messages;
 
       const requestOptions: any = {
-        model: this.pickModel(kr),
+        model: this.pickModel(kr, options.lite),
         messages: finalMessages,
         stream: true,
         stream_options: { include_usage: true },

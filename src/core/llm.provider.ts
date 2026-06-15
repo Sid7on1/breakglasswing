@@ -15,6 +15,7 @@ export interface ChatOptions {
   maxTokens?: number;
   reasoningEffort?: string; // 'low' | 'medium' | 'high' — when set, sent as reasoning_effort
   signal?: AbortSignal;
+  lite?: boolean; // route this call to the configured LITE model (cheap aux work), if one is set
 }
 
 export type ChatEvent =

@@ -123,7 +123,8 @@ globalCommandRegistry.register({
         title: 'Settings — type to search, ↑/↓ to move, Enter to open',
         options: [
           // — Models & access —
-          { label: 'Model', value: '/model', desc: `Current: ${context.options.model || 'default'}`, category: 'Models & Access' },
+          { label: 'Coding model', value: '/model', desc: `Primary agent model — ${context.options.model || 'default'}`, category: 'Models & Access' },
+          { label: 'Lite model', value: '/model lite', desc: `Fast model for summaries / self-critic — ${(() => { try { return getConfig().liteModel || 'uses coding model'; } catch { return 'uses coding model'; } })()}`, category: 'Models & Access' },
           { label: 'Provider', value: '/provider', desc: 'Switch AI provider', category: 'Models & Access' },
           { label: 'API Keys', value: '/keys', desc: 'Add / replace API keys', category: 'Models & Access' },
           { label: 'Agent persona', value: '/agents', desc: `Active: ${context.options.agent || 'default'} — switch persona`, category: 'Models & Access' },
@@ -138,6 +139,7 @@ globalCommandRegistry.register({
           { label: 'Memory limit (context window)', value: '/context-window', desc: `${(() => { try { const w = getConfig().contextWindowTokens; return w > 0 ? w.toLocaleString() + ' tokens' : '128k tokens (default)'; } catch { return '128k tokens (default)'; } })()} — how much the model can hold before history is trimmed`, category: 'Codebase Intelligence' },
           { label: 'History trimming (compaction)', value: '/context-mode', desc: `${ctxMode === 'full' ? 'Off until full — trims only when the model says it ran out of room' : 'On — auto-shrinks old tool output & summarizes old chat so you never run out'} (follows "How tools are sent")`, category: 'Codebase Intelligence' },
           { label: 'Reasoning effort', value: '/reasoning', desc: `${(() => { try { return getConfig().reasoningEffort || 'off'; } catch { return 'off'; } })()} — lower = faster replies after tool calls`, category: 'Models & Access' },
+          { label: 'Parallel tool calls', value: '/config parallel', desc: `Batch independent tool calls per turn — ${onOff((() => { try { return getConfig().parallelToolCalls !== false; } catch { return true; } })())}`, category: 'Models & Access' },
           { label: 'Re-run onboarding', value: '/config onboard', desc: 'Offer the map-graph / AI-graph setup again', category: 'Codebase Intelligence' },
 
           // — Extensions —
@@ -181,6 +183,20 @@ globalCommandRegistry.register({
         options: [
           { label: '[ ON ]', value: `/config set ${key} true`, desc: args[0] === 'mapPanel' ? 'Show the pinned map overview' : 'Show the pre-send token estimate' },
           { label: '[ OFF ]', value: `/config set ${key} false`, desc: 'Hide it' },
+        ],
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
+
+    // /config parallel — toggle batched (parallel) tool calls.
+    if (args[0] === 'parallel' && args.length === 1) {
+      const cur = (() => { try { return getConfig().parallelToolCalls !== false; } catch { return true; } })();
+      return {
+        type: 'menu',
+        title: `Parallel tool calls (currently ${cur ? 'ON' : 'OFF'})`,
+        options: [
+          { label: '[ ON ]', value: '/config set parallelTools true', desc: 'Model can batch independent reads/greps in one turn (faster)' },
+          { label: '[ OFF ]', value: '/config set parallelTools false', desc: 'One tool call per turn (for backends like NVIDIA NIM that reject batches)' },
         ],
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
@@ -230,6 +246,10 @@ globalCommandRegistry.register({
         context.options.governor.mode = val === 'true' ? 'bypass' : 'interactive';
       } else if (key === 'model') {
         updates.model = val;
+        try { context.options.llmAdapter?.applyConfig({ model: val }); } catch { /* adapter optional */ }
+      } else if (key === 'liteModel') {
+        updates.liteModel = val;
+        try { context.options.llmAdapter?.applyConfig({ liteModel: val }); } catch { /* adapter optional */ }
       } else if (key === 'notificationBell') {
         updates.notificationBell = val === 'true' || val === 'on';
       } else if (key === 'maxToolIterations') {

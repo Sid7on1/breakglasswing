@@ -52,7 +52,7 @@ Your task is to select the most logical, safest, and productive option to keep t
 Reply ONLY with the exact text of the option you choose. Do not provide any conversational text, explanations, or quotes.`;
       
       try {
-        const response = await llmAdapter.chatCompletion([{ role: 'user', content: prompt }]);
+        const response = await llmAdapter.chatCompletion([{ role: 'user', content: prompt }], undefined, { lite: true });
         cliEvents.emit('log', { level: 'info', text: `[AskUserTool] LLM Supervisor selected: ${response.trim()}` } as any);
         return `User selected: ${response.trim()}`;
       } catch (e: any) {

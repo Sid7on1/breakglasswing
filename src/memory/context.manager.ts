@@ -163,7 +163,8 @@ export class ContextManager {
 
     let summaryText = '';
     try {
-      const generator = this.llm.chat(summaryPrompt, {});
+      // Summarization is cheap aux work — route it to the lite model when one is configured.
+      const generator = this.llm.chat(summaryPrompt, { lite: true });
       for await (const event of generator) {
         if (event.type === 'token') summaryText += event.text;
       }

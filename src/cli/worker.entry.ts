@@ -4,6 +4,7 @@ import * as os from 'os';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
 import { SubAgentConfig } from '../core/subagent.manager';
+import { loadConfig } from './config';
 import { SkillLoader, DynamicPersona } from './skills.loader';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
@@ -41,6 +42,15 @@ async function runWorker() {
     const pool = buildKeyPool();
     const apiKeyManager = new ApiKeyManager(pool);
     const llmAdapter = new LlmAdapter(apiKeyManager);
+    // Subagents must run on the SAME model/config the user chose — otherwise they silently fall back
+    // to the adapter's hardcoded default. Load the persisted config and apply it.
+    try {
+      const cfg = await loadConfig();
+      llmAdapter.applyConfig({
+        model: cfg.model, liteModel: cfg.liteModel, temperature: cfg.temperature,
+        maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, parallelToolCalls: cfg.parallelToolCalls,
+      });
+    } catch { /* fall back to adapter defaults if config can't be read in the worker */ }
     // Permission bridge: inherit parent's mode
     const eventBus = new EventBus();
     const governor = new Governor(eventBus);

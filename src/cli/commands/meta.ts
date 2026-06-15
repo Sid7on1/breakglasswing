@@ -4,6 +4,7 @@ import { getCurrentProvider } from '../provider';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
+import { modelMenuOptions } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -67,49 +68,62 @@ globalCommandRegistry.register({
   description: 'Show current model',
   category: 'Configuration',
   execute: async (args, context) => {
-    // Apply a model selection live: update the running adapter, the session options (for the
-    // status bar), and persist to config. Used by the picker's onSelect and `/model <id>`.
-    const applyModel = (model: string) => {
+    // Two slots: CODING (the main agent loop) and LITE (cheap aux calls — summaries, self-critic).
+    const applyCoding = (model: string) => {
       try { context.options.llmAdapter?.applyConfig({ model }); } catch { /* adapter optional */ }
       context.options.model = model;
       context.saveConfig({ model });
-      context.addSystemMessage('success', `Model switched to ${model}`);
+      context.addSystemMessage('success', `Coding model → ${model}`);
     };
-
-    if (args.length >= 1) {
-      // `/model <id>` direct set.
-      applyModel(args.join(' ').trim());
-      return { type: 'none' };
-    }
-
-    // Open a masked-free prompt so the user can type any model id their provider supports.
-    const promptCustomModel = () => {
+    const applyLite = (model: string) => {
+      try { context.options.llmAdapter?.applyConfig({ liteModel: model }); } catch { /* adapter optional */ }
+      (context.options as any).liteModel = model;
+      context.saveConfig({ liteModel: model });
+      context.addSystemMessage('success', `Lite model → ${model}`);
+    };
+    const promptCustom = (apply: (m: string) => void) => {
       context.setActivePrompt({
         title: 'Enter a model id (e.g. provider/model-name)',
         onResolve: (val: string) => {
           const id = (val || '').trim();
-          if (id) applyModel(id);
-          else context.addSystemMessage('info', 'No model id entered — nothing changed.');
+          if (id) apply(id); else context.addSystemMessage('info', 'No model id entered — nothing changed.');
         },
       });
     };
+    const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
 
+    // /model lite [id]  |  /model coding [id]
+    const slot = (args[0] || '').toLowerCase();
+    if (slot === 'lite' || slot === 'coding') {
+      const apply = slot === 'lite' ? applyLite : applyCoding;
+      const rest = args.slice(1).join(' ').trim();
+      if (rest) { rest === '__custom__' ? promptCustom(apply) : apply(rest); return { type: 'none' }; }
+      const cur = slot === 'lite' ? (liteOf() || '(uses coding model)') : (context.options.model || 'default');
+      return {
+        type: 'menu',
+        title: `Select ${slot === 'lite' ? 'LITE (fast/cheap)' : 'CODING (primary)'} model — current: ${cur}`,
+        options: [...modelMenuOptions(cur), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
+        onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustom(apply) : apply(opt.value)),
+      };
+    }
+
+    // /model <id>  → set the coding model directly.
+    if (args.length >= 1) { applyCoding(args.join(' ').trim()); return { type: 'none' }; }
+
+    // /model  → coding picker, with a jump to the lite slot at the top.
     const current = context.options.model || 'default';
     return {
       type: 'menu',
-      title: `Select Model (current: ${current})`,
+      title: `Models — Coding: ${current}  ·  Lite: ${liteOf() || '(uses coding)'}`,
       options: [
-        { label: 'MiniMax M3 (Nvidia)', value: 'minimaxai/minimax-m3', desc: 'Default — strong reasoning' },
-        { label: 'Llama 3.1 70B (Nvidia)', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls' },
-        { label: 'Llama 3.3 70B (Nvidia)', value: 'meta/llama-3.3-70b-instruct', desc: 'Newer Llama' },
-        { label: 'GPT-4o (OpenAI)', value: 'gpt-4o', desc: 'Needs OPENAI_API_KEY' },
-        { label: 'Claude 3.5 Sonnet (Anthropic)', value: 'claude-3-5-sonnet-20241022', desc: 'Needs ANTHROPIC_API_KEY' },
-        { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs Google key' },
-        { label: 'DeepSeek Chat', value: 'deepseek-chat' },
-        { label: 'MiniMax 2.7', value: 'minimax/minimax-m2.7' },
-        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports' },
+        { label: '⚙ Set LITE model…', value: '/model lite', desc: `Fast model for summaries / self-critic / ask-user (current: ${liteOf() || 'uses coding'})`, category: 'Slots' },
+        ...modelMenuOptions(current),
+        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' },
       ],
-      onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustomModel() : applyModel(opt.value)),
+      onSelect: (opt: any) =>
+        opt.value === '/model lite' ? context.executeCommand('/model lite')
+        : opt.value === '__custom__' ? promptCustom(applyCoding)
+        : applyCoding(opt.value),
     };
   }
 });
@@ -169,7 +183,8 @@ globalCommandRegistry.register({
 
         // — Session —
         { label: 'Workspace', value: 'workspace', desc: context.cwd, category: 'Session' },
-        { label: 'Model', value: '/model', desc: context.options.model || 'default', category: 'Session' },
+        { label: 'Coding model', value: '/model', desc: context.options.model || 'default', category: 'Session' },
+        { label: 'Lite model', value: '/model lite', desc: (() => { try { return getConfig().liteModel || 'uses coding model'; } catch { return 'uses coding model'; } })(), category: 'Session' },
         { label: 'Agent', value: '/agents', desc: context.options.agent, category: 'Session' },
         { label: 'Provider', value: '/provider', desc: String(getCurrentProvider().name), category: 'Session' },
         { label: 'Theme', value: '/config theme', desc: context.options.theme, category: 'Session' },

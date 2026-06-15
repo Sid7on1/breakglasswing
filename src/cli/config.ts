@@ -19,7 +19,8 @@ const PROJECT_KEYS: (keyof CliConfig)[] = ['onboardingComplete', 'workspaceRoot'
 
 export interface CliConfig {
   defaultAgent: string;
-  model: string;
+  model: string;       // the CODING model — drives the main agent loop
+  liteModel: string;   // the LITE model — used for cheap aux calls (summaries, self-critic, ask-user)
   timeout: number;
   temperature: number;
   maxTokens: number;
@@ -64,6 +65,7 @@ export interface CliConfig {
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
   model: 'minimaxai/minimax-m3',
+  liteModel: 'meta/llama-3.1-70b-instruct',
   timeout: 120000,
   temperature: 0.7,
   maxTokens: 4096,

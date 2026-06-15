@@ -241,7 +241,8 @@ export abstract class AgentPersona {
 - Otherwise, list the concrete defects or missing pieces as a short bulleted list (no preamble). Be specific and actionable. Do not invent requirements the user did not ask for.`;
     return this.llmAdapter.chatCompletion(
       [{ role: 'user', content: `User's request:\n${originalPrompt}\n\nThe agent's work/response:\n${work}` }],
-      system
+      system,
+      { lite: true } // self-review is cheap aux work
     );
   }
 }

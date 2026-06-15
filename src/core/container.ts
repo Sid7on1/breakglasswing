@@ -96,6 +96,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
     maxTokens: cfg.maxTokens,
     reasoningEffort: cfg.reasoningEffort,
     parallelToolCalls: cfg.parallelToolCalls,
+    liteModel: cfg.liteModel,
   });
 
   // Yolo Classifier
