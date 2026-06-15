@@ -9,23 +9,21 @@ export interface ModelEntry {
   tier: 'coding' | 'lite' | 'other';
 }
 
+// NIM ids below are VERIFIED to respond to "hi" on NVIDIA NIM (2026-06-15 probe). Earlier
+// best-guess ids (deepseek-v4-pro/flash, zai/glm-5.1, mistral-medium-3.5, minimax-m2.7,
+// gemma-4-31b) 404'd or timed out, so they were removed — re-add via the Custom entry if you
+// find their correct NIM id. The "other" tier needs that provider's own API key (untested here).
 export const MODEL_CATALOG: ModelEntry[] = [
-  // — Strong coding / agentic —
+  // — Strong coding / agentic (verified) —
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Agentic coding, 1M ctx, native multimodal — the coding default', tier: 'coding' },
-  { label: 'DeepSeek V4 Pro', value: 'deepseek-ai/deepseek-v4-pro', desc: 'Frontier reasoning/math, Codeforces 3206, 1M ctx', tier: 'coding' },
-  { label: 'GLM 5.1', value: 'zai/glm-5.1', desc: '#1 SWE-Bench Pro 58.4%, 8-hr autonomous runs, 200K ctx', tier: 'coding' },
-  { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Unified instruct/reasoning/coding, SWE-bench 77.6%', tier: 'coding' },
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Multimodal agent audits, 400 tok/s, 3 reasoning levels', tier: 'coding' },
 
-  // — Fast / lite (good as the LITE model: summaries, self-critic, classification) —
-  { label: 'DeepSeek V4 Flash', value: 'deepseek-ai/deepseek-v4-flash', desc: 'Fast utility coding, SWE-bench 80.6%, ~$0.14/M', tier: 'lite' },
-  { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: 'Office/enterprise text processing, 128K ctx', tier: 'lite' },
-  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: 'Open reasoning, LiveCodeBench 86.4%, Apache 2.0', tier: 'lite' },
-  { label: 'Gemma 4 31B', value: 'google/gemma-4-31b-it', desc: 'Frontier math (AIME 89.2%), edge-deployable, 256K ctx', tier: 'lite' },
+  // — Fast / lite (verified; good as the LITE model: summaries, self-critic) —
   { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls — the lite default', tier: 'lite' },
+  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: 'Open reasoning, LiveCodeBench 86.4%, Apache 2.0', tier: 'lite' },
   { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Indic multilingual (10+ Indian languages), 32K ctx', tier: 'lite' },
 
-  // — Other providers (need their own API key) —
+  // — Other providers (need their own API key; not probed) —
   { label: 'GPT-4o (OpenAI)', value: 'gpt-4o', desc: 'Needs OPENAI_API_KEY', tier: 'other' },
   { label: 'Claude 3.5 Sonnet (Anthropic)', value: 'claude-3-5-sonnet-20241022', desc: 'Needs ANTHROPIC_API_KEY', tier: 'other' },
   { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs a Google key', tier: 'other' },
