@@ -143,6 +143,9 @@ export class LlmAdapter implements LLMProvider {
   // The LITE model — used for cheap auxiliary calls (history summaries, self-critic, ask-user
   // auto-decisions). Falls back to the main (coding) model when unset. Set via /model lite.
   public liteModel?: string = process.env.BGW_LITE_MODEL || undefined;
+  // The model the user EXPLICITLY chose (config.model / /model). Takes precedence over a key's
+  // provider-default model so the picker actually changes the model. Unset = use the key/default.
+  public userModel?: string = process.env.BGW_MODEL || undefined;
 
   private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
 
@@ -153,7 +156,7 @@ export class LlmAdapter implements LLMProvider {
   }
 
   public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
-    if (cfg.model) this.defaultModel = cfg.model;
+    if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
     if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
@@ -168,7 +171,9 @@ export class LlmAdapter implements LLMProvider {
 
   private pickModel(keyResult: KeyResult, lite?: boolean): string {
     if (lite && this.liteModel) return this.liteModel;
-    return keyResult.model || this.defaultModel;
+    // The user's explicit choice (set via /model → applyConfig) must win. Previously the key's
+    // baked-in provider default (keyResult.model) shadowed it, so /model appeared to do nothing.
+    return this.userModel || keyResult.model || this.defaultModel;
   }
 
   private async getKey(): Promise<KeyResult> {
