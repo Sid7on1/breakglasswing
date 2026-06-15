@@ -5,16 +5,19 @@ describe('model catalog', () => {
     const ids = MODEL_CATALOG.map(m => m.value);
     // Only NIM-verified ids remain (see the 2026-06-15 probe).
     expect(ids).toEqual(expect.arrayContaining([
-      'minimaxai/minimax-m3', 'stepfun-ai/step-3.7-flash',
+      'minimaxai/minimax-m3', 'z-ai/glm-5.1', 'mistralai/mistral-medium-3.5-128b',
+      'stepfun-ai/step-3.7-flash', 'minimaxai/minimax-m2.7',
       'meta/llama-3.1-70b-instruct', 'stepfun-ai/step-3.5-flash', 'sarvamai/sarvam-m',
     ]));
     expect(MODEL_CATALOG.some(m => m.tier === 'coding')).toBe(true);
     expect(MODEL_CATALOG.some(m => m.tier === 'lite')).toBe(true);
   });
 
-  it('does not include the unverified ids that 404/timeout on NIM', () => {
+  it('uses the correct GLM publisher slug (z-ai, not zai) and omits the non-responding giants', () => {
     const ids = MODEL_CATALOG.map(m => m.value);
-    for (const bad of ['zai/glm-5.1', 'deepseek-ai/deepseek-v4-pro', 'deepseek-ai/deepseek-v4-flash', 'minimaxai/minimax-m2.7', 'google/gemma-4-31b-it']) {
+    expect(ids).toContain('z-ai/glm-5.1');
+    expect(ids).not.toContain('zai/glm-5.1'); // the 404 typo
+    for (const bad of ['deepseek-ai/deepseek-v4-pro', 'deepseek-ai/deepseek-v4-flash', 'google/gemma-4-31b-it']) {
       expect(ids).not.toContain(bad);
     }
   });

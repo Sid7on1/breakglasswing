@@ -9,19 +9,22 @@ export interface ModelEntry {
   tier: 'coding' | 'lite' | 'other';
 }
 
-// NIM ids below are VERIFIED to respond to "hi" on NVIDIA NIM (2026-06-15 probe). Earlier
-// best-guess ids (deepseek-v4-pro/flash, zai/glm-5.1, mistral-medium-3.5, minimax-m2.7,
-// gemma-4-31b) 404'd or timed out, so they were removed — re-add via the Custom entry if you
-// find their correct NIM id. The "other" tier needs that provider's own API key (untested here).
+// NIM ids below were each VERIFIED to respond to "hi" on NVIDIA NIM (2026-06-15 probe). Three
+// catalogued NIM models did NOT respond within ~3 min even after a warm-up (deepseek-v4-pro 1.6T,
+// deepseek-v4-flash 284B, google/gemma-4-31b — likely free-tier capacity / cold-start); add them
+// via the Custom entry if NIM has them warm. The "other" tier needs that provider's own API key.
 export const MODEL_CATALOG: ModelEntry[] = [
   // — Strong coding / agentic (verified) —
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Agentic coding, 1M ctx, native multimodal — the coding default', tier: 'coding' },
-  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Multimodal agent audits, 400 tok/s, 3 reasoning levels', tier: 'coding' },
+  { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Flagship agentic + coding + long-horizon reasoning', tier: 'coding' },
+  { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Strong text/coding/agentic (slow cold-start)', tier: 'coding' },
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Sparse-MoE multimodal reasoning, agentic + coding', tier: 'coding' },
+  { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: '230B coding/reasoning/office (slow cold-start)', tier: 'coding' },
 
   // — Fast / lite (verified; good as the LITE model: summaries, self-critic) —
   { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls — the lite default', tier: 'lite' },
-  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: 'Open reasoning, LiveCodeBench 86.4%, Apache 2.0', tier: 'lite' },
-  { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Indic multilingual (10+ Indian languages), 32K ctx', tier: 'lite' },
+  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: '200B open-source MoE reasoning, agentic', tier: 'lite' },
+  { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual (Indian languages), coding + math', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
   { label: 'GPT-4o (OpenAI)', value: 'gpt-4o', desc: 'Needs OPENAI_API_KEY', tier: 'other' },
