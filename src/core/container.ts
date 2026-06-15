@@ -49,6 +49,7 @@ import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
 import { globalMcpManager } from '../mcp/manager';
 import { createMcpManageTool } from '../tools/implementations/mcp.tool';
+import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { globalSkillService } from '../skills/skill.service';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
@@ -144,6 +145,8 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createSkillTool(governor, globalSkillService));
   // Agent-driven MCP setup: gated by the Governor (the tool is destructive → user confirms).
   toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
+  // Smart context mode: loader for deferred tool schemas (kept off the wire until needed).
+  toolRegistry.register(createToolSearchTool(governor, toolRegistry));
 
   // External MCP servers: register their tools alongside native ones. Opt-in via
   // .bimax/mcp.json; absent config = zero overhead. Best-effort — a server that fails to

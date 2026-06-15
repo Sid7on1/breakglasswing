@@ -7,17 +7,30 @@ globalCommandRegistry.register({
   description: 'Build AST codebase index',
   category: 'Code & Intelligence',
   execute: async (args, context) => {
+    // Wipe the current project's map (e.g. a stale/huge one from accidentally indexing a parent dir).
+    if (args[0] === 'clear') {
+      try {
+        context.graphStore?.clear?.();
+        await context.graphStore?.saveToDisk?.();
+        cliEvents.emit('graph_changed');
+        return { type: 'message', level: 'success', content: 'Codebase map cleared. cd into a specific project and run /index to build a focused one.' };
+      } catch (err: any) {
+        return { type: 'message', level: 'error', content: `Could not clear the map: ${err.message}` };
+      }
+    }
+
     if (args[0] !== 'force') {
       return {
         type: 'menu',
-        title: 'Build AST Codebase Index?',
+        title: 'Codebase Map',
         options: [
-          { label: '[ Start Indexing ]', value: '/index force', desc: 'Parse all workspace files' },
+          { label: '[ Start Indexing ]', value: '/index force', desc: 'Parse all files under the current directory' },
+          { label: '[ Clear current map ]', value: '/index clear', desc: 'Remove the existing map (use if it indexed the wrong/parent folder)' },
           { label: '[ Cancel ]', value: 'cancel', desc: 'Do nothing' }
         ]
       };
     }
-    
+
     if (!context.codebaseIndexer) {
       return { type: 'message', level: 'error', content: 'Codebase indexer not available' };
     }
@@ -26,7 +39,15 @@ globalCommandRegistry.register({
     try {
       const count = await context.codebaseIndexer.buildAstIndex();
       cliEvents.emit('graph_changed');
-      return { type: 'message', level: 'success', content: `AST Indexing complete! Extracted ${count} nodes.` };
+      // A graph this big almost always means a parent/home folder was indexed (dependencies, other
+      // projects). Point the user at running inside the specific project for a focused, useful map.
+      if (count > 20000) {
+        return {
+          type: 'message', level: 'success',
+          content: `AST Indexing complete — ${count.toLocaleString()} nodes. That's very large; you likely indexed a parent or home folder. For a focused map, cd into the specific project (cwd shown in the footer) and run /index there.`,
+        };
+      }
+      return { type: 'message', level: 'success', content: `AST Indexing complete! Extracted ${count.toLocaleString()} nodes.` };
     } catch (err: any) {
       return { type: 'message', level: 'error', content: `Indexing failed: ${err.message}` };
     }

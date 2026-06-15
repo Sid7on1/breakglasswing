@@ -3,6 +3,8 @@ import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents } from 
 import { getCurrentProvider } from '../provider';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
+import { getConfig } from '../config';
+import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
   name: '/routes',
@@ -117,20 +119,66 @@ globalCommandRegistry.register({
   description: 'Show current context',
   category: 'Session & Context',
   execute: async (args, context) => {
+    // Live readout of the smart-context engine: which mode we're in, how the system prompt splits
+    // into a cached static prefix vs a per-turn dynamic suffix, how many tool schemas are actually
+    // on the wire vs deferred, and which compaction layers are active.
+    const mode = (() => { try { return getConfig().contextMode || 'smart'; } catch { return 'smart'; } })();
+    const tok = (s: string) => { try { return encode(s).length; } catch { return Math.ceil(s.length / 4); } };
+
+    let promptDesc = 'could not read the active agent — try again after sending one message';
+    let toolsDesc = 'could not read the tool list';
+    try {
+      const registry = context.options.toolRegistry;
+      const persona = context.options.persona;
+      if (persona && typeof persona.getSystemPromptParts === 'function') {
+        const planMode = context.options.governor?.mode === 'plan';
+        const { staticPrefix, dynamicSuffix } = persona.getSystemPromptParts({ planMode, contextMode: mode });
+        const total = tok(staticPrefix) + tok(dynamicSuffix);
+        promptDesc = `~${total.toLocaleString()} tokens of instructions sent each turn (${tok(staticPrefix).toLocaleString()} fixed + ${tok(dynamicSuffix).toLocaleString()} that change)`;
+      }
+      if (registry) {
+        const sent = registry.getSchemas({ mode }).length;
+        const names = registry.getToolNames();
+        const deferredTotal = names.filter((n: string) => registry.isDeferred(n)).length;
+        const loaded = names.filter((n: string) => registry.isDeferred(n) && registry.isDiscovered(n)).length;
+        toolsDesc = mode === 'full'
+          ? `Full — all ${sent} tools sent every turn`
+          : `Smart — ${sent} ready now · ${deferredTotal} load only when needed (${loaded} loaded so far)`;
+      }
+    } catch { /* best-effort readout */ }
+
+    const window = (() => { try { return getConfig().contextWindowTokens || 0; } catch { return 0; } })();
+    const windowDesc = window > 0
+      ? `model can hold ~${window.toLocaleString()} tokens — we start trimming around ${Math.round(window * 0.7).toLocaleString()}`
+      : `~128,000 tokens (default) — set yours via the Context window row or /context-window`;
+    const compactionDesc = mode === 'full'
+      ? "off until you run out of room — full history is sent until the model says it's too long, then it's trimmed"
+      : 'auto-trims old chat so you never run out of room: shrinks big tool outputs, drops stale ones, then summarizes the oldest if still full';
+
     return {
       type: 'menu',
       title: 'Current Context',
       options: [
-        { label: 'Workspace', value: 'workspace', desc: context.cwd },
-        { label: 'Model', value: '/model', desc: context.options.model || 'default' },
-        { label: 'Agent', value: '/agents', desc: context.options.agent },
-        { label: 'Provider', value: '/provider', desc: String(getCurrentProvider().name) },
-        { label: 'Theme', value: '/config theme', desc: context.options.theme },
-        { label: 'Verbose Logging', value: '/config verbose', desc: context.options.verbose ? 'On' : 'Off' },
-        { label: 'Permissions', value: '/config skipPerms', desc: context.options.governor?.mode === 'bypass' ? 'Bypassed' : 'Strict' },
-        { label: 'MCP servers', value: '/mcp', desc: `${globalMcpManager.list().length} connected` },
-        { label: 'Agent skills', value: '/skills', desc: `${globalSkillService.list().length} installed` },
-      ]
+        // — Context engine (the smart-sending machinery), in plain words. "Tools sent now" already
+        //   states the mode (Full/Smart), so there's no separate "How tools are sent" row here —
+        //   change the mode from the / settings hub. —
+        { label: 'Tools sent now', value: '/context-mode', desc: toolsDesc, category: 'Context Engine' },
+        { label: 'Instructions size', value: '/context-mode', desc: promptDesc, category: 'Context Engine' },
+        { label: 'Memory limit (context window)', value: '/context-window', desc: windowDesc, category: 'Context Engine' },
+        { label: 'History trimming (compaction)', value: '/context-mode', desc: compactionDesc, category: 'Context Engine' },
+
+        // — Session —
+        { label: 'Workspace', value: 'workspace', desc: context.cwd, category: 'Session' },
+        { label: 'Model', value: '/model', desc: context.options.model || 'default', category: 'Session' },
+        { label: 'Agent', value: '/agents', desc: context.options.agent, category: 'Session' },
+        { label: 'Provider', value: '/provider', desc: String(getCurrentProvider().name), category: 'Session' },
+        { label: 'Theme', value: '/config theme', desc: context.options.theme, category: 'Session' },
+        { label: 'Verbose Logging', value: '/config verbose', desc: context.options.verbose ? 'On' : 'Off', category: 'Session' },
+        { label: 'Permissions', value: '/config skipPerms', desc: context.options.governor?.mode === 'bypass' ? 'Bypassed' : 'Strict', category: 'Session' },
+        { label: 'MCP servers', value: '/mcp', desc: `${globalMcpManager.list().length} connected`, category: 'Session' },
+        { label: 'Agent skills', value: '/skills', desc: `${globalSkillService.list().length} installed`, category: 'Session' },
+      ],
+      onSelect: (opt: any) => { if (typeof opt.value === 'string' && opt.value.startsWith('/')) context.executeCommand(opt.value); },
     };
   }
 });

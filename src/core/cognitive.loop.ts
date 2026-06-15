@@ -53,7 +53,7 @@ export class CognitiveLoop {
 
       // 4. Physical Routing
       Logger.info(`[CognitiveLoop] Safely routing task to ActionRouter...`);
-      this.router.route({
+      await this.router.route({
         id: payload.id,
         category: payload.category || 'trigger',
         payload: payload.data

@@ -23,8 +23,8 @@ export class VectorStore {
     this.loadStore().catch(() => {});
   }
 
-  private async loadStore() {
-    await this.rwMutex.runExclusive(async () => {
+  private async loadStore(alreadyLocked: boolean = false) {
+    const load = async () => {
       try {
         const data = await fs.readFile(this.STORE_PATH, 'utf-8');
         this.store = JSON.parse(data);
@@ -32,7 +32,13 @@ export class VectorStore {
       } catch (e) {
         // Missing file is fine
       }
-    });
+    };
+
+    if (alreadyLocked) {
+      await load();
+    } else {
+      await this.rwMutex.runExclusive(load);
+    }
   }
 
   private async saveStore() {
@@ -69,35 +75,37 @@ export class VectorStore {
 
   async semanticSearch(query: string, limit: number = 3, minScore: number = 0.25): Promise<VectorDocument[]> {
     Logger.info(`[VectorStore] Running offline semantic search for query: "${query.substring(0, 30)}..."`);
-    await this.loadStore(); // This is protected internally
-    
-    if (this.store.length === 0) return [];
 
     const queryEmbedding = await this.embedder.generateEmbedding(query);
-    
-    const scoredDocs = this.store.map(doc => {
-      let dotProduct = 0;
-      let normA = 0;
-      let normB = 0;
-      for (let i = 0; i < doc.embedding.length; i++) {
-        dotProduct += queryEmbedding[i] * doc.embedding[i];
-        normA += queryEmbedding[i] * queryEmbedding[i];
-        normB += doc.embedding[i] * doc.embedding[i];
-      }
-      const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-      // Guard against division by zero (zero-magnitude vectors)
-      const score = denominator === 0 ? 0 : Math.max(-1, Math.min(1, dotProduct / denominator));
-      return { doc, score };
+
+    return this.rwMutex.runExclusive(async () => {
+      await this.loadStore(true); // loads store inside mutex (already locked)
+      if (this.store.length === 0) return [];
+
+      const scoredDocs = this.store.map(doc => {
+        let dotProduct = 0;
+        let normA = 0;
+        let normB = 0;
+        for (let i = 0; i < doc.embedding.length; i++) {
+          dotProduct += queryEmbedding[i] * doc.embedding[i];
+          normA += queryEmbedding[i] * queryEmbedding[i];
+          normB += doc.embedding[i] * doc.embedding[i];
+        }
+        const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+        // Guard against division by zero (zero-magnitude vectors)
+        const score = denominator === 0 ? 0 : Math.max(-1, Math.min(1, dotProduct / denominator));
+        return { doc, score };
+      });
+
+      // Sort by descending score
+      scoredDocs.sort((a, b) => b.score - a.score);
+
+      scoredDocs.forEach(d => Logger.info(`[VectorStore] Score for ${d.doc.id}: ${d.score.toFixed(3)}`));
+
+      // Filter out terrible matches (caller-tunable confidence threshold)
+      const topMatches = scoredDocs.filter(item => item.score > minScore).slice(0, limit);
+
+      return topMatches.map(item => item.doc);
     });
-
-    // Sort by descending score
-    scoredDocs.sort((a, b) => b.score - a.score);
-    
-    scoredDocs.forEach(d => Logger.info(`[VectorStore] Score for ${d.doc.id}: ${d.score.toFixed(3)}`));
-
-    // Filter out terrible matches (caller-tunable confidence threshold)
-    const topMatches = scoredDocs.filter(item => item.score > minScore).slice(0, limit);
-    
-    return topMatches.map(item => item.doc);
   }
 }

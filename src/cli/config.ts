@@ -46,6 +46,16 @@ export interface CliConfig {
   onboardingComplete: boolean; // per-project: has the map-graph/AI-graph onboarding flow run once?
   showMapPanel: boolean; // pinned codebase-map overview panel above the input
   showTokenMeter: boolean; // live "tokens that will be sent" estimate near the input
+  // How much we put on the wire each turn:
+  //   'smart' (default) — send only the core working-set of tool schemas; rare/heavy tools and
+  //                       all MCP tools are deferred, loaded on demand via ToolSearchTool.
+  //   'full'            — send every tool description, every turn (no deferral). Heavier, but the
+  //                       model always sees the entire toolbox.
+  contextMode: 'smart' | 'full';
+  // The active model's context window in tokens. Drives when proactive compaction fires. 0 = use
+  // the safe built-in default (128k). Set this to YOUR model's real window — bimax talks to any
+  // OpenAI-compatible provider, so we can't reliably auto-detect it (no Claude-style per-variant map).
+  contextWindowTokens: number;
 }
 
 const DEFAULTS: CliConfig = {
@@ -76,6 +86,8 @@ const DEFAULTS: CliConfig = {
   onboardingComplete: false,
   showMapPanel: true,
   showTokenMeter: true,
+  contextMode: 'smart',
+  contextWindowTokens: 0,
 };
 
 let cached: CliConfig | null = null;

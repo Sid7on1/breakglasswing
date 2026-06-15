@@ -32,6 +32,19 @@ describe('ResponseSanitizer.stripFiller — removes whole-line tool-meta filler'
     expect(strip("I don't need to use any tools for this.")).toBe('');
   });
 
+  it('removes post-hoc tool-execution narration', () => {
+    expect(strip('The ChangeDirectoryTool was successfully executed, and the cwd was changed to /x.\nNow in /x.'))
+      .toBe('Now in /x.');
+    expect(strip('- a.txt\n- b.txt\nThese files are listed in the output of the ls -la command executed by the BashTool.'))
+      .toBe('- a.txt\n- b.txt');
+  });
+
+  it('removes a leaked CHAT/QUESTION/TASK triage-classification line', () => {
+    expect(strip('This message is a "CHAT" message, so I will respond with a one-sentence greeting.\n\nHey there!'))
+      .toBe('Hey there!');
+    expect(strip('This is a TASK message. I will now build it.\nDone.')).toBe('Done.');
+  });
+
   it('tolerates list/quote markers and indentation before the filler', () => {
     expect(strip('- No function call is needed.')).toBe('');
     expect(strip('> I will now call the BashTool function.')).toBe('');
@@ -62,6 +75,12 @@ describe('ResponseSanitizer.stripFiller — preserves genuine content', () => {
   it('does not eat prose explaining when a tool would be needed', () => {
     const s = 'A function call is needed whenever you want to read a file from disk.';
     // This is real explanatory content, not the standalone "no ... needed" filler.
+    expect(strip(s)).toBe(s);
+  });
+
+  it('does not eat real prose that mentions TASK/CHAT as ordinary words', () => {
+    const s = 'This is a TASK queue that processes jobs in CHAT order.';
+    // No quotes around the token and not "<token> message" → genuine content, left intact.
     expect(strip(s)).toBe(s);
   });
 

@@ -103,6 +103,7 @@ globalCommandRegistry.register({
     const cfgFlag = (k: 'showMapPanel' | 'showTokenMeter') => {
       try { return (getConfig() as any)[k] !== false; } catch { return true; }
     };
+    const ctxMode = (() => { try { return getConfig().contextMode || 'smart'; } catch { return 'smart'; } })();
     if (args.length === 0) {
       // Reflect live state in every label so the hub is a true control panel (no hardcoding).
       const onOff = (v: boolean) => (v ? 'ON' : 'OFF');
@@ -133,6 +134,10 @@ globalCommandRegistry.register({
           { label: 'Build AI graph', value: '/index-ai', desc: aiBuilt ? 'Built ✓ — semantic layer present. Re-run to refresh' : 'Not built — adds purpose + risk per symbol (costs credits)', category: 'Codebase Intelligence' },
           { label: 'Codebase map panel', value: '/config mapPanel', desc: `Pinned map overview above input — ${onOff(cfgFlag('showMapPanel'))}`, category: 'Codebase Intelligence' },
           { label: 'Live token meter', value: '/config tokenMeter', desc: `Show tokens that will be sent — ${onOff(cfgFlag('showTokenMeter'))}`, category: 'Codebase Intelligence' },
+          { label: 'How tools are sent', value: '/context-mode', desc: `${ctxMode === 'full' ? 'Full — every tool sent every turn (heavier)' : 'Smart — only tools needed now are sent; rest load on request (faster)'}`, category: 'Codebase Intelligence' },
+          { label: 'Memory limit (context window)', value: '/context-window', desc: `${(() => { try { const w = getConfig().contextWindowTokens; return w > 0 ? w.toLocaleString() + ' tokens' : '128k tokens (default)'; } catch { return '128k tokens (default)'; } })()} — how much the model can hold before history is trimmed`, category: 'Codebase Intelligence' },
+          { label: 'History trimming (compaction)', value: '/context-mode', desc: `${ctxMode === 'full' ? 'Off until full — trims only when the model says it ran out of room' : 'On — auto-shrinks old tool output & summarizes old chat so you never run out'} (follows "How tools are sent")`, category: 'Codebase Intelligence' },
+          { label: 'Reasoning effort', value: '/reasoning', desc: `${(() => { try { return getConfig().reasoningEffort || 'off'; } catch { return 'off'; } })()} — lower = faster replies after tool calls`, category: 'Models & Access' },
           { label: 'Re-run onboarding', value: '/config onboard', desc: 'Offer the map-graph / AI-graph setup again', category: 'Codebase Intelligence' },
 
           // — Extensions —
@@ -231,8 +236,27 @@ globalCommandRegistry.register({
         updates.maxToolIterations = parseInt(val) || 15;
       } else if (key === 'showMapPanel' || key === 'showTokenMeter' || key === 'onboardingComplete') {
         updates[key] = val === 'true' || val === 'on';
+      } else if (key === 'contextMode') {
+        if (val !== 'smart' && val !== 'full') {
+          return { type: 'message', level: 'error', content: `contextMode must be 'smart' or 'full'.` };
+        }
+        updates.contextMode = val;
+      } else if (key === 'contextWindowTokens') {
+        const n = parseInt(val, 10);
+        if (isNaN(n) || n < 0) {
+          return { type: 'message', level: 'error', content: `contextWindowTokens must be a non-negative integer (0 = use the 128k default).` };
+        }
+        updates.contextWindowTokens = n;
+      } else if (key === 'reasoningEffort') {
+        const v = (val || '').toLowerCase();
+        if (!['off', 'low', 'medium', 'high'].includes(v)) {
+          return { type: 'message', level: 'error', content: `reasoningEffort must be off | low | medium | high.` };
+        }
+        updates.reasoningEffort = v === 'off' ? '' : v;
+        // Apply live so the very next turn is faster/slower without a restart.
+        try { context.options.llmAdapter?.applyConfig({ reasoningEffort: updates.reasoningEffort }); } catch { /* adapter optional */ }
       } else {
-        return { type: 'message', level: 'error', content: `Unknown key: ${key}. Keys: theme, verbose, skipPerms, model, notificationBell, maxToolIterations, showMapPanel, showTokenMeter` };
+        return { type: 'message', level: 'error', content: `Unknown key: ${key}. Keys: theme, verbose, skipPerms, model, notificationBell, maxToolIterations, showMapPanel, showTokenMeter, contextMode, contextWindowTokens, reasoningEffort` };
       }
 
       // Mirror into the running session so the change takes effect immediately (and the
@@ -276,5 +300,90 @@ globalCommandRegistry.register({
         ]
       };
     }
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/context-mode',
+  aliases: ['/context-sending'],
+  description: 'Choose how much tool context is sent each turn (smart vs full)',
+  category: 'Configuration',
+  execute: async (args, context) => {
+    const sub = (args[0] || '').toLowerCase();
+    if (sub === 'smart' || sub === 'full') {
+      await context.saveConfig({ contextMode: sub });
+      (context.options as any).contextMode = sub;
+      cliEvents.emit('config_changed');
+      return {
+        type: 'message',
+        level: 'success',
+        content: sub === 'full'
+          ? 'Context sending: FULL — every tool description is sent to the model each turn.'
+          : 'Context sending: SMART — only the core tools are sent; rare/heavy and MCP tools load on demand via ToolSearchTool.',
+      };
+    }
+    let cur = 'smart';
+    try { cur = getConfig().contextMode || 'smart'; } catch { /* default */ }
+    return {
+      type: 'menu',
+      title: `Context sending (currently ${cur.toUpperCase()})`,
+      options: [
+        { label: 'Smart (recommended)', value: '/context-mode smart', desc: 'Send only core tools; defer the rest + all MCP tools, loaded on demand. Smaller, faster context.' },
+        { label: 'Full', value: '/context-mode full', desc: 'Send every tool description every turn. The model always sees the whole toolbox; heavier context.' },
+      ],
+      onSelect: (opt: any) => context.executeCommand(opt.value),
+    };
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/reasoning',
+  aliases: ['/effort', '/think'],
+  description: 'Set the thinking depth of reasoning models (off/low/medium/high) — lower = faster replies',
+  category: 'Configuration',
+  execute: async (args, context) => {
+    const sub = (args[0] || '').toLowerCase();
+    if (['off', 'low', 'medium', 'high'].includes(sub)) {
+      return context.executeCommand(`/config set reasoningEffort ${sub}`) as any;
+    }
+    let cur = 'off';
+    try { cur = getConfig().reasoningEffort || 'off'; } catch { /* default */ }
+    return {
+      type: 'menu',
+      title: `Reasoning effort (currently ${cur.toUpperCase()}) — lower is faster, esp. after tool calls`,
+      options: [
+        { label: 'Low (fastest)', value: '/reasoning low', desc: 'Minimal hidden thinking — snappiest replies. Best for chat + simple tasks.' },
+        { label: 'Medium', value: '/reasoning medium', desc: 'Balanced thinking vs speed.' },
+        { label: 'High', value: '/reasoning high', desc: 'Deepest reasoning — slowest. For hard problems.' },
+        { label: 'Off (model default)', value: '/reasoning off', desc: 'Send no cap — the model thinks as much as it wants (can be very slow after tool calls).' },
+      ],
+      onSelect: (opt: any) => context.executeCommand(opt.value),
+    };
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/context-window',
+  aliases: ['/ctxwindow', '/window'],
+  description: "Set the active model's context window in tokens (drives when compaction fires)",
+  category: 'Configuration',
+  execute: async (args, context) => {
+    if (args[0]) {
+      return context.executeCommand(`/config set contextWindowTokens ${args[0]}`) as any;
+    }
+    let cur = 0;
+    try { cur = getConfig().contextWindowTokens || 0; } catch { /* default */ }
+    const curLabel = cur > 0 ? `${cur.toLocaleString()} tok` : '128,000 tok (default)';
+    return {
+      type: 'menu',
+      title: `Context window — currently ${curLabel}. Pick YOUR model's real window:`,
+      options: [
+        { label: '32k', value: '/context-window 32768', desc: 'Small-context models (older/local).' },
+        { label: '128k (safe default)', value: '/context-window 0', desc: 'Most modern models. 0 = use the built-in 128k default.' },
+        { label: '200k', value: '/context-window 200000', desc: 'Claude-class / large-context models.' },
+        { label: '1M', value: '/context-window 1000000', desc: 'Very large context (some MiniMax/Gemini tiers).' },
+      ],
+      onSelect: (opt: any) => context.executeCommand(opt.value),
+    };
   }
 });

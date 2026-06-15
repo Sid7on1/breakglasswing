@@ -51,10 +51,12 @@ export function InteractiveMenu({ theme, options, onSelect, onCancel, title, ena
     <Box 
       flexDirection="column" 
       marginBottom={1} 
-      borderStyle="round" 
+      borderStyle="round"
       borderColor={theme.borderFocus}
       paddingX={1}
-      width={70}
+      // Grow with the terminal so long descriptions don't wrap so aggressively (was a fixed 70).
+      // Clamp so it never gets absurdly wide on huge monitors or collapses on narrow ones.
+      width={Math.min(120, Math.max(70, (process.stdout.columns || 80) - 4))}
     >
       <Box marginBottom={1} flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">

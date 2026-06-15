@@ -33,7 +33,25 @@ const LANGUAGES: Record<string, { wasm: string; spec: LangSpec }> = {
   },
 };
 
-const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.breakglass', '__pycache__', '.venv', 'venv']);
+// Directories never worth indexing — dependencies, build output, caches, tool/IDE metadata. Matched
+// by basename during the file walk. Kept broad on purpose: indexing a venv / site-packages / VS Code
+// extensions folder is what balloons the graph into 100k+ junk nodes.
+const IGNORED_DIRS = new Set([
+  // VCS + our own
+  '.git', '.hg', '.svn', '.breakglass',
+  // JS / TS deps + build + caches
+  'node_modules', 'bower_components', 'jspm_packages', 'dist', 'build', 'out', 'coverage',
+  '.next', '.nuxt', '.svelte-kit', '.turbo', '.parcel-cache', '.cache', '.expo', '.yarn', '.pnpm-store',
+  // Python
+  '__pycache__', '.venv', 'venv', 'site-packages', '.tox', '.mypy_cache', '.pytest_cache',
+  '.ipynb_checkpoints', '.eggs',
+  // Rust / Go / Java / .NET / iOS / Dart
+  'target', 'vendor', '.gradle', 'Pods', 'obj', 'DerivedData', '.dart_tool', '.cargo', '.rustup',
+  // Tooling / IDE / infra
+  '.idea', '.vscode', '.vscode-server', '.terraform', '.serverless',
+  // macOS home heavyweights (so `/index ~` doesn't crawl the whole machine)
+  'Library', 'Applications',
+]);
 
 function resolveGrammarWasm(name: string): string | null {
   try {

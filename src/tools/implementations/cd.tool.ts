@@ -1,5 +1,6 @@
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
+import { cliEvents } from '../../cli/events';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -38,6 +39,10 @@ export const createCdTool = (governor: IGovernor) => buildTool({
     } else {
       process.chdir(absolutePath); // Fallback if no context provided
     }
+
+    // Tell the UI the project changed so it reloads the per-project graph / map panel — otherwise
+    // the panel keeps showing whatever was indexed at launch (e.g. a stale home-dir map).
+    cliEvents.emit('cwd_changed', absolutePath);
 
     // Return useful context about the new directory
     const entries = fs.readdirSync(absolutePath).slice(0, 30);

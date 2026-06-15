@@ -79,3 +79,25 @@ describe('TreeSitterAnalyzer — Python (M1)', () => {
     expect(res).not.toContain('greet');
   });
 });
+
+describe('TreeSitterAnalyzer — skips dependency / junk directories', () => {
+  it('does not index files under node_modules, site-packages, .venv, Library, .vscode', async () => {
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-ignore-'));
+    // One real source file at the root...
+    fs.writeFileSync(path.join(proj, 'app.py'), 'def real():\n    return 1\n');
+    // ...and junk under every kind of ignored dir.
+    for (const junkDir of ['node_modules', 'site-packages', '.venv', 'Library', '.vscode', '__pycache__']) {
+      const d = path.join(proj, junkDir);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'junk.py'), 'def junk():\n    return 2\n');
+    }
+    const store = new GraphStore(':memory:');
+    await new TreeSitterAnalyzer(proj, store).analyzeProject();
+
+    expect(store.getNode('func:app.py:real')).toBeDefined();
+    // No node from any ignored directory should exist.
+    const ids = Array.from(store.getGraph().nodes.keys());
+    expect(ids.some(id => /junk\.py/.test(id))).toBe(false);
+    fs.rmSync(proj, { recursive: true, force: true });
+  });
+});

@@ -14,19 +14,24 @@ export class AgentLoop {
   constructor(
     private llm: LLMProvider,
     private tools: ToolRegistry,
-    private governor: IGovernor
+    private governor: IGovernor,
+    // The active model's context window (tokens). Compaction thresholds scale to this so bimax
+    // works correctly whether the chosen model has a 32k or a 1M window. Falls back to a safe default.
+    maxContextTokens?: number
   ) {
-    this.contextManager = new ContextManager(llm);
+    this.contextManager = new ContextManager(llm, maxContextTokens);
   }
 
   async *execute(
     initialMessages: Message[],
     systemPrompt: string,
-    options?: { maxIterations?: number },
+    options?: { maxIterations?: number; contextMode?: 'smart' | 'full' },
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
     const maxIter = options?.maxIterations ?? 30;
+    // 'smart' (default) sends only the core + discovered tool schemas; 'full' sends everything.
+    const contextMode = options?.contextMode ?? 'smart';
     // Bounds the regenerate-on-empty correction below to a single retry, so a model
     // that keeps emitting pure filler can never spin the loop.
     let pureFillerRetried = false;
@@ -37,11 +42,15 @@ export class AgentLoop {
     const MAX_TRANSIENT_RETRIES = 2;
 
     for (let i = 0; i < maxIter; i++) {
-      // 1. Auto-Compact if reaching capacity
-      this.messages = await this.contextManager.checkAndCompact(this.messages);
+      // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
+      //    full mode is a no-op here and relies on reactive compaction if the API rejects the size).
+      this.messages = await this.contextManager.checkAndCompact(this.messages, contextMode);
+      // In smart mode the registry returns only the core working set + ToolSearch + any tools the
+      // model has already surfaced via ToolSearchTool; in full mode it returns every schema. This
+      // is recomputed each turn so a tool discovered mid-task becomes available immediately.
       const generator = this.llm.chat(this.messages, {
         system: systemPrompt,
-        tools: this.tools.getAllSchemas() as any,
+        tools: this.tools.getSchemas({ mode: contextMode }) as any,
       });
 
       const toolCalls: { id: string; name: string; args: string }[] = [];

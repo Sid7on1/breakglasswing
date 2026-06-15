@@ -14,14 +14,25 @@ export class GlobalPrompter {
 
     this.isPrompting = true;
 
-    return new Promise((resolve) => {
+    try {
       cliEvents.emit('spinner_state', 'vetoing', 'Governor is evaluating safety constraints...');
+    } catch {
+      this.isPrompting = false;
+      throw new Error('[GlobalPrompter] Failed to emit spinner state.');
+    }
 
-      cliEvents.emit('veto_prompt', question, options, (answer: string) => {
+    return new Promise((resolve) => {
+      try {
+        cliEvents.emit('veto_prompt', question, options, (answer: string) => {
+          this.isPrompting = false;
+          cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
+          resolve(answer.trim());
+        });
+      } catch (e) {
         this.isPrompting = false;
         cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
-        resolve(answer.trim());
-      });
+        throw e;
+      }
     });
   }
 

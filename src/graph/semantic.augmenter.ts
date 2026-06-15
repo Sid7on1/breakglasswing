@@ -47,8 +47,14 @@ export class SemanticAugmenter {
           if (node.type === 'FILE') {
             // Send only the first 30 lines of a file to avoid massive token usage
             codeSnippet = fullContent.split('\n').slice(0, 30).join('\n') + '\n// ... (truncated)';
+          } else if (node.startLine && node.endLine) {
+            const lines = fullContent.split('\n');
+            const start = Math.max(0, node.startLine - 1);
+            const end = Math.min(lines.length, node.endLine);
+            const snippet = lines.slice(start, end).join('\n');
+            codeSnippet = snippet + '\n// ... (truncated)';
           } else {
-            // Ideally we extract the exact AST node text, but for MVP we send the file slice
+            // Fallback: send the first 50 lines if no source location is available
             codeSnippet = fullContent.split('\n').slice(0, 50).join('\n') + '\n// ... (truncated)';
           }
         }

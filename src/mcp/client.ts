@@ -88,6 +88,47 @@ async function openClient(spec: McpServerSpec): Promise<any> {
   }
 }
 
+/**
+ * Coerce a single value to the type its JSON Schema declares. Only converts the safe, common cases
+ * a weak model gets wrong — string→number/integer and string→boolean — and recurses into arrays and
+ * nested objects. Anything that doesn't cleanly convert is left untouched so we never corrupt input.
+ */
+function coerceValueToSchema(value: any, schema: any): any {
+  if (!schema || value == null) return value;
+  // JSON Schema `type` may be a string or an array of allowed types; normalize to a set.
+  const types: string[] = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+
+  if ((types.includes('number') || types.includes('integer')) && typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed !== '' && !isNaN(Number(trimmed))) {
+      const n = Number(trimmed);
+      return types.includes('integer') && !types.includes('number') ? Math.trunc(n) : n;
+    }
+  }
+  if (types.includes('boolean') && typeof value === 'string') {
+    const l = value.trim().toLowerCase();
+    if (l === 'true') return true;
+    if (l === 'false') return false;
+  }
+  if (types.includes('array') && Array.isArray(value) && schema.items) {
+    return value.map((v) => coerceValueToSchema(v, schema.items));
+  }
+  if (types.includes('object') && value && typeof value === 'object' && schema.properties) {
+    return coerceArgsToSchema(value, schema);
+  }
+  return value;
+}
+
+/** Coerce each property of an args object to the types its tool input schema declares. */
+export function coerceArgsToSchema(args: any, schema: any): any {
+  if (!schema || !schema.properties || !args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const out: any = { ...args };
+  for (const [key, propSchema] of Object.entries<any>(schema.properties)) {
+    if (key in out) out[key] = coerceValueToSchema(out[key], propSchema);
+  }
+  return out;
+}
+
 export interface ConnectedMcp {
   name: string;
   client: any;
@@ -132,7 +173,11 @@ export async function connectAndRegister(
         schema: t.inputSchema || { type: 'object', properties: {} },
         isDestructive: true, // external tools are fail-closed under the Governor
         execute: async (args: any) => {
-          const res = await client.callTool({ name: t.name, arguments: args || {} });
+          // Weak models routinely emit numbers/booleans as strings ("1", "true"). MCP servers
+          // validate strictly (zod) and reject those, so coerce each arg to its declared schema
+          // type first. Native tools tolerate strings already; MCP is where strict validation bites.
+          const coerced = coerceArgsToSchema(args || {}, t.inputSchema);
+          const res = await client.callTool({ name: t.name, arguments: coerced });
           const text = contentToString(res);
           return res?.isError ? `MCP tool ${t.name} reported an error: ${text}` : text;
         },

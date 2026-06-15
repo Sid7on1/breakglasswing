@@ -585,22 +585,45 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setShowTokenMeter(readFlag('showTokenMeter'));
     };
     const onGraphChanged = () => setGraphVersion((v) => v + 1);
+    // When the agent cd's into another project, reload that project's graph so the map panel
+    // reflects the NEW location (empty if it was never indexed) instead of the launch-dir graph.
+    const onCwdChanged = async (newCwd: string) => {
+      try {
+        graphStore.setStoragePath(path.join(newCwd, '.breakglass/graph', 'playground.json'));
+        graphStore.clear();
+        await graphStore.loadFromDisk();
+        try { codebaseIndexer?.setProjectRoot?.(newCwd); } catch { /* indexer reroot best-effort */ }
+        setGraphVersion((v) => v + 1);
+      } catch { /* best-effort: never let a cd break the UI */ }
+    };
     cliEvents.on('config_changed', onConfigChanged);
     cliEvents.on('graph_changed', onGraphChanged);
+    cliEvents.on('cwd_changed', onCwdChanged);
     return () => {
       cliEvents.off('config_changed', onConfigChanged);
       cliEvents.off('graph_changed', onGraphChanged);
+      cliEvents.off('cwd_changed', onCwdChanged);
     };
   }, []);
 
-  // Token meter: system-prompt size is recomputed only when the agent/plan-mode changes
-  // (rebuilding it every keystroke would be wasteful); history size tracks the transcript.
+  // Token meter: "tokens that will be sent" = the system-prompt TEXT (built for the ACTIVE context
+  // mode) + the tool-schema JSON actually put on the wire — that schema payload is the main thing
+  // Smart vs Full changes, so it must be counted or the meter looks identical between modes.
+  // Recomputed on agent / plan-mode change AND on any /config toggle (so switching Smart↔Full moves it).
   useEffect(() => {
-    try {
-      const persona = personasRef.current?.[defaultAgent] || personasRef.current?.bimax;
-      const sys = persona?.getSystemPrompt({ planMode: options.governor.mode === 'plan' }) || '';
-      setSystemPromptTokens(estimateTokens(sys));
-    } catch { /* best-effort */ }
+    const recompute = () => {
+      try {
+        const mode = ((getConfig().contextMode as 'smart' | 'full') || 'smart');
+        const persona = personasRef.current?.[defaultAgent] || personasRef.current?.bimax;
+        const sys = persona?.getSystemPrompt({ planMode: options.governor.mode === 'plan', contextMode: mode }) || '';
+        let toolTokens = 0;
+        try { toolTokens = estimateTokens(JSON.stringify(options.toolRegistry.getSchemas({ mode }))); } catch { /* registry optional */ }
+        setSystemPromptTokens(estimateTokens(sys) + toolTokens);
+      } catch { /* best-effort */ }
+    };
+    recompute();
+    cliEvents.on('config_changed', recompute);
+    return () => { cliEvents.off('config_changed', recompute); };
   }, [defaultAgent, options.governor.mode]);
 
   useEffect(() => {
@@ -788,7 +811,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       try {
         const context: CommandContext = {
           cwd: process.cwd(),
-          options,
+          // Inject the live active persona so commands like /context can read the real system
+          // prompt (options.persona is null at startup; the actual instances live in personasRef).
+          options: { ...options, persona: personasRef.current?.[defaultAgent] || personasRef.current?.bimax },
           codebaseIndexer,
           graphStore,
           saveConfig,
