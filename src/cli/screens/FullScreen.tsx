@@ -19,6 +19,7 @@ import { setVerifyEnabled, verifyHook, registerVerifyGraphStore, VERIFY_TOOLS } 
 import { setSandboxEnabled } from '../../sandbox/exec.sandbox';
 import { Footer } from '../components/Footer';
 import { decideTier, applyBrief, Tier } from '../model.router';
+import { getInkInstance } from '../inkInstance';
 import { PermissionDialog } from '../components/PermissionDialog';
 import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
@@ -249,10 +250,12 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [historyTokens, setHistoryTokens] = useState(0);
   const onboardingStartedRef = useRef(false);
 
-  // Ink 3 leaves ghost box-frames after a terminal resize: it erases the previous
-  // live frame using the OLD width, so wrapped lines don't line up. On resize we
-  // wipe the terminal and remount <Static> (via clearEpoch) so the whole transcript
-  // re-prints cleanly at the new width. Debounced to the trailing edge so a
+  // Ink 3 leaves ghost box-frames after a terminal resize: it erases the previous live frame
+  // using the OLD width, so wrapped lines don't line up. On resize we (1) reset Ink's own frame
+  // tracking via instance.clear() — without this Ink still believes the stale frame is on screen
+  // and erases the wrong lines on its next paint, which is the real source of the ghost — then
+  // (2) wipe the terminal + scrollback and (3) remount <Static> (via clearEpoch) so the whole
+  // transcript re-prints cleanly at the new width. Debounced to the trailing edge so a
   // drag-resize repaints once it settles rather than on every intermediate size.
   useEffect(() => {
     const out = process.stdout;
@@ -261,6 +264,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     const onResize = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
+        try { getInkInstance()?.clear(); } catch { /* instance optional */ }
         out.write('\x1b[2J\x1b[3J\x1b[H');
         setClearEpoch((e) => e + 1);
       }, 80);

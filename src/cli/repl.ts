@@ -5,6 +5,7 @@ import { CodebaseIndexer } from '../graph/indexer';
 import { GraphStore } from '../graph/graph.store';
 import { GlobalPrompter } from './prompter';
 import { FullScreen } from './screens/FullScreen';
+import { setInkInstance } from './inkInstance';
 import { ThemeName } from './themes';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
@@ -36,7 +37,7 @@ export async function startRepl(
   // starts at the top of an empty screen instead of below whatever was already in the terminal.
   try { process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); } catch { /* non-TTY: nothing to clear */ }
 
-  render(
+  const instance = render(
     React.createElement(FullScreen, {
       taskPipeline,
       codebaseIndexer,
@@ -44,4 +45,6 @@ export async function startRepl(
       options,
     }),
   );
+  // Expose the instance so the resize handler can reset Ink's frame tracking (kills resize ghosts).
+  setInkInstance(instance);
 }
