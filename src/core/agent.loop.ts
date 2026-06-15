@@ -6,6 +6,7 @@ import { IGovernor } from './interfaces';
 import { Logger } from '../utils';
 import { ContextManager } from '../memory/context.manager';
 import { cliEvents, ToolCallEntry } from '../cli/events';
+import { getActiveTodos } from '../tools/implementations/todo.tool';
 
 export class AgentLoop {
   private contextManager: ContextManager;
@@ -40,6 +41,10 @@ export class AgentLoop {
     // spin the loop, while a flaky one still gets a fresh attempt (new key / re-sample).
     let transientRetries = 0;
     const MAX_TRANSIENT_RETRIES = 2;
+    // Bounds the "keep going while todos are open" persistence below, so a model that refuses to
+    // finish (or keeps re-opening items) can't spin the loop forever.
+    let persistenceNudges = 0;
+    const MAX_PERSISTENCE_NUDGES = 4;
 
     for (let i = 0; i < maxIter; i++) {
       // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
@@ -118,11 +123,28 @@ export class AgentLoop {
         this.messages.push({ role: 'assistant', content: currentContent });
       }
 
+      // Drop identical tool calls the model sometimes emits twice in one turn (e.g. cd x2): same name
+      // + same args = redundant work and duplicate output. Keep the first of each.
+      if (toolCalls.length > 1) {
+        const seen = new Set<string>();
+        const unique = toolCalls.filter(tc => {
+          const key = `${tc.name}:${tc.args}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        if (unique.length < toolCalls.length) {
+          Logger.warn(`[AgentLoop] Dropped ${toolCalls.length - unique.length} duplicate tool call(s).`);
+          toolCalls.length = 0;
+          toolCalls.push(...unique);
+        }
+      }
+
       if (toolCalls.length > 0) {
         // Build the tool_calls payload for the assistant message
         const asstMsg: Message = { role: 'assistant', tool_calls: [] };
         if (currentContent) asstMsg.content = currentContent;
-        
+
         for (const tc of toolCalls) {
           asstMsg.tool_calls!.push({
             id: tc.id,
@@ -214,7 +236,21 @@ export class AgentLoop {
           });
           continue;
         }
-        // No tool calls, task complete
+        // Persistence ("beast mode"): if the model tries to stop but its own todo list still has open
+        // items, push it to keep going instead of handing back half-done. Bounded so it can't spin.
+        const incomplete = getActiveTodos().filter(t => t.status !== 'completed');
+        if (incomplete.length > 0 && persistenceNudges < MAX_PERSISTENCE_NUDGES) {
+          persistenceNudges++;
+          this.messages.push({
+            role: 'user',
+            content:
+              `You stopped, but the task isn't finished — these items on your own todo list are still open:\n` +
+              incomplete.map(t => `- ${t.content} (${t.status})`).join('\n') +
+              `\nKeep working through them now. Don't hand back until they're all completed — or, if you're genuinely blocked, say exactly what's blocking and why.`,
+          });
+          continue;
+        }
+        // No tool calls and nothing left open — task complete.
         return;
       }
     }

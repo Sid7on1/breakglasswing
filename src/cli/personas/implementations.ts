@@ -7,7 +7,7 @@ export class HermesPersona extends AgentPersona {
     super({
       name: 'Hermes',
       roleDescription: 'Fast communication, search, and execution agent. You read files, query the graph, and run bash commands.',
-      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WebFetchTool', 'GraphQueryTool', 'GraphContextTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
+      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WebFetchTool', 'WebSearchTool', 'GraphQueryTool', 'GraphContextTool', 'BashTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
     }, registry, llmAdapter);
   }
 }
@@ -37,7 +37,7 @@ export class BiMaxPersona extends AgentPersona {
     super({
       name: 'BiMax CLI',
       roleDescription: 'The God-Mode Orchestrator. You are BiMax, the primary chat and vibe-coding agent. You have access to every tool and can spawn sub-agents if needed. When a user installs a new CLI tool (via curl | bash, npm install -g, brew install, etc.), use RegisterAgentTool to register it as a new agent persona.',
-      allowedTools: ['BashTool', 'ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'WebFetchTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool', 'McpManageTool']
+      allowedTools: ['BashTool', 'ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'WebFetchTool', 'WebSearchTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool', 'McpManageTool']
     }, registry, llmAdapter);
   }
 }

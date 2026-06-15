@@ -136,6 +136,10 @@ export class LlmAdapter implements LLMProvider {
   // Optional reasoning budget for thinking models (e.g. minimax). Off by default —
   // when set ('low'|'medium'|'high'), sent as reasoning_effort to trade depth for speed.
   public reasoningEffort?: string = process.env.BGW_REASONING_EFFORT || undefined;
+  // Allow the model to emit several tool calls in ONE turn (batched reads/greps run concurrently in
+  // the loop → far faster investigation). Default ON; disable for backends that reject multi-tool
+  // turns (e.g. NVIDIA NIM) via config or BGW_PARALLEL_TOOL_CALLS=false.
+  public parallelToolCalls: boolean = process.env.BGW_PARALLEL_TOOL_CALLS !== 'false';
 
   private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
 
@@ -145,12 +149,13 @@ export class LlmAdapter implements LLMProvider {
     this.budgetVeto = budgetVeto;
   }
 
-  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string }) {
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean }) {
     if (cfg.model) this.defaultModel = cfg.model;
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
     if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
     if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
+    if (cfg.parallelToolCalls !== undefined) this.parallelToolCalls = cfg.parallelToolCalls;
   }
 
   private createClient(keyResult: KeyResult): OpenAI {
@@ -442,7 +447,9 @@ export class LlmAdapter implements LLMProvider {
         // The agent loop already executes tool calls sequentially, so constrain
         // the model to one call per turn by default. Opt back in with
         // BGW_PARALLEL_TOOL_CALLS=true for providers that support it.
-        if (process.env.BGW_PARALLEL_TOOL_CALLS !== 'true') {
+        // Default ON now (batched tool calls = faster). Only constrain to single-call for backends
+        // that reject multi-tool turns, via config / BGW_PARALLEL_TOOL_CALLS=false.
+        if (!this.parallelToolCalls) {
           requestOptions.parallel_tool_calls = false;
         }
       }

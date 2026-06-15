@@ -44,15 +44,12 @@ export const createCdTool = (governor: IGovernor) => buildTool({
     // the panel keeps showing whatever was indexed at launch (e.g. a stale home-dir map).
     cliEvents.emit('cwd_changed', absolutePath);
 
-    // Return useful context about the new directory
-    const entries = fs.readdirSync(absolutePath).slice(0, 30);
+    // Return a single concise line (not a 23-line JSON blob) — enough for the model to know where it
+    // landed and roughly what's there; it can `ls` for the full listing if it actually needs it.
+    const all = fs.readdirSync(absolutePath).filter(n => n !== '.DS_Store');
     const isCodebase = CODEBASE_MARKERS.some(m => fs.existsSync(path.join(absolutePath, m)));
-
-    return {
-      success: true,
-      newCwd: absolutePath,
-      isCodebase,
-      contents: entries,
-    };
+    const preview = all.slice(0, 12).join(', ');
+    const more = all.length > 12 ? ` …(+${all.length - 12} more)` : '';
+    return `Now in ${absolutePath}${isCodebase ? ' (codebase)' : ''}. Contains: ${preview}${more}`;
   }
 }, governor);

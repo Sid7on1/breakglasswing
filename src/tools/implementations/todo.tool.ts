@@ -13,6 +13,12 @@ const STATUS_ICON: Record<TodoItem['status'], string> = {
   completed: '[x]',
 };
 
+// The most recent todo list the agent wrote this session. The agent loop reads it to decide whether
+// to keep going (persistence) when the model tries to stop with items still open.
+let lastTodos: TodoItem[] = [];
+export function getActiveTodos(): TodoItem[] { return lastTodos; }
+export function clearActiveTodos(): void { lastTodos = []; }
+
 export function renderTodoList(todos: TodoItem[]): string {
   if (todos.length === 0) return 'Todo list is empty.';
   const done = todos.filter(t => t.status === 'completed').length;
@@ -56,6 +62,7 @@ export const createTodoWriteTool = (governor: IGovernor) => buildTool({
         (t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed'),
     );
 
+    lastTodos = todos; // remember for the loop's persistence check
     // Push to the UI: full list into app state, compact progress into the status bar.
     cliEvents.emit('todo_update', todos);
     const done = todos.filter(t => t.status === 'completed').length;

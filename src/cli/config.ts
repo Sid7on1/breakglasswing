@@ -56,6 +56,9 @@ export interface CliConfig {
   // the safe built-in default (128k). Set this to YOUR model's real window — bimax talks to any
   // OpenAI-compatible provider, so we can't reliably auto-detect it (no Claude-style per-variant map).
   contextWindowTokens: number;
+  // Let the model emit multiple tool calls per turn (batched reads/greps run concurrently → faster).
+  // Default true; set false for backends that reject multi-tool turns (e.g. NVIDIA NIM).
+  parallelToolCalls: boolean;
 }
 
 const DEFAULTS: CliConfig = {
@@ -88,6 +91,7 @@ const DEFAULTS: CliConfig = {
   showTokenMeter: true,
   contextMode: 'smart',
   contextWindowTokens: 0,
+  parallelToolCalls: true,
 };
 
 let cached: CliConfig | null = null;

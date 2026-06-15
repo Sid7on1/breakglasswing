@@ -26,6 +26,7 @@ import { createRememberTool } from '../tools/implementations/remember.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
+import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { globalSkillService } from '../skills/skill.service';
 import { globalMcpManager } from '../mcp/manager';
 import { globalProjectMemory } from '../memory/project.memory';
@@ -71,6 +72,7 @@ async function runWorker() {
     toolRegistry.register(createSkillTool(governor, globalSkillService));
     toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
+    toolRegistry.register(createWebSearchTool(governor));
 
     // 2. Instantiate Persona
     let agent: AgentPersona;

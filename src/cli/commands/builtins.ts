@@ -241,6 +241,10 @@ globalCommandRegistry.register({
           return { type: 'message', level: 'error', content: `contextMode must be 'smart' or 'full'.` };
         }
         updates.contextMode = val;
+      } else if (key === 'parallelTools' || key === 'parallelToolCalls') {
+        const on = val === 'true' || val === 'on';
+        updates.parallelToolCalls = on;
+        try { context.options.llmAdapter?.applyConfig({ parallelToolCalls: on }); } catch { /* adapter optional */ }
       } else if (key === 'contextWindowTokens') {
         const n = parseInt(val, 10);
         if (isNaN(n) || n < 0) {
