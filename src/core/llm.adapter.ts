@@ -165,8 +165,20 @@ export class LlmAdapter implements LLMProvider {
     if (cfg.liteModel !== undefined) this.liteModel = cfg.liteModel || undefined;
   }
 
+  // Reuse one OpenAI client per (baseURL, key) instead of constructing a fresh one — with its own
+  // connection pool — on every request. Keep-alive then survives across calls (faster, fewer TLS
+  // handshakes). Per-request options like timeout are still passed at call time, so this is safe.
+  private clientCache = new Map<string, OpenAI>();
   private createClient(keyResult: KeyResult): OpenAI {
-    return new OpenAI({ apiKey: keyResult.keyStr || '', baseURL: keyResult.baseURL || 'https://integrate.api.nvidia.com/v1', maxRetries: 3 });
+    const apiKey = keyResult.keyStr || '';
+    const baseURL = keyResult.baseURL || 'https://integrate.api.nvidia.com/v1';
+    const cacheKey = `${baseURL} ${apiKey}`;
+    let client = this.clientCache.get(cacheKey);
+    if (!client) {
+      client = new OpenAI({ apiKey, baseURL, maxRetries: 3 });
+      this.clientCache.set(cacheKey, client);
+    }
+    return client;
   }
 
   private pickModel(keyResult: KeyResult, lite?: boolean): string {
