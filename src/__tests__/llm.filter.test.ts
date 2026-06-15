@@ -49,6 +49,33 @@ describe('ThinkTagFilter', () => {
     expect(r.text).toBe('a < b and <thin air');
     expect(r.thinking).toBe('');
   });
+
+  // The leak from the live transcript: step-3.5/minimax emit reasoning then ONLY a closing tag.
+  it('diverts opener-less reasoning ending in a stray </think>', () => {
+    const r = run(['The user said hi. Let me greet them.</think>Hey! What are we building today?']);
+    expect(r.text).toBe('Hey! What are we building today?');
+    expect(r.thinking).toBe('The user said hi. Let me greet them.');
+  });
+
+  it('handles opener-less reasoning split across many chunks', () => {
+    const r = run(['reason', 'ing more', ' reasoning</thi', 'nk>the ', 'answer']);
+    expect(r.text).toBe('the answer');
+    expect(r.thinking).toBe('reasoning more reasoning');
+  });
+
+  it('treats a tag-free turn as the answer, never as thinking', () => {
+    const r = run(['Just', ' a normal answer.']);
+    expect(r.text).toBe('Just a normal answer.');
+    expect(r.thinking).toBe('');
+  });
+
+  it('with implicit mode off, leaves an opener-less closer in the text (plain models)', () => {
+    const f = new ThinkTagFilter(false);
+    const a = f.process('answer</think>more');
+    const b = f.flush();
+    expect(a.text + b.text).toContain('answer');
+    expect((a.thinking + b.thinking)).toBe('');
+  });
 });
 
 describe('stripThink', () => {

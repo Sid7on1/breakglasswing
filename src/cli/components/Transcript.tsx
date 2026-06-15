@@ -30,6 +30,9 @@ export function MessageRow({ msg, theme, searchQuery = '' }: MessageRowProps) {
         </Box>
       ) : msg.role === 'assistant' ? (
         <Box flexDirection="column">
+          {typeof msg.thoughtMs === 'number' && msg.thoughtMs >= 500 && (
+            <Text color={theme.subtle}>✻ Thought for {Math.round(msg.thoughtMs / 1000)}s</Text>
+          )}
           {msg.toolCalls && msg.toolCalls.length > 0 && (
             <Box flexDirection="column" marginBottom={1}>
               {msg.toolCalls.map((tc) => (

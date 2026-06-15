@@ -26,7 +26,7 @@ export class AgentLoop {
   async *execute(
     initialMessages: Message[],
     systemPrompt: string,
-    options?: { maxIterations?: number; contextMode?: 'smart' | 'full' },
+    options?: { maxIterations?: number; contextMode?: 'smart' | 'full'; useLite?: boolean },
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
@@ -56,6 +56,9 @@ export class AgentLoop {
       const generator = this.llm.chat(this.messages, {
         system: systemPrompt,
         tools: this.tools.getSchemas({ mode: contextMode }) as any,
+        // Tier routing: when the turn was routed to the lite model, every step of this loop
+        // (incl. tool-call follow-ups) runs on lite. Heavy turns leave this unset → coding model.
+        lite: options?.useLite,
       });
 
       const toolCalls: { id: string; name: string; args: string }[] = [];

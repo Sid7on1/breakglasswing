@@ -32,6 +32,10 @@ export async function startRepl(
 ) {
   GlobalPrompter.register();
 
+  // Open clean and full-screen, like Claude Code: wipe the terminal AND its scrollback so bimax
+  // starts at the top of an empty screen instead of below whatever was already in the terminal.
+  try { process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); } catch { /* non-TTY: nothing to clear */ }
+
   render(
     React.createElement(FullScreen, {
       taskPipeline,

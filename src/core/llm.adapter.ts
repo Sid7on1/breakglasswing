@@ -39,14 +39,30 @@ export function classifyStreamError(e: any): { status: number; recoverable: bool
 
 /**
  * Streaming filter that separates <think>...</think> spans from visible content.
- * Reasoning models (MiniMax, DeepSeek, QwQ...) interleave thinking inside content;
- * without this the internal monologue leaks into the user-facing reply.
+ * Reasoning models (MiniMax, DeepSeek, step-3.5, QwQ...) interleave thinking inside the
+ * content channel; without this the internal monologue leaks into the user-facing reply.
+ *
+ * Two emission shapes are handled:
+ *  - Paired:   `<think>reasoning</think>answer` — divert the span between the tags.
+ *  - Opener-less: `reasoning</think>answer` — several models (step-3.5, minimax on NIM)
+ *    emit the reasoning first and ONLY a closing tag. The old filter, looking for `<think>`
+ *    first, treated all the reasoning as the answer and leaked it. So in "implicit" mode the
+ *    filter buffers leading content silently until it can tell which it is: a `</think>`
+ *    proves the buffer was reasoning (divert it); the stream ending with no closer proves it
+ *    was the answer (emit it). This never leaks reasoning, at the cost of the answer from a
+ *    NON-reasoning model arriving in one burst at stream end — acceptable since the product's
+ *    default models are reasoning models; disable with implicit=false for plain models.
  */
 export class ThinkTagFilter {
   private pending = '';
   private inThink = false;
+  private seenOpen = false; // a real <think> opener has appeared this turn
+  private decided = false;  // leading region resolved → subsequent content streams visibly
+  private preamble = '';    // leading content held back while still tentative (implicit mode)
   private static readonly OPEN = '<think>';
   private static readonly CLOSE = '</think>';
+
+  constructor(private implicit: boolean = true) {}
 
   /** Returns visible text and thinking text extracted from this token. */
   process(token: string): { text: string; thinking: string } {
@@ -55,19 +71,66 @@ export class ThinkTagFilter {
     let thinking = '';
 
     for (;;) {
-      const tag = this.inThink ? ThinkTagFilter.CLOSE : ThinkTagFilter.OPEN;
-      const idx = this.pending.indexOf(tag);
-      if (idx !== -1) {
-        const before = this.pending.slice(0, idx);
-        if (this.inThink) thinking += before; else text += before;
-        this.pending = this.pending.slice(idx + tag.length);
-        this.inThink = !this.inThink;
+      if (this.inThink) {
+        const idx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+        if (idx !== -1) {
+          thinking += this.pending.slice(0, idx);
+          this.pending = this.pending.slice(idx + ThinkTagFilter.CLOSE.length);
+          this.inThink = false;
+          this.decided = true;
+          continue;
+        }
+        const hold = this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE);
+        thinking += this.pending.slice(0, this.pending.length - hold);
+        this.pending = this.pending.slice(this.pending.length - hold);
+        break;
+      }
+
+      const openIdx = this.pending.indexOf(ThinkTagFilter.OPEN);
+
+      // Tentative leading region (implicit mode, before any tag): could be opener-less
+      // reasoning or just the answer. Resolve only on a definite signal.
+      if (this.implicit && !this.seenOpen && !this.decided) {
+        const closeIdx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+        if (closeIdx !== -1 && (openIdx === -1 || closeIdx < openIdx)) {
+          // Opener-less closer: everything buffered + up to the tag was reasoning.
+          thinking += this.preamble + this.pending.slice(0, closeIdx);
+          this.preamble = '';
+          this.pending = this.pending.slice(closeIdx + ThinkTagFilter.CLOSE.length);
+          this.seenOpen = true;
+          this.decided = true;
+          continue;
+        }
+        if (openIdx !== -1) {
+          // A real opener: the buffered preamble was answer text preceding an explicit block.
+          text += this.preamble + this.pending.slice(0, openIdx);
+          this.preamble = '';
+          this.pending = this.pending.slice(openIdx + ThinkTagFilter.OPEN.length);
+          this.inThink = true;
+          this.seenOpen = true;
+          this.decided = true;
+          continue;
+        }
+        // No full tag yet — buffer, holding back any suffix that could be a split tag.
+        const hold = Math.max(
+          this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN),
+          this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE),
+        );
+        this.preamble += this.pending.slice(0, this.pending.length - hold);
+        this.pending = this.pending.slice(this.pending.length - hold);
+        break;
+      }
+
+      // Visible streaming region: emit text, but a new <think> block may still open.
+      if (openIdx !== -1) {
+        text += this.pending.slice(0, openIdx);
+        this.pending = this.pending.slice(openIdx + ThinkTagFilter.OPEN.length);
+        this.inThink = true;
+        this.seenOpen = true;
         continue;
       }
-      // Hold back any suffix that could be the start of the tag split across chunks
-      const hold = this.partialTagSuffix(this.pending, tag);
-      const emit = this.pending.slice(0, this.pending.length - hold);
-      if (this.inThink) thinking += emit; else text += emit;
+      const hold = this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN);
+      text += this.pending.slice(0, this.pending.length - hold);
       this.pending = this.pending.slice(this.pending.length - hold);
       break;
     }
@@ -79,7 +142,14 @@ export class ThinkTagFilter {
   flush(): { text: string; thinking: string } {
     const rest = this.pending;
     this.pending = '';
-    if (this.inThink) return { text: '', thinking: rest };
+    if (this.inThink) return { text: '', thinking: this.preamble + rest };
+    // Tentative buffer never resolved → the stream had no closing tag, so the leading
+    // region was the answer all along. Emit it as visible text.
+    if (!this.decided && this.preamble) {
+      const t = this.preamble + rest;
+      this.preamble = '';
+      return { text: t, thinking: '' };
+    }
     return { text: rest, thinking: '' };
   }
 
@@ -128,14 +198,27 @@ export class LlmAdapter implements LLMProvider {
   public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
   public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
   public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
+  // Nucleus sampling cap. Clipping the low-probability tail is what actually curbs the
+  // "dropped a tool argument / fabricated a path" failures on reasoning models — far more
+  // than lowering temperature, which on a tuned MoE just pushes it off-distribution. Default
+  // 0.95 (minimax model card + opencode's provider/transform.ts).
+  public topP: number = parseFloat(process.env.BGW_TOP_P || '0.95');
   public maxTokens: number = parseInt(process.env.BGW_MAX_TOKENS || '4096', 10);
-  // How long to wait for the next streamed chunk before assuming the stream stalled.
-  // Configurable because slow reasoning models (minimax) can legitimately pause between
-  // chunks longer than the original hardcoded 60s.
+  // Inter-chunk stall timeout: how long to wait for the NEXT streamed chunk once the stream
+  // is already flowing, before assuming it stalled.
   public streamReadTimeoutMs = parseInt(process.env.BGW_STREAM_TIMEOUT_MS || '60000', 10);
+  // Time-to-first-token budget. Cold starts on slow reasoning models (minimax) routinely run
+  // 60–90s before the first token while later chunks arrive quickly, so the first chunk gets a
+  // longer budget than the inter-chunk one — a real cold start isn't killed as a "stall," but a
+  // genuinely dead stream is still caught.
+  public firstChunkTimeoutMs = parseInt(process.env.BGW_FIRST_CHUNK_TIMEOUT_MS || '120000', 10);
   // Optional reasoning budget for thinking models (e.g. minimax). Off by default —
   // when set ('low'|'medium'|'high'), sent as reasoning_effort to trade depth for speed.
   public reasoningEffort?: string = process.env.BGW_REASONING_EFFORT || undefined;
+  // Handle opener-less reasoning (`reasoning</think>answer`, no leading <think>) by buffering
+  // leading content until a closer proves it was thinking. On for the default reasoning models;
+  // set BGW_IMPLICIT_THINK=false for plain models so their answers stream token-by-token.
+  public implicitThink: boolean = process.env.BGW_IMPLICIT_THINK !== 'false';
   // Allow the model to emit several tool calls in ONE turn (batched reads/greps run concurrently in
   // the loop → far faster investigation). Default ON; disable for backends that reject multi-tool
   // turns (e.g. NVIDIA NIM) via config or BGW_PARALLEL_TOOL_CALLS=false.
@@ -155,10 +238,11 @@ export class LlmAdapter implements LLMProvider {
     this.budgetVeto = budgetVeto;
   }
 
-  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
     if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
+    if (cfg.topP !== undefined) this.topP = cfg.topP;
     if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
     if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
     if (cfg.parallelToolCalls !== undefined) this.parallelToolCalls = cfg.parallelToolCalls;
@@ -179,6 +263,22 @@ export class LlmAdapter implements LLMProvider {
       this.clientCache.set(cacheKey, client);
     }
     return client;
+  }
+
+  /**
+   * Resolve the sampling regime for a model. Reasoning MoE models are tuned for a specific
+   * temperature/top_p and go pathological off it: minimax's own model card specifies
+   * temperature 1.0 + top_p 0.95, and a blanket 0.7-with-no-top_p (the prior default) measurably
+   * increased dropped tool arguments, fabricated paths, and run-to-run variance. So minimax is
+   * pinned to its recommended regime; everything else uses the configured temperature. In all
+   * cases we apply the top_p tail-clip, which is the real lever against those failures. An
+   * explicit per-call `temperature` (e.g. the deterministic aux callers) always wins. Mirrors
+   * opencode's provider/transform.ts.
+   */
+  public resolveSampling(model: string, override?: number): { temperature: number; top_p: number } {
+    const id = (model || '').toLowerCase();
+    if (id.includes('minimax')) return { temperature: override ?? 1.0, top_p: this.topP };
+    return { temperature: override ?? this.temperature, top_p: this.topP };
   }
 
   private pickModel(keyResult: KeyResult, lite?: boolean): string {
@@ -444,12 +544,15 @@ export class LlmAdapter implements LLMProvider {
         ? [{ role: 'system', content: options.system }, ...messages]
         : messages;
 
+      const model = this.pickModel(kr, options.lite);
+      const sampling = this.resolveSampling(model, options.temperature);
       const requestOptions: any = {
-        model: this.pickModel(kr, options.lite),
+        model,
         messages: finalMessages,
         stream: true,
         stream_options: { include_usage: true },
-        temperature: options.temperature ?? this.temperature,
+        temperature: sampling.temperature,
+        top_p: sampling.top_p,
         max_tokens: options.maxTokens ?? this.maxTokens,
       };
 
@@ -486,17 +589,20 @@ export class LlmAdapter implements LLMProvider {
       let activeToolCallId = '';
       let activeToolName = '';
       let activeToolArgs = '';
-      const thinkFilter = new ThinkTagFilter();
+      const thinkFilter = new ThinkTagFilter(this.implicitThink);
 
       const iterator = stream[Symbol.asyncIterator]();
+      let receivedFirstChunk = false;
       while (true) {
         const nextPromise = iterator.next();
-        // Guard against a silently stalled stream. The timer MUST be cleared once the
-        // chunk arrives, or every chunk leaks a 60s timer (and a later unhandled
-        // rejection) — a long reasoning stream would spawn hundreds of them.
+        // Guard against a silently stalled stream. The first chunk (time-to-first-token) gets a
+        // longer budget than later chunks: a cold start is a legitimate long pause, a mid-stream
+        // gap is not. The timer MUST be cleared once the chunk arrives, or every chunk leaks a
+        // timer (and a later unhandled rejection) — a long reasoning stream would spawn hundreds.
+        const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : this.firstChunkTimeoutMs;
         let timeoutHandle: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<any>((_, reject) => {
-          timeoutHandle = setTimeout(() => reject(new Error(`Stream read timeout: no data from the API for ${Math.round(this.streamReadTimeoutMs / 1000)}s (check provider status / API key)`)), this.streamReadTimeoutMs);
+          timeoutHandle = setTimeout(() => reject(new Error(`Stream read timeout: no data from the API for ${Math.round(chunkTimeoutMs / 1000)}s (check provider status / API key)`)), chunkTimeoutMs);
         });
 
         let result: any;
@@ -506,6 +612,7 @@ export class LlmAdapter implements LLMProvider {
           clearTimeout(timeoutHandle!);
         }
         if (result.done) break;
+        receivedFirstChunk = true;
 
         const chunk = result.value;
 

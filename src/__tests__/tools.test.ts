@@ -119,6 +119,24 @@ describe('GlobTool', () => {
     const res = await tool.execute({ pattern: '**/*.xyz', path: dir }, { cwd: dir });
     expect(res).toContain('No files matched');
   });
+
+  // Defense against parameter-dropping + path-fabrication (report bugs G/K): the result must state
+  // WHERE it searched, so a model that dropped a user-specified `path` can see it scanned the wrong
+  // place instead of silently scanning cwd and then claiming "the path doesn't exist".
+  it('reports the search root it actually used', async () => {
+    await fs.mkdir(path.join(dir, 'engine'));
+    await fs.writeFile(path.join(dir, 'engine', 'a.ts'), '');
+    await fs.writeFile(path.join(dir, 'top.ts'), '');
+
+    const scoped = await tool.execute({ pattern: '**/*.ts', path: 'engine' }, { cwd: dir });
+    expect(scoped).toContain('under engine');
+    expect(scoped).not.toContain('top.ts');
+
+    // Path omitted → defaults to cwd, and the output says so (not silently misleading).
+    const dropped = await tool.execute({ pattern: '**/*.ts' }, { cwd: dir });
+    expect(dropped).toContain('under the current directory');
+    expect(dropped).toContain('top.ts');
+  });
 });
 
 describe('TodoWriteTool', () => {

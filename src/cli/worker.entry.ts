@@ -47,7 +47,7 @@ async function runWorker() {
     try {
       const cfg = await loadConfig();
       llmAdapter.applyConfig({
-        model: cfg.model, liteModel: cfg.liteModel, temperature: cfg.temperature,
+        model: cfg.model, liteModel: cfg.liteModel, temperature: cfg.temperature, topP: cfg.topP,
         maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, parallelToolCalls: cfg.parallelToolCalls,
       });
     } catch { /* fall back to adapter defaults if config can't be read in the worker */ }

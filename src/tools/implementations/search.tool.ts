@@ -12,6 +12,19 @@ function resolvePath(p: string, cwd: string): string {
   return path.resolve(cwd, p);
 }
 
+/**
+ * Human-readable label for where a search actually ran, relative to cwd. Surfacing this in the
+ * result is the defense against a model that DROPPED a user-specified `path` arg: instead of
+ * silently scanning the whole cwd and then (sometimes) claiming "the path doesn't exist", the
+ * output now states the directory it searched, so the discrepancy is visible to model and user.
+ */
+function describeRoot(root: string, cwd: string): string {
+  const rel = path.relative(cwd, root);
+  if (rel === '') return 'the current directory';
+  if (rel.startsWith('..')) return root; // outside cwd → show absolute
+  return rel;
+}
+
 /** Cheap binary sniff: a NUL byte in the first chunk means "don't grep this". */
 function looksBinary(sample: string): boolean {
   return sample.includes('\u0000');
@@ -134,17 +147,18 @@ export const createGrepTool = (governor: IGovernor) => buildTool({
       }
     }
 
+    const where = rootStat.isFile() ? (path.relative(cwd, root) || path.basename(root)) : describeRoot(root, cwd);
     if (outputMode === 'files') {
-      if (matchedFiles.length === 0) return `No files matched /${args.pattern}/.`;
-      return `${matchedFiles.length} file(s) matched:\n${matchedFiles.sort().join('\n')}`;
+      if (matchedFiles.length === 0) return `No files matched /${args.pattern}/ in ${where}.`;
+      return `${matchedFiles.length} file(s) matched in ${where}:\n${matchedFiles.sort().join('\n')}`;
     }
     if (outputMode === 'count') {
-      if (counts.length === 0) return `No matches for /${args.pattern}/.`;
+      if (counts.length === 0) return `No matches for /${args.pattern}/ in ${where}.`;
       counts.sort((a, b) => b.n - a.n);
       return counts.map(c => `${c.n}\t${c.file}`).join('\n');
     }
-    if (contentLines.length === 0) return `No matches for /${args.pattern}/.`;
-    const header = `Found ${total} match(es)${total > maxResults ? ` (showing first ${maxResults})` : ''}:`;
+    if (contentLines.length === 0) return `No matches for /${args.pattern}/ in ${where}.`;
+    const header = `Found ${total} match(es) in ${where}${total > maxResults ? ` (showing first ${maxResults})` : ''}:`;
     return `${header}\n${contentLines.join('\n')}`;
   },
 }, governor);
@@ -186,10 +200,11 @@ export const createGlobTool = (governor: IGovernor) => buildTool({
       matches.push({ file: path.relative(cwd, f) || f, mtime: stat ? stat.mtimeMs : 0 });
     }
 
-    if (matches.length === 0) return `No files matched ${args.pattern}.`;
+    const where = describeRoot(root, cwd);
+    if (matches.length === 0) return `No files matched ${args.pattern} under ${where}.`;
     matches.sort((a, b) => b.mtime - a.mtime);
     const shown = matches.slice(0, maxResults);
     const suffix = matches.length > maxResults ? `\n...and ${matches.length - maxResults} more` : '';
-    return `${matches.length} file(s) matched ${args.pattern}:\n${shown.map(m => m.file).join('\n')}${suffix}`;
+    return `${matches.length} file(s) matched ${args.pattern} under ${where}:\n${shown.map(m => m.file).join('\n')}${suffix}`;
   },
 }, governor);

@@ -93,6 +93,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
     model: cfg.model,
     timeout: cfg.timeout,
     temperature: cfg.temperature,
+    topP: cfg.topP,
     maxTokens: cfg.maxTokens,
     reasoningEffort: cfg.reasoningEffort,
     parallelToolCalls: cfg.parallelToolCalls,

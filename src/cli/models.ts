@@ -22,8 +22,8 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: '230B coding/reasoning/office (slow cold-start)', tier: 'coding' },
 
   // — Fast / lite (verified; good as the LITE model: summaries, self-critic) —
-  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls — the lite default', tier: 'lite' },
-  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: '200B open-source MoE reasoning, agentic', tier: 'lite' },
+  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: '200B open-source MoE reasoning, agentic — the lite default', tier: 'lite' },
+  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls (plain, no reasoning)', tier: 'lite' },
   { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual (Indian languages), coding + math', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
@@ -34,7 +34,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
 
 /** Default model for each slot. */
 export const DEFAULT_CODING_MODEL = 'minimaxai/minimax-m3';
-export const DEFAULT_LITE_MODEL = 'meta/llama-3.1-70b-instruct';
+export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.5-flash';
 
 /** Menu options for a model picker, optionally annotated with which slot is current. */
 export function modelMenuOptions(current?: string): { label: string; value: string; desc: string; category: string }[] {

@@ -89,6 +89,9 @@ export interface MessageEntry {
   payload?: any;
   content: string | React.ReactNode;
   toolCalls?: ToolCallEntry[];
+  // Wall-clock the model spent in its reasoning channel this turn. Rendered as a collapsed
+  // "Thought for Ns" line (Claude Code style) once thinking finishes.
+  thoughtMs?: number;
   timestamp: Date;
 }
 

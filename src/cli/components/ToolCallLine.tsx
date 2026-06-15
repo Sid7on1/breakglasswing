@@ -60,6 +60,36 @@ function summarizeOutput(call: ToolCallEntry): string {
   return lineCount > 1 ? `${preview} (+${lineCount - 1} lines)` : preview;
 }
 
+/**
+ * Claude-Code-style "Added N lines, removed M lines" summary for edit/write tools, computed from
+ * the call's arguments (oldString/newString or content). Returns null for non-edit tools so the
+ * generic output summary is used instead.
+ */
+function editStats(call: ToolCallEntry): string | null {
+  const lines = (s: any) => (typeof s === 'string' && s.length ? s.split('\n').length : 0);
+  let added = 0;
+  let removed = 0;
+  try {
+    const p = JSON.parse(call.input);
+    if (call.toolName === 'EditFileTool') {
+      added = lines(p.newString); removed = lines(p.oldString);
+    } else if (call.toolName === 'WriteFileTool') {
+      added = lines(p.content);
+    } else if (call.toolName === 'MultiEditTool' && Array.isArray(p.edits)) {
+      for (const e of p.edits) { added += lines(e.newString); removed += lines(e.oldString); }
+    } else {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  if (added === 0 && removed === 0) return null;
+  const parts: string[] = [];
+  if (added) parts.push(`Added ${added} line${added === 1 ? '' : 's'}`);
+  if (removed) parts.push(`removed ${removed} line${removed === 1 ? '' : 's'}`);
+  return parts.join(', ');
+}
+
 interface ToolCallLineProps {
   call: ToolCallEntry;
   theme: ThemeColors;
@@ -71,7 +101,8 @@ export function ToolCallLine({ call, theme }: ToolCallLineProps) {
   const dotColor = isError ? theme.error : isRunning ? theme.warning : theme.success;
   const label = TOOL_LABELS[call.toolName] || call.toolName.replace(/Tool$/, '');
   const input = summarizeInput(call);
-  const output = summarizeOutput(call);
+  // For successful edits, prefer the "Added N / removed M lines" diff stat (Claude Code style).
+  const output = (!isError && editStats(call)) || summarizeOutput(call);
 
   return (
     <Box flexDirection="column">

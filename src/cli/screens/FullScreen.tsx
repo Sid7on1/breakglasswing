@@ -18,6 +18,7 @@ import { setGitAutoCommitEnabled, gitAutoCommitHook, GIT_AUTOCOMMIT_TOOLS } from
 import { setVerifyEnabled, verifyHook, registerVerifyGraphStore, VERIFY_TOOLS } from '../../sandbox/verify.loop';
 import { setSandboxEnabled } from '../../sandbox/exec.sandbox';
 import { Footer } from '../components/Footer';
+import { decideTier, applyBrief, Tier } from '../model.router';
 import { PermissionDialog } from '../components/PermissionDialog';
 import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
@@ -197,6 +198,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [history, setHistory] = useState<string[]>(() => loadPromptHistory());
   const [historyIndex, setHistoryIndex] = useState(-1);
   const lastCtrlC = useRef<number>(0);
+  // Manual model-routing override: null = auto (lite decides + escalates), else pinned to a tier.
+  // A ref so the async submit handler always reads the current value (no stale closure).
+  const pinnedTierRef = useRef<Tier | null>(null);
   const [vetoQuestion, setVetoQuestion] = useState<string | null>(null);
   const [vetoOptions, setVetoOptions] = useState<string[]>([]);
   const [vetoResolver, setVetoResolver] = useState<((answer: string) => void) | null>(null);
@@ -429,6 +433,15 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     }
 
     if (char === 'l' && key.ctrl) {
+      return;
+    }
+
+    if (char === 't' && key.ctrl) {
+      // Cycle the routing pointer: auto → pin lite → pin heavy → auto.
+      const next: Tier | null = pinnedTierRef.current === null ? 'lite' : pinnedTierRef.current === 'lite' ? 'heavy' : null;
+      pinnedTierRef.current = next;
+      cliEvents.emit('model_tier', { tier: next ?? 'lite', pinned: next });
+      cliEvents.emit('status', next === null ? 'Routing → auto (lite decides, escalates as needed)' : `Routing pinned → ${next} model`);
       return;
     }
 
@@ -940,6 +953,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     cliEvents.on('tool_call', onToolCall);
     cliEvents.on('tool_call_result', onToolCallResult);
 
+    // Measure reasoning time for the "Thought for Ns" line: clock starts at the first thinking
+    // token and stops at the first visible answer token (or the next tool call).
+    let thinkingStart = 0;
+    let thoughtMs = 0;
+    const stopThinkingClock = () => { if (thinkingStart && !thoughtMs) thoughtMs = Date.now() - thinkingStart; };
+    const onThinking = () => { if (!thinkingStart) thinkingStart = Date.now(); };
+    cliEvents.on('thinking', onThinking);
+
     let tokenBuffer = '';
     let lastRenderTime = Date.now();
 
@@ -958,11 +979,28 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       }
     } catch { /* @-expansion is best-effort */ }
 
+    // Model-tier routing: the lite model is the default responder; escalate to the heavy coding
+    // model only when the turn needs it. A manual pin (Ctrl+T) overrides the decision. The footer
+    // pointer flips to whichever model will actually receive this request.
+    let useLite = true;
+    try {
+      const decision = await decideTier(options.llmAdapter, query, pinnedTierRef.current);
+      useLite = decision.tier === 'lite';
+      cliEvents.emit('model_tier', { tier: decision.tier, pinned: pinnedTierRef.current });
+      if (!useLite) {
+        agentQuery = applyBrief(agentQuery, decision.brief);
+        let heavyName = '';
+        try { heavyName = (getConfig().model || '').split('/').pop() || ''; } catch { /* best-effort */ }
+        addLog('info', `→ heavy model${heavyName ? ` (${heavyName})` : ''}${decision.via === 'pinned' ? ' [pinned]' : ''}${decision.brief ? `: ${decision.brief}` : ''}`);
+      }
+    } catch { /* routing is best-effort; fall back to lite */ }
+
     try {
       await active.execute(agentQuery, (token: string) => {
+        stopThinkingClock(); // first visible token ends the reasoning phase
         totalChars += token.length;
         tokenBuffer += token;
-        
+
         const now = Date.now();
         if (now - lastRenderTime > 50) {
           setStreamingText((prev) => prev + tokenBuffer);
@@ -970,17 +1008,19 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           tokenBuffer = '';
           lastRenderTime = now;
         }
-      }, { maxIterations: options.maxToolIterations, planMode: options.governor.mode === 'plan' });
+      }, { maxIterations: options.maxToolIterations, planMode: options.governor.mode === 'plan', useLite });
 
       if (tokenBuffer) {
         setStreamingText((prev) => prev + tokenBuffer);
         setStreamMeta((m) => ({ ...m, chars: totalChars }));
       }
 
+      stopThinkingClock();
       clearInterval(metaTimer);
       cliEvents.emit('cost_update', totalChars);
       cliEvents.off('tool_call', onToolCall);
       cliEvents.off('tool_call_result', onToolCallResult);
+      cliEvents.off('thinking', onThinking);
       cliEvents.emit('thinking_clear');
 
       // Collect every assistant segment from this turn (multi-step tool loops
@@ -991,6 +1031,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         .map((m: any) => m.content.trim())
         .join('\n\n')
         .replace(/<think>[\s\S]*?<\/think>/g, '')
+        .replace(/^[\s\S]*?<\/think>/, '') // opener-less reasoning (step-3.5/minimax on NIM)
         .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
         .replace(/<tool_call>[\s\S]*/, '')
         .trim();
@@ -1001,6 +1042,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           role: 'assistant',
           content: turnContent,
           toolCalls: currentToolCalls,
+          thoughtMs,
           timestamp: new Date(),
         } as import('../events').MessageEntry);
       }
@@ -1016,6 +1058,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       clearInterval(metaTimer);
       cliEvents.off('tool_call', onToolCall);
       cliEvents.off('tool_call_result', onToolCallResult);
+      cliEvents.off('thinking', onThinking);
       cliEvents.emit('thinking_clear');
       setStreamingText('');
       setStreamingToolCalls([]);
@@ -1407,6 +1450,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       <Footer
         theme={theme}
         model={options.model}
+        liteModel={(() => { try { return getConfig().liteModel; } catch { return undefined; } })()}
         agent={options.agent}
         verbose={options.verbose}
         streamMeta={isProcessing || streamingText ? streamMeta : undefined}

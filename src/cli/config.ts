@@ -23,6 +23,7 @@ export interface CliConfig {
   liteModel: string;   // the LITE model — used for cheap aux calls (summaries, self-critic, ask-user)
   timeout: number;
   temperature: number;
+  topP: number; // nucleus sampling cap; clips the low-probability tail that drives dropped tool args / fabricated paths
   maxTokens: number;
   theme: string;
   verbose: boolean;
@@ -65,9 +66,10 @@ export interface CliConfig {
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
   model: 'minimaxai/minimax-m3',
-  liteModel: 'meta/llama-3.1-70b-instruct',
+  liteModel: 'stepfun-ai/step-3.5-flash',
   timeout: 120000,
   temperature: 0.7,
+  topP: 0.95,
   maxTokens: 4096,
   theme: 'auto',
   verbose: false,
