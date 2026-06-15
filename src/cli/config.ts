@@ -61,6 +61,9 @@ export interface CliConfig {
   // Let the model emit multiple tool calls per turn (batched reads/greps run concurrently → faster).
   // Default true; set false for backends that reject multi-tool turns (e.g. NVIDIA NIM).
   parallelToolCalls: boolean;
+  // Optional TUI keybinding overrides, e.g. { "search": "ctrl+/", "toggleLogs": "ctrl+l" }.
+  // Action names + defaults live in keybindings.ts; only overrides go here.
+  keybindings?: Record<string, string>;
 }
 
 const DEFAULTS: CliConfig = {

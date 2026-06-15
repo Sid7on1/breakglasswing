@@ -20,6 +20,7 @@ import { setSandboxEnabled } from '../../sandbox/exec.sandbox';
 import { Footer } from '../components/Footer';
 import { decideTier, applyBrief, Tier } from '../model.router';
 import { getInkInstance } from '../inkInstance';
+import { getBindings, matchChord, listBindings } from '../keybindings';
 import { PermissionDialog } from '../components/PermissionDialog';
 import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
@@ -294,6 +295,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ['/clear', 'Clear screen'],
     ['/config', 'Show / set config'],
     ['/keys', 'Show / add API keys'],
+    ['/shortcuts', 'Show keyboard shortcuts'],
     ['/model', 'Show / set model'],
     ['/provider', 'Switch AI provider'],
     ['/agents', 'List known agents'],
@@ -369,6 +371,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
 
   useInput((char, key) => {
     if (vetoQuestion || activeMenu) return;
+    const keys = getBindings();
 
     if (isSearching) {
       if (key.return || key.escape) {
@@ -414,14 +417,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if (char === 'r' && key.ctrl && stashedInput) {
+    if (matchChord(char, key, keys.resumeStash) && stashedInput) {
       setInput(stashedInput);
       setStashedInput(null);
       cliEvents.emit('status', 'Stashed prompt resumed');
       return;
     }
 
-    if (char === 'f' && key.ctrl) {
+    if (matchChord(char, key, keys.search)) {
       setIsSearching(true);
       setSearchQuery('');
       setShowTranscript(false); // search operates on the logs panel
@@ -429,7 +432,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if (char === 'p' && key.ctrl) {
+    if (matchChord(char, key, keys.pastePreview)) {
       // Preview the full text behind the "[Pasted text #N …]" chips in the current input.
       if (pastesRef.current.size === 0) {
         cliEvents.emit('status', 'No pasted text to preview');
@@ -441,7 +444,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if (char === 'o' && key.ctrl) {
+    if (matchChord(char, key, keys.toggleLogs)) {
       toggleView();
       cliEvents.emit('status', showTranscript ? 'Logs panel shown' : 'Logs panel hidden');
       return;
@@ -451,7 +454,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if (char === 't' && key.ctrl) {
+    if (matchChord(char, key, keys.routeToggle)) {
       // Cycle the routing pointer: auto → pin lite → pin heavy → auto.
       const next: Tier | null = pinnedTierRef.current === null ? 'lite' : pinnedTierRef.current === 'lite' ? 'heavy' : null;
       pinnedTierRef.current = next;
@@ -460,14 +463,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
-    if (char === 'd' && key.ctrl) {
+    if (matchChord(char, key, keys.quit)) {
       cliEvents.emit('shutdown');
       exit();
       process.exit(0);
     }
 
-    if (char === 'c' && key.ctrl) {
-      // Require a double-press so a stray Ctrl+C doesn't kill a running task
+    if (matchChord(char, key, keys.interrupt)) {
+      // Require a double-press so a stray interrupt doesn't kill a running task
       const now = Date.now();
       if (now - lastCtrlC.current < 2500) {
         cliEvents.emit('shutdown');
@@ -801,6 +804,13 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (!query.trim()) return;
     // Committed to submit — the pasted blobs are now baked into `query`; reset the chip store.
     clearPastes();
+
+    if (query === '/shortcuts') {
+      const rows = listBindings().map(b => `  ${b.chord.padEnd(10)} ${b.label}`).join('\n');
+      addSystemMessage('info', `Keyboard shortcuts (override in config → keybindings):\n${rows}`);
+      setInput('');
+      return;
+    }
 
     if (query === '/clear') {
       setActiveMenu({
