@@ -11,7 +11,15 @@ export class FileSystemVeto {
     try {
       realPath = await fs.realpath(targetPath);
     } catch (e) {
-      realPath = path.resolve(targetPath); // Fallback if file doesn't exist yet
+      // File doesn't exist yet — resolve the PARENT's real path so a symlinked parent directory
+      // can't smuggle the operation outside the workspace (the parent must already exist).
+      const abs = path.resolve(targetPath);
+      try {
+        const parentReal = await fs.realpath(path.dirname(abs));
+        realPath = path.join(parentReal, path.basename(abs));
+      } catch {
+        realPath = abs; // parent missing too — leave unresolved; the boundary check still applies
+      }
     }
     
     // Normalize and canonicalize

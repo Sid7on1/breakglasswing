@@ -19,8 +19,14 @@ export class FileSystemAdapter {
     try {
       realPath = await fs.realpath(absolutePath);
     } catch (e) {
-      // File doesn't exist yet (e.g. for writeFile)
-      realPath = absolutePath;
+      // File doesn't exist yet (e.g. for writeFile). Resolve the PARENT's real path so a symlinked
+      // parent directory can't smuggle the write outside the jail (the parent must already exist).
+      try {
+        const parentReal = await fs.realpath(path.dirname(absolutePath));
+        realPath = path.join(parentReal, path.basename(absolutePath));
+      } catch {
+        realPath = absolutePath; // parent missing too — leave unresolved; the prefix check still applies
+      }
     }
     
     // Explicitly prevent directory traversal attacks (e.g. `../../../etc/passwd` or via symlinks).

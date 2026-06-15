@@ -101,7 +101,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const { exit } = useApp();
   const theme = getTheme(options.theme);
 
-  options.governor.mode = options.dangerouslySkipPermissions ? 'bypass' : 'interactive';
+  // Initialize the governor mode ONCE from the launch flag. Doing this in the component body
+  // unconditionally (as before) reset the mode on every render, so toggling bypass via /governor
+  // never stuck — the next re-render forced it back to 'interactive'. Guard it to first mount.
+  const governorInitRef = React.useRef(false);
+  if (!governorInitRef.current) {
+    governorInitRef.current = true;
+    options.governor.mode = options.dangerouslySkipPermissions ? 'bypass' : 'interactive';
+  }
 
   const personasRef = React.useRef<Record<string, AgentPersona> | null>(null);
   if (!personasRef.current) {
