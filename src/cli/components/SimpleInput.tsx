@@ -1,6 +1,29 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Text, useInput } from 'ink';
 
+/** Shell-style line edits. `offset` is the cursor distance from the END of the string (the model
+ *  SimpleInput already uses). Pure so it can be unit-tested without the TUI. */
+export type LineEdit = 'home' | 'end' | 'killStart' | 'killEnd' | 'deleteWord';
+export function editLine(op: LineEdit, value: string, offset: number): { value: string; offset: number } {
+  const i = value.length - offset; // cursor index from the start
+  const before = value.slice(0, i);
+  const after = value.slice(i);
+  switch (op) {
+    case 'home': return { value, offset: value.length };          // Ctrl+A
+    case 'end': return { value, offset: 0 };                       // Ctrl+E
+    case 'killStart': return { value: after, offset: after.length }; // Ctrl+U
+    case 'killEnd': return { value: before, offset: 0 };           // Ctrl+K
+    case 'deleteWord': {                                            // Ctrl+W
+      const cut = before.replace(/\s+$/, '').replace(/\S+$/, '');
+      return { value: cut + after, offset: after.length };
+    }
+  }
+}
+
+// Ctrl-letter → edit op. Excludes letters bound to global shortcuts (f/p/o/t/r/d/c) so there's
+// no collision with FullScreen's keybindings.
+const CTRL_EDITS: Record<string, LineEdit> = { a: 'home', e: 'end', u: 'killStart', k: 'killEnd', w: 'deleteWord' };
+
 export interface SimpleInputProps {
   value: string;
   onChange: (value: string) => void;
@@ -68,6 +91,19 @@ export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mas
       internalValueRef.current = newVal;
       onChange(newVal);
       return;
+    }
+
+    // Shell-style line editing (Ctrl+A/E/U/K/W). Handle these before delegating other ctrl
+    // combos (the global shortcuts) up to the parent.
+    if (key.ctrl && char) {
+      const op = CTRL_EDITS[char.toLowerCase()];
+      if (op) {
+        const r = editLine(op, internalValueRef.current, cursorOffset);
+        internalValueRef.current = r.value;
+        setCursorOffset(r.offset);
+        onChange(r.value);
+        return;
+      }
     }
 
     if (key.upArrow || key.downArrow || key.escape || key.ctrl || key.meta) {
