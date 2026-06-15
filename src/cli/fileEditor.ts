@@ -1,8 +1,33 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { structuredPatch } from 'diff';
 
 const BACKUP_DIR = path.join(process.cwd(), '.breakglass', 'backups');
+
+/**
+ * A compact, context-limited unified diff (git-style: 3 lines of context around each change) with
+ * ABSOLUTE line numbers in the @@ hunk headers. Unlike unifiedDiff() below — which emits the whole
+ * file as context — this stays small even for a one-line change in a large file, so it's cheap to
+ * put in tool output and clean to render with line numbers. Used by the edit/write tools.
+ */
+export function compactDiff(oldText: string, newText: string, label: string, context = 3): string {
+  const patch = structuredPatch(label, label, oldText, newText, '', '', { context });
+  if (patch.hunks.length === 0) return '';
+  const out: string[] = [];
+  for (const h of patch.hunks) {
+    out.push(`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`);
+    out.push(...h.lines);
+  }
+  return out.join('\n');
+}
+
+/** Truncate a diff to a sane number of lines for tool output / display. */
+export function capDiff(diff: string, maxLines = 80): string {
+  const lines = diff.split('\n');
+  if (lines.length <= maxLines) return diff;
+  return lines.slice(0, maxLines).join('\n') + `\n…(${lines.length - maxLines} more diff lines)`;
+}
 
 export interface BackupEntry {
   file: string;

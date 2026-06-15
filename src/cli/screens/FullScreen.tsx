@@ -1259,7 +1259,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
               {streamingToolCalls.length > 0 && (
                 <Box flexDirection="column" marginBottom={1}>
                   {streamingToolCalls.map(call => (
-                    <ToolCallLine key={call.id} call={call} theme={theme} />
+                    <ToolCallLine key={call.id} call={call} theme={theme} compact />
                   ))}
                 </Box>
               )}

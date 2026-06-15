@@ -238,7 +238,8 @@ describe('Flattened-file corruption guard', () => {
     await fs.writeFile(file, multiline);
     const next = '/** JWT rule. */\n' + multiline; // add a real JSDoc line, keep structure
     const res = await writeTool.execute({ path: file, content: next, overwrite: true }, { cwd: dir });
-    expect(res).toContain('Successfully wrote');
+    expect(res).toContain('Updated');
+    expect(res).not.toContain('refused');
     expect(await fs.readFile(file, 'utf8')).toBe(next);
   });
 
@@ -247,7 +248,8 @@ describe('Flattened-file corruption guard', () => {
     await fs.writeFile(file, 'export const a = 1;\nexport const b = 2;\n'); // 2 lines, short
     const stub = 'export const a = 1;\n';
     const res = await writeTool.execute({ path: file, content: stub, overwrite: true }, { cwd: dir });
-    expect(res).toContain('Successfully wrote');
+    expect(res).toContain('Updated');
+    expect(res).not.toContain('refused');
   });
 });
 

@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { backupFile, unifiedDiff } from '../../cli/fileEditor';
+import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { sliceLineRange } from '../file-range';
@@ -122,7 +122,8 @@ Use this tool to write new code, update configuration files, or generate artifac
     if (exists) await backupFile(fullPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
     await fs.writeFile(fullPath, args.content, 'utf-8');
-    return `Successfully wrote to ${args.path}`;
+    const diff = capDiff(compactDiff(prior, args.content, args.path));
+    return `${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}`;
   }
 }, governor);
 

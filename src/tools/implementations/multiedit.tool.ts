@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { backupFile, unifiedDiff } from '../../cli/fileEditor';
+import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 
@@ -124,6 +124,7 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       await fs.writeFile(full, working.get(full)!, 'utf8');
     }
 
-    return `Applied ${edits.length} edit(s) across ${order.length} file(s):\n${order.map(f => '- ' + path.relative(cwd, f)).join('\n')}`;
+    const diff = capDiff(order.map(f => compactDiff(originals.get(f)!, working.get(f)!, path.relative(cwd, f))).join('\n'));
+    return `Applied ${edits.length} edit(s) across ${order.length} file(s):\n${diff}`;
   },
 }, governor);

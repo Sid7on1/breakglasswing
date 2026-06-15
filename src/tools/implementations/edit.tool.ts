@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { backupFile, unifiedDiff } from '../../cli/fileEditor';
+import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { detectCorruptWrite } from '../write-guard';
@@ -25,15 +25,6 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 /** Render a compact unified-style preview of the change for the transcript. */
-function diffPreview(oldStr: string, newStr: string): string {
-  const removed = oldStr.split('\n').map(l => `- ${l}`);
-  const added = newStr.split('\n').map(l => `+ ${l}`);
-  const MAX = 20;
-  const lines = [...removed, ...added];
-  const shown = lines.slice(0, MAX);
-  const suffix = lines.length > MAX ? `\n  ...(${lines.length - MAX} more lines)` : '';
-  return shown.join('\n') + suffix;
-}
 
 interface EditArgs {
   path: string;
@@ -117,6 +108,6 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     await fs.writeFile(fullPath, updated, 'utf8');
 
     const n = args.replaceAll ? occurrences : 1;
-    return `Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}):\n${diffPreview(args.oldString, args.newString)}`;
+    return `Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}):\n${capDiff(compactDiff(content, updated, args.path))}`;
   },
 }, governor);
