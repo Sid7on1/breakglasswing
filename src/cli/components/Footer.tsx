@@ -76,7 +76,9 @@ export function Footer({ theme, model, liteModel, agent, verbose, streamMeta }: 
       </Text>
       <Box flexGrow={1} />
       {streamMeta && streamMeta.chars > 0 && (
-        <Text color={theme.subtle}>{streamMeta.chars} chars · {streamMeta.elapsed}s{'  '}</Text>
+        <Text color={theme.subtle}>
+          {streamMeta.chars} chars{streamMeta.elapsed > 0 ? ` · ${Math.round(streamMeta.chars / 4 / streamMeta.elapsed)} tok/s` : ''} · {streamMeta.elapsed}s{'  '}
+        </Text>
       )}
       <Text color={theme.subtle}>
         Ctrl+G palette · /help · Ctrl+O logs · Esc stash{'  '}
