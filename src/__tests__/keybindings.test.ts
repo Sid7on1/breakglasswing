@@ -35,4 +35,22 @@ describe('keybindings', () => {
     expect(rows.every(r => r.chord && r.label)).toBe(true);
     expect(rows.find(r => r.action === 'routeToggle')?.chord).toBe('Ctrl+T');
   });
+
+  it('opens the command palette on Ctrl+G by default', () => {
+    expect(getBindings().commandPalette).toEqual({ ctrl: true, key: 'g' });
+  });
+
+  // SimpleInput owns Ctrl+A/E/U/K/W for shell-style line editing; FullScreen's global chords must
+  // stay disjoint from those, or a single keypress would both edit the line AND fire a shortcut
+  // (e.g. the Ctrl+K palette/kill-end collision this guards against).
+  it('no global Ctrl-chord collides with a SimpleInput shell edit (a/e/u/k/w)', () => {
+    const SHELL_EDIT_KEYS = new Set(['a', 'e', 'u', 'k', 'w']);
+    for (const { action, chord } of listBindings()) {
+      const b = getBindings()[action as keyof ReturnType<typeof getBindings>];
+      if (b.ctrl && !b.shift && !b.meta) {
+        expect(SHELL_EDIT_KEYS.has(b.key.toLowerCase())).toBe(false);
+      }
+      expect(chord).toBeTruthy();
+    }
+  });
 });

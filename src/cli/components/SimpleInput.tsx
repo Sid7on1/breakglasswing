@@ -20,8 +20,8 @@ export function editLine(op: LineEdit, value: string, offset: number): { value: 
   }
 }
 
-// Ctrl-letter → edit op. Excludes letters bound to global shortcuts (f/p/o/t/r/d/c) so there's
-// no collision with FullScreen's keybindings.
+// Ctrl-letter → edit op. Excludes letters bound to global shortcuts (f/p/o/t/r/d/c/g) so there's
+// no collision with FullScreen's keybindings (g = command palette).
 const CTRL_EDITS: Record<string, LineEdit> = { a: 'home', e: 'end', u: 'killStart', k: 'killEnd', w: 'deleteWord' };
 
 export interface SimpleInputProps {

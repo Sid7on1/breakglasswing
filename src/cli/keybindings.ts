@@ -25,7 +25,7 @@ const DEFAULTS: Record<KeyAction, KeyChord> = {
   pastePreview: { ctrl: true, key: 'p' },
   toggleLogs: { ctrl: true, key: 'o' },
   routeToggle: { ctrl: true, key: 't' },
-  commandPalette: { ctrl: true, key: 'k' },
+  commandPalette: { ctrl: true, key: 'g' },
   quit: { ctrl: true, key: 'd' },
   interrupt: { ctrl: true, key: 'c' },
 };
