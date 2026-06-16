@@ -7,6 +7,25 @@
 
 ---
 
+## Implementation status (branch `feat/tui-cc-parity`)
+
+| Phase | Status | Commit |
+|---|---|---|
+| **1** — timing badge, terminal notifications, OSC 9;4 progress, dead-code cleanup | ✅ Done | `8b0783bf` |
+| **2** — markdown tables, cached/fast-path lexing | ✅ Done | `de3f60fe` |
+| **3** — word-level inline diff, transcript search | ✅ Done | `321bf8dd` |
+| **4** — React error boundary, ghost text + file-path completion | ✅ Done | `459741fa` |
+| **5** — collapse/expand tool output, sub-agent tool tree | ⬜ Deferred (low priority) | — |
+| **6** — FrameBuffer / rendering engine | ⬜ Skip unless a real flicker bug appears | — |
+
+Verification at Phase 4 close: **0 TypeScript errors**, **323/323 tests pass**, CLI boots.
+New deps used were already present: `string-width`/`wrap-ansi`/`strip-ansi` (tables),
+`diff@4` (word diff). All features are model-agnostic — no Anthropic-specific assumptions
+were ported (CC's `stripPromptXMLTags`, Sentry, and custom-Ink internals were intentionally
+dropped and re-implemented on stock Ink).
+
+---
+
 ## 0. Verification Summary — what the audit got wrong
 
 The audit was written against the older `breakglasswing` tree. Re-checking every
