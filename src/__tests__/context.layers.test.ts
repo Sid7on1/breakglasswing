@@ -19,6 +19,32 @@ function toolExchange(id: string, result: string): Message[] {
   ];
 }
 
+describe('ContextManager — multimodal-safe summarization', () => {
+  it('compact() flattens image content so a base64 data URL never reaches the summarizer', async () => {
+    const captured: string[] = [];
+    const llm: LLMProvider = {
+      async *chat(messages: Message[]): AsyncGenerator<ChatEvent> {
+        captured.push(JSON.stringify(messages));
+        yield { type: 'token', text: 'S' } as ChatEvent;
+      },
+    };
+    const bigB64 = 'A'.repeat(100000); // stand-in for a multi-MB image payload
+    const messages: Message[] = [
+      // An image turn that will age into the "older" (summarized) window.
+      { role: 'user', content: [
+        { type: 'text', text: 'look at this' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${bigB64}` } },
+      ] as any },
+      ...Array.from({ length: 20 }).map((_, i) => ({ role: 'user', content: `m${i}` } as Message)),
+    ];
+    const out = await new ContextManager(llm, 1000).compact(messages);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).not.toContain(bigB64);   // the blob was stripped...
+    expect(captured[0]).toContain('[image]');     // ...and replaced with a placeholder
+    expect(out.some(m => m.role === 'system' && contentToText(m.content).includes('S'))).toBe(true);
+  });
+});
+
 describe('ContextManager — layered passes (smart vs full)', () => {
   it('full mode is a no-op: history passes through untouched', async () => {
     const cm = new ContextManager(noopLlm, 100); // tiny window, but full mode ignores it

@@ -475,14 +475,20 @@ export class LlmAdapter implements LLMProvider {
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
-      const response = await client.chat.completions.create({
+      // Capability-gated structured output: only ask for a JSON object when the model supports it
+      // (sending response_format to a model that lacks it 400s — e.g. the minimax default). extractJson
+      // below is the universal fallback that recovers JSON from fenced/prose output for the rest.
+      const metaReq: any = {
         model: this.pickModel(kr),
         messages: [
           { role: 'system', content: systemContext },
           { role: 'user', content: userPrompt }
         ],
-        response_format: { type: "json_object" }
-      }, { timeout: this.requestTimeout });
+      };
+      if (this.capabilitiesForKey(kr).structuredOutputs) {
+        metaReq.response_format = { type: "json_object" };
+      }
+      const response = await client.chat.completions.create(metaReq, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
@@ -491,7 +497,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return JSON.parse(stripThink(response.choices[0].message.content || "") || "{}");
+      return JSON.parse(extractJson(stripThink(response.choices[0].message.content || "")) || "{}");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       this.apiKeyManager.reportKeyResult(kr.idx!, 500);

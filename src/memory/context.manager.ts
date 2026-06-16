@@ -157,9 +157,13 @@ export class ContextManager {
 
     Logger.info(`[ContextManager] Summarizing ${olderMessages.length} older messages...`);
 
+    // Flatten any multimodal (image) content to text before serializing: a base64 data URL can be
+    // megabytes, and embedding it in the summary prompt would blow up tokens/cost and likely 400 the
+    // very summarizer meant to SHRINK context. contentToText replaces image parts with "[image]".
+    const olderForSummary = olderMessages.map(m => ({ ...m, content: contentToText(m.content) }));
     const summaryPrompt: Message[] = [
       { role: 'system', content: 'You are an AI tasked with summarizing a long conversation history. Extract the key context, tools used, results, and what has been accomplished so far. Be extremely concise. Keep important paths and error details.' },
-      { role: 'user', content: `Please summarize these older messages:\n${JSON.stringify(olderMessages)}` }
+      { role: 'user', content: `Please summarize these older messages:\n${JSON.stringify(olderForSummary)}` }
     ];
 
     let summaryText = '';
