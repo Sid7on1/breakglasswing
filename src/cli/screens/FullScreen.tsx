@@ -42,6 +42,7 @@ import { CodebaseMapPanel } from '../components/CodebaseMapPanel';
 import { summarizeGraph, isCodebase } from '../../graph/graph.summary';
 import { estimateTokens } from '../../graph/context.planner';
 import { expandAtMentions, suggestAtSymbols, suggestPaths, looksLikePath } from '../atMention';
+import { extractImagePaths } from '../../core/multimodal';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { Governor } from '../../governor/governor';
@@ -1045,6 +1046,16 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       }
     } catch { /* @-expansion is best-effort */ }
 
+    // Vision: pull any referenced local image files out of the prompt so they ride along as
+    // attachments. base.persona drops them with a notice if the active model can't see images.
+    let images: string[] = [];
+    try {
+      images = extractImagePaths(query, process.cwd());
+      if (images.length > 0) {
+        addLog('info', `Attached ${images.length} image${images.length > 1 ? 's' : ''}: ${images.map(p => p.split('/').pop()).join(', ')}`);
+      }
+    } catch { /* image detection is best-effort */ }
+
     // Model-tier routing: the lite model is the default responder; escalate to the heavy coding
     // model only when the turn needs it. A manual pin (Ctrl+T) overrides the decision. The footer
     // pointer flips to whichever model will actually receive this request.
@@ -1074,7 +1085,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           tokenBuffer = '';
           lastRenderTime = now;
         }
-      }, { maxIterations: options.maxToolIterations, planMode: options.governor.mode === 'plan', useLite });
+      }, { maxIterations: options.maxToolIterations, planMode: options.governor.mode === 'plan', useLite, images });
 
       if (tokenBuffer) {
         setStreamingText((prev) => prev + tokenBuffer);

@@ -1,4 +1,5 @@
 import { LLMProvider, Message } from '../core/llm.provider';
+import { contentToText } from '../core/multimodal';
 import { encode } from 'gpt-tokenizer';
 import { Logger } from '../utils/logger';
 
@@ -129,7 +130,7 @@ export class ContextManager {
 
   private estimateTokens(messages: Message[]): number {
     try {
-      const text = messages.map(m => m.content || '').join('\n');
+      const text = messages.map(m => contentToText(m.content)).join('\n');
       return encode(text).length;
     } catch {
       return Math.ceil(JSON.stringify(messages).length / 4);

@@ -1,5 +1,6 @@
 import { ContextManager } from '../memory/context.manager';
 import { LLMProvider, Message, ChatEvent } from '../core/llm.provider';
+import { contentToText } from '../core/multimodal';
 
 // The cheap passes never call the LLM; summarize uses this stub so we can assert it fired.
 function summarizerLlm(marker = 'SUMMARY'): LLMProvider {
@@ -82,7 +83,7 @@ describe('ContextManager — layered passes (smart vs full)', () => {
       ...Array.from({ length: 20 }).map((_, i) => ({ role: 'user', content: `message number ${i} ` + 'word '.repeat(50) } as Message)),
     ];
     const out = await cm.checkAndCompact(messages, 'smart');
-    expect(out.some(m => m.role === 'system' && (m.content || '').includes('SUMMARY'))).toBe(true);
+    expect(out.some(m => m.role === 'system' && contentToText(m.content).includes('SUMMARY'))).toBe(true);
     expect(out.length).toBeLessThan(messages.length);
   });
 
@@ -95,10 +96,10 @@ describe('ContextManager — layered passes (smart vs full)', () => {
     ];
     // Tiny window → over 70% → must summarize.
     const small = await new ContextManager(summarizerLlm('S'), 1000).checkAndCompact([...messages], 'smart');
-    expect(small.some(m => m.role === 'system' && (m.content || '').includes('S'))).toBe(true);
+    expect(small.some(m => m.role === 'system' && contentToText(m.content).includes('S'))).toBe(true);
     // Huge window → well under threshold → no summary, history intact.
     const big = await new ContextManager(summarizerLlm('S'), 1_000_000).checkAndCompact([...messages], 'smart');
-    expect(big.some(m => m.role === 'system' && (m.content || '').includes('S'))).toBe(false);
+    expect(big.some(m => m.role === 'system' && contentToText(m.content).includes('S'))).toBe(false);
   });
 
   it('treats a 0/invalid window as the safe 128k default', async () => {

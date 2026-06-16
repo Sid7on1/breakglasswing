@@ -1,6 +1,8 @@
 import { ToolRegistry } from '../../tools/tool.registry';
 import { BuiltTool } from '../../tools/tool.factory';
 import { LlmAdapter } from '../../core/llm.adapter';
+import { ModelCapabilities } from '../../core/capabilities';
+import { buildUserContent } from '../../core/multimodal';
 import { cliEvents } from '../events';
 import * as os from 'os';
 import { AgentLoop } from '../../core/agent.loop';
@@ -181,11 +183,26 @@ export abstract class AgentPersona {
     return { staticPrefix, dynamicSuffix };
   }
 
-  public async execute(prompt: string, onToken?: (token: string) => void, options?: { maxIterations?: number; planMode?: boolean; useLite?: boolean }): Promise<string> {
+  public async execute(prompt: string, onToken?: (token: string) => void, options?: { maxIterations?: number; planMode?: boolean; useLite?: boolean; images?: string[] }): Promise<string> {
     // Fresh user turn: drop any leftover todos so the loop's persistence check only reacts to items
     // this task actually opens (no spurious "keep going" on an unrelated next message).
     clearActiveTodos();
-    this.messages.push({ role: 'user', content: prompt });
+
+    // Resolve the active model's capabilities once for this turn — drives both vision attachment
+    // and the context-window fallback below. Best-effort: FLOOR (no caps) on any failure.
+    let caps: ModelCapabilities | undefined;
+    try { caps = await this.llmAdapter.activeCapabilities(options?.useLite); } catch { /* best-effort */ }
+
+    // Vision: attach any referenced images as OpenAI content parts when the model can see them;
+    // otherwise keep the plain-text turn and tell the user why the images were dropped.
+    const images = options?.images ?? [];
+    if (images.length > 0) {
+      const built = buildUserContent(prompt, images, !!caps?.visionInput);
+      if (built.notice && onToken) onToken(`_${built.notice}_\n`);
+      this.messages.push({ role: 'user', content: built.content });
+    } else {
+      this.messages.push({ role: 'user', content: prompt });
+    }
     let executionLog = '';
 
     // Self-writing project memory: pull in any learned conventions/decisions relevant
@@ -201,11 +218,8 @@ export abstract class AgentPersona {
     // is conservative-but-safe. Best-effort: any failure leaves it undefined (ContextManager default).
     let contextWindow: number | undefined =
       cfg.contextWindowTokens && cfg.contextWindowTokens > 0 ? cfg.contextWindowTokens : undefined;
-    if (contextWindow === undefined) {
-      try {
-        const caps = await this.llmAdapter.activeCapabilities(options?.useLite);
-        if (caps.contextWindow && caps.contextWindow > 0) contextWindow = caps.contextWindow;
-      } catch { /* capability lookup is best-effort; fall back to ContextManager default */ }
+    if (contextWindow === undefined && caps && caps.contextWindow > 0) {
+      contextWindow = caps.contextWindow;
     }
     const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, null as any, contextWindow);
     const maxIterations = options?.maxIterations ?? 15;

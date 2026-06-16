@@ -1,8 +1,11 @@
-
+import { ContentPart } from './multimodal';
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content?: string;
+  // String for text turns (the overwhelming common case); an OpenAI content-part array only for a
+  // user turn that carries image attachments (see core/multimodal.ts). All text-path transforms
+  // guard on `typeof content === 'string'`, so the array form is inert outside the vision flow.
+  content?: string | ContentPart[];
   tool_call_id?: string;
   name?: string;
   tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];

@@ -1,0 +1,149 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+/**
+ * Multimodal (vision) input. BiMax talks to every model through the OpenAI SDK, so the OpenAI
+ * chat-content format — an array of `{type:'text'}` / `{type:'image_url'}` parts with a base64
+ * data URL — is the single universal wire format: OpenAI, Anthropic's OpenAI-compat endpoint,
+ * Gemini's OpenAI-compat endpoint and NVIDIA NIM vision models all accept it. There is therefore
+ * no per-provider divergence to handle here; capability gating (`caps.visionInput`) decides only
+ * whether images are attached at all or dropped with a notice for a text-only model.
+ */
+
+export type TextPart = { type: 'text'; text: string };
+export type ImagePart = { type: 'image_url'; image_url: { url: string } };
+export type ContentPart = TextPart | ImagePart;
+
+/** Extension → MIME for the raster formats the vision models accept. Lower-cased, no dot. */
+const MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+};
+
+/** The set of extensions we treat as attachable images (used by the input layer to detect paths). */
+export const IMAGE_EXTENSIONS: readonly string[] = Object.keys(MIME_BY_EXT);
+
+/** Pure: does this path look like an image we can attach? (extension check only, no FS access). */
+export function looksLikeImagePath(p: string): boolean {
+  const dot = p.lastIndexOf('.');
+  if (dot < 0) return false;
+  return Object.prototype.hasOwnProperty.call(MIME_BY_EXT, p.slice(dot + 1).toLowerCase());
+}
+
+/**
+ * Build an `image_url` content part from a source that is either an existing local image file or
+ * an already-formed `data:`/`http(s):` URL. Local files are read and base64-encoded into a data
+ * URL (the form that works offline and without exposing local paths to the API). Returns null when
+ * the source can't be turned into an image part (unknown extension, unreadable file) so the caller
+ * can fall back to text rather than send a broken request.
+ */
+export function imagePartFromSource(source: string): ImagePart | null {
+  if (source.startsWith('data:') || source.startsWith('http://') || source.startsWith('https://')) {
+    return { type: 'image_url', image_url: { url: source } };
+  }
+  const dot = source.lastIndexOf('.');
+  if (dot < 0) return null;
+  const mime = MIME_BY_EXT[source.slice(dot + 1).toLowerCase()];
+  if (!mime) return null;
+  try {
+    const b64 = fs.readFileSync(source).toString('base64');
+    return { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } };
+  } catch {
+    return null;
+  }
+}
+
+export interface UserContent {
+  /** Array form when one or more images attached to a vision-capable model; plain string otherwise. */
+  content: string | ContentPart[];
+  /** Set when something is worth telling the user (model can't see images, or a file failed to load). */
+  notice?: string;
+  /** How many images actually made it into the content. */
+  attached: number;
+}
+
+/**
+ * Assemble the user turn's content from the typed text plus any referenced image sources.
+ *
+ * - No images, or a model without `visionCapable`: returns the plain text string (FLOOR behavior),
+ *   appending a short notice when images were requested but the model can't see them — so the run
+ *   continues on text instead of silently dropping the attachment or erroring.
+ * - Vision-capable with at least one loadable image: returns OpenAI array content (text part first,
+ *   then the image parts). Unloadable sources are skipped and surfaced in the notice.
+ */
+export function buildUserContent(text: string, imageSources: string[], visionCapable: boolean): UserContent {
+  const sources = imageSources.filter((s) => s && s.trim().length > 0);
+  if (sources.length === 0) return { content: text, attached: 0 };
+
+  if (!visionCapable) {
+    const n = sources.length;
+    return {
+      content: text,
+      notice: `Note: ${n} image${n === 1 ? '' : 's'} attached, but the active model has no vision support — continuing on text only.`,
+      attached: 0,
+    };
+  }
+
+  const parts: ContentPart[] = [];
+  if (text && text.length > 0) parts.push({ type: 'text', text });
+  const failed: string[] = [];
+  for (const src of sources) {
+    const part = imagePartFromSource(src);
+    if (part) parts.push(part);
+    else failed.push(src);
+  }
+
+  const attached = parts.filter((p) => p.type === 'image_url').length;
+  if (attached === 0) {
+    return {
+      content: text,
+      notice: `Could not load image${failed.length === 1 ? '' : 's'}: ${failed.join(', ')}`,
+      attached: 0,
+    };
+  }
+  return {
+    content: parts,
+    notice: failed.length > 0 ? `Could not load: ${failed.join(', ')}` : undefined,
+    attached,
+  };
+}
+
+/**
+ * Scan a prompt for references to local image files and return the absolute paths of the ones that
+ * actually exist. A token qualifies when it has an image extension and resolves (after `~`/relative
+ * expansion against `cwd`) to a readable file. A leading `@` (the mention syntax) is tolerated. This
+ * is how the TUI turns `describe @shot.png` or a pasted path into a vision attachment without a
+ * dedicated command. Returns `[]` when nothing matches, so the turn stays a plain text turn.
+ */
+export function extractImagePaths(text: string, cwd: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let tok of text.split(/\s+/)) {
+    if (!tok) continue;
+    if (tok.startsWith('@')) tok = tok.slice(1);
+    tok = tok.replace(/[.,;:)]+$/, ''); // trailing sentence punctuation
+    if (!looksLikeImagePath(tok)) continue;
+    let abs: string;
+    if (tok.startsWith('~')) abs = path.join(os.homedir(), tok.slice(1));
+    else if (path.isAbsolute(tok)) abs = tok;
+    else abs = path.join(cwd, tok);
+    if (seen.has(abs)) continue;
+    try {
+      if (fs.statSync(abs).isFile()) { seen.add(abs); out.push(abs); }
+    } catch { /* not a real file — leave it as plain text */ }
+  }
+  return out;
+}
+
+/** Flatten any message content (string or part array) to its plain text — for token estimation/logging. */
+export function contentToText(content: string | ContentPart[] | undefined): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  return content
+    .map((p) => (p.type === 'text' ? p.text : '[image]'))
+    .join('\n');
+}
