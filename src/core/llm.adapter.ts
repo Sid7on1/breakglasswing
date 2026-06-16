@@ -3,6 +3,7 @@ import { Logger } from '../utils';
 import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capabilities';
+import { contentToText } from './multimodal';
 
 /**
  * Mark a chat message's content as a prompt-cache breakpoint (Anthropic `cache_control`,
@@ -594,6 +595,14 @@ export class LlmAdapter implements LLMProvider {
         ? [{ role: 'system', content: options.system }, ...messages]
         : messages;
 
+      // Vision safety net: image content is built upstream from the *configured* model's caps, but a
+      // key-pool can route THIS call to a different model. If the resolved model can't see images,
+      // flatten any image_url parts to a "[image]" text placeholder so we never send multimodal
+      // content to a model that would 400 on it. Vision-capable models pass through untouched.
+      if (!caps.visionInput && finalMessages.some(m => Array.isArray(m.content))) {
+        finalMessages = finalMessages.map(m => Array.isArray(m.content) ? { ...m, content: contentToText(m.content) } : m);
+      }
+
       // Native fast-path: prompt caching. When the active model supports Anthropic `cache_control`
       // (Claude, via OpenRouter/native/Bedrock), mark the large stable system prompt as a cache
       // breakpoint so repeated turns in a session re-bill it at the cheap cached rate. For every
@@ -659,6 +668,11 @@ export class LlmAdapter implements LLMProvider {
       let activeToolCallId = '';
       let activeToolName = '';
       let activeToolArgs = '';
+      // Throttle live tool-arg partials (C3): a big tool call streams hundreds of arg fragments, and
+      // emitting one partial per fragment would drive a UI re-render each time. Coalesce to at most
+      // one partial every PARTIAL_EMIT_MS; the final authoritative tool_call always fires regardless.
+      const PARTIAL_EMIT_MS = 80;
+      let lastPartialAt = 0;
       // Native-thinking fast-path: a model with a structured reasoning channel (Claude, o-series,
       // DeepSeek-R1, minimax) delivers its reasoning out-of-band via `reasoning_content`; the
       // content channel is the answer, with no opener-less `</think>` to guard against. Implicit
@@ -727,9 +741,14 @@ export class LlmAdapter implements LLMProvider {
           // C3 — live tool-arg streaming. When the model streams partial-JSON tool args, surface the
           // call (name + args-so-far) as it forms so the UI shows activity before the turn finishes.
           // Additive + display-only: the authoritative `tool_call` still fires at the boundary/end.
-          // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged.
+          // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged. Throttled
+          // so a large tool call doesn't flood the UI with a re-render per arg fragment.
           if (caps.partialJsonTools && activeToolCallId) {
-            yield { type: 'tool_call_partial', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+            const now = Date.now();
+            if (now - lastPartialAt >= PARTIAL_EMIT_MS) {
+              lastPartialAt = now;
+              yield { type: 'tool_call_partial', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+            }
           }
         }
         
