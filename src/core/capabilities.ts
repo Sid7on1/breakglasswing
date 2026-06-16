@@ -189,6 +189,37 @@ export function capabilitiesFor(provider: string | null | undefined, model: stri
   return applyOverrides(resolved);
 }
 
+/** True only for the genuine first-party Anthropic API host — where `anthropic-beta` is honored. */
+export function isFirstPartyAnthropic(baseURL: string | null | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    return new URL(baseURL).hostname === 'api.anthropic.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the `anthropic-beta` request header for Anthropic's beta-gated features (1M context,
+ * token-efficient tools, interleaved thinking). These are Messages-API betas that only the genuine
+ * Anthropic endpoint understands and several are model/tier-gated (sending `context-1m` to an
+ * ineligible model/tier 400s), so this is deliberately:
+ *   1. host-gated — never emitted unless the call targets api.anthropic.com, so the header can't
+ *      leak to OpenRouter/Bedrock/NIM and break an unrelated request; and
+ *   2. opt-in — the exact, version-stamped beta tokens come from `BGW_ANTHROPIC_BETA` (comma-
+ *      separated), because the safe set depends on the user's specific model + account tier and
+ *      must not be guessed. Unset → undefined → no header → today's behavior, unchanged.
+ * Returns the header map or undefined.
+ */
+export function anthropicBetaHeaders(baseURL: string | null | undefined): Record<string, string> | undefined {
+  if (!isFirstPartyAnthropic(baseURL)) return undefined;
+  const raw = (process.env.BGW_ANTHROPIC_BETA || '').trim();
+  if (!raw) return undefined;
+  const betas = raw.split(',').map(s => s.trim()).filter(Boolean);
+  if (betas.length === 0) return undefined;
+  return { 'anthropic-beta': betas.join(',') };
+}
+
 /**
  * A compact glyph cluster for the footer/status line, showing what the active model unlocks.
  * Empty string when nothing notable is on (a floor model), so the footer stays quiet.

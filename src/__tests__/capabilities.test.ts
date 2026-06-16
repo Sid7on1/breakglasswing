@@ -1,4 +1,4 @@
-import { capabilitiesFor, capabilityGlyphs, FLOOR } from '../core/capabilities';
+import { capabilitiesFor, capabilityGlyphs, FLOOR, isFirstPartyAnthropic, anthropicBetaHeaders } from '../core/capabilities';
 import { markCacheBreakpoint } from '../core/llm.adapter';
 
 // The capability layer is the spine of BiMax's "Claude-when-you-can, universal-always" design.
@@ -113,5 +113,40 @@ describe('capabilityGlyphs — footer surfacing', () => {
     expect(g).toContain('cache');
     expect(g).toContain('think');
     expect(g).toContain('vision');
+  });
+});
+
+describe('isFirstPartyAnthropic — C6 host gate', () => {
+  it('is true only for the genuine Anthropic host', () => {
+    expect(isFirstPartyAnthropic('https://api.anthropic.com/v1')).toBe(true);
+    expect(isFirstPartyAnthropic('https://api.anthropic.com')).toBe(true);
+  });
+  it('is false for proxies, OpenRouter, NIM, and junk', () => {
+    expect(isFirstPartyAnthropic('https://openrouter.ai/api/v1')).toBe(false);
+    expect(isFirstPartyAnthropic('https://integrate.api.nvidia.com/v1')).toBe(false);
+    expect(isFirstPartyAnthropic('https://evil.com/api.anthropic.com')).toBe(false);
+    expect(isFirstPartyAnthropic('')).toBe(false);
+    expect(isFirstPartyAnthropic(undefined)).toBe(false);
+    expect(isFirstPartyAnthropic('not a url')).toBe(false);
+  });
+});
+
+describe('anthropicBetaHeaders — C6 opt-in beta emission', () => {
+  const ENV = { ...process.env };
+  afterEach(() => { process.env = { ...ENV }; });
+
+  it('emits nothing on a non-Anthropic host even when the env is set', () => {
+    process.env.BGW_ANTHROPIC_BETA = 'context-1m-2025-08-07';
+    expect(anthropicBetaHeaders('https://openrouter.ai/api/v1')).toBeUndefined();
+  });
+  it('emits nothing on Anthropic when the env is unset', () => {
+    delete process.env.BGW_ANTHROPIC_BETA;
+    expect(anthropicBetaHeaders('https://api.anthropic.com/v1')).toBeUndefined();
+  });
+  it('emits the joined, trimmed beta list on Anthropic when opted in', () => {
+    process.env.BGW_ANTHROPIC_BETA = ' context-1m-2025-08-07 , token-efficient-tools , ';
+    expect(anthropicBetaHeaders('https://api.anthropic.com/v1')).toEqual({
+      'anthropic-beta': 'context-1m-2025-08-07,token-efficient-tools',
+    });
   });
 });

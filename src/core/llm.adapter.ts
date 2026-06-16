@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import { Logger } from '../utils';
 import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
-import { capabilitiesFor, ModelCapabilities } from './capabilities';
+import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capabilities';
 
 /**
  * Mark a chat message's content as a prompt-cache breakpoint (Anthropic `cache_control`,
@@ -638,7 +638,14 @@ export class LlmAdapter implements LLMProvider {
       const effort = options.reasoningEffort ?? this.reasoningEffort;
       if (effort) requestOptions.reasoning_effort = effort;
 
-      const stream: any = await client.chat.completions.create(requestOptions, { timeout: this.requestTimeout, signal: options.signal as any });
+      // C6 — Anthropic beta-header features (1M context, token-efficient tools, interleaved
+      // thinking). Host-gated to the genuine Anthropic endpoint and opt-in via BGW_ANTHROPIC_BETA,
+      // so on every other backend (the default) this is undefined and the request is unchanged.
+      const requestInit: any = { timeout: this.requestTimeout, signal: options.signal as any };
+      const betaHeaders = anthropicBetaHeaders(kr.baseURL);
+      if (betaHeaders) requestInit.headers = betaHeaders;
+
+      const stream: any = await client.chat.completions.create(requestOptions, requestInit);
 
       let activeToolCallId = '';
       let activeToolName = '';
