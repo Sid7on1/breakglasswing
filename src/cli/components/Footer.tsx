@@ -88,7 +88,7 @@ export function Footer({ theme, model, liteModel, agent, verbose, streamMeta }: 
         {pinned ? ' 📌' : ''} · {agent}
         {verbose ? ` · ~${totalTokens}tok` : ''}
       </Text>
-      {glyphs && <Text color={theme.subtle}>{'  '}{glyphs}</Text>}
+      {glyphs ? <Text color={theme.subtle}>{'  '}{glyphs}</Text> : null}
     </Box>
   );
 }

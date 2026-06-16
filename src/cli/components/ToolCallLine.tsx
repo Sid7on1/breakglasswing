@@ -203,7 +203,7 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
   const header = (
     <Box>
       <Text color={dotColor}>{call.agentLabel ? '└ ⏺ ' : '⏺ '}</Text>
-      {call.agentLabel && <Text color={theme.subtle}>[{call.agentLabel}] </Text>}
+      {call.agentLabel ? <Text color={theme.subtle}>[{call.agentLabel}] </Text> : null}
       <Text color={theme.text} bold>{label}</Text>
       <Text color={theme.subtle}>({input})</Text>
       {isRunning && (
