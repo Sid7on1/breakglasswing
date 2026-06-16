@@ -6,12 +6,16 @@ interface SearchHighlightProps {
   text: string;
   query: string;
   theme: ThemeColors;
+  /** Background for matched spans. Defaults to the theme's search highlight; pass
+   *  theme.searchCurrent to mark the currently-focused match in a results list. */
+  highlightColor?: string;
 }
 
-export function SearchHighlight({ text, query, theme }: SearchHighlightProps) {
+export function SearchHighlight({ text, query, theme, highlightColor }: SearchHighlightProps) {
   if (!query || !text) {
     return <Text>{text}</Text>;
   }
+  const hl = highlightColor || theme.searchHighlight;
 
   const lowerText = text.toLowerCase();
   const lowerQuery = query.toLowerCase();
@@ -35,7 +39,7 @@ export function SearchHighlight({ text, query, theme }: SearchHighlightProps) {
     <Text>
       {parts.map((part, i) =>
         part.match
-          ? <Text key={i} backgroundColor={theme.searchHighlight} bold>{part.text}</Text>
+          ? <Text key={i} backgroundColor={hl} bold>{part.text}</Text>
           : <Text key={i}>{part.text}</Text>
       )}
     </Text>

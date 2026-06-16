@@ -27,6 +27,7 @@ import { Markdown } from '../components/Markdown';
 import { LogView } from '../components/LogView';
 import { DiffView } from '../components/DiffView';
 import { SearchHighlight } from '../components/SearchHighlight';
+import { SearchResults, SearchMatch } from '../components/SearchResults';
 import { ThinkingText } from '../components/ThinkingText';
 import { WorkingIndicator } from '../components/WorkingIndicator';
 import { InteractiveMenu, MenuOption } from '../components/InteractiveMenu';
@@ -212,6 +213,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [searchIndex, setSearchIndex] = useState(0);
+  // Mirror of the computed match list so the useInput handler (registered above the
+  // render-time computation) navigates the current results without a stale closure.
+  const searchMatchesRef = useRef<SearchMatch[]>([]);
   const [diffText, setDiffText] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(true);
   const [streamingText, setStreamingText] = useState('');
@@ -375,10 +379,20 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     const keys = getBindings();
 
     if (isSearching) {
-      if (key.return || key.escape) {
+      if (key.escape) {
         setIsSearching(false);
         setSearchQuery('');
         cliEvents.emit('status', '');
+        return;
+      }
+      const count = searchMatchesRef.current.length;
+      // Enter and ↓ advance to the next match; ↑ goes to the previous one (wrapping).
+      if (key.return || key.downArrow) {
+        if (count > 0) setSearchIndex((i) => (i + 1) % count);
+        return;
+      }
+      if (key.upArrow) {
+        if (count > 0) setSearchIndex((i) => (i - 1 + count) % count);
         return;
       }
       return;
@@ -428,8 +442,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (matchChord(char, key, keys.search)) {
       setIsSearching(true);
       setSearchQuery('');
-      setShowTranscript(false); // search operates on the logs panel
-      cliEvents.emit('status', 'Search: type to filter logs');
+      setSearchIndex(0);
+      cliEvents.emit('status', 'Search transcript & logs — ↑/↓ navigate, Esc exit');
       return;
     }
 
@@ -1246,6 +1260,33 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     ? logs.filter((l) => l.text.toLowerCase().includes(searchQuery.toLowerCase()))
     : logs;
 
+  // Ctrl+F search now spans the transcript (assistant/user/system message text) AND the logs —
+  // each matching line becomes a navigable result. This closes the "search is logs-only" gap.
+  const searchMatches = useMemo<SearchMatch[]>(() => {
+    if (!isSearching || !searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    const out: SearchMatch[] = [];
+    for (const m of messages) {
+      if (typeof m.content !== 'string') continue;
+      const source: SearchMatch['source'] =
+        m.role === 'user' ? 'you' : m.role === 'assistant' ? 'assistant' : 'system';
+      for (const line of m.content.split('\n')) {
+        const t = line.trim();
+        if (t && t.toLowerCase().includes(q)) out.push({ source, lineText: t });
+      }
+    }
+    for (const l of logs) {
+      if (l.text.toLowerCase().includes(q)) out.push({ source: 'log', lineText: l.text });
+    }
+    return out;
+  }, [isSearching, searchQuery, messages, logs]);
+  searchMatchesRef.current = searchMatches; // keep the keyboard handler's view current
+  // Restart at the first match whenever the query changes.
+  useEffect(() => { setSearchIndex(0); }, [searchQuery]);
+  const safeSearchIndex = searchMatches.length
+    ? Math.min(searchIndex, searchMatches.length - 1)
+    : 0;
+
   const staticItems: Array<{ kind: 'welcome'; id: string } | { kind: 'msg'; id: string; msg: MessageEntry }> = [
     { kind: 'welcome', id: '__welcome__' },
     ...messages.map((m) => ({ kind: 'msg' as const, id: m.id, msg: m })),
@@ -1275,9 +1316,16 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       </Static>
 
       <Box flexDirection="column" width="100%" paddingX={1}>
-        {!showTranscript && (
-          <LogView logs={filteredLogs.slice(-12)} theme={theme} searchQuery={isSearching ? searchQuery : ''} />
-        )}
+        {isSearching ? (
+          <SearchResults
+            matches={searchMatches}
+            query={searchQuery}
+            current={safeSearchIndex}
+            theme={theme}
+          />
+        ) : !showTranscript ? (
+          <LogView logs={filteredLogs.slice(-12)} theme={theme} searchQuery="" />
+        ) : null}
 
         <Box flexDirection="column" paddingX={1} marginTop={1} minHeight={1}>
           {(isProcessing || streamingText || streamingToolCalls.length > 0) ? (
@@ -1467,7 +1515,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                       clearPastes();
                     }
                   }}
-                  onSubmit={isSearching ? () => { setIsSearching(false); setSearchQuery(''); } : handleSubmit}
+                  // During search, Enter is handled by the global useInput handler (jump to next
+                  // match); keep onSubmit a no-op so it doesn't also exit. Esc exits search.
+                  onSubmit={isSearching ? () => {} : handleSubmit}
                   focus={!vetoQuestion && !activeMenu && !activePrompt}
                   onPaste={isSearching ? undefined : handlePaste}
                 />

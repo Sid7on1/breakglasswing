@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
+import { diffWordsWithSpace } from 'diff';
 import { ToolCallEntry } from '../events';
 import { ThemeColors } from '../themes';
 import { formatDuration, toolDurationMs } from '../format';
@@ -97,7 +98,51 @@ const MAX_DIFF_LINES = 40;
 const MAX_OUTPUT_LINES = 14;
 const trunc = (s: string, n = 116) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
-interface DiffRow { kind: 'ctx' | 'add' | 'del'; n: number; text: string; }
+interface WordSeg { text: string; changed: boolean; }
+interface DiffRow { kind: 'ctx' | 'add' | 'del'; n: number; text: string; segs?: WordSeg[]; }
+// Shape of a `diff` package word part (the lib ships no types).
+interface DiffPart { value: string; added?: boolean; removed?: boolean; }
+
+// Only word-diff small intra-line edits; larger rewrites read better as whole-line add/remove.
+const WORD_CHANGE_THRESHOLD = 0.4;
+// Skip word-diffing very long lines (minified/data) — keeps layout bounded and cheap.
+const WORD_DIFF_MAX_LINE = 200;
+
+/**
+ * Word-level inline diff (ported from Claude Code's StructuredDiff/Fallback —
+ * processAdjacentLines + calculateWordDiffs). Pairs each maximal run of `del` rows with the
+ * immediately-following run of `add` rows, then uses `diffWordsWithSpace` to mark which words
+ * actually changed. Gated by a change ratio so only small edits get highlighted. Mutates rows
+ * in place, attaching `segs` to paired rows.
+ */
+function computeWordDiffs(rows: DiffRow[]): void {
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind !== 'del') { i++; continue; }
+    let j = i;
+    const dels: DiffRow[] = [];
+    while (j < rows.length && rows[j].kind === 'del') { dels.push(rows[j]); j++; }
+    const adds: DiffRow[] = [];
+    while (j < rows.length && rows[j].kind === 'add') { adds.push(rows[j]); j++; }
+    if (dels.length && adds.length) {
+      const pairs = Math.min(dels.length, adds.length);
+      for (let k = 0; k < pairs; k++) {
+        const del = dels[k], add = adds[k];
+        if (del.text.length > WORD_DIFF_MAX_LINE || add.text.length > WORD_DIFF_MAX_LINE) continue;
+        const parts: DiffPart[] = diffWordsWithSpace(del.text, add.text, { ignoreCase: false });
+        const total = del.text.length + add.text.length;
+        const changed = parts.filter((p) => p.added || p.removed).reduce((s, p) => s + p.value.length, 0);
+        if (total === 0 || changed / total > WORD_CHANGE_THRESHOLD) continue; // too different → whole-line
+        // Remove line keeps common + removed words; add line keeps common + added words.
+        del.segs = parts.filter((p) => !p.added).map((p) => ({ text: p.value, changed: !!p.removed }));
+        add.segs = parts.filter((p) => !p.removed).map((p) => ({ text: p.value, changed: !!p.added }));
+      }
+      i = j;
+    } else {
+      i++;
+    }
+  }
+}
 
 /**
  * Parse the compact unified diff the edit/write tools now emit (`@@ -a,b +c,d @@` hunks with
@@ -187,6 +232,7 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
   // Full transcript rendering: line-numbered colored diff for edits, dim output block otherwise.
   if (DIFF_TOOLS.has(call.toolName)) {
     const rows = parseUnifiedDiff(call.output || '');
+    computeWordDiffs(rows); // attach word-level segments to paired del/add rows
     const shown = rows.slice(0, MAX_DIFF_LINES);
     const hidden = rows.length - shown.length;
     const numW = Math.max(2, ...shown.map(r => String(r.n).length));
@@ -202,10 +248,21 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
             {shown.map((r, i) => {
               const sign = r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' ';
               const color = r.kind === 'add' ? theme.success : r.kind === 'del' ? theme.error : theme.text;
+              const wordBg = r.kind === 'add' ? theme.diffAddedWord : theme.diffRemovedWord;
               return (
                 <Box key={i}>
                   <Text color={theme.subtle}>{String(r.n).padStart(numW)} </Text>
-                  <Text color={color}>{sign} {trunc(r.text)}</Text>
+                  {r.segs ? (
+                    // Word-level highlight: changed words get a background, common words stay base color.
+                    <Text>
+                      <Text color={color}>{sign} </Text>
+                      {r.segs.map((s, k) => s.changed
+                        ? <Text key={k} color={theme.inverseText} backgroundColor={wordBg}>{s.text}</Text>
+                        : <Text key={k} color={color}>{s.text}</Text>)}
+                    </Text>
+                  ) : (
+                    <Text color={color}>{sign} {trunc(r.text)}</Text>
+                  )}
                 </Box>
               );
             })}
