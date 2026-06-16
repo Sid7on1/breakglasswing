@@ -20,3 +20,4 @@ import './watch';
 import './council';
 import './speculate';
 import './evolve';
+import './plugins';
