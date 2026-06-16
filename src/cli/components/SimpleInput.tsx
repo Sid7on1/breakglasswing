@@ -24,6 +24,21 @@ export function editLine(op: LineEdit, value: string, offset: number): { value: 
 // no collision with FullScreen's keybindings (g = command palette).
 const CTRL_EDITS: Record<string, LineEdit> = { a: 'home', e: 'end', u: 'killStart', k: 'killEnd', w: 'deleteWord' };
 
+/**
+ * Insert a newline at the cursor for multi-line composing. A trailing backslash immediately before
+ * the cursor is consumed, so typing `\` then Enter reads as a clean line continuation (the robust,
+ * terminal-agnostic newline gesture; Option+Enter also routes here where the terminal sends meta).
+ * `offset` is the cursor distance from the END (SimpleInput's model); the returned offset keeps the
+ * cursor just after the inserted newline. Pure — unit-tested in lineedit.test.ts.
+ */
+export function insertNewline(value: string, offset: number): { value: string; offset: number } {
+  const i = value.length - offset; // cursor index from the start
+  let before = value.slice(0, i);
+  const after = value.slice(i);
+  if (before.endsWith('\\')) before = before.slice(0, -1); // consume the continuation backslash
+  return { value: before + '\n' + after, offset: after.length };
+}
+
 export interface SimpleInputProps {
   value: string;
   onChange: (value: string) => void;
@@ -69,7 +84,20 @@ export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mas
     if (!focus) return;
 
     if (key.return) {
-      onSubmit(internalValueRef.current);
+      // Multi-line composing: `\`+Enter (or Option/Alt+Enter where the terminal sends meta) inserts
+      // a newline instead of submitting; plain Enter submits. The trailing backslash, if any, is
+      // consumed by insertNewline so it reads as a line continuation.
+      const curVal = internalValueRef.current;
+      const idx = curVal.length - cursorOffset; // cursor index from start
+      const prevChar = idx > 0 ? curVal[idx - 1] : '';
+      if (key.meta || prevChar === '\\') {
+        const r = insertNewline(curVal, cursorOffset);
+        internalValueRef.current = r.value;
+        setCursorOffset(r.offset);
+        onChange(r.value);
+        return;
+      }
+      onSubmit(curVal);
       return;
     }
 

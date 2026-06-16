@@ -1,4 +1,4 @@
-import { editLine } from '../cli/components/SimpleInput';
+import { editLine, insertNewline } from '../cli/components/SimpleInput';
 
 // `offset` is the cursor distance from the END of the string (SimpleInput's model).
 describe('editLine — shell-style line editing', () => {
@@ -25,5 +25,26 @@ describe('editLine — shell-style line editing', () => {
 
   it('deleteWord on leading text clears it', () => {
     expect(editLine('deleteWord', 'hello', 0)).toEqual({ value: '', offset: 0 });
+  });
+});
+
+describe('insertNewline — multi-line composing', () => {
+  it('inserts a newline at the cursor (end of line)', () => {
+    // cursor at end (offset 0): "abc" → "abc\n"
+    expect(insertNewline('abc', 0)).toEqual({ value: 'abc\n', offset: 0 });
+  });
+
+  it('consumes a trailing backslash so `\\`+Enter is a clean continuation', () => {
+    // user typed "abc\" then Enter (cursor at end): the backslash is replaced by the newline
+    expect(insertNewline('abc\\', 0)).toEqual({ value: 'abc\n', offset: 0 });
+  });
+
+  it('splits at a mid-string cursor and keeps the cursor after the newline', () => {
+    // "abcdef", offset 3 from end → before="abc", after="def" → "abc\ndef", cursor before "def"
+    expect(insertNewline('abcdef', 3)).toEqual({ value: 'abc\ndef', offset: 3 });
+  });
+
+  it('adds a second line onto an existing multi-line value', () => {
+    expect(insertNewline('line1\n', 0)).toEqual({ value: 'line1\n\n', offset: 0 });
   });
 });

@@ -438,6 +438,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (key.upArrow) {
       if (suggestions.length > 0) {
         setSuggestionIndex((i) => (i > 0 ? i - 1 : suggestions.length - 1));
+      } else if (input.includes('\n')) {
+        // Multi-line draft: don't let history recall clobber it. (Line navigation is the
+        // terminal's own; left/right move across the newline.)
+        return;
       } else if (history.length > 0 && historyIndex < history.length - 1) {
         const nextIndex = historyIndex + 1;
         setHistoryIndex(nextIndex);
@@ -449,6 +453,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (key.downArrow) {
       if (suggestions.length > 0) {
         setSuggestionIndex((i) => (i < suggestions.length - 1 ? i + 1 : 0));
+      } else if (input.includes('\n')) {
+        return; // multi-line draft — see upArrow note
       } else if (historyIndex > 0) {
         const nextIndex = historyIndex - 1;
         setHistoryIndex(nextIndex);
@@ -1575,7 +1581,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 isMasked={activePrompt.isMasked}
               />
             ) : (
-              <Box flexDirection="row">
+              <Box flexDirection="column">
+                <Box flexDirection="row">
                 {!vetoQuestion && !isSearching && (
                   <Box marginRight={1}>
                     <Text color={theme.accent}>❯</Text>
@@ -1598,6 +1605,12 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                   focus={!vetoQuestion && !activeMenu && !activePrompt}
                   onPaste={isSearching ? undefined : handlePaste}
                 />
+                </Box>
+                {!isSearching && input.includes('\n') && (
+                  <Box paddingLeft={2}>
+                    <Text color={theme.subtle}>↵ send · \↵ newline · {input.split('\n').length} lines</Text>
+                  </Box>
+                )}
               </Box>
             )}
           </Box>
