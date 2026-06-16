@@ -23,6 +23,7 @@ export interface KeyResult {
   keyStr: string | null;
   model: string | null;
   baseURL: string | null;
+  provider: string | null;
   idx: number | null;
   waitTimeSecs: number;
 }
@@ -57,7 +58,7 @@ export class ApiKeyManager {
 
   public async getNextKey(): Promise<KeyResult> {
     return await this.mutex.runExclusive(async () => {
-      if (this.keyStates.length === 0) return { keyStr: null, model: null, baseURL: null, idx: null, waitTimeSecs: 0 };
+      if (this.keyStates.length === 0) return { keyStr: null, model: null, baseURL: null, provider: null, idx: null, waitTimeSecs: 0 };
 
       const n = this.keyStates.length;
       const now = Date.now() / 1000;
@@ -68,7 +69,7 @@ export class ApiKeyManager {
         if (now >= state.cooldown_until) {
           this.keyRR = (idx + 1) % n;
           state.last_used = now;
-          return { keyStr: state.keyStr, model: state.model || null, baseURL: state.baseURL || null, idx, waitTimeSecs: 0 };
+          return { keyStr: state.keyStr, model: state.model || null, baseURL: state.baseURL || null, provider: state.provider || null, idx, waitTimeSecs: 0 };
         }
       }
 
@@ -82,7 +83,7 @@ export class ApiKeyManager {
       }
 
       this.keyStates[bestIdx].last_used = now;
-      return { keyStr: this.keyStates[bestIdx].keyStr, model: this.keyStates[bestIdx].model || null, baseURL: this.keyStates[bestIdx].baseURL || null, idx: bestIdx, waitTimeSecs: Math.max(0, soonestCooldown - now) };
+      return { keyStr: this.keyStates[bestIdx].keyStr, model: this.keyStates[bestIdx].model || null, baseURL: this.keyStates[bestIdx].baseURL || null, provider: this.keyStates[bestIdx].provider || null, idx: bestIdx, waitTimeSecs: Math.max(0, soonestCooldown - now) };
     });
   }
 

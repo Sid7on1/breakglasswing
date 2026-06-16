@@ -2,6 +2,22 @@ import OpenAI from 'openai';
 import { Logger } from '../utils';
 import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
+import { capabilitiesFor, ModelCapabilities } from './capabilities';
+
+/**
+ * Mark a chat message's content as a prompt-cache breakpoint (Anthropic `cache_control`,
+ * forwarded by OpenRouter / native Anthropic / Bedrock for Claude models). Converts the plain
+ * string content into the single-text-part array form the cache marker requires. Pure; only ever
+ * called when the active model advertises `promptCaching`, so non-capable models keep plain
+ * string content untouched. Returns a NEW message (no mutation of the caller's array).
+ */
+export function markCacheBreakpoint(msg: any): any {
+  if (!msg || typeof msg.content !== 'string' || msg.content.length === 0) return msg;
+  return {
+    ...msg,
+    content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }],
+  };
+}
 
 /**
  * Classify an error thrown while streaming a chat completion so the agent loop knows
@@ -288,6 +304,24 @@ export class LlmAdapter implements LLMProvider {
     return this.userModel || keyResult.model || this.defaultModel;
   }
 
+  /**
+   * Resolve the capability descriptor for the model THIS call will actually use. Critically this
+   * keys off `pickModel(...)`, not a global env var: a key-pool can map different keys to
+   * different models (`<ENV>_MODEL_<n>`), so the model a call lands on — and thus what it
+   * supports — is only known per-call. Conservative FLOOR for anything unrecognised, so a model
+   * the table doesn't know behaves exactly as before the capability layer existed.
+   */
+  public capabilitiesForKey(keyResult: KeyResult, lite?: boolean): ModelCapabilities {
+    return capabilitiesFor(keyResult.provider, this.pickModel(keyResult, lite));
+  }
+
+  /** Best-effort capabilities for the currently-configured model — for UI/status surfacing. */
+  public async activeCapabilities(lite?: boolean): Promise<ModelCapabilities> {
+    const model = this.userModel || this.defaultModel;
+    if (lite && this.liteModel) return capabilitiesFor(undefined, this.liteModel);
+    return capabilitiesFor(undefined, model);
+  }
+
   private async getKey(): Promise<KeyResult> {
     const kr = await this.apiKeyManager.getNextKey();
     if (!kr.keyStr || kr.idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
@@ -310,20 +344,28 @@ export class LlmAdapter implements LLMProvider {
     }
     
     try {
-      const response = await client.chat.completions.create({
+      // Native fast-path: a model with constrained-output support is told to emit a JSON object,
+      // so the plan comes back well-formed instead of wrapped in prose/fences. `extractJson` below
+      // remains the universal fallback (and handles models that ignore the hint), so floor models —
+      // for whom this field is omitted — are unaffected.
+      const planReq: any = {
         model: this.pickModel(kr),
         messages: [
           { role: 'system', content: systemContext },
           { role: 'user', content: userPrompt }
         ]
-      }, { timeout: this.requestTimeout });
-      
+      };
+      if (this.capabilitiesForKey(kr).structuredOutputs) {
+        planReq.response_format = { type: 'json_object' };
+      }
+      const response = await client.chat.completions.create(planReq, { timeout: this.requestTimeout });
+
       const usage = response.usage;
       if (this.budgetVeto && usage) {
         const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       }
-      
+
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       // Models often wrap the plan in a markdown fence or prose; extract the raw JSON before parsing.
       const content = extractJson(stripThink(response.choices[0].message.content || ""));
@@ -540,9 +582,21 @@ export class LlmAdapter implements LLMProvider {
     let usageRecorded = false;
 
     try {
-      const finalMessages: any[] = options.system
+      const caps = this.capabilitiesForKey(kr, options.lite);
+
+      let finalMessages: any[] = options.system
         ? [{ role: 'system', content: options.system }, ...messages]
         : messages;
+
+      // Native fast-path: prompt caching. When the active model supports Anthropic `cache_control`
+      // (Claude, via OpenRouter/native/Bedrock), mark the large stable system prompt as a cache
+      // breakpoint so repeated turns in a session re-bill it at the cheap cached rate. For every
+      // other model this branch is skipped and messages stay as plain strings (FLOOR = unchanged).
+      // BiMax's universal answer to the same problem is the graph-native context engine (send less),
+      // which runs regardless — caching simply stacks on top when the model can do it.
+      if (caps.promptCaching && options.system && finalMessages.length > 0) {
+        finalMessages = [markCacheBreakpoint(finalMessages[0]), ...finalMessages.slice(1)];
+      }
 
       const model = this.pickModel(kr, options.lite);
       const sampling = this.resolveSampling(model, options.temperature);
@@ -589,7 +643,15 @@ export class LlmAdapter implements LLMProvider {
       let activeToolCallId = '';
       let activeToolName = '';
       let activeToolArgs = '';
-      const thinkFilter = new ThinkTagFilter(this.implicitThink);
+      // Native-thinking fast-path: a model with a structured reasoning channel (Claude, o-series,
+      // DeepSeek-R1, minimax) delivers its reasoning out-of-band via `reasoning_content`; the
+      // content channel is the answer, with no opener-less `</think>` to guard against. Implicit
+      // mode buffers leading content until a closer proves it was reasoning — for these models that
+      // closer never comes, so it only adds latency (the answer arrives in one burst at stream end).
+      // Disable implicit mode when the capability is present so the answer streams token-by-token.
+      // FLOOR (caps.nativeThinking=false) leaves this exactly as before: `this.implicitThink`.
+      const useImplicitThink = this.implicitThink && !caps.nativeThinking;
+      const thinkFilter = new ThinkTagFilter(useImplicitThink);
 
       const iterator = stream[Symbol.asyncIterator]();
       let receivedFirstChunk = false;
