@@ -65,6 +65,17 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(caps.structuredOutputs).toBe(false);
   });
 
+  // The A3 reasoning_effort send-gate keys off reasoningEffortKnob: only flagged models get the
+  // field (others 400 on it). Lock both polarities so a table edit can't silently break the gate.
+  it('reasoningEffortKnob: on for reasoning models (incl. the minimax default), off for the rest', () => {
+    expect(capabilitiesFor('nvidia', 'minimax-m1').reasoningEffortKnob).toBe(true);
+    expect(capabilitiesFor('openai', 'o1-preview').reasoningEffortKnob).toBe(true);
+    expect(capabilitiesFor('deepseek', 'deepseek-r1').reasoningEffortKnob).toBe(true);
+    expect(capabilitiesFor('openai', 'gpt-4o').reasoningEffortKnob).toBe(false);
+    expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').reasoningEffortKnob).toBe(false);
+    expect(capabilitiesFor('local', 'mystery-7b').reasoningEffortKnob).toBe(false);
+  });
+
   it('an env override can force-enable a capability the table withholds (proxy escape hatch)', () => {
     process.env.BGW_CAP_PROMPT_CACHING = 'true';
     expect(capabilitiesFor('local', 'mystery-model').promptCaching).toBe(true);

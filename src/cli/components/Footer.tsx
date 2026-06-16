@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 import { cliEvents, AgentState } from '../events';
 import { ThemeColors } from '../themes';
 import { getConfig } from '../config';
+import { capabilitiesFor, capabilityGlyphs } from '../../core/capabilities';
 
 interface FooterProps {
   theme: ThemeColors;
@@ -62,6 +63,8 @@ export function Footer({ theme, model, liteModel, agent, verbose, streamMeta }: 
   const isIdle = status === 'idle';
   // The model that will receive the next request, derived from the live tier + config.
   const activeModel = (tier === 'heavy' ? models.coding : models.lite) || models.coding || models.lite || model;
+  // Capability glyphs for that model (⚡cache ⊹think {}json ◉vision); empty for a floor model.
+  const glyphs = capabilityGlyphs(capabilitiesFor(undefined, activeModel));
 
   return (
     <Box marginTop={1} paddingX={1}>
@@ -85,6 +88,7 @@ export function Footer({ theme, model, liteModel, agent, verbose, streamMeta }: 
         {pinned ? ' 📌' : ''} · {agent}
         {verbose ? ` · ~${totalTokens}tok` : ''}
       </Text>
+      {glyphs && <Text color={theme.subtle}>{'  '}{glyphs}</Text>}
     </Box>
   );
 }

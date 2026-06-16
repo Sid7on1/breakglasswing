@@ -635,8 +635,11 @@ export class LlmAdapter implements LLMProvider {
 
       // Optional reasoning budget — only sent when explicitly configured, so default
       // behavior is unchanged. Lets thinking models (minimax) trade depth for speed.
+      // Only send reasoning_effort to a model that advertises the knob — several backends 400 on an
+      // unknown sampling field. Reasoning models (o-series, deepseek-r1, minimax) are flagged in the
+      // table; unknowns can opt in with BGW_CAP_REASONING_EFFORT=true.
       const effort = options.reasoningEffort ?? this.reasoningEffort;
-      if (effort) requestOptions.reasoning_effort = effort;
+      if (effort && caps.reasoningEffortKnob) requestOptions.reasoning_effort = effort;
 
       // C6 — Anthropic beta-header features (1M context, token-efficient tools, interleaved
       // thinking). Host-gated to the genuine Anthropic endpoint and opt-in via BGW_ANTHROPIC_BETA,

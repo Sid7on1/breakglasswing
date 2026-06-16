@@ -11,6 +11,8 @@
 | Phase | Status | What landed |
 |---|---|---|
 | **A — Capability foundation** | ✅ Done | `src/core/capabilities.ts` (descriptor + curated table + env overrides + glyphs); per-key resolution (`LlmAdapter.capabilitiesForKey`, fixing the key-pool model-mix bug from §4); `KeyResult.provider` threaded through; `activeCapabilities()` accessor. **17 new tests, 340/340 pass, 0 tsc errors, CLI boots.** |
+| **A3 — reasoning_effort gate** | ✅ Done | `chat()` now sends `reasoning_effort` only when `caps.reasoningEffortKnob` (o-series, deepseek-r1, minimax-default), so backends that 400 on an unknown sampling field are never sent it; `BGW_CAP_REASONING_EFFORT=true` is the escape hatch. Both polarities locked by tests. |
+| **A4 — Footer capability glyphs** | ✅ Done | `capabilityGlyphs(capabilitiesFor(model))` was defined+tested but never rendered; now wired into `Footer.tsx` next to the active model (⚡cache ⊹think {}json ◉vision), empty for a floor model so the footer stays quiet. |
 | **B1 — Prompt caching (C1)** | ✅ Done | `markCacheBreakpoint()` + capability-gated `cache_control` injection on the system prompt in `chat()`. Active only when `caps.promptCaching` (Claude via OpenRouter/native/Bedrock); FLOOR path byte-identical. |
 | **B2 — Native-thinking bypass (C2)** | ✅ Done | `chat()` runs the `ThinkTagFilter` in non-implicit mode when `caps.nativeThinking`, so models with a real `reasoning_content` channel stream the answer token-by-token instead of buffering for an opener-less `</think>` that never arrives. FLOOR unchanged. |
 | **B3 — Structured outputs (C5)** | ✅ Done | `generateTinyPlans` sends `response_format:{type:'json_object'}` when `caps.structuredOutputs`; `extractJson` stays the universal fallback. |
