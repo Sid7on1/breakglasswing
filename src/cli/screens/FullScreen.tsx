@@ -33,6 +33,7 @@ import { InteractiveMenu, MenuOption } from '../components/InteractiveMenu';
 import { InteractivePrompt } from '../components/InteractivePrompt';
 import { getTheme, ThemeName } from '../themes';
 import { tailToHeight } from '../streaming.viewport';
+import { notify, progress } from '../notify';
 import { TaskPipeline } from '../../task';
 import { CodebaseIndexer } from '../../graph/indexer';
 import { GraphStore } from '../../graph/graph.store';
@@ -958,6 +959,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     setStreamingText('');
     setStreamingToolCalls([]);
     setIsProcessing(true);
+    progress('indeterminate'); // OSC 9;4 — terminal progress while the turn runs
     setStreamMeta({ elapsed: 0, chars: 0 });
     const streamStart = Date.now();
     let totalChars = 0;
@@ -1075,9 +1077,11 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setStreamingText('');
       setStreamingToolCalls([]);
       setIsProcessing(false);
+      progress('completed'); // clear terminal progress indicator
       cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
       if (options.notificationBell !== false && totalChars > 0) {
-        process.stdout.write('\x07');
+        // Rich terminal notification (iTerm2/Kitty/Ghostty) + bell fallback.
+        notify({ title: 'Bimax', message: 'Response ready' });
       }
     } catch (e: any) {
       clearInterval(metaTimer);
@@ -1088,6 +1092,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setStreamingText('');
       setStreamingToolCalls([]);
       setIsProcessing(false);
+      progress('error'); // signal failure to the terminal, then it auto-clears next turn
       addLog('error', `Agent error: ${e.message}`);
       cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
     }

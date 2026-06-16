@@ -10,6 +10,7 @@ import { ThemeName } from './themes';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { Governor } from '../governor/governor';
+import { progress } from './notify';
 
 export interface ReplOptions {
   agent: string;
@@ -47,4 +48,7 @@ export async function startRepl(
   );
   // Expose the instance so the resize handler can reset Ink's frame tracking (kills resize ghosts).
   setInkInstance(instance);
+
+  // Make sure any lingering OSC 9;4 terminal progress indicator is cleared on exit.
+  process.once('exit', () => { try { progress(null); } catch { /* stdout may be gone */ } });
 }

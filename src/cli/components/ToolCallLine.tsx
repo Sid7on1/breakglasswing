@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { ToolCallEntry } from '../events';
 import { ThemeColors } from '../themes';
+import { formatDuration, toolDurationMs } from '../format';
 
 const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -149,6 +150,11 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
   // For successful edits, the "Added N / removed M lines" stat is the headline summary.
   const summary = (!isError && editStats(call)) || summarizeOutput(call);
 
+  // Per-tool timing badge (Claude Code style): shown once the call finishes. The
+  // duration is already tracked on the entry (startTime/endTime) — we just format it.
+  const durMs = toolDurationMs(call);
+  const timing = !isRunning && durMs !== null ? formatDuration(durMs) : null;
+
   const header = (
     <Box>
       <Text color={dotColor}>⏺ </Text>
@@ -159,6 +165,7 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
           <InlineSpinner color={theme.warning} />
         </Box>
       )}
+      {timing && <Text color={theme.subtle}> · {timing}</Text>}
     </Box>
   );
 
