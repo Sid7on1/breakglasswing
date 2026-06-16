@@ -32,6 +32,7 @@ import { globalSkillService } from '../skills/skill.service';
 import { globalMcpManager } from '../mcp/manager';
 import { globalProjectMemory } from '../memory/project.memory';
 import { GraphStore } from '../graph/graph.store';
+import { cliEvents } from './events';
 
 async function runWorker() {
   if (!parentPort) throw new Error('Worker must be run as a thread');
@@ -104,10 +105,24 @@ async function runWorker() {
     // Isolate CWD
     agent.cwd = config.cwd;
 
+    // Forward this sub-agent's tool activity to the parent so the UI can nest it under the spawn
+    // (T3). cliEvents here is the worker-thread-local singleton the agent loop emits on; we relay
+    // each call over parentPort. The parent (SubAgentManager) tags it with parentId/agentLabel.
+    const relay = (subtype: 'tool_call' | 'tool_call_result') => (call: any) => {
+      try { parentPort!.postMessage({ type: 'tool_event', subtype, call }); } catch { /* best-effort */ }
+    };
+    const onCall = relay('tool_call');
+    const onResult = relay('tool_call_result');
+    cliEvents.on('tool_call', onCall);
+    cliEvents.on('tool_call_result', onResult);
+
     // 3. Execute
     const result = await agent.execute(config.prompt, (token) => {
       // Optional streaming
     });
+
+    cliEvents.off('tool_call', onCall);
+    cliEvents.off('tool_call_result', onResult);
 
     parentPort.postMessage({ type: 'success', result });
   } catch (err: any) {

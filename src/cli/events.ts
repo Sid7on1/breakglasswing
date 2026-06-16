@@ -79,6 +79,11 @@ export interface ToolCallEntry {
   status: 'running' | 'success' | 'error';
   startTime: Date;
   endTime?: Date;
+  // Set when this call was made by a sub-agent (worker thread) rather than the main loop. The UI
+  // indents and labels such calls so /swarm & /speculate work is legible instead of an opaque
+  // "Subagent (running…)" line. `parentId` is the spawning task id; `agentLabel` is the agent type.
+  parentId?: string;
+  agentLabel?: string;
 }
 
 export interface MessageEntry {

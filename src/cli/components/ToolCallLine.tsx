@@ -202,7 +202,8 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
 
   const header = (
     <Box>
-      <Text color={dotColor}>⏺ </Text>
+      <Text color={dotColor}>{call.agentLabel ? '└ ⏺ ' : '⏺ '}</Text>
+      {call.agentLabel && <Text color={theme.subtle}>[{call.agentLabel}] </Text>}
       <Text color={theme.text} bold>{label}</Text>
       <Text color={theme.subtle}>({input})</Text>
       {isRunning && (
@@ -296,7 +297,7 @@ export function ToolCallLine({ call, theme, compact = false }: ToolCallLineProps
 
   // Everything else: header + single summary line.
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" marginLeft={call.agentLabel ? 2 : 0}>
       {header}
       {summary ? (
         <Box marginLeft={2}>

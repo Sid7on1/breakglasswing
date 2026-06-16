@@ -1,6 +1,7 @@
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import { Logger } from '../utils/logger';
+import { cliEvents } from '../cli/events';
 
 export interface SubAgentConfig {
   agentType: string;
@@ -59,6 +60,11 @@ export class SubAgentManager {
           finalize(() => reject(new Error(message.error)));
         } else if (message.type === 'log') {
           Logger.info(`[Worker ${taskId}] ${message.content}`);
+        } else if (message.type === 'tool_event' && message.call) {
+          // T3 — re-emit a sub-agent's tool activity on the main event bus, tagged so the UI nests
+          // it under this spawn. Tag-and-forward only; never settles the spawn promise.
+          const call = { ...message.call, parentId: taskId, agentLabel: config.agentType };
+          cliEvents.emit(message.subtype === 'tool_call_result' ? 'tool_call_result' : 'tool_call', call);
         }
       });
 
