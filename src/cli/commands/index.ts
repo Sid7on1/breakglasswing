@@ -21,3 +21,4 @@ import './council';
 import './speculate';
 import './evolve';
 import './plugins';
+import './security';
