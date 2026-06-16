@@ -1,28 +1,77 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { marked } from 'marked';
 import highlight from 'cli-highlight';
 import { ThemeColors } from '../themes';
+import { MarkdownTable } from './MarkdownTable';
 
 interface MarkdownProps {
   children: string;
   theme: ThemeColors;
 }
 
-export function Markdown({ children, theme }: MarkdownProps) {
-  if (!children) return null;
+// --- Token cache + fast-path lexing (ported from Claude Code's Markdown.tsx) ---
+// marked.lexer is the hot cost when committed transcript rows re-mount in Ink's
+// <Static> region and when the live preview re-renders each streaming delta. Tokens
+// for a given content string are stable, so we cache them (LRU, hash-keyed to avoid
+// retaining full content strings) and skip the parse entirely for plain text.
+const TOKEN_CACHE_MAX = 500;
+const tokenCache = new Map<string, any[]>();
 
-  try {
-    const tokens = marked.lexer(children);
-    return (
-      <Box flexDirection="column">
-        {tokens.map((token, i) => <MarkdownToken key={i} token={token} theme={theme} />)}
-      </Box>
-    );
-  } catch (err) {
-    // Fallback to raw text if parsing fails
-    return <Text color={theme.text}>{children}</Text>;
+// Any markdown marker, a blank line (paragraph break), or an ordered-list start.
+const MD_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /;
+function hasMarkdownSyntax(s: string): boolean {
+  // Markdown markers appear early if at all (headers, fences, lists); long plain
+  // tool-output tails don't need a full scan.
+  return MD_SYNTAX_RE.test(s.length > 500 ? s.slice(0, 500) : s);
+}
+
+// Fast non-crypto string hash (djb2). Good enough as a cache key for immutable content.
+function hashContent(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36) + ':' + s.length;
+}
+
+function cachedLexer(content: string): any[] {
+  // Fast path: plain text with no markdown → a single paragraph token, no parse.
+  if (!hasMarkdownSyntax(content)) {
+    return [{ type: 'paragraph', raw: content, text: content,
+      tokens: [{ type: 'text', raw: content, text: content }] }];
   }
+  const key = hashContent(content);
+  const hit = tokenCache.get(key);
+  if (hit) {
+    // Promote to MRU so scrolling back to an early message doesn't evict it.
+    tokenCache.delete(key);
+    tokenCache.set(key, hit);
+    return hit;
+  }
+  const tokens = marked.lexer(content);
+  if (tokenCache.size >= TOKEN_CACHE_MAX) {
+    const first = tokenCache.keys().next().value; // Map preserves insertion order → drop oldest
+    if (first !== undefined) tokenCache.delete(first);
+  }
+  tokenCache.set(key, tokens);
+  return tokens;
+}
+
+export function Markdown({ children, theme }: MarkdownProps) {
+  // Memoize on (content, theme): avoids re-tokenizing + rebuilding the element tree
+  // when the parent re-renders for unrelated reasons (the common case during streaming).
+  return useMemo(() => {
+    if (!children) return null;
+    try {
+      const tokens = cachedLexer(children);
+      return (
+        <Box flexDirection="column">
+          {tokens.map((token, i) => <MarkdownToken key={i} token={token} theme={theme} />)}
+        </Box>
+      );
+    } catch {
+      return <Text color={theme.text}>{children}</Text>;
+    }
+  }, [children, theme]);
 }
 
 function MarkdownToken({ token, theme }: { token: any; theme: ThemeColors }) {
@@ -85,6 +134,9 @@ function MarkdownToken({ token, theme }: { token: any; theme: ThemeColors }) {
           ))}
         </Box>
       );
+
+    case 'table':
+      return <MarkdownTable token={token} theme={theme} />;
 
     case 'blockquote':
       return (
