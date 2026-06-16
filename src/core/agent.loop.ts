@@ -76,6 +76,18 @@ export class AgentLoop {
           cliEvents.emit('thinking', event.text);
         } else if (event.type === 'tool_call') {
           toolCalls.push(event);
+        } else if (event.type === 'tool_call_partial') {
+          // Live activity only: show the call forming in the UI while args still stream. The
+          // authoritative entry is (re-)emitted by executeTool with the same id, which the UI
+          // dedupes, so this never double-runs anything.
+          cliEvents.emit('tool_call', {
+            id: event.id,
+            toolName: event.name,
+            input: event.args || '',
+            output: '',
+            status: 'running',
+            startTime: new Date(),
+          } as ToolCallEntry);
         } else if (event.type === 'usage') {
           this.contextManager.updateTokens(event.prompt);
         } else if (event.type === 'error') {

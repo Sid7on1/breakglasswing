@@ -718,6 +718,13 @@ export class LlmAdapter implements LLMProvider {
               activeToolArgs += tc.function.arguments;
             }
           }
+          // C3 — live tool-arg streaming. When the model streams partial-JSON tool args, surface the
+          // call (name + args-so-far) as it forms so the UI shows activity before the turn finishes.
+          // Additive + display-only: the authoritative `tool_call` still fires at the boundary/end.
+          // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged.
+          if (caps.partialJsonTools && activeToolCallId) {
+            yield { type: 'tool_call_partial', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+          }
         }
         
         // Handle usage if present in the stream (requires stream_options in some models).

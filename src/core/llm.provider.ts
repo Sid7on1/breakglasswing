@@ -25,6 +25,11 @@ export type ChatEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string } // Model's internal reasoning — never show as the reply
   | { type: 'tool_call'; id: string; name: string; args: string } // Note: args comes in as a string
+  // Live, still-streaming tool call — args is the partial (possibly invalid) JSON accumulated so
+  // far. Emitted only when the model supports partial-JSON tool streaming (caps.partialJsonTools);
+  // display-only, the authoritative call still arrives as a final `tool_call`. Consumers that don't
+  // render live activity can ignore it.
+  | { type: 'tool_call_partial'; id: string; name: string; args: string }
   | { type: 'usage'; prompt: number; completion: number }
   // `kind` tells the agent loop *how* to recover: 'context' → compact and retry;
   // 'transient' → bounded re-ask (new key / re-sampled output). Absent when fatal.

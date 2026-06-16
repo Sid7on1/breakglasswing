@@ -1,6 +1,7 @@
 import { AgentLoop } from '../core/agent.loop';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LLMProvider, ChatEvent, Message } from '../core/llm.provider';
+import { cliEvents, ToolCallEntry } from '../cli/events';
 
 /**
  * End-to-end: when the model writes a tool call as plain text instead of using the
@@ -53,6 +54,57 @@ describe('AgentLoop — recovers and executes a text-emitted tool call', () => {
     const finalAssistant = [...loop.messages].reverse().find(m => m.role === 'assistant');
     expect(finalAssistant?.content).toContain('Done');
     expect(loop.messages.some(m => m.role === 'assistant' && typeof m.content === 'string' && m.content.includes('"name"'))).toBe(false);
+  });
+});
+
+/**
+ * C3 live tool-arg streaming: a `tool_call_partial` event must surface as a live "running" tool
+ * entry on the UI bus (so the call shows as it forms) WITHOUT being executed — only the final
+ * authoritative `tool_call` runs the tool.
+ */
+describe('AgentLoop — live tool-arg streaming (tool_call_partial)', () => {
+  it('emits a running tool_call for the partial without executing it', async () => {
+    let execCount = 0;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'WriteFileTool', description: 'writes', schema: {},
+      isDestructive: false, isConcurrencySafe: true,
+      execute: async () => { execCount++; return 'OK'; },
+    } as any);
+
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        if (call === 1) {
+          yield { type: 'tool_call_partial', id: 'tc1', name: 'WriteFileTool', args: '{"path":"/tmp/' };
+          yield { type: 'tool_call_partial', id: 'tc1', name: 'WriteFileTool', args: '{"path":"/tmp/x","content":"hi"}' };
+          yield { type: 'tool_call', id: 'tc1', name: 'WriteFileTool', args: '{"path":"/tmp/x","content":"hi"}' };
+          yield { type: 'done' };
+        } else {
+          yield { type: 'token', text: 'Done.' };
+          yield { type: 'done' };
+        }
+      },
+    };
+
+    const seen: ToolCallEntry[] = [];
+    const onCall = (c: ToolCallEntry) => seen.push(c);
+    cliEvents.on('tool_call', onCall);
+    try {
+      const loop = new AgentLoop(mockLlm, registry, null as any);
+      // eslint-disable-next-line no-empty
+      for await (const _ of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 2 })) {}
+    } finally {
+      cliEvents.off('tool_call', onCall);
+    }
+
+    // The partials surfaced as running entries (live activity) with the growing args...
+    const running = seen.filter(c => c.id === 'tc1' && c.status === 'running');
+    expect(running.length).toBeGreaterThanOrEqual(2);
+    expect(running.some(c => c.input === '{"path":"/tmp/')).toBe(true);
+    // ...and the tool executed exactly once (driven by the final tool_call, not the partials).
+    expect(execCount).toBe(1);
   });
 });
 

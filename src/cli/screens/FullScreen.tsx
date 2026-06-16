@@ -1009,7 +1009,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
 
     const currentToolCalls: import('../events').ToolCallEntry[] = [];
     const onToolCall = (tc: import('../events').ToolCallEntry) => {
-      currentToolCalls.push(tc);
+      // Dedupe by id: a call can be announced twice — first as a live partial while its args still
+      // stream (C3), then for real at execution. Same id → update in place, don't add a second row.
+      const idx = currentToolCalls.findIndex(t => t.id === tc.id);
+      if (idx !== -1) currentToolCalls[idx] = tc; else currentToolCalls.push(tc);
       setStreamingToolCalls([...currentToolCalls]);
     };
     const onToolCallResult = (tc: import('../events').ToolCallEntry) => {
