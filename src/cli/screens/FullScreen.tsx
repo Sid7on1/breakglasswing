@@ -506,6 +506,23 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       return;
     }
 
+    if (matchChord(char, key, keys.commandPalette)) {
+      // Command palette: a fuzzy-searchable overlay of EVERY registered command, derived live from
+      // the registry (built-ins + user .bimax/commands), so it never drifts from what actually
+      // exists. Selecting a command runs it through the normal submit path.
+      const opts = globalCommandRegistry.getPaletteOptions();
+      setActiveMenu({
+        type: 'menu',
+        title: 'Command Palette — type to fuzzy-search, Enter to run',
+        options: opts,
+        onSelect: (opt: MenuOption) => {
+          setActiveMenu(null);
+          if (opt.value && opt.value.startsWith('/')) handleSubmit(opt.value);
+        },
+      });
+      return;
+    }
+
     if (matchChord(char, key, keys.quit)) {
       cliEvents.emit('shutdown');
       exit();

@@ -66,6 +66,19 @@ export class CommandRegistry {
     }
     return Array.from(uniqueCommands);
   }
+
+  /**
+   * Palette rows for the Ctrl+K command palette: one entry per registered command (deduped by
+   * object identity, so aliases don't double-list), sorted by category then name. This is the
+   * SINGLE SOURCE OF TRUTH for "what commands exist" — the palette derives from the live registry
+   * (built-ins + user `.bimax/commands/*.md`), so it can never drift from reality the way a
+   * hardcoded list does.
+   */
+  getPaletteOptions(): { label: string; value: string; desc: string; category: string }[] {
+    return this.getAllCommands()
+      .map(c => ({ label: c.name, value: c.name, desc: c.description, category: c.category }))
+      .sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
+  }
 }
 
 export const globalCommandRegistry = new CommandRegistry();

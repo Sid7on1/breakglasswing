@@ -13,6 +13,7 @@ export type KeyAction =
   | 'pastePreview'
   | 'toggleLogs'
   | 'routeToggle'
+  | 'commandPalette'
   | 'quit'
   | 'interrupt';
 
@@ -24,6 +25,7 @@ const DEFAULTS: Record<KeyAction, KeyChord> = {
   pastePreview: { ctrl: true, key: 'p' },
   toggleLogs: { ctrl: true, key: 'o' },
   routeToggle: { ctrl: true, key: 't' },
+  commandPalette: { ctrl: true, key: 'k' },
   quit: { ctrl: true, key: 'd' },
   interrupt: { ctrl: true, key: 'c' },
 };
@@ -34,6 +36,7 @@ export const ACTION_LABELS: Record<KeyAction, string> = {
   pastePreview: 'Preview pasted text',
   toggleLogs: 'Toggle the logs panel',
   routeToggle: 'Cycle model routing (auto → lite → heavy)',
+  commandPalette: 'Open the command palette',
   quit: 'Quit bimax',
   interrupt: 'Interrupt / quit (press twice)',
 };
