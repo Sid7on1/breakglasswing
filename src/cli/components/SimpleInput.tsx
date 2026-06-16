@@ -34,9 +34,12 @@ export interface SimpleInputProps {
   // When a multi-line paste arrives, the parent can swap the raw blob for a short placeholder
   // chip (Claude-Code style). Return the text to actually insert into the visible input.
   onPaste?: (text: string) => string;
+  // Inline ghost text (gray) shown after the cursor when it is at the end — the predicted
+  // completion of the current token. Accepted via Tab (handled by the parent). Empty = none.
+  ghost?: string;
 }
 
-export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mask, onPaste }: SimpleInputProps) {
+export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mask, onPaste, ghost }: SimpleInputProps) {
   const [cursorOffset, setCursorOffset] = useState(0);
   
   // Use a ref to track the latest value synchronously for rapid typing/pasting
@@ -106,8 +109,8 @@ export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mas
       }
     }
 
-    if (key.upArrow || key.downArrow || key.escape || key.ctrl || key.meta) {
-      return; // Handled by parent components or ignored
+    if (key.upArrow || key.downArrow || key.escape || key.tab || key.ctrl || key.meta) {
+      return; // Handled by parent components (incl. Tab = accept ghost/suggestion) or ignored
     }
 
     // For typing and pasting
@@ -147,6 +150,11 @@ export function SimpleInput({ value, onChange, onSubmit, focus, placeholder, mas
   }
 
   if (cursorOffset === 0) {
+    // Cursor at end: if there's predicted ghost text, put the cursor on its first char and dim
+    // the rest (gray) so it reads as a suggestion to accept with Tab.
+    if (ghost && !mask) {
+      return <Text>{renderedValue}<Text inverse>{ghost[0]}</Text><Text dimColor>{ghost.slice(1)}</Text></Text>;
+    }
     return <Text>{renderedValue}<Text inverse> </Text></Text>;
   }
 

@@ -41,7 +41,7 @@ import { GraphStore } from '../../graph/graph.store';
 import { CodebaseMapPanel } from '../components/CodebaseMapPanel';
 import { summarizeGraph, isCodebase } from '../../graph/graph.summary';
 import { estimateTokens } from '../../graph/context.planner';
-import { expandAtMentions, suggestAtSymbols } from '../atMention';
+import { expandAtMentions, suggestAtSymbols, suggestPaths, looksLikePath } from '../atMention';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { Governor } from '../../governor/governor';
@@ -352,11 +352,15 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setSuggestionIndex(matches.length > 0 ? 0 : -1);
       return;
     }
-    // @symbol autocomplete: complete the `@<partial>` token currently being typed from
-    // graph node names (G4). Resolves symbols, not files — more precise than @file.
-    const atMatch = value.match(/(?:^|\s)@([A-Za-z0-9_.]*)$/);
+    // @ autocomplete for the trailing `@<token>`. A path-shaped token (@./, @~/, @/, or any
+    // token containing a slash) completes against the filesystem; otherwise it completes graph
+    // symbol names (G4 — symbol-precise, more useful than a bare file path).
+    const atMatch = value.match(/(?:^|\s)@(\S*)$/);
     if (atMatch) {
-      const matches = suggestAtSymbols(graphStore, atMatch[1]).map(n => `@${n}  symbol`);
+      const token = atMatch[1];
+      const matches = looksLikePath(token)
+        ? suggestPaths(token, process.cwd())
+        : suggestAtSymbols(graphStore, token).map(n => `@${n}  symbol`);
       setSuggestions(matches);
       setSuggestionIndex(matches.length > 0 ? 0 : -1);
       return;
@@ -394,6 +398,25 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       if (key.upArrow) {
         if (count > 0) setSearchIndex((i) => (i - 1 + count) % count);
         return;
+      }
+      return;
+    }
+
+    // Tab accepts the current autocomplete suggestion / ghost text into the input (never executes —
+    // Enter does that). For a directory pick, no trailing space so you can keep descending.
+    if (key.tab) {
+      if (suggestions.length > 0 && suggestionIndex >= 0) {
+        const selected = suggestions[suggestionIndex].split('  ')[0];
+        setSuggestions([]);
+        setSuggestionIndex(-1);
+        let newVal: string;
+        if (selected.startsWith('@')) {
+          newVal = input.replace(/@\S*$/, selected.endsWith('/') ? selected : selected + ' ');
+        } else {
+          newVal = selected + ' ';
+        }
+        setInput(newVal);
+        updateSuggestions(newVal); // refresh (e.g. show the contents of a just-accepted dir)
       }
       return;
     }
@@ -798,10 +821,12 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setSuggestions([]);
       setSuggestionIndex(-1);
 
-      // @symbol completion: replace the trailing `@<partial>` with the chosen symbol and
-      // keep editing (never auto-submit on an @ pick).
+      // @ completion (symbol or path): replace the trailing `@<token>` with the choice and keep
+      // editing (never auto-submit). For a directory pick (trailing `/`), don't append a space so
+      // the user can keep descending into it; otherwise add a trailing space.
       if (selected.startsWith('@')) {
-        setInput(rawQuery.replace(/@[A-Za-z0-9_.]*$/, selected + ' '));
+        const tail = selected.endsWith('/') ? selected : selected + ' ';
+        setInput(rawQuery.replace(/@\S*$/, tail));
         return;
       }
 
@@ -1297,6 +1322,22 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   const tokenEstimate = systemPromptTokens + historyTokens + estimateTokens(input);
   const mapPanelVisible = showMapPanel && graphSummary.nodeCount > 0;
 
+  // Inline ghost text: the suffix of the currently-selected suggestion beyond what's typed for
+  // the trailing token (slash command or @token). Rendered dim after the cursor; accept with Tab.
+  const ghostText = (() => {
+    if (isSearching || suggestionIndex < 0 || suggestionIndex >= suggestions.length) return '';
+    const sel = suggestions[suggestionIndex].split('  ')[0];
+    if (input.startsWith('/') && !input.includes(' ')) {
+      return sel.startsWith(input) ? sel.slice(input.length) : '';
+    }
+    const m = input.match(/@(\S*)$/);
+    if (m) {
+      const typed = '@' + m[1];
+      return sel.startsWith(typed) ? sel.slice(typed.length) : '';
+    }
+    return '';
+  })();
+
   return (
     <>
       {/* Completed content is printed once into scrollback and never redrawn —
@@ -1506,6 +1547,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                   </Box>
                 )}
                 <SimpleInput
+                  ghost={isSearching ? '' : ghostText}
                   value={isSearching ? searchQuery : input}
                   onChange={isSearching ? setSearchQuery : (val: string) => {
                     setInput(val);

@@ -1,3 +1,6 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { IGraphStore } from '../graph/models';
 import { resolveNodeId } from '../graph/node.search';
 import { readSymbolSource } from '../graph/symbol.source';
@@ -62,6 +65,42 @@ export async function expandAtMentions(
   if (blocks.length === 0) return { text, resolved, unresolved };
   const appended = `${text}\n\n--- Referenced symbols (from @mentions) ---\n${blocks.join('\n\n')}`;
   return { text: appended, resolved, unresolved };
+}
+
+/**
+ * A `@<token>` is treated as a filesystem path (rather than a symbol) when it looks like one:
+ * starts with `./`, `../`, `/`, `~`, or contains a slash. Used to route @-completion.
+ */
+export function looksLikePath(token: string): boolean {
+  return token.startsWith('./') || token.startsWith('../') || token.startsWith('/')
+    || token.startsWith('~') || token.includes('/');
+}
+
+/**
+ * Filesystem completions for a `@<path>` token being typed (`@./src/`, `@~/notes`, `@/etc/`).
+ * Returns full `@<dir><entry>` strings (dirs suffixed with `/`) so the accept step can replace
+ * the whole token. Pure-ish (reads the FS); failures resolve to an empty list.
+ */
+export function suggestPaths(token: string, cwd: string, limit = 10): string[] {
+  try {
+    let dirPart: string, prefix: string;
+    if (token.endsWith('/')) { dirPart = token; prefix = ''; }
+    else { const i = token.lastIndexOf('/'); dirPart = i >= 0 ? token.slice(0, i + 1) : ''; prefix = i >= 0 ? token.slice(i + 1) : token; }
+
+    let baseDir: string;
+    if (dirPart.startsWith('~')) baseDir = path.join(os.homedir(), dirPart.slice(1));
+    else if (path.isAbsolute(dirPart)) baseDir = dirPart || '/';
+    else baseDir = path.join(cwd, dirPart);
+
+    const lc = prefix.toLowerCase();
+    return fs.readdirSync(baseDir, { withFileTypes: true })
+      .filter((e) => (lc ? e.name.toLowerCase().startsWith(lc) : !e.name.startsWith('.')))
+      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+      .slice(0, limit)
+      .map((e) => `@${dirPart}${e.name}${e.isDirectory() ? '/' : ''}  ${e.isDirectory() ? 'dir' : 'file'}`);
+  } catch {
+    return [];
+  }
 }
 
 /** Symbol-name completions for the `@<partial>` being typed (pure; for the autocomplete UI). */

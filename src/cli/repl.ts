@@ -6,7 +6,8 @@ import { GraphStore } from '../graph/graph.store';
 import { GlobalPrompter } from './prompter';
 import { FullScreen } from './screens/FullScreen';
 import { setInkInstance } from './inkInstance';
-import { ThemeName } from './themes';
+import { ThemeName, getTheme } from './themes';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { Governor } from '../governor/governor';
@@ -38,13 +39,19 @@ export async function startRepl(
   // starts at the top of an empty screen instead of below whatever was already in the terminal.
   try { process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); } catch { /* non-TTY: nothing to clear */ }
 
+  // Wrap the app in a top-level error boundary so a render-time crash shows a fallback
+  // (and logs) instead of tearing down the whole TUI.
   const instance = render(
-    React.createElement(FullScreen, {
-      taskPipeline,
-      codebaseIndexer,
-      graphStore,
-      options,
-    }),
+    React.createElement(
+      ErrorBoundary,
+      { theme: getTheme(options.theme) },
+      React.createElement(FullScreen, {
+        taskPipeline,
+        codebaseIndexer,
+        graphStore,
+        options,
+      }),
+    ),
   );
   // Expose the instance so the resize handler can reset Ink's frame tracking (kills resize ghosts).
   setInkInstance(instance);
