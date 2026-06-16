@@ -195,7 +195,18 @@ export abstract class AgentPersona {
 
     // AgentLoop expects an IGovernor, but our tools already have it injected during buildTool
     const cfg = getConfig();
-    const contextWindow = cfg.contextWindowTokens && cfg.contextWindowTokens > 0 ? cfg.contextWindowTokens : undefined;
+    // Context window precedence: an explicit user setting always wins; otherwise fall back to the
+    // active model's advertised capability window (Claude 200k, Gemini 1M, …) so compaction scales
+    // to the real model instead of a blanket 128k default. FLOOR (unknown model) yields 32k, which
+    // is conservative-but-safe. Best-effort: any failure leaves it undefined (ContextManager default).
+    let contextWindow: number | undefined =
+      cfg.contextWindowTokens && cfg.contextWindowTokens > 0 ? cfg.contextWindowTokens : undefined;
+    if (contextWindow === undefined) {
+      try {
+        const caps = await this.llmAdapter.activeCapabilities(options?.useLite);
+        if (caps.contextWindow && caps.contextWindow > 0) contextWindow = caps.contextWindow;
+      } catch { /* capability lookup is best-effort; fall back to ContextManager default */ }
+    }
     const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, null as any, contextWindow);
     const maxIterations = options?.maxIterations ?? 15;
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';

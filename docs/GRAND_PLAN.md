@@ -15,7 +15,8 @@
 | **B2 — Native-thinking bypass (C2)** | ✅ Done | `chat()` runs the `ThinkTagFilter` in non-implicit mode when `caps.nativeThinking`, so models with a real `reasoning_content` channel stream the answer token-by-token instead of buffering for an opener-less `</think>` that never arrives. FLOOR unchanged. |
 | **B3 — Structured outputs (C5)** | ✅ Done | `generateTinyPlans` sends `response_format:{type:'json_object'}` when `caps.structuredOutputs`; `extractJson` stays the universal fallback. |
 | **B4 — Live tool-arg streaming (C3)** | ↪ Folded into Phase C | Backend already streams/accumulates args correctly; the only delta is live UI render (new `ChatEvent` + agent-loop + TUI), which belongs with the Phase C tool-display work. |
-| **C — TUI cherry-picks** | ⬜ Planned | streaming stable-prefix, collapse/expand, sub-agent tool tree. |
+| **B5 — Capability-driven context window** | ✅ Done | `base.persona.execute()` now falls back to `activeCapabilities().contextWindow` (Claude 200k, Gemini 1M, FLOOR 32k) when the user hasn't set `contextWindowTokens`, so compaction scales to the real model instead of a blanket 128k. Explicit user setting still wins; lookup is best-effort. 340/340 pass, 0 tsc errors. |
+| **C — TUI cherry-picks** | ⚠ Re-scoped | C-T2 (collapse/expand) & C-T3 (sub-agent tool tree) are NOT cheap cherry-picks: `ToolCallLine` renders inside Ink `<Static>` (write-once rows), and sub-agents run in isolated worker threads posting only final success/error (`worker.entry.ts`). Both need architecture changes (pull output out of `<Static>` / worker→parent IPC + `parentId`), not ~150-LOC ports. Deferred until scoped as their own effort. |
 | **D — Multimodal/search** | ⬜ Planned | vision input, native web search. |
 
 ---
