@@ -6,6 +6,7 @@ import { GraphStore } from '../graph/graph.store';
 import { GlobalPrompter } from './prompter';
 import { FullScreen } from './screens/FullScreen';
 import { setInkInstance } from './inkInstance';
+import { makeSyncStdout, shouldSyncOutput } from './syncOutput';
 import { ThemeName, getTheme } from './themes';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToolRegistry } from '../tools/tool.registry';
@@ -39,6 +40,13 @@ export async function startRepl(
   // starts at the top of an empty screen instead of below whatever was already in the terminal.
   try { process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); } catch { /* non-TTY: nothing to clear */ }
 
+  // Synchronized output (DEC 2026): when opt-in + a capable terminal, hand Ink a stdout that
+  // brackets each frame in BSU/ESU so repaints land atomically (no flicker/tearing). Off by
+  // default → Ink uses the real stdout exactly as before.
+  const inkOpts = shouldSyncOutput()
+    ? { stdout: makeSyncStdout(process.stdout) as any }
+    : undefined;
+
   // Wrap the app in a top-level error boundary so a render-time crash shows a fallback
   // (and logs) instead of tearing down the whole TUI.
   const instance = render(
@@ -52,6 +60,7 @@ export async function startRepl(
         options,
       }),
     ),
+    inkOpts,
   );
   // Expose the instance so the resize handler can reset Ink's frame tracking (kills resize ghosts).
   setInkInstance(instance);
