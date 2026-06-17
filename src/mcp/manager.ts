@@ -93,6 +93,7 @@ export class McpManager {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ servers: specs }, null, 2), 'utf8');
     if (!enabled) await this.disconnect(name, registry);
+    cliEvents.emit('mcp_changed');
     return true;
   }
 

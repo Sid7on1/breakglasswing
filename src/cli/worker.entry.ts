@@ -29,6 +29,7 @@ import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { globalSkillService } from '../skills/skill.service';
+import { loadHooksConfig } from '../tools/hooks.loader';
 import { globalMcpManager } from '../mcp/manager';
 import { globalProjectMemory } from '../memory/project.memory';
 import { GraphStore } from '../graph/graph.store';
@@ -81,6 +82,7 @@ async function runWorker() {
     toolRegistry.register(createRememberTool(governor, globalProjectMemory));
     globalSkillService.load(config.cwd || process.cwd());
     toolRegistry.register(createSkillTool(governor, globalSkillService));
+    loadHooksConfig(config.cwd || process.cwd());
     toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
     toolRegistry.register(createWebSearchTool(governor));

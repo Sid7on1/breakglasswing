@@ -53,6 +53,7 @@ import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { globalSkillService } from '../skills/skill.service';
+import { loadHooksConfig } from '../tools/hooks.loader';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
@@ -147,6 +148,9 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
   globalSkillService.load(projectRoot);
   toolRegistry.register(createSkillTool(governor, globalSkillService));
+  // Shell-command hooks: PreToolUse can block a tool, PostToolUse runs for side effects.
+  // Loaded from .bimax/hooks.json; absent config registers nothing.
+  loadHooksConfig(projectRoot);
   // Agent-driven MCP setup: gated by the Governor (the tool is destructive → user confirms).
   toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
   // Smart context mode: loader for deferred tool schemas (kept off the wire until needed).

@@ -41,6 +41,26 @@ describe('McpManager config persistence', () => {
     expect(await mgr.setEnabled('nope', false, undefined, dir)).toBe(false);
   });
 
+  it('setEnabled emits mcp_changed so the UI/token-meter refreshes', async () => {
+    const { cliEvents } = require('../cli/events');
+    const mgr = new McpManager();
+    mgr.addToConfig({ name: 'seq', command: 'node', args: [FIXTURE] }, dir);
+
+    const changed = jest.fn();
+    cliEvents.on('mcp_changed', changed);
+    try {
+      await mgr.setEnabled('seq', false, undefined, dir);
+      expect(changed).toHaveBeenCalledTimes(1);
+      await mgr.setEnabled('seq', true, undefined, dir);
+      expect(changed).toHaveBeenCalledTimes(2);
+      // An unknown server makes no change and emits nothing.
+      await mgr.setEnabled('nope', false, undefined, dir);
+      expect(changed).toHaveBeenCalledTimes(2);
+    } finally {
+      cliEvents.off('mcp_changed', changed);
+    }
+  });
+
   it('addToConfig then removeFromConfig round-trips .bimax/mcp.json', () => {
     const mgr = new McpManager();
     mgr.addToConfig({ name: 'echo', command: 'node', args: [FIXTURE] }, dir);
