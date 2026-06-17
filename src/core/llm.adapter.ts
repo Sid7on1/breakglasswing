@@ -242,8 +242,10 @@ export class LlmAdapter implements LLMProvider {
   // Time-to-first-token budget. Cold starts on slow reasoning models (minimax) routinely run
   // 60–90s before the first token while later chunks arrive quickly, so the first chunk gets a
   // longer budget than the inter-chunk one — a real cold start isn't killed as a "stall," but a
-  // genuinely dead stream is still caught.
-  public firstChunkTimeoutMs = parseInt(process.env.BGW_FIRST_CHUNK_TIMEOUT_MS || '120000', 10);
+  // genuinely dead stream is still caught. Default 180s: NVIDIA NIM queues a cold heavy reasoning
+  // model (minimax-m3) well past 120s before the first token, which surfaced as a spurious
+  // "stream timeout" + retry loop. Also covers the whole reasoning phase (see chat()).
+  public firstChunkTimeoutMs = parseInt(process.env.BGW_FIRST_CHUNK_TIMEOUT_MS || '180000', 10);
   // Optional reasoning budget for thinking models (e.g. minimax). Off by default —
   // when set ('low'|'medium'|'high'), sent as reasoning_effort to trade depth for speed.
   public reasoningEffort?: string = process.env.BGW_REASONING_EFFORT || undefined;
@@ -707,9 +709,10 @@ export class LlmAdapter implements LLMProvider {
         // gap is not. The timer MUST be cleared once the chunk arrives, or every chunk leaks a
         // timer (and a later unhandled rejection) — a long reasoning stream would spawn hundreds.
         const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : this.firstChunkTimeoutMs;
+        const phase = receivedFirstChunk ? 'mid-stream' : 'first token';
         let timeoutHandle: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<any>((_, reject) => {
-          timeoutHandle = setTimeout(() => reject(new Error(`Stream read timeout: no data from the API for ${Math.round(chunkTimeoutMs / 1000)}s (check provider status / API key)`)), chunkTimeoutMs);
+          timeoutHandle = setTimeout(() => reject(new Error(`LLM stream timeout: model '${model}' sent no ${phase} for ${Math.round(chunkTimeoutMs / 1000)}s (provider ${kr.provider || 'NIM'} cold/slow — not a tool error)`)), chunkTimeoutMs);
         });
 
         let result: any;

@@ -29,6 +29,9 @@ describe('classifyStreamError', () => {
   it('marks stalled streams and server errors as transient', () => {
     expect(classifyStreamError(new Error('Stream read timeout: no data from the API for 60s')))
       .toMatchObject({ status: 408, recoverable: true, kind: 'transient' });
+    // The model-naming timeout message must still classify as a recoverable stall.
+    expect(classifyStreamError(new Error("LLM stream timeout: model 'minimax-m3' sent no first token for 180s (provider NIM cold/slow — not a tool error)")))
+      .toMatchObject({ status: 408, recoverable: true, kind: 'transient' });
     expect(classifyStreamError({ status: 503, message: 'service unavailable' }))
       .toMatchObject({ recoverable: true, kind: 'transient' });
   });
