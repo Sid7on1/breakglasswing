@@ -12,7 +12,6 @@ import { GlobalPrompter } from '../prompter';
 import { globalCommandRegistry, CommandResult, CommandContext } from '../commands/registry';
 import '../commands';
 import { loadCustomCommands } from '../commands/custom.loader';
-import { loadHooksConfig } from '../../tools/hooks.loader';
 import { registerPostHook } from '../../tools/hooks';
 import { setGitAutoCommitEnabled, gitAutoCommitHook, GIT_AUTOCOMMIT_TOOLS } from '../../tools/git.autocommit';
 import { setVerifyEnabled, verifyHook, registerVerifyGraphStore, VERIFY_TOOLS } from '../../sandbox/verify.loop';
@@ -605,11 +604,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       if (custom.length > 0) addLog('info', `Loaded ${custom.length} custom command(s): ${custom.join(' ')}`);
     } catch { /* custom commands are best-effort */ }
 
-    // Load shell hooks from .bimax/hooks.json (A2). Best-effort.
-    try {
-      const nHooks = loadHooksConfig();
-      if (nHooks > 0) addLog('info', `Loaded ${nHooks} tool hook(s) from .bimax/hooks.json`);
-    } catch { /* hooks are best-effort */ }
+    // Shell hooks (.bimax/hooks.json) are loaded once in createContainer so that print mode
+    // and worker threads honor them too; loading here as well would double-register them.
 
     // Git auto-commit (B1): a built-in PostToolUse hook on edit tools, gated on the live flag
     // (off by default). Interactive only — registered here, so workers/print never auto-commit.
