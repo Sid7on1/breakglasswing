@@ -64,7 +64,7 @@ BiMax's terminal becomes a **cockpit**: a fast, flicker-free, keyboard-driven su
 ### Track 0 — Interaction Core *(enabler — build first)*
 **Goal:** the primitives every panel/palette/HUD needs, so we build them once.
 - **Overlay/modal host**: a `useOverlayStack` hook + an absolutely-positioned `<Box>` layer rendered in `FullScreen`'s live region (never inside `<Static>`), so dialogs/palettes/HUDs float without a screen rewrite. Files: new `src/cli/overlay/`, `src/cli/screens/FullScreen.tsx`.
-- **Keybinding context stack**: refactor flat `useInput` into a priority dispatcher (Global → Chat → Overlay → Search → Permission). Additive — current chords become the Global context. Files: `src/cli/keybindings.ts`, `FullScreen.tsx`. Zod-validate the rebind config.
+- **Keybinding context stack** ✅ *shipped*: flat `useInput` refactored into a priority dispatcher (`dispatchKey` + `KeyContext`/`CONTEXT_PRIORITY` in `keybindings.ts`) walking Permission → Overlay → Search → Chat → Global. Additive — every existing chord lives unchanged in the Global context; the old fall-through order is reproduced exactly and locked by 8 dispatcher tests. Files: `src/cli/keybindings.ts`, `FullScreen.tsx`.
 - **Focusable interactive rows**: a minimal focus model (`useFocus`/index cursor) for rows that live in the live region (committed `<Static>` stays write-once; *interactive* rows render just above it). Enables collapse/expand + pickers.
 - **Selector store slice**: wrap `appStore` (`src/state/app.state.ts`) in `useSyncExternalStore` + `useAppState(selector)`; peel streaming-text + footer fields out of `FullScreen` so streamed tokens stop re-rendering the whole tree.
 - **Effort:** L · **Risk:** med (central input/render path) · **Prereq for:** Tracks 1–4.

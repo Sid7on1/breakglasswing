@@ -20,7 +20,7 @@ import { setSandboxEnabled } from '../../sandbox/exec.sandbox';
 import { Footer } from '../components/Footer';
 import { decideTier, applyBrief, Tier } from '../model.router';
 import { getInkInstance } from '../inkInstance';
-import { getBindings, matchChord, listBindings } from '../keybindings';
+import { getBindings, matchChord, listBindings, dispatchKey, KeyContext } from '../keybindings';
 import { PermissionDialog } from '../components/PermissionDialog';
 import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
@@ -355,168 +355,206 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   }, []);
 
   useInput((char, key) => {
-    if (vetoQuestion || activeMenu) return;
     const keys = getBindings();
 
-    if (isSearching) {
-      if (key.escape) {
-        setIsSearching(false);
-        setSearchQuery('');
-        cliEvents.emit('status', '');
-        return;
-      }
-      const count = searchMatchesRef.current.length;
-      // Enter and ↓ advance to the next match; ↑ goes to the previous one (wrapping).
-      if (key.return || key.downArrow) {
-        if (count > 0) setSearchIndex((i) => (i + 1) % count);
-        return;
-      }
-      if (key.upArrow) {
-        if (count > 0) setSearchIndex((i) => (i - 1 + count) % count);
-        return;
-      }
-      return;
-    }
+    // Priority stack of input contexts (highest → lowest): a modal veto or menu swallows
+    // everything; then search mode; then in-place chat editing (tab/arrows/escape); then the
+    // global action chords. `dispatchKey` walks them in CONTEXT_PRIORITY order and stops at the
+    // first that consumes the press. Each `handle` returns true to consume, false to pass through.
+    const contexts: KeyContext[] = [
+      // Permission / Overlay — a veto prompt or open menu has its own input handler; the global
+      // handler must not also react, so these consume every press while active.
+      { name: 'permission', active: !!vetoQuestion, handle: () => true },
+      { name: 'overlay', active: !!activeMenu, handle: () => true },
 
-    // Tab accepts the current autocomplete suggestion / ghost text into the input (never executes —
-    // Enter does that). For a directory pick, no trailing space so you can keep descending.
-    if (key.tab) {
-      if (suggestions.length > 0 && suggestionIndex >= 0) {
-        const selected = suggestions[suggestionIndex].split('  ')[0];
-        setSuggestions([]);
-        setSuggestionIndex(-1);
-        let newVal: string;
-        if (selected.startsWith('@')) {
-          newVal = input.replace(/@\S*$/, selected.endsWith('/') ? selected : selected + ' ');
-        } else {
-          newVal = selected + ' ';
-        }
-        setInput(newVal);
-        updateSuggestions(newVal); // refresh (e.g. show the contents of a just-accepted dir)
-      }
-      return;
-    }
-
-    if (key.escape) {
-      if (input.trim()) {
-        setStashedInput(input);
-        setInput('');
-        cliEvents.emit('status', 'Prompt stashed');
-      }
-      return;
-    }
-
-    if (key.upArrow) {
-      if (suggestions.length > 0) {
-        setSuggestionIndex((i) => (i > 0 ? i - 1 : suggestions.length - 1));
-      } else if (input.includes('\n')) {
-        // Multi-line draft: don't let history recall clobber it. (Line navigation is the
-        // terminal's own; left/right move across the newline.)
-        return;
-      } else if (history.length > 0 && historyIndex < history.length - 1) {
-        const nextIndex = historyIndex + 1;
-        setHistoryIndex(nextIndex);
-        setInput(history[history.length - 1 - nextIndex]);
-      }
-      return;
-    }
-
-    if (key.downArrow) {
-      if (suggestions.length > 0) {
-        setSuggestionIndex((i) => (i < suggestions.length - 1 ? i + 1 : 0));
-      } else if (input.includes('\n')) {
-        return; // multi-line draft — see upArrow note
-      } else if (historyIndex > 0) {
-        const nextIndex = historyIndex - 1;
-        setHistoryIndex(nextIndex);
-        setInput(history[history.length - 1 - nextIndex]);
-      } else if (historyIndex === 0) {
-        setHistoryIndex(-1);
-        setInput('');
-      }
-      return;
-    }
-
-    if (matchChord(char, key, keys.resumeStash) && stashedInput) {
-      setInput(stashedInput);
-      setStashedInput(null);
-      cliEvents.emit('status', 'Stashed prompt resumed');
-      return;
-    }
-
-    if (matchChord(char, key, keys.search)) {
-      setIsSearching(true);
-      setSearchQuery('');
-      setSearchIndex(0);
-      cliEvents.emit('status', 'Search transcript & logs — ↑/↓ navigate, Esc exit');
-      return;
-    }
-
-    if (matchChord(char, key, keys.pastePreview)) {
-      // Preview the full text behind the "[Pasted text #N …]" chips in the current input.
-      if (pastesRef.current.size === 0) {
-        cliEvents.emit('status', 'No pasted text to preview');
-      } else {
-        for (const [ph, real] of pastesRef.current.entries()) {
-          addSystemMessage('info', `${ph}\n${real}`);
-        }
-      }
-      return;
-    }
-
-    if (matchChord(char, key, keys.toggleLogs)) {
-      toggleView();
-      cliEvents.emit('status', showTranscript ? 'Logs panel shown' : 'Logs panel hidden');
-      return;
-    }
-
-    if (char === 'l' && key.ctrl) {
-      return;
-    }
-
-    if (matchChord(char, key, keys.routeToggle)) {
-      // Cycle the routing pointer: auto → pin lite → pin heavy → auto.
-      const next: Tier | null = pinnedTierRef.current === null ? 'lite' : pinnedTierRef.current === 'lite' ? 'heavy' : null;
-      pinnedTierRef.current = next;
-      cliEvents.emit('model_tier', { tier: next ?? 'lite', pinned: next });
-      cliEvents.emit('status', next === null ? 'Routing → auto (lite decides, escalates as needed)' : `Routing pinned → ${next} model`);
-      return;
-    }
-
-    if (matchChord(char, key, keys.commandPalette)) {
-      // Command palette: a fuzzy-searchable overlay of EVERY registered command, derived live from
-      // the registry (built-ins + user .bimax/commands), so it never drifts from what actually
-      // exists. Selecting a command runs it through the normal submit path.
-      const opts = globalCommandRegistry.getPaletteOptions();
-      setActiveMenu({
-        type: 'menu',
-        title: 'Command Palette — type to fuzzy-search, Enter to run',
-        options: opts,
-        onSelect: (opt: MenuOption) => {
-          setActiveMenu(null);
-          if (opt.value && opt.value.startsWith('/')) handleSubmit(opt.value);
+      // Search — ↑/↓ (and Enter) cycle matches, Esc exits; all other keys are swallowed so typing
+      // doesn't leak into the input while searching.
+      {
+        name: 'search',
+        active: isSearching,
+        handle: (_c, k) => {
+          if (k.escape) {
+            setIsSearching(false);
+            setSearchQuery('');
+            cliEvents.emit('status', '');
+            return true;
+          }
+          const count = searchMatchesRef.current.length;
+          // Enter and ↓ advance to the next match; ↑ goes to the previous one (wrapping).
+          if (k.return || k.downArrow) {
+            if (count > 0) setSearchIndex((i) => (i + 1) % count);
+            return true;
+          }
+          if (k.upArrow) {
+            if (count > 0) setSearchIndex((i) => (i - 1 + count) % count);
+            return true;
+          }
+          return true; // search is modal: consume everything else too
         },
-      });
-      return;
-    }
+      },
 
-    if (matchChord(char, key, keys.quit)) {
-      cliEvents.emit('shutdown');
-      exit();
-      process.exit(0);
-    }
+      // Chat — in-place editing of the prompt: autocomplete accept, stash, history recall.
+      {
+        name: 'chat',
+        active: true,
+        handle: (_c, k) => {
+          // Tab accepts the current autocomplete suggestion / ghost text into the input (never
+          // executes — Enter does that). For a directory pick, no trailing space so you can keep
+          // descending.
+          if (k.tab) {
+            if (suggestions.length > 0 && suggestionIndex >= 0) {
+              const selected = suggestions[suggestionIndex].split('  ')[0];
+              setSuggestions([]);
+              setSuggestionIndex(-1);
+              let newVal: string;
+              if (selected.startsWith('@')) {
+                newVal = input.replace(/@\S*$/, selected.endsWith('/') ? selected : selected + ' ');
+              } else {
+                newVal = selected + ' ';
+              }
+              setInput(newVal);
+              updateSuggestions(newVal); // refresh (e.g. show the contents of a just-accepted dir)
+            }
+            return true;
+          }
 
-    if (matchChord(char, key, keys.interrupt)) {
-      // Require a double-press so a stray interrupt doesn't kill a running task
-      const now = Date.now();
-      if (now - lastCtrlC.current < 2500) {
-        cliEvents.emit('shutdown');
-        exit();
-        process.exit(0);
-      }
-      lastCtrlC.current = now;
-      cliEvents.emit('status', 'Press Ctrl+C again to exit');
-    }
+          if (k.escape) {
+            if (input.trim()) {
+              setStashedInput(input);
+              setInput('');
+              cliEvents.emit('status', 'Prompt stashed');
+            }
+            return true;
+          }
+
+          if (k.upArrow) {
+            if (suggestions.length > 0) {
+              setSuggestionIndex((i) => (i > 0 ? i - 1 : suggestions.length - 1));
+            } else if (input.includes('\n')) {
+              // Multi-line draft: don't let history recall clobber it. (Line navigation is the
+              // terminal's own; left/right move across the newline.)
+              return true;
+            } else if (history.length > 0 && historyIndex < history.length - 1) {
+              const nextIndex = historyIndex + 1;
+              setHistoryIndex(nextIndex);
+              setInput(history[history.length - 1 - nextIndex]);
+            }
+            return true;
+          }
+
+          if (k.downArrow) {
+            if (suggestions.length > 0) {
+              setSuggestionIndex((i) => (i < suggestions.length - 1 ? i + 1 : 0));
+            } else if (input.includes('\n')) {
+              return true; // multi-line draft — see upArrow note
+            } else if (historyIndex > 0) {
+              const nextIndex = historyIndex - 1;
+              setHistoryIndex(nextIndex);
+              setInput(history[history.length - 1 - nextIndex]);
+            } else if (historyIndex === 0) {
+              setHistoryIndex(-1);
+              setInput('');
+            }
+            return true;
+          }
+
+          return false; // not an editing key — fall through to the Global chords
+        },
+      },
+
+      // Global — the named, user-rebindable action chords. Always active.
+      {
+        name: 'global',
+        active: true,
+        handle: (c, k) => {
+          if (matchChord(c, k, keys.resumeStash) && stashedInput) {
+            setInput(stashedInput);
+            setStashedInput(null);
+            cliEvents.emit('status', 'Stashed prompt resumed');
+            return true;
+          }
+
+          if (matchChord(c, k, keys.search)) {
+            setIsSearching(true);
+            setSearchQuery('');
+            setSearchIndex(0);
+            cliEvents.emit('status', 'Search transcript & logs — ↑/↓ navigate, Esc exit');
+            return true;
+          }
+
+          if (matchChord(c, k, keys.pastePreview)) {
+            // Preview the full text behind the "[Pasted text #N …]" chips in the current input.
+            if (pastesRef.current.size === 0) {
+              cliEvents.emit('status', 'No pasted text to preview');
+            } else {
+              for (const [ph, real] of pastesRef.current.entries()) {
+                addSystemMessage('info', `${ph}\n${real}`);
+              }
+            }
+            return true;
+          }
+
+          if (matchChord(c, k, keys.toggleLogs)) {
+            toggleView();
+            cliEvents.emit('status', showTranscript ? 'Logs panel shown' : 'Logs panel hidden');
+            return true;
+          }
+
+          if (c === 'l' && k.ctrl) {
+            return true;
+          }
+
+          if (matchChord(c, k, keys.routeToggle)) {
+            // Cycle the routing pointer: auto → pin lite → pin heavy → auto.
+            const next: Tier | null = pinnedTierRef.current === null ? 'lite' : pinnedTierRef.current === 'lite' ? 'heavy' : null;
+            pinnedTierRef.current = next;
+            cliEvents.emit('model_tier', { tier: next ?? 'lite', pinned: next });
+            cliEvents.emit('status', next === null ? 'Routing → auto (lite decides, escalates as needed)' : `Routing pinned → ${next} model`);
+            return true;
+          }
+
+          if (matchChord(c, k, keys.commandPalette)) {
+            // Command palette: a fuzzy-searchable overlay of EVERY registered command, derived live
+            // from the registry (built-ins + user .bimax/commands), so it never drifts from what
+            // actually exists. Selecting a command runs it through the normal submit path.
+            const opts = globalCommandRegistry.getPaletteOptions();
+            setActiveMenu({
+              type: 'menu',
+              title: 'Command Palette — type to fuzzy-search, Enter to run',
+              options: opts,
+              onSelect: (opt: MenuOption) => {
+                setActiveMenu(null);
+                if (opt.value && opt.value.startsWith('/')) handleSubmit(opt.value);
+              },
+            });
+            return true;
+          }
+
+          if (matchChord(c, k, keys.quit)) {
+            cliEvents.emit('shutdown');
+            exit();
+            process.exit(0);
+          }
+
+          if (matchChord(c, k, keys.interrupt)) {
+            // Require a double-press so a stray interrupt doesn't kill a running task
+            const now = Date.now();
+            if (now - lastCtrlC.current < 2500) {
+              cliEvents.emit('shutdown');
+              exit();
+              process.exit(0);
+            }
+            lastCtrlC.current = now;
+            cliEvents.emit('status', 'Press Ctrl+C again to exit');
+            return true;
+          }
+
+          return false;
+        },
+      },
+    ];
+
+    dispatchKey(char, key, contexts);
   });
 
   useEffect(() => {
