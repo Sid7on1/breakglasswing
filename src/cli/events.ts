@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { appStore } from '../state/app.state';
+import { recordToolCall } from './toolHistory';
 
 class AppEventEmitter extends EventEmitter {
   emit(event: string | symbol, ...args: any[]): boolean {
@@ -46,6 +47,8 @@ class AppEventEmitter extends EventEmitter {
           if (idx !== -1) arr[idx] = tc;
           return { streamingToolCalls: arr };
         });
+        // Capture the finished call (with its full, untruncated output) for the /output viewer.
+        try { recordToolCall(tc); } catch { /* best-effort */ }
       }
     } catch (e) {
       // Ignore bridging errors

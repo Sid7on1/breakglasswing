@@ -23,3 +23,4 @@ import './evolve';
 import './plugins';
 import './security';
 import './diagnostics';
+import './output';
