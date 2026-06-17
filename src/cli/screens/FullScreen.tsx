@@ -578,8 +578,6 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setVetoResolver(() => resolver);
     };
 
-    const handleDiff = (diff: string) => setDiffText(diff);
-
     // Inline diff approval: show the proposed change and gate the write on Accept/Reject.
     try { setDiffApprovalEnabled(!!getConfig().diffApproval); setSelfCriticEnabled(!!getConfig().selfCritic); } catch { /* config not loaded */ }
     registerDiffApprover((summary, diff) => new Promise<boolean>((resolve) => {
@@ -653,7 +651,6 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     cliEvents.on('log', handleLog);
     cliEvents.on('message', handleMessage);
     cliEvents.on('veto_prompt', handleVeto);
-    cliEvents.on('diff', handleDiff);
     cliEvents.on('set_tier', handleSetTier);
 
     const originalLog = console.log;
@@ -674,7 +671,6 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.off('log', handleLog);
       cliEvents.off('message', handleMessage);
       cliEvents.off('veto_prompt', handleVeto);
-      cliEvents.off('diff', handleDiff);
       cliEvents.off('set_tier', handleSetTier);
       registerDiffApprover(null);
       registerBlastConfirmer(null);
@@ -747,7 +743,13 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     };
     recompute();
     cliEvents.on('config_changed', recompute);
-    return () => { cliEvents.off('config_changed', recompute); };
+    // MCP servers connecting/disconnecting changes the tool schemas actually on the wire, so the
+    // token meter must recompute then too (previously mcp_changed was emitted into the void).
+    cliEvents.on('mcp_changed', recompute);
+    return () => {
+      cliEvents.off('config_changed', recompute);
+      cliEvents.off('mcp_changed', recompute);
+    };
   }, [defaultAgent, options.governor.mode]);
 
   useEffect(() => {

@@ -63,6 +63,16 @@ export const cliEvents = new AppEventEmitter();
 // doesn't print MaxListenersExceededWarning during long sessions.
 cliEvents.setMaxListeners(50);
 
+// Central session-usage accumulator. `cost_update` fires the streamed-char count at the end of
+// every turn; the Footer renders the live rate, but commands (e.g. /cost) need the running total
+// too — so we accumulate it once here instead of locking the number inside one component.
+let _sessionChars = 0;
+cliEvents.on('cost_update', (chars: number) => { if (typeof chars === 'number' && chars > 0) _sessionChars += chars; });
+/** Rough running token estimate for the session (≈ chars/4). 0 before any output streams. */
+export function getSessionTokenEstimate(): number {
+  return Math.round(_sessionChars / 4);
+}
+
 export type AgentState = 'idle' | 'thinking' | 'decomposing' | 'executing' | 'vetoing' | 'blocked' | 'responding';
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'success' | 'debug';
@@ -103,22 +113,21 @@ export interface MessageEntry {
   timestamp: Date;
 }
 
-// Events:
+// Events (live wires — keep this list in sync with actual emit/on sites):
 // - log: (entry: LogEntry) => Appends to log stream
 // - message: (msg: MessageEntry) => New chat message
-// - tool_call: (call: ToolCallEntry) => Tool call update
-// - veto_prompt: (question: string, options: string[], resolve: (answer: string) => void) => Triggers permission overlay
-// - veto_answer: (answer: string) => Governor veto response
-// - clear: () => Clears logs
-// - spinner_state: (state: AgentState, message?: string) => Updates the footer status indicator
-// - search: (query: string) => Search transcript
-// - mode_change: (mode: string) => Mode change
-// - status: (text: string) => Status bar update
-// - stash: () => Stash current prompt
-// - resume_stashed: () => Resume stashed prompt
-// - shutdown: () => Graceful shutdown
-// - diff: (diffText: string) => Display inline diff
-// - thinking: (text: string) => Model's internal reasoning stream (status display only)
-// - thinking_clear: () => Reset the thinking display between turns
 // - tool_call: (call: ToolCallEntry) => A tool started running
 // - tool_call_result: (call: ToolCallEntry) => A tool finished (status success/error)
+// - veto_prompt: (question, options, resolve, isAskPrompt?) => Triggers permission overlay
+// - spinner_state: (state: AgentState, message?: string) => Updates the footer status indicator
+// - status: (text: string) => Status bar update
+// - mode_change: (mode: string) => Governor mode change (footer)
+// - model_tier: ({ tier, pinned }) => Active routing tier changed (footer)
+// - set_tier: ('auto'|'lite'|'heavy') => Manual tier pin request (/tier command → FullScreen)
+// - cost_update: (chars: number) => End-of-turn streamed-char count (footer + session accumulator)
+// - todo_update: (todos) => TodoWrite tool updated the task list (appStore → /todos panel)
+// - config_changed / graph_changed / cwd_changed / mcp_changed => live UI refresh signals
+// - rerun_onboarding: () => Re-open the first-run onboarding flow
+// - thinking: (text: string) => Model's internal reasoning stream (status display only)
+// - thinking_clear: () => Reset the thinking display between turns
+// - shutdown: () => Graceful shutdown

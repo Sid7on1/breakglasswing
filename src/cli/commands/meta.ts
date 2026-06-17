@@ -1,7 +1,7 @@
 import { globalCommandRegistry } from './registry';
 import { getCustomRules, addCustomRule, removeCustomRule, getKnownAgents } from '../agentRouter';
 import { getCurrentProvider } from '../provider';
-import { cliEvents } from '../events';
+import { cliEvents, getSessionTokenEstimate } from '../events';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
@@ -41,7 +41,28 @@ globalCommandRegistry.register({
             value: i.toString(),
             desc: `→ ${r[1]} (Select to delete)`
           }))
-        ]
+        ],
+        // "Add New Rule" prompts for the regex then the target agent (chained), then re-runs the
+        // command to apply it. Picking an existing rule deletes it by index. Without this onSelect
+        // the menu was inert — selecting a row did nothing.
+        onSelect: (opt: any) => {
+          if (opt.value === 'add_rule') {
+            context.setActivePrompt({
+              title: 'Enter regex pattern (matched against your prompt)',
+              onResolve: (re: string) => {
+                if (!re.trim()) return;
+                context.setActivePrompt({
+                  title: 'Route matching prompts to which agent?',
+                  onResolve: (agent: string) => {
+                    if (agent.trim()) context.executeCommand(`/routes add ${re.trim()} ${agent.trim()}`);
+                  },
+                });
+              },
+            });
+          } else {
+            context.executeCommand(`/routes remove ${opt.value}`);
+          }
+        },
       };
     }
   }
@@ -52,14 +73,30 @@ globalCommandRegistry.register({
   description: 'List agent personas',
   category: 'Configuration',
   execute: async (args, context) => {
+    // /agents <name> sets the persona directly; bare /agents shows a picker.
+    const apply = (name: string) => {
+      context.options.agent = name;
+      context.saveConfig({ defaultAgent: name });
+      context.addSystemMessage('success', `Agent persona switched to ${name}`);
+    };
+    const picked = args.join(' ').trim();
+    const known = getKnownAgents();
+    if (picked) {
+      if (!known.includes(picked)) return { type: 'message', level: 'error', content: `Unknown agent "${picked}". Known: ${known.join(', ')}` };
+      apply(picked);
+      return { type: 'none' };
+    }
     return {
       type: 'menu',
       title: 'Select an Agent Persona',
-      options: getKnownAgents().map(a => ({
+      options: known.map(a => ({
         label: a,
         value: a,
         description: 'Specialized model preset'
-      }))
+      })),
+      // Without this, selecting a persona did nothing (the registry menu reports type 'menu', so the
+      // legacy 'agent' branch in FullScreen never fired). Apply the pick directly.
+      onSelect: (opt: any) => apply(opt.value),
     };
   }
 });
@@ -206,11 +243,21 @@ globalCommandRegistry.register({
   description: 'Show session cost & usage',
   category: 'Session & Context',
   execute: async (args, context) => {
-    return {
-      type: 'message',
-      level: 'info',
-      content: 'Cost tracking is being migrated to StatsDashboard.'
-    };
+    // Live token usage is tracked per turn (footer shows it in verbose mode). Report the running
+    // session estimate here plus the model in use, so /cost is a real readout — not a dead stub.
+    const model = context.options?.model || 'default';
+    let liteModel = '';
+    try { liteModel = getConfig().liteModel || ''; } catch { /* config optional */ }
+    const sessionTokens = (() => { try { return getSessionTokenEstimate(); } catch { return 0; } })();
+    const lines = [
+      `Model: ${model}${liteModel ? `  ·  Lite: ${liteModel}` : ''}`,
+      sessionTokens > 0
+        ? `Session usage: ~${sessionTokens.toLocaleString()} tokens streamed so far.`
+        : 'Session usage: no output streamed yet this session.',
+      'Live per-turn token rate shows in the footer — enable verbose (/config verbose) for the running total.',
+      'Exact billed cost depends on your provider\'s pricing for the model above (BiMax is model-agnostic and does not set prices).',
+    ];
+    return { type: 'message', level: 'info', content: lines.join('\n') };
   }
 });
 

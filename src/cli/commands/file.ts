@@ -116,7 +116,8 @@ globalCommandRegistry.register({
           label: b.file.split('_').pop() || b.file,
           value: b.file,
           desc: 'Restore this backup'
-        }))
+        })),
+        onSelect: (opt: any) => context.executeCommand(`/undo ${opt.value}`),
       };
     }
 
@@ -142,7 +143,8 @@ globalCommandRegistry.register({
           label: b.file.split('_').pop() || b.file,
           value: b.file,
           desc: 'Diff against current file'
-        }))
+        })),
+        onSelect: (opt: any) => context.executeCommand(`/diff-file ${opt.value}`),
       };
     }
 
@@ -171,7 +173,9 @@ globalCommandRegistry.register({
         label: b.file.split('_').pop() || b.file,
         value: b.file,
         description: b.file
-      }))
+      })),
+      // Selecting a backup shows its diff against the live file (the natural next step).
+      onSelect: (opt: any) => context.executeCommand(`/diff-file ${opt.value}`),
     };
   }
 });
