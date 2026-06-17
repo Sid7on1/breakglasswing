@@ -189,8 +189,38 @@ const light: ThemeColors = {
   agentCyan: 'rgb(14,116,144)',
 };
 
-function toAnsi(hexOrRgb: string): string {
-  return hexOrRgb;
+/** Parse `rgb(r,g,b)` or `#rrggbb`/`#rgb` into [r,g,b]; null if unrecognized. Pure. */
+export function parseColor(s: string): [number, number, number] | null {
+  const m = s.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+  if (m) return [+m[1], +m[2], +m[3]];
+  let h = s.trim().replace(/^#/, '');
+  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  if (/^[0-9a-f]{6}$/i.test(h)) return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  return null;
+}
+
+// The 16 standard ANSI colors as chalk/Ink color NAMES + their typical xterm RGB. Mapping a theme
+// to the nearest of these makes the `-ansi` themes render via the terminal's OWN palette (so they
+// match the user's terminal theme and degrade cleanly on low-color terminals) instead of emitting
+// hardcoded truecolor that a non-truecolor terminal would mangle.
+const ANSI16: [string, [number, number, number]][] = [
+  ['black', [0, 0, 0]], ['red', [205, 0, 0]], ['green', [0, 205, 0]], ['yellow', [205, 205, 0]],
+  ['blue', [0, 0, 238]], ['magenta', [205, 0, 205]], ['cyan', [0, 205, 205]], ['white', [229, 229, 229]],
+  ['gray', [127, 127, 127]], ['redBright', [255, 0, 0]], ['greenBright', [0, 255, 0]], ['yellowBright', [255, 255, 0]],
+  ['blueBright', [92, 92, 255]], ['magentaBright', [255, 0, 255]], ['cyanBright', [0, 255, 255]], ['whiteBright', [255, 255, 255]],
+];
+
+/** Map an rgb()/hex color string to the nearest of the 16 ANSI color names. Unparseable → unchanged. */
+export function toAnsi(hexOrRgb: string): string {
+  const rgb = parseColor(hexOrRgb);
+  if (!rgb) return hexOrRgb;
+  let best = ANSI16[0][0];
+  let bestDist = Infinity;
+  for (const [name, [r, g, b]] of ANSI16) {
+    const d = (rgb[0] - r) ** 2 + (rgb[1] - g) ** 2 + (rgb[2] - b) ** 2;
+    if (d < bestDist) { bestDist = d; best = name; }
+  }
+  return best;
 }
 
 function ansiTheme(base: ThemeColors): ThemeColors {
