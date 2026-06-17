@@ -69,6 +69,25 @@ describe('ThinkTagFilter', () => {
     expect(r.thinking).toBe('');
   });
 
+  // A coding model that never emits a </think> closer would otherwise have its ENTIRE reply
+  // buffered as tentative "maybe-reasoning" and only revealed in one burst at flush — which the
+  // user perceives as a hang ("spinner rolls, no text"). Once the buffered preamble crosses the
+  // cap with no closer in sight, it must be released as visible text MID-stream, before flush.
+  it('streams a long opener-less answer live once the preamble cap is hit (no hang)', () => {
+    const f = new ThinkTagFilter(true);
+    let streamed = '';
+    // Feed well over the 240-char cap in chunks, never a closing tag.
+    for (let i = 0; i < 40; i++) streamed += f.process('answer chunk number ' + i + ' ').text;
+    // Text was emitted DURING streaming (before flush) — not held hostage to a closer.
+    expect(streamed.length).toBeGreaterThan(0);
+    expect(streamed).toContain('answer chunk number');
+    const tail = f.flush();
+    const all = streamed + tail.text;
+    // And the full answer survives intact, nothing diverted to thinking.
+    expect(all).toContain('answer chunk number 0');
+    expect(all).toContain('answer chunk number 39');
+  });
+
   it('with implicit mode off, leaves an opener-less closer in the text (plain models)', () => {
     const f = new ThinkTagFilter(false);
     const a = f.process('answer</think>more');

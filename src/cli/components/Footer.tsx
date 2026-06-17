@@ -81,7 +81,7 @@ export function Footer({ theme, model, liteModel, agent, verbose, streamMeta }: 
         </Text>
       )}
       <Text color={theme.subtle}>
-        Ctrl+G palette · /help · Ctrl+O logs · Esc stash{'  '}
+        Ctrl+G palette · Ctrl+T model · /help · Esc stash{'  '}
       </Text>
       <Text color={tier === 'heavy' ? theme.accent : theme.inactive}>
         {mode ? `${mode} · ` : ''}

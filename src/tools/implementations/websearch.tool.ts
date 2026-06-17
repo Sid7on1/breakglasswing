@@ -69,7 +69,14 @@ export function createWebSearchTool(governor: IGovernor): BuiltTool {
         });
         const html = await res.text();
         const results = parseDuckDuckGoHtml(html, max);
-        if (results.length === 0) return `No web results for "${q}".`;
+        if (results.length === 0) {
+          // Distinguish a genuine empty result set from a blocked/rate-limited page, so the
+          // model (and user) aren't told "no results" when the request was actually refused.
+          // DuckDuckGo answers a throttled request with a non-2xx status or an anomaly page.
+          if (!res.ok) return `Web search failed: DuckDuckGo returned HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''} (likely rate-limited — retry shortly).`;
+          if (/anomaly|unusual traffic|are you a robot/i.test(html)) return `Web search was rate-limited by DuckDuckGo (anomaly page). Retry shortly, or fetch a specific URL with WebFetchTool.`;
+          return `No web results for "${q}".`;
+        }
         return `Top ${results.length} result(s) for "${q}":\n\n` +
           results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`).join('\n\n');
       } catch (e: any) {

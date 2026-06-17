@@ -279,7 +279,13 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       // remount below then re-prints the whole transcript cleanly once the drag settles.
       const now = Date.now();
       if (now - lastClear > 40) {
+        // Hard-wipe the terminal, not just Ink's tracked rows. Ink's own clear() calls
+        // eraseLines(N) where N is the row count from the PRE-resize layout; after a width
+        // change a wrapped line occupies a different number of rows, so that erase misses a
+        // few cells — the stray 2-3 chars left clinging to the left edge after a zoom. A full
+        // \x1b[2J wipe doesn't depend on the stale count, so nothing survives the resize.
         try { getInkInstance()?.clear(); } catch { /* instance optional */ }
+        try { out.write('\x1b[2J\x1b[3J\x1b[H'); } catch { /* best-effort */ }
         lastClear = now;
       }
       clearTimeout(timer);
@@ -597,10 +603,20 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       handleSubmit(action);
     });
 
+    // Manual tier control from a slash command (/tier auto|lite|heavy) — the same pin the
+    // Ctrl+T chord drives, but discoverable and scriptable. 'auto' clears the pin.
+    const handleSetTier = (t: 'auto' | 'lite' | 'heavy') => {
+      const next: Tier | null = t === 'auto' ? null : t;
+      pinnedTierRef.current = next;
+      cliEvents.emit('model_tier', { tier: next ?? 'lite', pinned: next });
+      cliEvents.emit('status', next === null ? 'Routing → auto (lite decides, escalates as needed)' : `Routing pinned → ${next} model`);
+    };
+
     cliEvents.on('log', handleLog);
     cliEvents.on('message', handleMessage);
     cliEvents.on('veto_prompt', handleVeto);
     cliEvents.on('diff', handleDiff);
+    cliEvents.on('set_tier', handleSetTier);
 
     const originalLog = console.log;
     const originalWarn = console.warn;
@@ -621,6 +637,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.off('message', handleMessage);
       cliEvents.off('veto_prompt', handleVeto);
       cliEvents.off('diff', handleDiff);
+      cliEvents.off('set_tier', handleSetTier);
       registerDiffApprover(null);
       registerBlastConfirmer(null);
       registerBlastGraphStore(null);

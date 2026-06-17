@@ -109,6 +109,60 @@ describe('AgentLoop — live tool-arg streaming (tool_call_partial)', () => {
 });
 
 /**
+ * A turn that produces nothing visible — no streamed text, no tool call, not pure filler
+ * (e.g. a coding model that emitted only `reasoning_content` then ended empty, or a model
+ * that went silent right after a tool result) must not leave the user staring at a stopped
+ * spinner. The loop nudges once for a direct answer; bounded so it can't spin.
+ */
+describe('AgentLoop — recovers from a silent empty turn', () => {
+  it('nudges once when a turn is completely empty, then completes', async () => {
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        if (call === 1) {
+          // Only reasoning, no visible content, no tool call — collapses to empty.
+          yield { type: 'thinking', text: 'hmm let me think' };
+          yield { type: 'done' };
+        } else {
+          yield { type: 'token', text: 'Here is the actual answer.' };
+          yield { type: 'done' };
+        }
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'do it' }], 'sys', { maxIterations: 5 })) {
+      out += t;
+    }
+
+    expect(call).toBe(2); // nudged exactly once
+    expect(out).toContain('Here is the actual answer.');
+    // The nudge was injected as a user message so the model re-answers.
+    expect(loop.messages.some(m => m.role === 'user' && typeof m.content === 'string' && m.content.includes('empty response'))).toBe(true);
+  });
+
+  it('surfaces a visible note rather than dead silence if it stays empty', async () => {
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        // Always empty — exhausts the single empty-turn retry.
+        yield { type: 'done' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'do it' }], 'sys', { maxIterations: 5 })) {
+      out += t;
+    }
+
+    // Never silent — the user gets a note explaining no response came back.
+    expect(out).toContain('No response was produced');
+  });
+});
+
+/**
  * A transient provider/model error (stalled stream, 5xx, one malformed tool-call
  * emission) must not kill the task: the loop discards the partial turn and re-asks,
  * up to a bound. Past the bound it surfaces the error instead of spinning.

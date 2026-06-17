@@ -78,6 +78,13 @@ export class ThinkTagFilter {
   private preamble = '';    // leading content held back while still tentative (implicit mode)
   private static readonly OPEN = '<think>';
   private static readonly CLOSE = '</think>';
+  // Upper bound on tentative preamble buffering (implicit mode). Opener-less reasoning
+  // is always short and front-loaded; if this much leading content arrives with no
+  // `</think>` closer in sight, it is the answer, not reasoning — stop holding it back and
+  // stream it live. Without this cap, a model that never emits a closer (most coding models)
+  // would buffer its ENTIRE reply and only reveal it in one burst at stream end, which looks
+  // like a hang ("spinner rolls forever, no text"). Override with BGW_IMPLICIT_THINK_CAP.
+  private static readonly MAX_PREAMBLE = parseInt(process.env.BGW_IMPLICIT_THINK_CAP || '240', 10);
 
   constructor(private implicit: boolean = true) {}
 
@@ -135,6 +142,14 @@ export class ThinkTagFilter {
         );
         this.preamble += this.pending.slice(0, this.pending.length - hold);
         this.pending = this.pending.slice(this.pending.length - hold);
+        // Cap reached without any closer: this is the answer, not opener-less reasoning.
+        // Resolve the tentative region now and emit what we held so the reply streams live
+        // instead of arriving in one burst at stream end (which reads as a hang).
+        if (this.preamble.length >= ThinkTagFilter.MAX_PREAMBLE) {
+          text += this.preamble;
+          this.preamble = '';
+          this.decided = true;
+        }
         break;
       }
 

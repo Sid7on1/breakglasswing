@@ -36,6 +36,15 @@ export class AgentLoop {
     // Bounds the regenerate-on-empty correction below to a single retry, so a model
     // that keeps emitting pure filler can never spin the loop.
     let pureFillerRetried = false;
+    // Bounds the recovery for a turn that produced NOTHING at all — no text and no tool
+    // call (e.g. a reasoning/coding model that streamed only `reasoning_content` then ended
+    // with empty content, or a model that went silent right after a tool result). Without
+    // this the loop would `return` on the empty turn and the user would see a stopped
+    // spinner and no answer. Single retry so a persistently-empty model can't spin.
+    let emptyTurnRetried = false;
+    // Whether any visible text has been streamed to the user across the whole call. If the
+    // loop is about to end having shown nothing, we surface a note instead of silent silence.
+    let anyTextYielded = false;
     // Bounds re-asks after a transient provider/model error (stalled stream, 5xx, a
     // single malformed tool-call emission) so a deterministically-failing turn can't
     // spin the loop, while a flaky one still gets a fresh attempt (new key / re-sample).
@@ -70,6 +79,7 @@ export class AgentLoop {
       for await (const event of generator) {
         if (event.type === 'token') {
           currentContent += event.text;
+          if (event.text) anyTextYielded = true;
           yield event.text;
         } else if (event.type === 'thinking') {
           // Internal reasoning: surface to the UI status area, never into the reply
@@ -265,7 +275,27 @@ export class AgentLoop {
           });
           continue;
         }
-        // No tool calls and nothing left open — task complete.
+        // A turn that produced nothing the user can see — no streamed text this turn, no
+        // tool call, and not caught by the pure-filler path above (e.g. a reasoning/coding
+        // model that emitted only `reasoning_content` then ended empty, or a model that went
+        // silent right after a tool result). Ending here would leave the user staring at a
+        // stopped spinner. Nudge once for a direct answer; bounded so it can't spin.
+        if (!currentContent && !anyTextYielded && !emptyTurnRetried) {
+          emptyTurnRetried = true;
+          this.messages.push({
+            role: 'user',
+            content:
+              'You returned an empty response. Reply now with your actual answer to the ' +
+              'request in plain text. If you already have everything you need (including any ' +
+              'tool results above), just write the answer directly.',
+          });
+          continue;
+        }
+        // No tool calls and nothing left open — task complete. If the entire call produced
+        // no visible text at all, say so rather than returning dead silence.
+        if (!anyTextYielded) {
+          yield `\n[No response was produced. Try rephrasing, or press Ctrl+T to pin the model tier.]\n`;
+        }
         return;
       }
     }
