@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { cliEvents } from '../events';
 import { ThemeColors } from '../themes';
+import { ShimmerText } from './ShimmerText';
 
 const PHRASES = [
   'Thinking', 'Architecting', 'Brewing', 'Calculating', 'Cogitating',
@@ -49,7 +50,9 @@ export function ThinkingText({ theme }: ThinkingTextProps) {
 
   return (
     <Box flexDirection="row">
-      <Text color={theme.accentShimmer} bold>✻ {PHRASES[index]}{dots.padEnd(3, ' ')}</Text>
+      <Text color={theme.accentShimmer} bold>✻ </Text>
+      <ShimmerText text={PHRASES[index]} theme={theme} />
+      <Text color={theme.accentShimmer} bold>{dots.padEnd(3, ' ')}</Text>
       {snippet ? <Text color={theme.subtle} italic> {snippet}</Text> : null}
     </Box>
   );
