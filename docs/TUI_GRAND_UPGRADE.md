@@ -21,6 +21,19 @@
 
 340 → 396 tests (+56), 0 tsc errors across the batch; each shipped green and pushed to `main`. Registry-derived features (palette, hub, cockpit, diag, output) auto-appear in `Ctrl+G`. **Deferred (higher-risk render-core / focus work):** true *in-place* collapse/expand (needs a focusable-row layer outside `<Static>`), synchronized-output (BSU/ESU) flicker fix, overlay-host + selector-store generalization, a11y plain-output mode, up/down line-navigation in the composer.
 
+## Shipped from this plan (batch 2)
+
+| Feature | Open with | Track | File(s) |
+|---|---|---|---|
+| **Synchronized output** (BSU/ESU flicker fix) | `BGW_SYNC_OUTPUT=1` (opt-in) | Streaming polish | `syncOutput.ts`, `repl.ts` |
+| **Context-usage meter** | token line (automatic) | Streaming polish | `components/ProgressBar.tsx`, `FullScreen.tsx` |
+| **Reduced-motion mode** | `/a11y` (`/motion`), `BGW_REDUCED_MOTION` | a11y | `commands/a11y.ts`, `ShimmerText.tsx`, `WorkingIndicator.tsx` |
+| **Session browser / resume** | `/sessions`, `/resume` | Session & Context | `commands/session.ts` |
+| **ANSI theme down-mapping** | `*-ansi` themes | Theming & motion | `themes.ts` (`toAnsi`, `parseColor`) |
+| **Orchestration HUD** (4th cockpit) | `/orchestrate` (`/orch`) | Multi-agent | `commands/orchestrate.ts`, `agentRouter.ts` |
+
+396 → 428 tests (+32), 0 tsc errors. The four flagship cockpits are complete: **Plugin Hub** (`/plugins`), **Security Cockpit** (`/security`), **Diagnostics** (`/diagnostics`), **Orchestration HUD** (`/orchestrate`) — each registry-derived, so all appear in `Ctrl+G` and `/` autocomplete with no drift. Render-core changes (sync output, shimmer, reduced-motion) are feature-gated to keep the default render path byte-identical.
+
 ---
 
 ## 0. Context — why this plan exists
