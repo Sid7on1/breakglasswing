@@ -26,6 +26,8 @@ import { MessageRow } from '../components/Transcript';
 import { Markdown } from '../components/Markdown';
 import { LogView } from '../components/LogView';
 import { DiffView } from '../components/DiffView';
+import { ProgressBar, filledCells } from '../components/ProgressBar';
+import { capabilitiesFor } from '../../core/capabilities';
 import { SearchHighlight } from '../components/SearchHighlight';
 import { SearchResults, SearchMatch } from '../components/SearchResults';
 import { ThinkingText } from '../components/ThinkingText';
@@ -1449,6 +1451,20 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         {/* Always-on status line above the input: current coding model (so a /model change is
             instantly visible here), the lite model, and the live token estimate. */}
         <Box justifyContent="flex-end" paddingX={1}>
+          {showTokenMeter && (() => {
+            // Effective context window: explicit user setting wins, else the active model's
+            // capability window (Claude 200k / Gemini 1M / FLOOR 32k). Gives the token meter a
+            // determinate "how full is the context" bar instead of a bare number.
+            let win = 0;
+            try { win = getConfig().contextWindowTokens || 0; } catch { /* config not loaded */ }
+            if (!win || win <= 0) win = capabilitiesFor(undefined, options.model).contextWindow;
+            const frac = win > 0 ? tokenEstimate / win : 0;
+            return (
+              <Box marginRight={1}>
+                <ProgressBar value={frac} theme={theme} width={12} showPercent />
+              </Box>
+            );
+          })()}
           <Text color={theme.subtle}>
             {(options.model || 'default').split('/').pop()}
             {(() => { try { const l = getConfig().liteModel; return l ? ` (lite: ${l.split('/').pop()})` : ''; } catch { return ''; } })()}
