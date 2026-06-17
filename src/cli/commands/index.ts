@@ -24,3 +24,4 @@ import './plugins';
 import './security';
 import './diagnostics';
 import './output';
+import './a11y';
