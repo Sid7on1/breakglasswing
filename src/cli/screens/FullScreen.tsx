@@ -294,58 +294,21 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     };
   }, []);
 
-  const COMMAND_REGISTRY: [string, string][] = [
-    ['/help', 'Show help'],
-    ['/sessions', 'List saved sessions'],
-    ['/resume', 'Resume a session'],
-    ['/clear', 'Clear screen'],
-    ['/config', 'Show / set config'],
-    ['/keys', 'Show / add API keys'],
-    ['/shortcuts', 'Show keyboard shortcuts'],
-    ['/model', 'Show / set model'],
-    ['/provider', 'Switch AI provider'],
-    ['/agents', 'List known agents'],
-    ['/check', 'Typecheck project'],
-    ['/lint', 'Lint project'],
-    ['/edit', 'Search & replace in file'],
-    ['/write', 'Write file to disk'],
-    ['/undo', 'Undo last edit'],
-    ['/diff', 'Git diff'],
-    ['/diff-file', 'Diff file vs backup'],
-    ['/log', 'Git log'],
-    ['/git', 'Git status'],
-    ['/backups', 'List backups'],
-    ['/routes', 'Routing rules'],
-    ['/cost', 'Session cost'],
-    ['/context', 'Session context'],
-    ['/context-mode', 'How tools are sent each turn (smart/full)'],
-    ['/context-window', "Set the model's context window (tokens)"],
-    ['/reasoning', 'Thinking depth: off / low / medium / high'],
-    ['/agent-decisions', 'Let the agent auto-resolve ambiguities'],
-    ['/governor', 'Toggle Governor (on/off)'],
-    ['/plan', 'Read-only plan mode (propose, don\'t change)'],
-    ['/checkpoint', 'Snapshot the working tree'],
-    ['/rewind', 'Restore an earlier checkpoint'],
-    ['/swarm', 'Parallel worktree sub-agent swarm'],
-    ['/impact', 'Blast-radius preview for a symbol'],
-    ['/map', 'Top-level codebase map overview'],
-    ['/ask', 'Ask the architecture (graph-backed)'],
-    ['/replay', 'Export this session as markdown'],
-    ['/diff-approval', 'Review agent edits before they apply'],
-    ['/autocommit', 'Auto-commit each agent edit (on/off)'],
-    ['/remember', 'Save a durable project memory'],
-    ['/self-critic', 'Agent reviews & fixes its own work'],
-    ['/heal', 'Run tests; auto-fix failures in a worktree'],
-    ['/watch', 'Watch a file/schedule and wake the agent'],
-    ['/council', 'Run a task across multiple AI CLIs; keep winner'],
-    ['/speculate', 'Try distinct approaches in parallel; compare'],
-    ['/evolve', 'Gated self-evolution of BiMax\'s own source'],
-    ['/index', 'Build local AST codebase index'],
-    ['/index-ai', 'Run Semantic AI index (Costs API credits)'],
-    ['/mcp', 'List / add / remove MCP servers'],
-    ['/skills', 'List / create Agent Skills'],
-    ['/exit', 'Exit'],
-  ];
+  // `/` autocomplete is derived LIVE from the command registry (the single source of truth) so
+  // every registered command — built-ins, the new palette/hub/cockpit/output commands, and user
+  // `.bimax/commands/*.md` — is discoverable without maintaining a second hardcoded list (which
+  // previously drifted: new commands existed but never appeared here). A few non-registry built-ins
+  // handled directly in the input/submit path (/clear, /shortcuts, /exit) are appended.
+  const COMMAND_REGISTRY: [string, string][] = useMemo(() => {
+    const fromRegistry = globalCommandRegistry.getPaletteOptions().map(o => [o.value, o.desc] as [string, string]);
+    const extras: [string, string][] = [
+      ['/clear', 'Clear screen'],
+      ['/shortcuts', 'Show keyboard shortcuts'],
+      ['/exit', 'Exit'],
+    ];
+    const seen = new Set(fromRegistry.map(([c]) => c));
+    return [...fromRegistry, ...extras.filter(([c]) => !seen.has(c))].sort((a, b) => a[0].localeCompare(b[0]));
+  }, []);
 
   const updateSuggestions = useCallback((value: string) => {
     if (value.startsWith('/') && !value.includes(' ')) {

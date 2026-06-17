@@ -1,9 +1,6 @@
-import '../cli/commands/meta';
-import '../cli/commands/builtins';
-import '../cli/commands/session';
-import '../cli/commands/help';
-import '../cli/commands/git';
-import '../cli/commands/code';
+// Import the full command set the app loads at startup, so this test reflects what the `/`
+// autocomplete + Ctrl+G palette actually offer.
+import '../cli/commands';
 import { globalCommandRegistry } from '../cli/commands/registry';
 
 // The Ctrl+K command palette derives its options from the live registry — the single source of
@@ -30,6 +27,12 @@ describe('CommandRegistry.getPaletteOptions — palette single source of truth',
       expect(typeof o.category).toBe('string');
       expect(o.category.length).toBeGreaterThan(0);
     }
+  });
+
+  it('includes the new TUI-upgrade commands so they are discoverable', () => {
+    const values = opts.map(o => o.value);
+    // Regression: these existed but were missing from the old hardcoded `/` autocomplete list.
+    expect(values).toEqual(expect.arrayContaining(['/plugins', '/security', '/diagnostics', '/output']));
   });
 
   it('includes representative commands and is sorted by category then name', () => {
