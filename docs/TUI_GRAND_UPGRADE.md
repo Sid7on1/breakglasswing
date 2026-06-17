@@ -6,6 +6,23 @@
 
 ---
 
+## Shipped from this plan (batch 1)
+
+| Feature | Open with | Track | File(s) |
+|---|---|---|---|
+| **Command Palette** | `Ctrl+G` | Palette & Input | `commands/registry.ts` (`getPaletteOptions`), `keybindings.ts`, `FullScreen.tsx` |
+| **Plugin Hub** | `/plugins` (`/hub`) | Integration surfacing | `commands/plugins.ts` |
+| **Security Cockpit** | `/security` (`/sec`) | Integration surfacing | `commands/security.ts` |
+| **Diagnostics** | `/diagnostics` (`/diag`) | Integration surfacing | `commands/diagnostics.ts` |
+| **Throughput HUD** | footer (while streaming) | Streaming polish | `components/Footer.tsx` |
+| **Multi-line input** | `\`+Enter (Enter sends) | Palette & Input | `components/SimpleInput.tsx` (`insertNewline`), `FullScreen.tsx` |
+| **Full-output viewer** | `/output` (`/tools`) | Tool surface (T2 value) | `toolHistory.ts`, `commands/output.ts`, `events.ts` |
+| **Thinking shimmer** | (automatic, while thinking) | Theming & motion | `components/ShimmerText.tsx`, `ThinkingText.tsx` |
+
+340 → 396 tests (+56), 0 tsc errors across the batch; each shipped green and pushed to `main`. Registry-derived features (palette, hub, cockpit, diag, output) auto-appear in `Ctrl+G`. **Deferred (higher-risk render-core / focus work):** true *in-place* collapse/expand (needs a focusable-row layer outside `<Static>`), synchronized-output (BSU/ESU) flicker fix, overlay-host + selector-store generalization, a11y plain-output mode, up/down line-navigation in the composer.
+
+---
+
 ## 0. Context — why this plan exists
 
 The 34-doc audit measured BiMax (3.3K-line, ~19-component, **stock-Ink** TUI) against Claude Code (60K-line, 389-component, custom-Ink-fork TUI). The verdict stands: **we do not port CC's engine** — we cherry-pick techniques and, above all, **make BiMax's own moat visible**. BiMax already *leads* CC on integration (MCP client+server, custom commands, hooks, skills, watchers), security (7-layer governor, blast-gate, sandbox, checkpoints), multi-agent orchestration, theming (11 themes), and a11y (daltonized themes) — but almost all of that power is **invisible in the TUI** today. This plan turns invisible power into a controllable cockpit, and closes the few genuine interaction gaps (multi-line input, command palette, collapsible output), on stock Ink.
