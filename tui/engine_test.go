@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,6 +45,42 @@ func TestEngineRoundTrip(t *testing.T) {
 				}
 			}
 			if gotReady && gotMenu {
+				return // success
+			}
+		}
+	}
+}
+
+// Drives the engine's completion channel: ask for "/g" candidates and assert the engine returns
+// matching slash commands. Proves the query/queryResult round-trip end-to-end.
+func TestCompletionsRoundTrip(t *testing.T) {
+	eng, err := StartEngine("..")
+	if err != nil {
+		t.Fatalf("StartEngine: %v", err)
+	}
+	defer eng.Close()
+
+	timeout := time.After(90 * time.Second)
+	for {
+		select {
+		case <-timeout:
+			t.Fatal("timed out waiting for completions")
+		case m, ok := <-eng.Msgs:
+			if !ok {
+				t.Fatal("engine channel closed early")
+			}
+			if m.T == "ready" {
+				eng.Send(encodeQuery(1, "/g"))
+			}
+			if m.T == "queryResult" && m.ID == 1 {
+				if len(m.Items) == 0 {
+					t.Fatal("no completions for /g")
+				}
+				for _, it := range m.Items {
+					if it.Kind != "command" || !strings.HasPrefix(it.Value, "/g") {
+						t.Fatalf("unexpected completion: %+v", it)
+					}
+				}
 				return // success
 			}
 		}

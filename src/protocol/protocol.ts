@@ -34,7 +34,18 @@ export interface RequestMsg {
 /** Handshake — sent once when the host attaches, so the front-end can version-check. */
 export interface ReadyMsg { t: 'ready'; protocol: number; }
 
-export type Outbound = EventMsg | RequestMsg | ReadyMsg;
+/** A single autocomplete candidate (slash command, @symbol, or @path). */
+export interface CompletionItem {
+  value: string; // the text to insert (e.g. "/git", "@handlePayment", "@./src/")
+  label: string; // display label
+  desc: string;  // short description / category
+  kind: 'command' | 'symbol' | 'path';
+}
+
+/** Completions for a {@link QueryMsg}, correlated by `id` so stale results can be dropped. */
+export interface QueryResultMsg { t: 'queryResult'; id: number; items: CompletionItem[]; }
+
+export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg;
 
 // --- Inbound: front-end → engine -----------------------------------------------------------
 
@@ -47,7 +58,10 @@ export interface InputMsg { t: 'input'; text: string; }
 /** Cancel the in-flight turn (Ctrl-C / Esc in the front-end). */
 export interface InterruptMsg { t: 'interrupt'; }
 
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg;
+/** Ask the engine for autocomplete candidates for the current input `text`. */
+export interface QueryMsg { t: 'query'; id: number; text: string; }
+
+export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg;
 
 // --- Event vocabulary ----------------------------------------------------------------------
 

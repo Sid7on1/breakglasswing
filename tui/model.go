@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -45,6 +46,12 @@ type model struct {
 	reqQ    string
 	reqOpts []string
 
+	// autocomplete (slash commands + @-mentions), served by the engine
+	comps    []CompletionItem
+	compIdx  int
+	compOpen bool
+	queryID  int
+
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier   string // "lite" | "heavy"
 	fPinned string // pinned tier, if any
@@ -78,10 +85,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.vp.Width = msg.Width
-		m.vp.Height = msg.Height - 5 // header + status + footer + input + breathing room
 		m.input.Width = msg.Width - 4
-		m.refresh()
+		m.relayout()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -102,20 +107,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Completion-dropdown navigation takes priority while it's open.
+		if m.compOpen {
+			switch msg.String() {
+			case "esc":
+				m.compOpen = false
+				m.relayout()
+				return m, nil
+			case "up", "ctrl+p":
+				m.compIdx = (m.compIdx - 1 + len(m.comps)) % len(m.comps)
+				return m, nil
+			case "down", "ctrl+n":
+				m.compIdx = (m.compIdx + 1) % len(m.comps)
+				return m, nil
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			m.engine.Close()
 			return m, tea.Quit
+		case "tab":
+			if m.compOpen {
+				m.acceptCompletion()
+			}
+			m.requestCompletions() // open, or refine after accept (e.g. descend a dir)
+			return m, nil
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
 			if text != "" {
 				m.engine.Send(encodeInput(text)) // engine echoes the user message back
 				m.input.SetValue("")
 			}
+			m.compOpen = false
+			m.relayout()
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		m.requestCompletions() // refresh candidates for the new input
 		return m, cmd
 
 	case engineMsg:
@@ -145,9 +175,70 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqQ = o.Question
 		m.reqOpts = o.Options
 
+	case "queryResult":
+		if o.ID == m.queryID { // ignore stale results from earlier keystrokes
+			m.comps = o.Items
+			m.compIdx = 0
+			m.compOpen = len(o.Items) > 0
+			m.relayout()
+		}
+
 	case "event":
 		m.handleEvent(o)
 	}
+}
+
+// requestCompletions asks the engine for candidates for the current input. Empty input closes the
+// dropdown without a round-trip. Each query carries a fresh id so stale results are dropped.
+func (m *model) requestCompletions() {
+	v := m.input.Value()
+	if v == "" {
+		if m.compOpen {
+			m.compOpen = false
+			m.relayout()
+		}
+		return
+	}
+	m.queryID++
+	m.engine.Send(encodeQuery(m.queryID, v))
+}
+
+var trailingAt = regexp.MustCompile(`@[A-Za-z0-9_./~-]*$`)
+
+// acceptCompletion inserts the highlighted candidate: a command replaces the whole line; an
+// @symbol/@path replaces just the trailing @token.
+func (m *model) acceptCompletion() {
+	if !m.compOpen || len(m.comps) == 0 {
+		return
+	}
+	item := m.comps[m.compIdx]
+	if item.Kind == "command" {
+		m.input.SetValue(item.Value + " ")
+	} else {
+		repl := item.Value
+		if !strings.HasSuffix(repl, "/") { // a dir keeps the cursor on it to descend; else add a space
+			repl += " "
+		}
+		m.input.SetValue(trailingAt.ReplaceAllString(m.input.Value(), repl))
+	}
+	m.input.CursorEnd()
+	m.compOpen = false
+	m.relayout()
+}
+
+// relayout recomputes the viewport height to make room for the dropdown, and re-renders.
+func (m *model) relayout() {
+	compH := 0
+	if m.compOpen {
+		compH = len(m.comps)
+	}
+	h := m.height - 5 - compH
+	if h < 3 {
+		h = 3
+	}
+	m.vp.Width = m.width
+	m.vp.Height = h
+	m.refresh()
 }
 
 func (m *model) handleEvent(o Outbound) {
@@ -290,7 +381,25 @@ func (m model) View() string {
 		bottom = promptBox.Width(m.width - 2).Render(m.input.View())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), m.footerLine(), status, bottom)
+	mid := status
+	if m.compOpen && len(m.comps) > 0 {
+		mid = m.completionView()
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), m.footerLine(), mid, bottom)
+}
+
+// completionView renders the autocomplete dropdown, highlighting the selected row.
+func (m model) completionView() string {
+	var b strings.Builder
+	for i, it := range m.comps {
+		row := fmt.Sprintf("%-18s %s", it.Label, it.Desc)
+		if i == m.compIdx {
+			b.WriteString(compSel.Render("▸ "+row) + "\n")
+		} else {
+			b.WriteString("  " + dimStyle.Render(row) + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // footerLine renders the model/tier · tokens · goals · mode bar, mirroring Ink's Footer.tsx.

@@ -40,4 +40,7 @@ var (
 	footerTier = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	footerMode = lipgloss.NewStyle().Foreground(colOK).Bold(true)
 	footerSep  = lipgloss.NewStyle().Foreground(colDim).Render("  ·  ")
+
+	// Autocomplete dropdown.
+	compSel = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(colAccent)
 )

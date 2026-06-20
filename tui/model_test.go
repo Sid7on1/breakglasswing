@@ -90,6 +90,46 @@ func TestApprovalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAcceptCompletion(t *testing.T) {
+	cases := []struct {
+		name, input, value, kind, want string
+	}{
+		{"command replaces line", "/gi", "/git", "command", "/git "},
+		{"symbol replaces trailing @token", "rename @hand", "@handlePayment", "symbol", "rename @handlePayment "},
+		{"path keeps cursor on dir (no space)", "see @./sr", "@./src/", "path", "see @./src/"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, _ := newTestModel()
+			m.input.SetValue(c.input)
+			m.comps = []CompletionItem{{Value: c.value, Kind: c.kind}}
+			m.compOpen = true
+			m.acceptCompletion()
+			if got := m.input.Value(); got != c.want {
+				t.Fatalf("got %q want %q", got, c.want)
+			}
+			if m.compOpen {
+				t.Fatal("dropdown should close after accept")
+			}
+		})
+	}
+}
+
+func TestQueryResultOpensDropdown(t *testing.T) {
+	m, _ := newTestModel()
+	m.input.SetValue("/g")
+	m.queryID = 3
+	m.handleEngine(Outbound{T: "queryResult", ID: 3, Items: []CompletionItem{{Label: "/git", Value: "/git", Kind: "command"}}})
+	if !m.compOpen || len(m.comps) != 1 {
+		t.Fatalf("dropdown not opened: %+v", m.comps)
+	}
+	// A stale result (wrong id) must be ignored.
+	m.handleEngine(Outbound{T: "queryResult", ID: 1, Items: nil})
+	if !m.compOpen {
+		t.Fatal("stale queryResult wrongly closed the dropdown")
+	}
+}
+
 func TestMenuRendersOptions(t *testing.T) {
 	m, _ := newTestModel()
 	menu := map[string]any{

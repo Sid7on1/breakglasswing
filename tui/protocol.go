@@ -17,6 +17,15 @@ type Outbound struct {
 	Options  []string          `json:"options,omitempty"`  // request choices
 	IsAsk    bool              `json:"isAsk,omitempty"`
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
+	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
+}
+
+// CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.
+type CompletionItem struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+	Desc  string `json:"desc"`
+	Kind  string `json:"kind"` // "command" | "symbol" | "path"
 }
 
 // MessageEntry — the payload of a `message` event (args[0]). Mirrors src/cli/events.ts.
@@ -61,6 +70,11 @@ func encodeReply(id int, value string) []byte {
 
 func encodeInterrupt() []byte {
 	b, _ := json.Marshal(map[string]any{"t": "interrupt"})
+	return append(b, '\n')
+}
+
+func encodeQuery(id int, text string) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "query", "id": id, "text": text})
 	return append(b, '\n')
 }
 

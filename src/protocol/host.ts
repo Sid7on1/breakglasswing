@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import {
-  Outbound, Inbound, ReplyMsg,
+  Outbound, Inbound, ReplyMsg, CompletionItem,
   FORWARDED_EVENTS, PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
 
@@ -9,6 +9,8 @@ export interface HostHandlers {
   onInput?: (text: string) => void;
   /** The front-end asked to cancel the in-flight turn. */
   onInterrupt?: () => void;
+  /** The front-end asked for autocomplete candidates for the current input. */
+  onQuery?: (text: string) => CompletionItem[] | Promise<CompletionItem[]>;
 }
 
 /**
@@ -73,6 +75,13 @@ export class ProtocolHost {
       case 'interrupt':
         this.handlers.onInterrupt?.();
         return;
+      case 'query': {
+        const { id, text } = msg;
+        Promise.resolve(this.handlers.onQuery?.(text) ?? [])
+          .then(items => this.write({ t: 'queryResult', id, items }))
+          .catch(() => this.write({ t: 'queryResult', id, items: [] }));
+        return;
+      }
     }
   }
 
