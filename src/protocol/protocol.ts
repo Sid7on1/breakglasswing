@@ -63,6 +63,8 @@ export const FORWARDED_EVENTS: readonly string[] = [
   // Headless-only: the persona streams reply tokens through a direct callback in the Ink path;
   // in headless mode the driver re-emits each token here so the front-end can render the stream.
   'stream_token',
+  // Footer state the Ink UI reads from engine singletons; snapshotted for out-of-process clients.
+  'ui_snapshot',
 ];
 
 /** The event the host special-cases into a {@link RequestMsg}. */

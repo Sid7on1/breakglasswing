@@ -33,4 +33,11 @@ var (
 	requestBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).BorderForeground(colErr).
 			Padding(0, 1)
+
+	// Footer (mirrors Ink's Footer.tsx): model/tier · tokens · goals · mode.
+	footerBar  = lipgloss.NewStyle().Foreground(colDim)
+	footerVal  = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	footerTier = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	footerMode = lipgloss.NewStyle().Foreground(colOK).Bold(true)
+	footerSep  = lipgloss.NewStyle().Foreground(colDim).Render("  ·  ")
 )

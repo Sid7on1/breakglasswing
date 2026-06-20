@@ -2,6 +2,7 @@ import { cliEvents } from '../cli/events';
 import { buildPersonas } from '../cli/personas/factory';
 import { HeadlessSession } from './headless.session';
 import { startStdioHost } from './stdio.host';
+import { startUiSnapshot } from './ui.snapshot';
 
 /**
  * Run BiMax headless: no Ink, no TTY. The engine's events stream out as NDJSON on stdout and
@@ -37,6 +38,9 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     onInput: (text) => { void session.dispatch(text); },
     onInterrupt: () => { /* TODO: cancel the in-flight turn once persona.execute is cancelable */ },
   });
+
+  // Push footer state (model names, goal count) the Go front-end can't read from engine singletons.
+  startUiSnapshot();
 
   await new Promise<void>((resolve) => {
     let done = false;

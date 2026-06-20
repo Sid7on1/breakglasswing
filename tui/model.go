@@ -44,6 +44,15 @@ type model struct {
 	reqID   int
 	reqQ    string
 	reqOpts []string
+
+	// footer state (mirrors Ink's Footer.tsx)
+	fTier   string // "lite" | "heavy"
+	fPinned string // pinned tier, if any
+	fMode   string // governor / agent mode
+	fTokens int    // running session token estimate
+	fCoding string // coding model id
+	fLite   string // lite model id
+	fGoals  int    // active goal count
 }
 
 func initialModel(e *Engine) model {
@@ -70,7 +79,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width
-		m.vp.Height = msg.Height - 4 // header + status + input + breathing room
+		m.vp.Height = msg.Height - 5 // header + status + footer + input + breathing room
 		m.input.Width = msg.Width - 4
 		m.refresh()
 		return m, nil
@@ -160,6 +169,33 @@ func (m *model) handleEvent(o Outbound) {
 	case "spinner_state":
 		if s := argString(o.Args, 1); s != "" {
 			m.status = s
+		}
+
+	case "mode_change":
+		m.fMode = argString(o.Args, 0)
+
+	case "model_tier":
+		var t struct {
+			Tier   string `json:"tier"`
+			Pinned string `json:"pinned"`
+		}
+		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &t) == nil {
+			m.fTier, m.fPinned = t.Tier, t.Pinned
+		}
+
+	case "cost_update":
+		var chars float64
+		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &chars) == nil {
+			m.fTokens += int(chars / 4) // rough token estimate, same as Footer.tsx
+		}
+
+	case "ui_snapshot":
+		var s struct {
+			Models    struct{ Coding, Lite string } `json:"models"`
+			GoalCount int                            `json:"goalCount"`
+		}
+		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &s) == nil {
+			m.fCoding, m.fLite, m.fGoals = s.Models.Coding, s.Models.Lite, s.GoalCount
 		}
 
 	case "tool_call", "tool_call_result":
@@ -254,7 +290,51 @@ func (m model) View() string {
 		bottom = promptBox.Width(m.width - 2).Render(m.input.View())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), status, bottom)
+	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), m.footerLine(), status, bottom)
+}
+
+// footerLine renders the model/tier · tokens · goals · mode bar, mirroring Ink's Footer.tsx.
+func (m model) footerLine() string {
+	modelID := m.fLite
+	if m.fTier == "heavy" {
+		modelID = m.fCoding
+	}
+	if modelID == "" {
+		modelID = "—"
+	}
+	tier := m.fTier
+	if tier == "" {
+		tier = "lite"
+	}
+	if m.fPinned != "" {
+		tier += "📌"
+	}
+
+	parts := []string{footerTier.Render("◆ "+tier) + footerVal.Render(":"+shortModel(modelID))}
+	parts = append(parts, footerVal.Render(fmt.Sprintf("⛁ %s tok", humanCount(m.fTokens))))
+	if m.fGoals > 0 {
+		parts = append(parts, footerVal.Render(fmt.Sprintf("◎ %d goals", m.fGoals)))
+	}
+	if m.fMode != "" {
+		parts = append(parts, footerMode.Render("["+m.fMode+"]"))
+	}
+	return footerBar.Width(m.width).Render(strings.Join(parts, footerSep))
+}
+
+// shortModel strips the provider prefix: "minimaxai/minimax-m3" → "minimax-m3".
+func shortModel(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
+}
+
+// humanCount renders a token count compactly: 1234 → "1.2k".
+func humanCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprint(n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 // --- small helpers -------------------------------------------------------------------------
