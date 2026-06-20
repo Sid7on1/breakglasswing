@@ -26,6 +26,8 @@ export interface ReplOptions {
   notificationBell?: boolean;
   maxToolIterations?: number;
   persona: any;
+  /** When set, the TUI auto-submits this string as the first message on mount. */
+  initialPrompt?: string;
 }
 
 export async function startRepl(

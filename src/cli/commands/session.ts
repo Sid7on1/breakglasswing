@@ -2,6 +2,7 @@ import { globalCommandRegistry } from './registry';
 import { getProviders, setProvider, getCurrentProvider } from '../provider';
 import { saveApiKeyToEnv } from '../env.loader';
 import { SessionStore } from '../session';
+import { listSessionMeta } from '../../db/session.meta';
 
 /** "2026-06-17_02-30-15.jsonl" → "2026-06-17 02:30:15" for display. */
 function prettySessionName(file: string): string {
@@ -20,6 +21,38 @@ async function previewSession(file: string, context: any): Promise<void> {
     const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 200);
     if (snippet) context.addSystemMessage('info', `${who}: ${snippet}`);
   }
+}
+
+/**
+ * Restore a session's messages into the live conversation.
+ * The last 40 messages are injected — enough context to resume mid-task
+ * without overloading the context window with ancient history.
+ */
+async function resumeSession(file: string, context: any, store: SessionStore): Promise<void> {
+  const msgs = await store.loadSession(file);
+  if (msgs.length === 0) {
+    context.addSystemMessage('error', `Session ${prettySessionName(file)} is empty or unreadable.`);
+    return;
+  }
+  if (!context.restoreMessages) {
+    context.addSystemMessage('error', 'Session restore is not available in this context. Use /resume from the main terminal.');
+    return;
+  }
+  // Take the last 40 messages; drop any leading orphaned tool messages.
+  let tail = msgs.slice(-40);
+  while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
+  context.restoreMessages(tail);
+  context.addSystemMessage('success', `Resumed session "${prettySessionName(file)}" · ${tail.length} message(s) injected into context.`);
+
+  // Inject GoalManager continuation prompt so the model picks up the active goal
+  try {
+    const { getGoalManager } = require('../../memory/goal.manager');
+    const activeGoals = getGoalManager().getActiveGoals();
+    if (activeGoals.length > 0) {
+      const g = activeGoals[0];
+      context.addSystemMessage('info', `[GoalManager] Resuming with active goal: "${g.title}"${g.description ? ` — ${g.description}` : ''}. Pick up where you left off.`);
+    }
+  } catch { /* goals are best-effort */ }
 }
 
 // Apply a provider selection live: switch the active provider, persist the choice, and tell
@@ -101,18 +134,36 @@ globalCommandRegistry.register({
 
 globalCommandRegistry.register({
   name: '/sessions',
-  description: 'Browse saved sessions (pick one to preview)',
+  description: 'Browse saved sessions — pick one to preview or resume',
   category: 'Session & Context',
   execute: async (_args, context) => {
-    const files = await new SessionStore().listSessions();
+    const store = new SessionStore();
+    const files = await store.listSessions();
     if (files.length === 0) {
       return { type: 'message', level: 'info', content: 'No saved sessions yet (.breakglass/sessions). They accrue as you chat.' };
     }
+
+    // Enrich with metadata where available (title, cwd, message count, goal)
+    const metaMap = new Map(listSessionMeta(80).map(m => [m.id, m]));
+
+    const options = files.slice(0, 40).map(f => {
+      const id = f.replace(/\.jsonl$/, '');
+      const meta = metaMap.get(id);
+      const label = meta?.title && meta.title !== '(no messages yet)'
+        ? meta.title.slice(0, 60)
+        : prettySessionName(f);
+      const descParts: string[] = [prettySessionName(f)];
+      if (meta?.cwd) descParts.push(meta.cwd.split('/').slice(-2).join('/'));
+      if (meta?.messageCount) descParts.push(`${meta.messageCount} msgs`);
+      if (meta?.goalTitle) descParts.push(`goal: ${meta.goalTitle.slice(0, 30)}`);
+      return { label, value: f, desc: descParts.join(' · '), category: 'Sessions' };
+    });
+
     return {
       type: 'menu',
-      title: 'Saved sessions — pick one to preview (newest first)',
-      options: files.slice(0, 40).map(f => ({ label: prettySessionName(f), value: f, desc: f, category: 'Sessions' })),
-      onSelect: (opt: any) => { void previewSession(opt.value, context); },
+      title: 'Saved sessions — pick one to resume (newest first)',
+      options,
+      onSelect: (opt: any) => { void resumeSession(opt.value, context, store); },
     };
   }
 });
@@ -120,16 +171,95 @@ globalCommandRegistry.register({
 globalCommandRegistry.register({
   name: '/resume',
   aliases: ['/session'],
-  description: 'Preview a saved session (by id, or pick from the list)',
+  description: 'Resume a past session by injecting its messages into the current context',
   category: 'Session & Context',
   execute: async (args, context) => {
+    const store = new SessionStore();
     if (args[0]) {
-      const files = await new SessionStore().listSessions();
-      const match = files.find(f => f === args[0] || f === `${args[0]}.jsonl` || f.startsWith(args[0]));
+      const files = await store.listSessions();
+      // Prefer an exact match; only fall back to prefix when it's unambiguous. A short prefix like
+      // "2026" otherwise silently resumed whichever session happened to sort first.
+      const exact = files.find(f => f === args[0] || f === `${args[0]}.jsonl`);
+      let match = exact;
+      if (!match) {
+        const prefixed = files.filter(f => f.startsWith(args[0]));
+        if (prefixed.length === 1) {
+          match = prefixed[0];
+        } else if (prefixed.length > 1) {
+          return { type: 'message', level: 'error', content: `"${args[0]}" matches ${prefixed.length} sessions (${prefixed.slice(0, 5).join(', ')}…). Be more specific or open /sessions.` };
+        }
+      }
       if (!match) return { type: 'message', level: 'error', content: `No session matching "${args[0]}". Open /sessions to browse.` };
-      await previewSession(match, context);
+      await resumeSession(match, context, store);
       return { type: 'none' };
     }
     return { type: 'redirect', command: '/sessions' };
+  }
+});
+
+globalCommandRegistry.register({
+  name: '/branch',
+  description: 'Fork the current session into a named branch, or switch to a saved one',
+  category: 'Session & Context',
+  execute: async (args, context) => {
+    const store = new SessionStore();
+
+    // /branch create <name> — save current conversation as a named branch
+    if (args[0] === 'create' || args[0] === 'save') {
+      const name = args.slice(1).join('_').replace(/\s+/g, '_') || '';
+      if (!name) return { type: 'message', level: 'error', content: 'Usage: /branch create <name>   (name the fork)' };
+      const msgs = context.getMessages?.() || [];
+      if (msgs.length === 0) return { type: 'message', level: 'info', content: 'Nothing to branch — conversation is empty.' };
+      await store.saveBranch(name, msgs);
+      return { type: 'message', level: 'success', content: `Branch "${name}" saved (${msgs.length} message(s)). Resume it later with /branch switch ${name}` };
+    }
+
+    // /branch delete <name>
+    if (args[0] === 'delete' || args[0] === 'rm') {
+      const name = args.slice(1).join('_') || '';
+      if (!name) return { type: 'message', level: 'error', content: 'Usage: /branch delete <name>' };
+      const ok = await store.deleteBranch(name);
+      return ok
+        ? { type: 'message', level: 'success', content: `Branch "${name}" deleted.` }
+        : { type: 'message', level: 'error', content: `No branch named "${name}".` };
+    }
+
+    // /branch switch <name> or /branch list (default)
+    const branches = await store.listBranches();
+
+    if (args[0] === 'switch' || args[0] === 'load') {
+      const name = args.slice(1).join('_') || '';
+      if (!name) return { type: 'message', level: 'error', content: 'Usage: /branch switch <name>' };
+      const msgs = await store.loadBranch(name);
+      if (msgs.length === 0) return { type: 'message', level: 'error', content: `Branch "${name}" not found or empty. Use /branch list.` };
+      if (!context.restoreMessages) {
+        return { type: 'message', level: 'error', content: 'Branch restore is not available in this context.' };
+      }
+      let tail = msgs.slice(-40);
+      while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
+      context.restoreMessages(tail);
+      return { type: 'message', level: 'success', content: `Switched to branch "${name}" · ${tail.length} message(s) loaded.` };
+    }
+
+    // List branches
+    if (branches.length === 0) {
+      return { type: 'message', level: 'info', content: 'No branches yet. Create one with /branch create <name>' };
+    }
+    return {
+      type: 'menu',
+      title: 'Saved branches — pick one to switch to',
+      options: branches.map(b => ({ label: b, value: b, desc: `switch to branch "${b}"`, category: 'Branches' })),
+      onSelect: async (opt: any) => {
+        const msgs = await store.loadBranch(opt.value);
+        let tail = msgs.slice(-40);
+        while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
+        if (context.restoreMessages) {
+          context.restoreMessages(tail);
+          context.addSystemMessage('success', `Switched to branch "${opt.value}" · ${tail.length} message(s) loaded.`);
+        } else {
+          context.addSystemMessage('error', 'Branch restore not available.');
+        }
+      },
+    };
   }
 });

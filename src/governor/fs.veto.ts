@@ -42,11 +42,11 @@ export class FileSystemVeto {
       }
     }
 
-    // 3. Mathematical Regex Signature scanning
+    // 3. Sensitive filename pattern detection (e.g. id_rsa)
     for (const regex of SafetyPolicy.forbiddenRegex) {
       if (regex.test(normalized)) {
-        Logger.error(`[Governor: Veto] File operation blocked. Target matches forbidden regex signature: ${regex}`);
-        throw new GovernorVetoError('Forbidden cryptographic signature match.');
+        Logger.error(`[Governor: Veto] File operation blocked. Target matches forbidden filename pattern: ${regex}`);
+        throw new GovernorVetoError('Forbidden sensitive filename.');
       }
     }
 

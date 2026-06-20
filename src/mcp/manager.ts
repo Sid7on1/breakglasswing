@@ -19,6 +19,9 @@ function cleanSpec(spec: McpServerSpec): McpServerSpec {
 
 export class McpManager {
   private connections: Map<string, ConnectedMcp> = new Map();
+  /** Server names currently in the middle of a connect attempt. Used by ToolSearchTool to warn the
+   *  model that a missing MCP tool might appear once the server finishes connecting. */
+  private pending: Set<string> = new Set();
   /** The reason the most recent connect attempt failed (for surfacing to the user/agent). */
   public lastError: string | null = null;
 
@@ -70,7 +73,9 @@ export class McpManager {
         cliEvents.emit('status', `MCP '${spec.name}' skipped — missing path(s): ${missing.join(', ')}`);
         continue;
       }
+      this.pending.add(spec.name);
       const c = await this.connectSpec(spec, registry, governor);
+      this.pending.delete(spec.name);
       if (c) {
         n++;
         cliEvents.emit('status', `MCP '${spec.name}' connected — ${c.toolNames.length} tool(s)`);
@@ -100,6 +105,11 @@ export class McpManager {
   /** Is a configured server currently turned off? */
   public isDisabled(name: string, cwd?: string): boolean {
     return !!loadMcpServers(this.configRoot(cwd)).find(s => s.name === name)?.disabled;
+  }
+
+  /** Server names still connecting — used by ToolSearchTool to warn the model of pending tools. */
+  public getPendingServers(): string[] {
+    return Array.from(this.pending);
   }
 
   public list(): ConnectedMcp[] {

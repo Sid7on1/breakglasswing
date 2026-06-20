@@ -8,11 +8,14 @@ import * as os from 'os';
 import { AgentLoop } from '../../core/agent.loop';
 import { globalProjectMemory } from '../../memory/project.memory';
 import { isSelfCriticEnabled } from '../selfCritic';
+import { isAdversarialVerifyEnabled, runAdversarialVerifier, looksLikeCodeWork } from '../adversarialVerifier';
 import { isCodebase } from '../../graph/graph.summary';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
 import { loadProjectGuide } from '../projectGuide';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
+import { getGoalManager } from '../../memory/goal.manager';
+import { agentModePromptSection } from '../agentMode';
 
 export interface PersonaConfig {
   name: string;
@@ -145,6 +148,21 @@ export abstract class AgentPersona {
       sections.memory = opts.memory;
     }
 
+    // Persistent goals: inject active cross-session goals so the model knows the user's
+    // standing objectives without being re-briefed each session.
+    try {
+      const goalsBlock = getGoalManager().getSystemPromptBlock();
+      if (goalsBlock) sections.goals = goalsBlock;
+    } catch { /* goals are best-effort — getGoalManager() throws if not yet initialized */ }
+
+    // Behavioral mode (5.2): explore / code specialization. Injected into the dynamic suffix.
+    // 'explore' relies on the governor being flipped to plan mode for the read-only enforcement,
+    // so the explicit plan-mode section below still renders the hard write-gate notice.
+    try {
+      const modeSection = agentModePromptSection();
+      if (modeSection) sections.agentMode = modeSection;
+    } catch { /* mode guidance is best-effort */ }
+
     if (opts?.planMode) {
       sections.plan = `### PLAN MODE (ACTIVE — CRITICAL)\nYou are in read-only PLAN MODE. The Governor will reject every mutating action: writing or deleting files, and any non-read shell command. Do NOT attempt them — they will fail.\n- Use only read/search tools (read files, grep/glob, query the graph, fetch URLs, ask the user) to investigate.\n- When you understand the task, STOP and present a concrete, step-by-step implementation plan: the files you would change, what each change does, and any risks or open questions. Use a numbered list.\n- Do not claim you made any changes. Nothing is written in plan mode.\n- End by telling the user they can approve and run \`/plan off\` to let you execute the plan.`;
     }
@@ -177,6 +195,8 @@ export abstract class AgentPersona {
       sections.mcp,
       sections.pathRules,
       sections.memory,
+      sections.goals,   // cross-session persistent goals (injected after memory, before plan mode)
+      sections.agentMode, // behavioral mode (explore/code) specialization
       sections.plan,
     ].filter(Boolean).join('\n\n');
 
@@ -221,7 +241,9 @@ export abstract class AgentPersona {
     if (contextWindow === undefined && caps && caps.contextWindow > 0) {
       contextWindow = caps.contextWindow;
     }
-    const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, null as any, contextWindow);
+    // governor is undefined here: tools already carry their own injected governor, and the loop
+    // doesn't enforce policy itself (see AgentLoop constructor).
+    const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow);
     const maxIterations = options?.maxIterations ?? 15;
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
     const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, contextMode });
@@ -253,6 +275,31 @@ export abstract class AgentPersona {
           this.messages = loop.messages;
         }
       } catch { /* self-critic is best-effort; never fail the turn over it */ }
+    }
+
+    // Adversarial verifier: chains after self-critic. Uses the full model with a red-team
+    // framing to find bugs/edge-cases that both the agent and self-critic missed.
+    // Only fires when enabled, the turn touched real code, and is NOT in plan mode.
+    if (isAdversarialVerifyEnabled() && !options?.planMode && looksLikeCodeWork(executionLog)) {
+      try {
+        const findings = await runAdversarialVerifier(prompt, executionLog, this.llmAdapter);
+        if (findings) {
+          if (onToken) onToken(`\n\n_Red-team review found potential issues; addressing…_\n`);
+          this.messages.push({
+            role: 'user',
+            content:
+              `Adversarial review of your work found these potential issues:\n${findings}\n\n` +
+              `Address each point that is a real defect (not a false alarm). If a point is wrong, briefly say why. ` +
+              `Then give the corrected implementation or explain why no change is needed.`,
+          });
+          const gen3 = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite }, this);
+          for await (const token of gen3) {
+            if (onToken) onToken(token);
+            executionLog += token;
+          }
+          this.messages = loop.messages;
+        }
+      } catch { /* adversarial verifier is best-effort */ }
     }
 
     return executionLog;

@@ -2,6 +2,7 @@ import * as os from 'os';
 import { globalCommandRegistry } from './registry';
 import { getConfig } from '../config';
 import { capabilitiesFor, capabilityGlyphs } from '../../core/capabilities';
+import { globalTelemetry } from '../../telemetry/telemetry';
 
 function fmtDuration(totalSec: number): string {
   const s = Math.floor(totalSec % 60);
@@ -32,6 +33,29 @@ globalCommandRegistry.register({
     const caps = capabilitiesFor(undefined, model);
     const glyphs = capabilityGlyphs(caps);
 
+    // Tool latency telemetry
+    const toolStats = globalTelemetry.getToolStats();
+    const cacheStats = globalTelemetry.getCacheStats();
+
+    const toolLines: string[] = [];
+    if (toolStats.length > 0) {
+      toolLines.push('', '**Tool latency (this session)**');
+      const header = `${'Tool'.padEnd(28)} ${'Calls'.padStart(5)} ${'Avg'.padStart(6)} ${'Min'.padStart(6)} ${'p95'.padStart(6)} ${'Max'.padStart(6)}`;
+      toolLines.push('```', header);
+      for (const s of toolStats.slice(0, 12)) {
+        const name = s.name.slice(0, 27).padEnd(28);
+        toolLines.push(`${name} ${String(s.count).padStart(5)} ${(s.avgMs + 'ms').padStart(6)} ${(s.minMs + 'ms').padStart(6)} ${(s.p95Ms + 'ms').padStart(6)} ${(s.maxMs + 'ms').padStart(6)}`);
+      }
+      toolLines.push('```');
+    }
+
+    const cacheLines: string[] = [];
+    if (cacheStats.totalPrompt > 0) {
+      cacheLines.push('', '**Prompt cache (Anthropic)**');
+      cacheLines.push(`- Cache hit rate: ${cacheStats.hitRate} (${cacheStats.readTokens.toLocaleString()} read / ${cacheStats.totalPrompt.toLocaleString()} prompt tokens)`);
+      if (cacheStats.creationTokens > 0) cacheLines.push(`- Written to cache: ${cacheStats.creationTokens.toLocaleString()} tokens`);
+    }
+
     const lines = [
       '## Diagnostics',
       '',
@@ -48,6 +72,8 @@ globalCommandRegistry.register({
       `- Coding: ${model.split('/').pop()}${liteModel ? ` · Lite: ${liteModel.split('/').pop()}` : ''}`,
       `- Context window: ${caps.contextWindow.toLocaleString()} tokens`,
       `- Capabilities: ${glyphs || '(floor — no special capabilities)'}`,
+      ...toolLines,
+      ...cacheLines,
       '',
       '_Spend → /cost · context usage → /context · plugins → /plugins · safety → /security_',
     ];

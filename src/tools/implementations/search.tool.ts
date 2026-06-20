@@ -102,6 +102,12 @@ export const createGrepTool = (governor: IGovernor) => buildTool({
     const counts: { file: string; n: number }[] = [];
     let total = 0;
 
+    // Grep→Read fusion: when ≤5 matches found in content mode with no explicit contextLines,
+    // we auto-expand each to ±20 lines so the model sees real context without a separate ReadFile call.
+    // Collect raw match records during the walk; decide rendering at the end once total is known.
+    const fusionRecords: { rel: string; allLines: string[]; matchIdx: number }[] = [];
+    const collectFusion = outputMode === 'content' && args.contextLines === undefined;
+
     outer: for (const file of files) {
       const stat = await fs.stat(file).catch(() => null);
       if (!stat || stat.size > MAX_FILE_BYTES) continue;
@@ -124,6 +130,10 @@ export const createGrepTool = (governor: IGovernor) => buildTool({
 
         if (outputMode === 'content') {
           const rel = path.relative(cwd, file) || path.basename(file);
+          if (collectFusion) {
+            // Store enough to re-render with ±20 lines later; allLines is the already-read content
+            fusionRecords.push({ rel, allLines: lines, matchIdx: i });
+          }
           const from = Math.max(0, i - ctx);
           const to = Math.min(lines.length - 1, i + ctx);
           for (let j = from; j <= to; j++) {
@@ -158,6 +168,23 @@ export const createGrepTool = (governor: IGovernor) => buildTool({
       return counts.map(c => `${c.n}\t${c.file}`).join('\n');
     }
     if (contentLines.length === 0) return `No matches for /${args.pattern}/ in ${where}.`;
+
+    // Grep→Read fusion: ≤5 matches and user didn't specify contextLines → auto-expand to ±20
+    if (collectFusion && total <= 5 && fusionRecords.length === total) {
+      const fusedLines: string[] = [];
+      for (const m of fusionRecords) {
+        const from = Math.max(0, m.matchIdx - 20);
+        const to = Math.min(m.allLines.length - 1, m.matchIdx + 20);
+        fusedLines.push(`\n--- ${m.rel}:${m.matchIdx + 1} [±20 lines] ---`);
+        for (let j = from; j <= to; j++) {
+          const marker = j === m.matchIdx ? ':' : '-';
+          fusedLines.push(`${m.rel}${marker}${j + 1}${marker}${m.allLines[j]}`);
+        }
+        fusedLines.push('--');
+      }
+      return `Found ${total} match(es) in ${where} [auto-expanded ±20 lines]:\n${fusedLines.join('\n')}`;
+    }
+
     const header = `Found ${total} match(es) in ${where}${total > maxResults ? ` (showing first ${maxResults})` : ''}:`;
     return `${header}\n${contentLines.join('\n')}`;
   },

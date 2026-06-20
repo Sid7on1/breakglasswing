@@ -38,7 +38,14 @@ export class CodebaseIndexer {
     }
   }
 
-  public async autoIndex(force: boolean = false): Promise<void> {
+  /**
+   * @param interactive  Only true for a standalone (non-TUI) CLI invocation. MUST be false when
+   *   called from inside the Ink TUI: Ink owns process.stdin in raw mode, and opening a second
+   *   readline interface here makes two consumers fight over the same raw TTY — a stdin busy-loop
+   *   that pins a CPU core and freezes the UI (the "Mac frying an egg while idle" bug). In the TUI
+   *   we AST-index silently and leave semantic ingestion as an explicit opt-in (/graph ingest).
+   */
+  public async autoIndex(force: boolean = false, interactive: boolean = false): Promise<void> {
     if (!this.enabled) {
       Logger.info(`[CodebaseIndexer] Skipped — disabled by config.`);
       return;
@@ -84,11 +91,12 @@ export class CodebaseIndexer {
     }
     console.log(`Codebase index complete: ${nodeCount} nodes extracted.`);
 
-    // 2. Interactive LLM Prompt
-    if (process.stdout.isTTY) {
+    // 2. Semantic ingestion prompt — ONLY for a standalone CLI run. Never under the Ink TUI:
+    // readline + Ink both reading the raw TTY deadlock-spin on stdin (100% CPU, frozen UI).
+    if (interactive && process.stdout.isTTY) {
       await this.promptForSemanticIngestion(nodeCount);
     } else {
-      Logger.info(`[CodebaseIndexer] Non-interactive terminal detected. Skipping Semantic Ingestion prompt.`);
+      Logger.info(`[CodebaseIndexer] AST index ready (${nodeCount} nodes). Run semantic ingestion explicitly with /index-ai when you want LLM metadata.`);
     }
   }
 

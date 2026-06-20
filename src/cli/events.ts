@@ -131,3 +131,5 @@ export interface MessageEntry {
 // - thinking: (text: string) => Model's internal reasoning stream (status display only)
 // - thinking_clear: () => Reset the thinking display between turns
 // - shutdown: () => Graceful shutdown
+// - loop_detected: (signal: LoopSignal) => Agent loop detected a repetition pattern (Footer flash)
+// - goals_changed: () => Active goals changed (Footer goal counter refresh)

@@ -42,14 +42,14 @@ import { GraphStore } from '../../graph/graph.store';
 import { CodebaseMapPanel } from '../components/CodebaseMapPanel';
 import { summarizeGraph, isCodebase } from '../../graph/graph.summary';
 import { estimateTokens } from '../../graph/context.planner';
-import { expandAtMentions, suggestAtSymbols, suggestPaths, looksLikePath } from '../atMention';
+import { expandAtMentions, expandFileAtMentions, suggestAtSymbols, suggestPaths, looksLikePath } from '../atMention';
 import { extractImagePaths } from '../../core/multimodal';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { Governor } from '../../governor/governor';
 import { BiMaxPersona, HermesPersona, OpenCodePersona, OpenClawPersona } from '../personas/implementations';
 import { AgentPersona } from '../personas/base.persona';
-import { SessionStore } from '../session';
+import { SessionStore, messageEntriesToLLM } from '../session';
 import { routeQuery } from '../agentRouter';
 import { getGitStatus, gitLog, gitDiff } from '../git';
 import { writeWithBackup, undoLast, previewDiff, editFileLines, getBackups } from '../fileEditor';
@@ -60,10 +60,13 @@ import { saveConfig, getConfig } from '../config';
 import { registerDiffApprover, setDiffApprovalEnabled } from '../diffApproval';
 import { registerBlastConfirmer, registerBlastGraphStore, setBlastGateEnabled } from '../blastGate';
 import { setSelfCriticEnabled } from '../selfCritic';
+import { setAdversarialVerifyEnabled } from '../adversarialVerifier';
 import { globalWatcherManager } from '../watchers';
 import { saveApiKeyToEnv } from '../env.loader';
 import { globalSubAgentManager } from '../../core/subagent.manager';
 import { globalCheckpointManager } from '../../sandbox/checkpoint.manager';
+import { goalEvents } from '../../memory/goal.manager';
+import { startSessionMeta, recordFirstUserMessage, recordSessionProgress, endSessionMeta } from '../../db/session.meta';
 
 interface FullScreenProps {
   taskPipeline: TaskPipeline;
@@ -82,6 +85,8 @@ interface FullScreenProps {
     maxToolIterations?: number;
     autoAgentDecisions?: boolean;
     persona: AgentPersona;
+    /** When set, the TUI auto-submits this string as the first message on mount. */
+    initialPrompt?: string;
   };
 }
 
@@ -142,6 +147,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     return () => {
       globalSubAgentManager.killAll();
       globalWatcherManager.stopAll();
+      try { endSessionMeta(); } catch { /* ignore */ }
     };
   }, []);
 
@@ -150,6 +156,12 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     sessionRef.current.init()
       .then((prev) => {
         if (prev.length > 0) setMessages(prev);
+        // Start session metadata record (best-effort)
+        try {
+          const { getGoalManager } = require('../../memory/goal.manager');
+          const active = getGoalManager().getActiveGoals()[0];
+          startSessionMeta(sessionRef.current!.getId(), process.cwd(), active?.id, active?.title);
+        } catch { startSessionMeta('unknown', process.cwd()); }
       })
       .catch((e: Error) => {
         addLog('error', `Session init failed: ${e.message}`);
@@ -236,7 +248,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     suggestionsRef.current = suggestions;
     suggestionIndexRef.current = suggestionIndex;
   }, [suggestions, suggestionIndex]);
-  const [activeMenu, setActiveMenu] = useState<{ type: string, options: MenuOption[], title: string, onSelect?: (opt: MenuOption) => void | Promise<void> } | null>(null);
+  const [activeMenu, setActiveMenu] = useState<{ type: string, options: MenuOption[], title: string, initialIndex?: number, onSelect?: (opt: MenuOption) => void | Promise<void> } | null>(null);
   const [activePrompt, setActivePrompt] = useState<{ title: string, placeholder?: string, isMasked?: boolean, onResolve: (val: string) => void } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const isProcessingRef = useRef(false);
@@ -250,6 +262,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
   };
   const [showMapPanel, setShowMapPanel] = useState(() => readFlag('showMapPanel'));
   const [showTokenMeter, setShowTokenMeter] = useState(() => readFlag('showTokenMeter'));
+  // Bumped on every config_changed so animated components (ShimmerText, WorkingIndicator) re-render
+  // and re-evaluate prefersReducedMotion(). Without this, /a11y toggle had no visible effect because
+  // React bails out of re-rendering when only showMapPanel/showTokenMeter state is unchanged.
+  const [configVersion, setConfigVersion] = useState(0);
   // Bumped whenever the graph is (re)built so the map summary recomputes.
   const [graphVersion, setGraphVersion] = useState(0);
   const graphSummary = useMemo(() => summarizeGraph(graphStore), [graphStore, graphVersion]);
@@ -327,12 +343,25 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setSuggestionIndex(matches.length > 0 ? 0 : -1);
       return;
     }
-    // @ autocomplete for the trailing `@<token>`. A path-shaped token (@./, @~/, @/, or any
-    // token containing a slash) completes against the filesystem; otherwise it completes graph
-    // symbol names (G4 — symbol-precise, more useful than a bare file path).
+    // @ autocomplete for the trailing `@<token>`. Priority order:
+    //   1. Special keywords: @diff, @staged (file-level context injection)
+    //   2. Path-shaped tokens (@./, @~/, @/, or with a slash): filesystem completions
+    //   3. Everything else: graph symbol names (G4 — symbol-precise)
     const atMatch = value.match(/(?:^|\s)@(\S*)$/);
     if (atMatch) {
       const token = atMatch[1];
+      const FILE_KEYWORDS = [
+        { kw: '@diff', desc: 'git diff HEAD (all unstaged+staged changes)' },
+        { kw: '@staged', desc: 'git diff --staged (staged changes only)' },
+      ];
+      const keywordMatches = FILE_KEYWORDS
+        .filter(({ kw }) => kw.startsWith('@' + token))
+        .map(({ kw, desc }) => `${kw}  ${desc}`);
+      if (keywordMatches.length > 0) {
+        setSuggestions(keywordMatches);
+        setSuggestionIndex(0);
+        return;
+      }
       const matches = looksLikePath(token)
         ? suggestPaths(token, process.cwd())
         : suggestAtSymbols(graphStore, token).map(n => `@${n}  symbol`);
@@ -621,6 +650,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     // Bash sandbox (B3): restrict shell file-writes to the workspace when enabled. Off by default.
     try { setSandboxEnabled(!!getConfig().sandboxBash); } catch { /* config not loaded */ }
 
+    // Adversarial red-team verifier (Phase 4): full-model red-team pass after self-critic. Off by default.
+    try { setAdversarialVerifyEnabled(!!getConfig().adversarialVerify); } catch { /* config not loaded */ }
+
     // Background watchers: wake the agent on file change / schedule. Skip while a turn
     // is already running, and use the budget governor as a circuit breaker.
     globalWatcherManager.registerNotifier((msg) => addSystemMessage('info', msg));
@@ -644,6 +676,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       cliEvents.emit('status', next === null ? 'Routing → auto (lite decides, escalates as needed)' : `Routing pinned → ${next} model`);
     };
 
+    // Bridge goal mutations to cliEvents so the Footer's goals counter stays in sync.
+    const handleGoalsChanged = () => cliEvents.emit('goals_changed' as any);
+    goalEvents.on('goals_changed', handleGoalsChanged);
+
     cliEvents.on('log', handleLog);
     cliEvents.on('message', handleMessage);
     cliEvents.on('veto_prompt', handleVeto);
@@ -664,6 +700,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     };
 
     return () => {
+      goalEvents.off('goals_changed', handleGoalsChanged);
       cliEvents.off('log', handleLog);
       cliEvents.off('message', handleMessage);
       cliEvents.off('veto_prompt', handleVeto);
@@ -699,6 +736,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     const onConfigChanged = () => {
       setShowMapPanel(readFlag('showMapPanel'));
       setShowTokenMeter(readFlag('showTokenMeter'));
+      setConfigVersion(v => v + 1);
     };
     const onGraphChanged = () => setGraphVersion((v) => v + 1);
     // When the agent cd's into another project, reload that project's graph so the map panel
@@ -754,6 +792,9 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       if (typeof m.content === 'string') sum += estimateTokens(m.content);
     }
     setHistoryTokens(sum);
+    // Keep the session-metadata record current so /sessions shows real message/token counts
+    // instead of "0 msgs". Debounced inside recordSessionProgress, so this won't thrash disk.
+    try { recordSessionProgress(messages.length, sum); } catch { /* best-effort */ }
   }, [messages]);
 
   // First-run onboarding: when launched inside a real codebase with no map graph yet, offer to
@@ -953,7 +994,26 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
           addSystemMessage,
           setActiveMenu,
           setActivePrompt,
-          executeCommand: handleSubmit
+          executeCommand: handleSubmit,
+          // Session continuity: let /resume and /branch inject past messages into the live context.
+          restoreMessages: (msgs: any[]) => {
+            // Prepend a visual divider so the user can see where the restored history begins.
+            const divider: MessageEntry = {
+              id: `restore-divider-${Date.now()}`,
+              role: 'system',
+              level: 'info',
+              content: `── Session restored · ${msgs.length} message(s) ──`,
+              timestamp: new Date(),
+            };
+            setMessages([...msgs, divider]);
+            // Sync into the active persona's message history so the LLM sees the restored context.
+            // Convert the UI transcript (MessageEntry) into clean LLM Message[] — string-only content
+            // with collapsed tool calls folded into text — so the provider never receives a malformed
+            // payload (React-node content, orphaned tool shapes). UI dividers/system entries dropped.
+            const activePersona = personasRef.current?.[defaultAgent] || personasRef.current?.bimax;
+            if (activePersona) activePersona.messages = messageEntriesToLLM(msgs as any);
+          },
+          getMessages: () => messages,
         };
         
         const result = await globalCommandRegistry.execute(query, context);
@@ -1032,6 +1092,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
 
     const msgId = `msg-${Date.now()}`;
     cliEvents.emit('message', { id: msgId, role: 'user', content: query, timestamp: new Date() } as MessageEntry);
+    // Record first user message as session title (best-effort)
+    try { recordFirstUserMessage(query); } catch { /* ignore */ }
     const routedAgent = routeQuery(query);
     const active = personasRef.current![routedAgent] || personasRef.current!.bimax;
     const msgCountBefore = active.messages.length;
@@ -1084,7 +1146,15 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     // expanded prompt. Best-effort — fall back to the raw query on any failure.
     let agentQuery = query;
     try {
-      const expansion = await expandAtMentions(query, graphStore, process.cwd());
+      // Phase 1: expand @diff / @staged / @./file / @folder/ references (file-level context)
+      const fileExpansion = await expandFileAtMentions(query, process.cwd());
+      if (fileExpansion.injected.length > 0) {
+        agentQuery = fileExpansion.text;
+        addLog('info', `Injected ${fileExpansion.injected.length} file context block(s): ${fileExpansion.injected.join(', ')}`);
+      }
+
+      // Phase 2: expand @symbol mentions via the graph (symbol-precise, cheaper than @file)
+      const expansion = await expandAtMentions(agentQuery, graphStore, process.cwd());
       agentQuery = expansion.text;
       if (expansion.resolved.length > 0) {
         addLog('info', `Injected ${expansion.resolved.length} @symbol${expansion.resolved.length > 1 ? 's' : ''}: ${expansion.resolved.map(t => '@' + t).join(', ')}`);
@@ -1155,8 +1225,10 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
         .filter((m: any) => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim())
         .map((m: any) => m.content.trim())
         .join('\n\n')
+        .replace(/<thinking>[\s\S]*?<\/thinking>/g, '') // step-3.7 / QwQ style
         .replace(/<think>[\s\S]*?<\/think>/g, '')
-        .replace(/^[\s\S]*?<\/think>/, '') // opener-less reasoning (step-3.5/minimax on NIM)
+        .replace(/^[\s\S]*?<\/thinking>/, '') // opener-less </thinking> (step-3.7 on NIM)
+        .replace(/^[\s\S]*?<\/think>/, '')    // opener-less </think> (step-3.5/minimax on NIM)
         .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
         .replace(/<tool_call>[\s\S]*/, '')
         .trim();
@@ -1201,7 +1273,14 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
     if (!currentMenu) return;
 
     if (currentMenu.onSelect) {
-      await currentMenu.onSelect(option);
+      // onSelect handlers are often async (e.g. /sessions resume, /branch switch). An unhandled
+      // rejection here would surface as a process-level warning and leave the UI in a stuck state;
+      // catch and report it as a normal error message instead.
+      try {
+        await currentMenu.onSelect(option);
+      } catch (e: any) {
+        addSystemMessage('error', `Menu action failed: ${e?.message ?? e}`);
+      }
       return;
     }
 
@@ -1339,6 +1418,17 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
       setVetoResolver(null);
     }
   };
+
+  // When bimax is launched with a prompt argument (e.g. `bimax "fix the bug"`), auto-submit it
+  // as the first turn so the TUI stays open for follow-up instead of exiting after the response.
+  useEffect(() => {
+    const ip = options.initialPrompt;
+    if (!ip) return;
+    // Defer one tick so Ink has painted the initial frame before the agent loop starts.
+    const t = setTimeout(() => { handleSubmit(ip); }, 50);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const filteredLogs = isSearching && searchQuery
     ? logs.filter((l) => l.text.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -1587,6 +1677,7 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
                 onSelect={handleMenuSelect}
                 onCancel={handleMenuCancel}
                 enableSearch={activeMenu.type === 'help' || activeMenu.type === 'menu'}
+                initialIndex={activeMenu.initialIndex ?? 0}
               />
             ) : activePrompt ? (
               <InteractivePrompt

@@ -43,6 +43,7 @@ export interface CliConfig {
   autoVerify: boolean; // B2: typecheck after edits + feed errors back (off by default)
   sandboxBash: boolean; // B3: run BashTool under macOS sandbox-exec (off by default)
   selfCritic: boolean;
+  adversarialVerify: boolean; // Phase 4: full-model red-team pass after self-critic (off by default)
   allowSelfEvolution: boolean;
   reasoningEffort?: string; // off by default; 'low'|'medium'|'high' to speed up thinking models
   onboardingComplete: boolean; // per-project: has the map-graph/AI-graph onboarding flow run once?
@@ -64,6 +65,8 @@ export interface CliConfig {
   // Optional TUI keybinding overrides, e.g. { "search": "ctrl+/", "toggleLogs": "ctrl+l" }.
   // Action names + defaults live in keybindings.ts; only overrides go here.
   keybindings?: Record<string, string>;
+  // Accessibility: calm static UI — disables spinner/shimmer animation (also set via BGW_REDUCED_MOTION env).
+  reducedMotion?: boolean;
 }
 
 const DEFAULTS: CliConfig = {
@@ -82,7 +85,7 @@ const DEFAULTS: CliConfig = {
   excludeFromIndex: [],
   maxToolIterations: 15,
   maxSubAgents: 5,
-  notificationBell: true,
+  notificationBell: false,
   customRoutingRules: [],
   workspaceRoot: process.cwd(),
   autoAgentDecisions: false,
@@ -92,6 +95,7 @@ const DEFAULTS: CliConfig = {
   autoVerify: false,
   sandboxBash: false,
   selfCritic: false,
+  adversarialVerify: false,
   allowSelfEvolution: false,
   onboardingComplete: false,
   showMapPanel: true,

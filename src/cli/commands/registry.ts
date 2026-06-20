@@ -20,6 +20,10 @@ export interface CommandContext {
   setActiveMenu: (menu: any) => void;
   setActivePrompt: (prompt: any) => void;
   executeCommand: (cmd: string) => void;
+  /** Inject a past session's messages into the current live conversation (session resume). */
+  restoreMessages?: (messages: any[]) => void;
+  /** Return the current live conversation messages (for branching). */
+  getMessages?: () => any[];
 }
 
 export interface Command {

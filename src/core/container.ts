@@ -1,24 +1,15 @@
 /**
- * Dependency Injection container for BreakGlassWing.
- * Creates and wires the entire dependency graph in a single factory,
- * replacing scattered `new` calls inside the Orchestrator.
+ * Dependency Injection container for Bimax.
+ * Creates and wires the core dependency graph for the TUI — tools, graph, LLM, governor.
+ *
+ * Ghost services removed (2026-06-19):
+ *   - Express.js WebhookReceiver (booted port 8080 on every CLI start, never used by TUI)
+ *   - CognitiveLoop / Orchestrator (event-driven daemon loop, bypassed by AgentLoop)
+ *   - Bootloader (only wired the above two + SQLite that TUI never reads)
+ *   - ActionRouter / WorkerAgent / Coordinator (only fed the CognitiveLoop)
+ *   - ContextEngine / ShortTermMemory / LongTermMemory (only needed by above workers)
  */
 
-import { SandboxManager } from '../sandbox';
-import { CognitiveLoop } from './cognitive.loop';
-import { EnvValidator } from '../config';
-import { TelemetryEngine } from '../telemetry';
-import { MemoryMonitor } from '../telemetry/memory.monitor';
-import { DatabaseConnection } from '../storage';
-import { WebhookReceiver } from '../api';
-import { AuthAutomator } from '../auth';
-import { ActionRouter } from '../actions';
-import { ContextEngine, ShortTermMemory, LongTermMemory, VectorStore } from '../memory';
-
-import { Governor } from '../governor/governor';
-import { Orchestrator, OrchestratorDeps } from './orchestrator';
-import { Bootloader } from './bootloader';
-import { ShutdownCoordinator } from './shutdown.coordinator';
 import { EventBus } from './event.bus';
 import { Logger } from '../utils/logger';
 import { GraphStore } from '../graph/graph.store';
@@ -29,8 +20,6 @@ import { SemanticAugmenter } from '../graph/semantic.augmenter';
 import { GenomeRepository } from '../genome/genome.repository';
 import { ArchitectureGuardian } from '../genome/guardian';
 import { TaskPipeline } from '../task';
-import { Coordinator } from './coordinator';
-import { WorkerAgent } from './worker.agent';
 import * as path from 'path';
 
 import { YoloClassifier } from '../security/yolo.classifier';
@@ -57,35 +46,43 @@ import { loadHooksConfig } from '../tools/hooks.loader';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
+import { VectorStore } from '../memory';
 import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
 import { createRegisterAgentTool } from '../tools/implementations/register.tool';
 import { createAskUserTool } from '../tools/implementations/ask_user.tool';
 import { createGitTool } from '../tools/implementations/git.tool';
 import { createLspQueryTool } from '../tools/implementations/lsp.tool';
+import { createFreeContextTool } from '../tools/implementations/free-context.tool';
+import { createGoalsTool } from '../tools/implementations/goals.tool';
+import { initGoalManager } from '../memory/goal.manager';
+import { initPlanManager } from '../memory/plan.manager';
+import { createPlanTool } from '../tools/implementations/plan.tool';
+import { createScoutTool } from '../tools/implementations/scout.tool';
 
+import { Governor } from '../governor/governor';
 import { CliConfig } from '../cli/config';
 import { buildKeyPool } from '../cli/provider';
 
-export async function createContainer(config?: Partial<CliConfig>): Promise<{ orchestrator: Orchestrator, bootloader: Bootloader, coordinator: Coordinator, workerAgent: WorkerAgent, governor: Governor, toolRegistry: ToolRegistry, graphStore: GraphStore, llmAdapter: LlmAdapter, codebaseIndexer: CodebaseIndexer, taskPipeline: TaskPipeline }> {
+export async function createContainer(config?: Partial<CliConfig>): Promise<{
+  governor: Governor;
+  toolRegistry: ToolRegistry;
+  graphStore: GraphStore;
+  llmAdapter: LlmAdapter;
+  codebaseIndexer: CodebaseIndexer;
+  taskPipeline: TaskPipeline;
+}> {
   const cfg = config || {};
 
-  // Config
-  const validator = new EnvValidator();
+  // Goal Manager — persistent cross-session goals. Init first so system prompt can include them.
+  const goalManager = initGoalManager(process.cwd());
+  await goalManager.init();
 
-  // Core Events & Shutdown
+  // Plan Manager — VCS-backed structured plans in .bimax/plans/.
+  initPlanManager(process.cwd());
+
+  // Core Events
   const eventBus = new EventBus();
-  const shutdown = new ShutdownCoordinator();
-  
-  // Connect Logger
   Logger.setEventBus(eventBus);
-
-  // Infra
-  const telemetry = new TelemetryEngine();
-  const memoryMonitor = new MemoryMonitor(eventBus);
-  memoryMonitor.start();
-  const db = new DatabaseConnection();
-  const api = new WebhookReceiver(eventBus);
-  const auth = new AuthAutomator();
 
   // API Manager & LLM
   const apiKeyManager = new ApiKeyManager(buildKeyPool());
@@ -101,26 +98,15 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
     liteModel: cfg.liteModel,
   });
 
-  // Yolo Classifier
+  // Governor — YoloClassifier only fires in 'auto' mode (never in default interactive mode).
   const yolo = new YoloClassifier(llmAdapter);
-
-  // Governor
   const governor = new Governor(eventBus, yolo);
   llmAdapter.setBudgetVeto(governor.budget);
 
-  // Graph Engine (Playground)
-  // Always operate on the directory the CLI was launched from. A stale
-  // workspaceRoot persisted in config.json must not redirect indexing
-  // (it caused fatal boot crashes when it pointed outside the project).
+  // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();
   const graphStore = new GraphStore(path.join(projectRoot, '.breakglass/graph', 'playground.json'));
   await graphStore.loadFromDisk();
-  
-  // Memory
-  const shortTerm = new ShortTermMemory();
-  const vectorStore = new VectorStore();
-  const longTerm = new LongTermMemory(vectorStore);
-  const contextEngine = new ContextEngine(shortTerm, longTerm);
 
   // Tools
   const toolRegistry = new ToolRegistry();
@@ -138,6 +124,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createCdTool(governor));
   toolRegistry.register(createGraphQueryTool(governor, graphStore));
   toolRegistry.register(createGraphContextTool(governor, graphStore));
+  const vectorStore = new VectorStore();
   toolRegistry.register(createMemoryQueryTool(governor, vectorStore));
   toolRegistry.register(createRememberTool(governor, globalProjectMemory));
   toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));
@@ -145,11 +132,14 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createAskUserTool(governor, llmAdapter));
   toolRegistry.register(createGitTool(governor));
   toolRegistry.register(createLspQueryTool(governor, graphStore));
+  toolRegistry.register(createFreeContextTool(governor));
+  toolRegistry.register(createGoalsTool(governor));
+  toolRegistry.register(createPlanTool(governor));
+  toolRegistry.register(createScoutTool(governor));
   // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
   globalSkillService.load(projectRoot);
   toolRegistry.register(createSkillTool(governor, globalSkillService));
   // Shell-command hooks: PreToolUse can block a tool, PostToolUse runs for side effects.
-  // Loaded from .bimax/hooks.json; absent config registers nothing.
   loadHooksConfig(projectRoot);
   // Agent-driven MCP setup: gated by the Governor (the tool is destructive → user confirms).
   toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
@@ -157,19 +147,15 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   toolRegistry.register(createToolSearchTool(governor, toolRegistry));
   toolRegistry.register(createWebSearchTool(governor));
 
-  // External MCP servers: register their tools alongside native ones. Opt-in via
-  // .bimax/mcp.json; absent config = zero overhead. Best-effort — a server that fails to
-  // start is skipped, never blocking boot. Connections are retained for runtime /mcp management.
-  // NOT awaited: a slow/hung remote server must never freeze startup — tools register
-  // asynchronously as each server comes up.
+  // External MCP servers — best-effort, never blocks boot.
   globalMcpManager
     .connectAll(toolRegistry, governor, projectRoot)
     .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
 
-  // Genome & Evolution
+  // Genome & Evolution — used by /evolve (gated by allowSelfEvolution config, off by default).
   const genomeRepo = new GenomeRepository(projectRoot);
-  genomeRepo.reload().catch(e => Logger.error('Failed to load genome repo'));
-  const guardian = new ArchitectureGuardian(projectRoot, genomeRepo);
+  genomeRepo.reload().catch(() => {});
+  new ArchitectureGuardian(projectRoot, genomeRepo);
 
   const semanticAugmenter = new SemanticAugmenter(graphStore, llmAdapter, projectRoot);
   if (cfg.skipSemanticMetadata) semanticAugmenter.enabled = false;
@@ -178,45 +164,12 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{ or
   const codebaseIndexer = new CodebaseIndexer(projectRoot, graphStore, staticAnalyzer, semanticAugmenter);
   if (cfg.autoIndex === false) codebaseIndexer.enabled = false;
 
-  // Graph Observer
+  // Graph Observer — watches file changes and updates the graph.
   const graphObserver = new GraphObserver(eventBus, graphStore, projectRoot, semanticAugmenter);
   graphObserver.start();
 
-  // Actions
-  const actionRouter = new ActionRouter(eventBus, graphStore);
-
-  // Background Skills migrated to JSON Format
-
-  // Brain - Replaced by Coordinator & WorkerAgent architecture
-  const workerAgent = new WorkerAgent(actionRouter, db, contextEngine, governor, eventBus, llmAdapter, toolRegistry);
-  workerAgent.start(); // Start listening for WORKER_DISPATCH for standalone tasks
-
-  const coordinator = new Coordinator(eventBus, db, actionRouter, contextEngine, governor, llmAdapter, toolRegistry);
-
-  // Compose the deps
-  const bootloader = new Bootloader({
-    validator,
-    telemetry,
-    db,
-    api,
-    auth,
-    shutdown
-  });
-
-  const cognitiveLoop = new CognitiveLoop(actionRouter, db, contextEngine, governor, eventBus);
-
-  const orchestratorDeps: OrchestratorDeps = {
-    actionRouter,
-    loop: cognitiveLoop,
-    shutdown
-  };
-
+  // Task Pipeline — used by /watch watchers.
   const taskPipeline = new TaskPipeline(eventBus, llmAdapter);
-  // We need to pass taskPipeline to WebhookReceiver, but it's already created.
-  // Actually, we can just assign it to the property.
-  (api as any).taskPipeline = taskPipeline;
 
-  const orchestrator = new Orchestrator(orchestratorDeps);
-
-  return { orchestrator, bootloader, coordinator, workerAgent, governor, toolRegistry, graphStore, llmAdapter, codebaseIndexer, taskPipeline };
+  return { governor, toolRegistry, graphStore, llmAdapter, codebaseIndexer, taskPipeline };
 }

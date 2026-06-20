@@ -7,6 +7,7 @@ import { setSandboxEnabled, isSandboxEnabled, sandboxAvailable } from '../../san
 import { isGitAutoCommitEnabled } from '../../tools/git.autocommit';
 import { isDiffApprovalEnabled } from '../diffApproval';
 import { isSelfCriticEnabled } from '../selfCritic';
+import { setAdversarialVerifyEnabled, isAdversarialVerifyEnabled } from '../adversarialVerifier';
 
 globalCommandRegistry.register({
   name: '/governor',
@@ -30,6 +31,7 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: '/governor sandbox on', desc: 'Restrict shell file-writes to the workspace + temp' },
           { label: '[ OFF ]', value: '/governor sandbox off', desc: 'Run shell commands without isolation' },
         ],
+        initialIndex: isSandboxEnabled() ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -50,6 +52,28 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: '/governor verify on', desc: 'Typecheck edited files; feed errors back to the agent' },
           { label: '[ OFF ]', value: '/governor verify off', desc: 'No automatic typecheck after edits' },
         ],
+        initialIndex: isVerifyEnabled() ? 0 : 1,
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
+
+    // /governor redteam [on|off] — adversarial red-team verification pass after self-critic.
+    if ((args[0] || '').toLowerCase() === 'redteam') {
+      const sub = (args[1] || '').toLowerCase();
+      if (sub === 'on' || sub === 'off') {
+        const on = sub === 'on';
+        setAdversarialVerifyEnabled(on);
+        await context.saveConfig({ adversarialVerify: on });
+        return { type: 'message', level: 'success', content: `Red-team adversarial verifier is ${on ? 'ON — full-model red-team pass runs after self-critic on code turns' : 'OFF'}.` };
+      }
+      return {
+        type: 'menu',
+        title: `Adversarial red-team verifier (currently ${isAdversarialVerifyEnabled() ? 'ON' : 'OFF'})`,
+        options: [
+          { label: '[ ON ]', value: '/governor redteam on', desc: 'Full-model red-team pass after self-critic; finds bugs/edge cases the agent missed' },
+          { label: '[ OFF ]', value: '/governor redteam off', desc: 'Skip adversarial verification (faster, fewer tokens)' },
+        ],
+        initialIndex: isAdversarialVerifyEnabled() ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -70,6 +94,7 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: '/governor blast-gate on', desc: 'Confirm edits to HIGH/CRITICAL symbols, showing downstream impact' },
           { label: '[ OFF ]', value: '/governor blast-gate off', desc: 'Apply edits without the blast-radius check' },
         ],
+        initialIndex: isBlastGateEnabled() ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -184,6 +209,7 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: `/config set ${key} true`, desc: args[0] === 'mapPanel' ? 'Show the pinned map overview' : 'Show the pre-send token estimate' },
           { label: '[ OFF ]', value: `/config set ${key} false`, desc: 'Hide it' },
         ],
+        initialIndex: cur ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -198,6 +224,7 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: '/config set parallelTools true', desc: 'Model can batch independent reads/greps in one turn (faster)' },
           { label: '[ OFF ]', value: '/config set parallelTools false', desc: 'One tool call per turn (for backends like NVIDIA NIM that reject batches)' },
         ],
+        initialIndex: cur ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -214,6 +241,7 @@ globalCommandRegistry.register({
           { label: '[ ON ]', value: `${cmd} true`, desc: isVerbose ? 'Show detailed internal logs' : 'Ring the terminal bell when a turn finishes' },
           { label: '[ OFF ]', value: `${cmd} false`, desc: isVerbose ? 'Quieter output' : 'No bell' },
         ],
+        initialIndex: cur ? 0 : 1,
         onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
@@ -319,9 +347,11 @@ globalCommandRegistry.register({
         type: 'menu',
         title: `Auto Agent Decisions (Currently: ${context.options.autoAgentDecisions ? 'ON' : 'OFF'})`,
         options: [
-          { label: '[ ON ]', value: 'on', desc: 'Let the LLM auto-resolve ambiguities' },
-          { label: '[ OFF ]', value: 'off', desc: 'Require human input' }
-        ]
+          { label: '[ ON ]', value: '/agent-decisions on', desc: 'Let the LLM auto-resolve ambiguities' },
+          { label: '[ OFF ]', value: '/agent-decisions off', desc: 'Require human input' }
+        ],
+        initialIndex: context.options.autoAgentDecisions ? 0 : 1,
+        onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     }
   }

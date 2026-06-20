@@ -243,19 +243,44 @@ globalCommandRegistry.register({
   description: 'Show session cost & usage',
   category: 'Session & Context',
   execute: async (args, context) => {
-    // Live token usage is tracked per turn (footer shows it in verbose mode). Report the running
-    // session estimate here plus the model in use, so /cost is a real readout — not a dead stub.
     const model = context.options?.model || 'default';
     let liteModel = '';
     try { liteModel = getConfig().liteModel || ''; } catch { /* config optional */ }
     const sessionTokens = (() => { try { return getSessionTokenEstimate(); } catch { return 0; } })();
+
+    const tok = (s: string) => { try { return encode(s).length; } catch { return Math.ceil(s.length / 4); } };
+    const textOf = (c: any): string => typeof c === 'string' ? c : Array.isArray(c) ? c.map((p: any) => p.text || '').join('') : JSON.stringify(c);
+
+    // Token category breakdown from live message history.
+    let breakdownLines: string[] = [];
+    try {
+      const msgs: any[] = context.getMessages?.() || [];
+      if (msgs.length > 0) {
+        let systemTokens = 0, conversationTokens = 0, toolTokens = 0;
+        for (const m of msgs) {
+          const t = tok(textOf(m.content));
+          if (m.role === 'system') systemTokens += t;
+          else if (m.role === 'tool') toolTokens += t;
+          else conversationTokens += t;  // user + assistant
+        }
+        const total = systemTokens + conversationTokens + toolTokens;
+        const pct = (n: number) => total > 0 ? ` (${Math.round(n / total * 100)}%)` : '';
+        breakdownLines = [
+          `Token breakdown (${total.toLocaleString()} total in context):`,
+          `  System / instructions : ${systemTokens.toLocaleString()}${pct(systemTokens)}`,
+          `  Conversation history  : ${conversationTokens.toLocaleString()}${pct(conversationTokens)}`,
+          `  Tool results          : ${toolTokens.toLocaleString()}${pct(toolTokens)}`,
+        ];
+      }
+    } catch { /* best-effort */ }
+
     const lines = [
       `Model: ${model}${liteModel ? `  ·  Lite: ${liteModel}` : ''}`,
       sessionTokens > 0
-        ? `Session usage: ~${sessionTokens.toLocaleString()} tokens streamed so far.`
-        : 'Session usage: no output streamed yet this session.',
-      'Live per-turn token rate shows in the footer — enable verbose (/config verbose) for the running total.',
-      'Exact billed cost depends on your provider\'s pricing for the model above (BiMax is model-agnostic and does not set prices).',
+        ? `Streamed output this session: ~${sessionTokens.toLocaleString()} tokens.`
+        : 'Streamed output: none yet this session.',
+      ...breakdownLines,
+      'Exact billed cost depends on your provider\'s pricing (BiMax is model-agnostic and does not set prices).',
     ];
     return { type: 'message', level: 'info', content: lines.join('\n') };
   }
@@ -266,8 +291,10 @@ globalCommandRegistry.register({
   description: 'Clear screen',
   category: 'Session & Context',
   execute: async (args, context) => {
-    // Return a redirect to the legacy clear handler in FullScreen if we need it
-    // Or just a message since clear logic (setting history to []) is in FullScreen
-    return { type: 'redirect', command: 'clear_screen' }; 
+    // Redirect to the real `/clear` handler in FullScreen (which shows the clear-confirm menu →
+    // `/clear force`). The old target `clear_screen` was a dead sentinel nobody consumed, so it fell
+    // through to the agent and ran `Bash(clear)` instead of clearing. Routing back through `/clear`
+    // is safe: FullScreen intercepts `query === '/clear'` before the registry, so there's no loop.
+    return { type: 'redirect', command: '/clear' };
   }
 });

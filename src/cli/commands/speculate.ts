@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { globalCommandRegistry } from './registry';
 import { SpeculativeSolver } from '../../evolution/speculative.solver';
+import { getGlobalPatternStore } from '../../genome/pattern.store';
 
 function isGitRepo(cwd: string): boolean {
   try { return execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd, encoding: 'utf-8' }).trim() === 'true'; } catch { return false; }
@@ -38,6 +39,13 @@ globalCommandRegistry.register({
       const usable = r.arms.filter(a => a.changed);
       if (usable.length === 0) {
         return { type: 'message', level: 'error', content: `🔀 No approach produced usable changes.\n${rows.join('\n')}` };
+      }
+      // Log winner to genome pattern store so self-evolution can learn which approaches succeed
+      if (r.recommended != null) {
+        const winner = r.arms.find(a => a.index === r.recommended);
+        if (winner) {
+          try { getGlobalPatternStore()?.appendSpeculateWinner(task, winner.approach, winner.index); } catch { /* ignore */ }
+        }
       }
       const rec = r.recommended ? `\n\n⭐ Recommended: approach #${r.recommended}. Inspect a branch and merge with \`git merge <branch>\`.` : '';
       return { type: 'message', level: 'success', content: `🔀 Speculative results (each on its own branch):\n${rows.join('\n')}${rec}` };

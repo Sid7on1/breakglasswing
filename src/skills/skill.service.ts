@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as yaml from 'js-yaml';
 import { Logger } from '../utils/logger';
 
 // Agent Skills — Anthropic-style, model-invoked capability packs with progressive disclosure.
@@ -30,14 +31,33 @@ export interface Skill {
 /** Parse a SKILL.md: optional `---` frontmatter (name/description/allowed-tools) + body. Pure. */
 export function parseSkillFile(content: string): { meta: Record<string, string>; body: string } {
   const normalized = content.replace(/\r\n/g, '\n');
-  const fm = normalized.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!fm) return { meta: {}, body: normalized.trim() };
-  const meta: Record<string, string> = {};
-  for (const line of fm[1].split('\n')) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)\s*$/);
-    if (m) meta[m[1].toLowerCase()] = m[2].replace(/^["']|["']$/g, '').trim();
+  // Locate opening and closing --- delimiters robustly (tolerates trailing spaces and CRLF).
+  const open = normalized.match(/^---[ \t]*\n/);
+  if (!open) return { meta: {}, body: normalized.trim() };
+  const fmStart = open[0].length;
+  const closeRe = /\n---[ \t]*(\n|$)/g;
+  closeRe.lastIndex = fmStart;
+  const close = closeRe.exec(normalized);
+  if (!close) return { meta: {}, body: normalized.trim() };
+
+  const fmText = normalized.slice(fmStart, close.index);
+  const body = normalized.slice(close.index + close[0].length).trim();
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = (yaml.load(fmText) as Record<string, unknown>) || {};
+  } catch {
+    // Malformed frontmatter — return no meta so the skill is skipped with a warning.
+    parsed = {};
   }
-  return { meta, body: normalized.slice(fm[0].length).trim() };
+
+  // Normalise all keys to lowercase strings for consistent lookup.
+  const meta: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    meta[k.toLowerCase()] = String(v ?? '');
+  }
+
+  return { meta, body };
 }
 
 export class SkillService {

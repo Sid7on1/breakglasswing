@@ -27,6 +27,9 @@ export class Governor implements IGovernor {
   constructor(private eventBus: IEventBus, private yolo?: YoloClassifier) {
     this.budget = new BudgetVeto();
     this.fs = new FileSystemVeto();
+    // Pre-load the tree-sitter-bash grammar so command analysis uses the AST path. Fire-and-forget:
+    // analyze() stays synchronous and falls back to regex until (and if ever) the grammar is ready.
+    void this.bashAnalyzer.warmUp();
     Logger.info('[Governor] Initialized Multi-Layer Permission Engine.');
   }
 

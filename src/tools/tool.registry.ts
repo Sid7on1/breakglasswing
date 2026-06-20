@@ -87,6 +87,31 @@ export class ToolRegistry {
   }
 
   /**
+   * Search across tools that are already callable (core set + already-discovered deferred tools).
+   * Used by ToolSearchTool to detect when the model is looping — asking for a tool it already has.
+   * Returns matching tool names (not schemas — the model already has them).
+   */
+  public findCallable(query: string, max = 5): string[] {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) return [];
+    if (q.startsWith('select:')) {
+      const wanted = new Set(q.slice('select:'.length).split(',').map(s => s.trim()).filter(Boolean));
+      return Array.from(this.tools.keys()).filter(name =>
+        wanted.has(name) && (CORE_TOOLS.has(name) || this.discovered.has(name) || name === TOOL_SEARCH_TOOL)
+      ).slice(0, max);
+    }
+    const terms = q.split(/[\s,+]+/).filter(Boolean);
+    return Array.from(this.tools.values())
+      .filter(t => CORE_TOOLS.has(t.name) || this.discovered.has(t.name))
+      .filter(t => {
+        const hay = `${t.name} ${t.description}`.toLowerCase();
+        return terms.some(term => hay.includes(term));
+      })
+      .slice(0, max)
+      .map(t => t.name);
+  }
+
+  /**
    * Resolve a ToolSearch query to deferred tools and mark them discovered. Supports
    * `select:Name1,Name2` for exact lookup, otherwise keyword-ranks across names + descriptions.
    * Returns the matched tools' schemas (also surfaced as text by ToolSearchTool).

@@ -18,6 +18,8 @@ export class VectorStore {
   private embedder = new EmbeddingsGenerator();
   private readonly STORE_PATH = path.join(process.cwd(), '.breakglass/memory', 'vectors.json');
   private rwMutex = new Mutex();
+  // Hard cap: evict oldest entries once exceeded to prevent unbounded growth & O(N) blowup.
+  private readonly MAX_VECTORS = 500;
 
   constructor() {
     this.loadStore().catch(() => {});
@@ -66,6 +68,10 @@ export class VectorStore {
         this.store[existingIdx] = doc;
       } else {
         this.store.push(doc);
+        // Evict oldest entries once the cap is exceeded (FIFO).
+        if (this.store.length > this.MAX_VECTORS) {
+          this.store.splice(0, this.store.length - this.MAX_VECTORS);
+        }
       }
 
       await this.saveStore();
@@ -82,18 +88,17 @@ export class VectorStore {
       await this.loadStore(true); // loads store inside mutex (already locked)
       if (this.store.length === 0) return [];
 
+      // Embeddings are L2-normalized by EmbeddingsGenerator, so cosine similarity = dot product.
+      // Pre-compute the query's own norm once to guard against zero-magnitude edge cases.
+      const qNorm = Math.sqrt(queryEmbedding.reduce((s, v) => s + v * v, 0));
+
       const scoredDocs = this.store.map(doc => {
         let dotProduct = 0;
-        let normA = 0;
-        let normB = 0;
-        for (let i = 0; i < doc.embedding.length; i++) {
-          dotProduct += queryEmbedding[i] * doc.embedding[i];
-          normA += queryEmbedding[i] * queryEmbedding[i];
-          normB += doc.embedding[i] * doc.embedding[i];
+        const emb = doc.embedding;
+        for (let i = 0; i < emb.length; i++) {
+          dotProduct += queryEmbedding[i] * emb[i];
         }
-        const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-        // Guard against division by zero (zero-magnitude vectors)
-        const score = denominator === 0 ? 0 : Math.max(-1, Math.min(1, dotProduct / denominator));
+        const score = qNorm === 0 ? 0 : Math.max(-1, Math.min(1, dotProduct / qNorm));
         return { doc, score };
       });
 

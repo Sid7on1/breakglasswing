@@ -4,6 +4,7 @@ import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
 import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capabilities';
 import { contentToText } from './multimodal';
+import { globalTelemetry } from '../telemetry/telemetry';
 
 /**
  * Mark a chat message's content as a prompt-cache breakpoint (Anthropic `cache_control`,
@@ -85,12 +86,48 @@ export class ThinkTagFilter {
   // would buffer its ENTIRE reply and only reveal it in one burst at stream end, which looks
   // like a hang ("spinner rolls forever, no text"). Override with BGW_IMPLICIT_THINK_CAP.
   private static readonly MAX_PREAMBLE = parseInt(process.env.BGW_IMPLICIT_THINK_CAP || '240', 10);
+  // Effective cap for THIS filter. Inline-reasoning models (caps.inlineReasoning) stream long CoT
+  // before a tool call and reliably close it with `</think>`, so the cap is lifted (Infinity): we
+  // wait for the closer instead of leaking the reasoning as the reply. A tool call (drainPending)
+  // or the stream-end flush still bounds the wait, so there's no plain-model "hang" regression.
+  private readonly maxPreamble: number;
 
-  constructor(private implicit: boolean = true) {}
+  constructor(private implicit: boolean = true, capPreamble: boolean = true) {
+    this.maxPreamble = capPreamble ? ThinkTagFilter.MAX_PREAMBLE : Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * A tool call has started, which proves this turn's content-channel text (if any) was reasoning,
+   * not the answer — the answer IS the call. Divert whatever the filter is still holding tentatively
+   * (opener-less reasoning not yet terminated by `</think>`, or text mid-`<think>` block) to the
+   * thinking channel so it can never surface as the reply. No-op once the leading region is resolved
+   * or the filter is already streaming visible text. Returns the diverted thinking text.
+   */
+  drainPending(): string {
+    if (this.inThink) {
+      const t = this.preamble + this.pending;
+      this.preamble = '';
+      this.pending = '';
+      return t;
+    }
+    if (this.implicit && !this.seenOpen && !this.decided) {
+      const t = this.preamble + this.pending;
+      this.preamble = '';
+      this.pending = '';
+      this.decided = true;
+      return t;
+    }
+    return '';
+  }
 
   /** Returns visible text and thinking text extracted from this token. */
   process(token: string): { text: string; thinking: string } {
     this.pending += token;
+    // Normalize <thinking>/<\/thinking> (step-3.7, QwQ, etc.) to <think>/<\/think> INSIDE
+    // the pending buffer — so split tags that straddle two chunks are also normalized once
+    // the second chunk assembles the full tag in pending. Outer per-token normalization in
+    // chat() handles the common single-token case; this catches the rest.
+    this.pending = this.pending.replace(/<thinking>/g, '<think>').replace(/<\/thinking>/g, '</think>');
     let text = '';
     let thinking = '';
 
@@ -145,7 +182,7 @@ export class ThinkTagFilter {
         // Cap reached without any closer: this is the answer, not opener-less reasoning.
         // Resolve the tentative region now and emit what we held so the reply streams live
         // instead of arriving in one burst at stream end (which reads as a hang).
-        if (this.preamble.length >= ThinkTagFilter.MAX_PREAMBLE) {
+        if (this.preamble.length >= this.maxPreamble) {
           text += this.preamble;
           this.preamble = '';
           this.decided = true;
@@ -161,7 +198,20 @@ export class ThinkTagFilter {
         this.seenOpen = true;
         continue;
       }
-      const hold = this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN);
+      // Strip a spurious </think> closer that arrived without a matching opener (e.g.
+      // minimax on NIM sometimes leaks a bare </think> or </thinking> in the content
+      // channel alongside reasoning_content). Also prevents split-tag fragments like
+      // `</thin` from being flushed as visible text before `king>` arrives.
+      const closeIdx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+      if (closeIdx !== -1) {
+        text += this.pending.slice(0, closeIdx);
+        this.pending = this.pending.slice(closeIdx + ThinkTagFilter.CLOSE.length);
+        continue;
+      }
+      const hold = Math.max(
+        this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN),
+        this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE),
+      );
       text += this.pending.slice(0, this.pending.length - hold);
       this.pending = this.pending.slice(this.pending.length - hold);
       break;
@@ -194,9 +244,14 @@ export class ThinkTagFilter {
   }
 }
 
-/** Remove <think> spans from a complete (non-streamed) response. */
+/** Remove <think>/<thinking> spans from a complete (non-streamed) response. */
 export function stripThink(content: string): string {
-  return content.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^[\s\S]*<\/think>/, '').trim();
+  return content
+    .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/^[\s\S]*<\/thinking>/, '') // opener-less </thinking>
+    .replace(/^[\s\S]*<\/think>/, '')    // opener-less </think>
+    .trim();
 }
 
 /**
@@ -698,7 +753,22 @@ export class LlmAdapter implements LLMProvider {
       // Disable implicit mode when the capability is present so the answer streams token-by-token.
       // FLOOR (caps.nativeThinking=false) leaves this exactly as before: `this.implicitThink`.
       const useImplicitThink = this.implicitThink && !caps.nativeThinking;
-      const thinkFilter = new ThinkTagFilter(useImplicitThink);
+      // Lift the preamble cap for inline-reasoning models (minimax, step-3 on NIM): they stream long
+      // chain-of-thought before a tool call and reliably close it with `</think>`, so capping early
+      // leaks that reasoning as the reply (the "thinking leaks when a tool is called" bug). For plain
+      // models the cap stays on so their answer never buffers into a burst.
+      const thinkFilter = new ThinkTagFilter(useImplicitThink, !caps.inlineReasoning);
+
+      // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
+      // field key the provider sent, then writes them to a dedicated debug file at stream end. This
+      // is how we learn the EXACT reasoning delimiter/channel a model uses (e.g. minimax's closer)
+      // without guessing. TEMPORARILY default-ON for diagnosis — opt out with BGW_DEBUG_STREAM=0.
+      // Writes to a separate file (not the console/Logger), so it can't corrupt the TUI. REVERT to
+      // default-off once the format is captured.
+      const debugStream = process.env.BGW_DEBUG_STREAM !== '0' && process.env.BGW_DEBUG_STREAM !== 'false';
+      let dbgContent = '';
+      let dbgReasoning = '';
+      const dbgDeltaKeys = new Set<string>();
 
       const iterator = stream[Symbol.asyncIterator]();
       let receivedFirstChunk = false;
@@ -726,15 +796,29 @@ export class LlmAdapter implements LLMProvider {
 
         const chunk = result.value;
 
+        if (debugStream) {
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta && typeof delta === 'object') {
+            for (const k of Object.keys(delta)) dbgDeltaKeys.add(k);
+            if (typeof delta.content === 'string') dbgContent += delta.content;
+            if (typeof delta.reasoning_content === 'string') dbgReasoning += delta.reasoning_content;
+            // Some providers use `reasoning` instead of `reasoning_content`; capture it too.
+            if (typeof (delta as any).reasoning === 'string') dbgReasoning += (delta as any).reasoning;
+          }
+        }
+
         // Reasoning channel (MiniMax/DeepSeek-style): never surface as the reply
         const reasoning = chunk.choices[0]?.delta?.reasoning_content;
         if (reasoning) {
           yield { type: 'thinking', text: reasoning };
         }
 
-        // Yield tokens, with inline <think> spans diverted to the thinking channel
-        const token = chunk.choices[0]?.delta?.content;
-        if (token) {
+        // Yield tokens, with inline <think> spans diverted to the thinking channel.
+        // Normalize <thinking>/<\/thinking> (step-3.7, QwQ, etc.) to the canonical
+        // <think>/<\/think> form so the filter handles both tag variants uniformly.
+        const rawToken = chunk.choices[0]?.delta?.content;
+        if (rawToken) {
+          const token = rawToken.replace(/<thinking>/g, '<think>').replace(/<\/thinking>/g, '</think>');
           const { text, thinking } = thinkFilter.process(token);
           if (thinking) yield { type: 'thinking', text: thinking };
           if (text) yield { type: 'token', text };
@@ -743,6 +827,12 @@ export class LlmAdapter implements LLMProvider {
         // Handle tool calls streaming
         const toolCalls = chunk.choices[0]?.delta?.tool_calls;
         if (toolCalls && toolCalls.length > 0) {
+          // The turn is producing a tool call, so any leading content-channel text the model emitted
+          // was reasoning (the answer is the call). Divert whatever the filter still holds tentatively
+          // to the thinking channel — covers models that reason inline then jump straight to a tool
+          // call without ever emitting a `</think>` closer. Idempotent: a no-op after it first fires.
+          const stray = thinkFilter.drainPending();
+          if (stray) yield { type: 'thinking', text: stray };
           for (const tc of toolCalls) {
             if (tc.id) {
               // Yield previous tool call if any
@@ -774,6 +864,9 @@ export class LlmAdapter implements LLMProvider {
         // Guard against a provider sending more than one usage chunk: record once, or
         // the reservation would be released repeatedly.
         if (chunk.usage && !usageRecorded) {
+          const cacheRead = chunk.usage.cache_read_input_tokens ?? 0;
+          const cacheCreate = chunk.usage.cache_creation_input_tokens ?? 0;
+          globalTelemetry.recordUsage(chunk.usage.prompt_tokens ?? 0, cacheRead, cacheCreate);
           yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
           if (this.budgetVeto) {
             const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
@@ -781,6 +874,28 @@ export class LlmAdapter implements LLMProvider {
           }
           usageRecorded = true;
         }
+      }
+
+      if (debugStream && (dbgContent || dbgReasoning)) {
+        // Write to a dedicated file (not console/Logger) so the TUI is never corrupted. JSON.stringify
+        // shows whitespace/special tokens literally, so the exact reasoning delimiter is visible.
+        try {
+          const fs = require('fs');
+          const path = require('path');
+          const dir = path.join(process.cwd(), '.breakglass', 'logs');
+          fs.mkdirSync(dir, { recursive: true });
+          const rec = {
+            ts: new Date().toISOString(),
+            model,
+            hadTools: !!(options.tools && options.tools.length),
+            deltaKeys: [...dbgDeltaKeys],
+            reasoningLen: dbgReasoning.length,
+            contentLen: dbgContent.length,
+            content: dbgContent.slice(0, 4000),
+            reasoning_content: dbgReasoning.slice(0, 2000),
+          };
+          fs.appendFileSync(path.join(dir, 'stream-debug.log'), JSON.stringify(rec) + '\n', 'utf-8');
+        } catch { /* diagnostic only — never break the stream */ }
       }
 
       // Flush any text held back by the think-tag filter

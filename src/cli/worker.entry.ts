@@ -1,6 +1,5 @@
 import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
-import * as os from 'os';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
 import { SubAgentConfig } from '../core/subagent.manager';
@@ -22,16 +21,17 @@ import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createCdTool } from '../tools/implementations/cd.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
 import { createGitTool } from '../tools/implementations/git.tool';
-import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
-import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { globalSkillService } from '../skills/skill.service';
 import { loadHooksConfig } from '../tools/hooks.loader';
-import { globalMcpManager } from '../mcp/manager';
 import { globalProjectMemory } from '../memory/project.memory';
+// LspQueryTool is excluded: it initialises TreeSitter WASM on import, adding ~100 MB per worker
+// thread and a cold-start penalty of 1-2s. Sub-agents use the shared graph store for code context.
+// McpManageTool is excluded: MCP connections belong to the parent process; re-connecting in every
+// worker thread would race against the parent's connections and create duplicate sessions.
 import { GraphStore } from '../graph/graph.store';
 import { cliEvents } from './events';
 
@@ -59,7 +59,10 @@ async function runWorker() {
     governor.mode = config.parentMode as any;
 
     const toolRegistry = new ToolRegistry();
-    const graphStorePath = path.join(os.homedir(), '.breakglass', 'graph.json');
+    // Must match the parent's graph path (container.ts: <projectRoot>/.breakglass/graph/playground.json),
+    // keyed off the sub-agent's project cwd — NOT ~/.breakglass/graph.json, which left workers querying
+    // an empty/stale store relative to the parent project.
+    const graphStorePath = path.join(config.cwd || process.cwd(), '.breakglass', 'graph', 'playground.json');
     const graphStore = new GraphStore(graphStorePath);
     
     // Register basic tools for the worker
@@ -78,12 +81,10 @@ async function runWorker() {
     toolRegistry.register(createGraphQueryTool(governor, graphStore));
     toolRegistry.register(createGraphContextTool(governor, graphStore));
     toolRegistry.register(createGitTool(governor));
-    toolRegistry.register(createLspQueryTool(governor, graphStore));
     toolRegistry.register(createRememberTool(governor, globalProjectMemory));
     globalSkillService.load(config.cwd || process.cwd());
     toolRegistry.register(createSkillTool(governor, globalSkillService));
     loadHooksConfig(config.cwd || process.cwd());
-    toolRegistry.register(createMcpManageTool(governor, toolRegistry, globalMcpManager));
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
     toolRegistry.register(createWebSearchTool(governor));
 

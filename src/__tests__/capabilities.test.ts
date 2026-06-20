@@ -76,6 +76,23 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('local', 'mystery-7b').reasoningEffortKnob).toBe(false);
   });
 
+  // inlineReasoning drives the streaming think-filter's preamble-cap lift: the NIM reasoning models
+  // that emit chain-of-thought inline (before a tool call) must be flagged, or their reasoning leaks
+  // into the reply. Plain/structured-reasoning models stay false so the cap protects them.
+  it('inlineReasoning: on for the inline-CoT NIM models, off for plain + native-channel models', () => {
+    expect(capabilitiesFor('nvidia', 'minimax-m3').inlineReasoning).toBe(true);
+    expect(capabilitiesFor('nvidia', 'step-3.5-flash').inlineReasoning).toBe(true);
+    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').inlineReasoning).toBe(true);
+    expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').inlineReasoning).toBe(false);
+    expect(capabilitiesFor('openai', 'gpt-4o').inlineReasoning).toBe(false);
+    expect(capabilitiesFor('local', 'mystery-7b').inlineReasoning).toBe(false);
+  });
+
+  it('BGW_CAP_INLINE_REASONING can force the cap-lift for an unlisted inline-CoT model', () => {
+    process.env.BGW_CAP_INLINE_REASONING = 'true';
+    expect(capabilitiesFor('local', 'some-qwq-clone').inlineReasoning).toBe(true);
+  });
+
   it('an env override can force-enable a capability the table withholds (proxy escape hatch)', () => {
     process.env.BGW_CAP_PROMPT_CACHING = 'true';
     expect(capabilitiesFor('local', 'mystery-model').promptCaching).toBe(true);

@@ -29,6 +29,7 @@ globalCommandRegistry.register({
         { label: '[ ON ]', value: '/a11y on', desc: 'Static glyphs — calmer, screen-reader friendly' },
         { label: '[ OFF ]', value: '/a11y off', desc: 'Restore the animated spinner + thinking shimmer' },
       ],
+      initialIndex: cur ? 0 : 1,
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };
   },

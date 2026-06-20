@@ -1,9 +1,12 @@
 import * as fs from 'fs';
+import * as fsAsync from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
+import { execSync } from 'child_process';
 import { IGraphStore } from '../graph/models';
 import { resolveNodeId } from '../graph/node.search';
 import { readSymbolSource } from '../graph/symbol.source';
+import { readIdeSelection, formatSelectionBlock } from './ideSelection';
 
 // G4 — `@symbol` mentions. Typing `@handlePayment` in the prompt resolves the symbol via the
 // graph and injects ONLY that symbol's source into the turn (symbol-precise, cheaper than
@@ -117,4 +120,133 @@ export function suggestAtSymbols(store: IGraphStore, partial: string, limit = 8)
     if (named.length >= limit) break;
   }
   return named;
+}
+
+export interface FileAtExpansion {
+  text: string;         // query text with @file/@diff/@staged tokens replaced by content
+  injected: string[];   // labels for what was injected (for the status bar)
+}
+
+/**
+ * Expand file-level @-references before symbol @-mentions are resolved.
+ * Handles three patterns:
+ *   @diff          → git diff HEAD (unstaged+staged changes)
+ *   @staged        → git diff --staged (only staged changes)
+ *   @./rel/path    → file content (relative path starting with ./ or ../)
+ *   @~/abs/path    → file content (home-dir path)
+ *   @folder/path   → directory listing when token contains / and is a directory
+ *
+ * Injected content is appended as clearly-labelled blocks; the original @token
+ * in the text is replaced with a short placeholder so the symbol resolver
+ * (expandAtMentions) doesn't attempt to resolve "diff" or "staged" as symbols.
+ */
+// Compiled once — avoids re-parsing the regex on every keystroke / expansion call.
+// Matches @url <https://...>, @diff, @staged, @selection/@sel, and @path-like tokens
+const FILE_AT_RE = /(?<![A-Za-z0-9_@])@(diff|staged|selection|sel|(?:\.\.?\/|~\/|\/)[^\s,;"'`()[\]{}]*|[A-Za-z0-9_./-]+\/[^\s,;"'`()[\]{}]*)/g;
+// URL pattern matched separately (fetch is async and the URL contains non-path chars)
+const URL_AT_RE = /(?<![A-Za-z0-9_@])@url\s+(https?:\/\/\S+)/gi;
+
+async function fetchUrlContent(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text.slice(0, 40_000); // cap at 40k to avoid blowing the context window
+  } catch {
+    return null;
+  }
+}
+
+export async function expandFileAtMentions(text: string, cwd: string): Promise<FileAtExpansion> {
+
+  const injected: string[] = [];
+  const blocks: string[] = [];
+  let replacedText = text;
+
+  // --- @url expansion (async fetch, handled before path/diff tokens) ---
+  const urlMatches = [...text.matchAll(URL_AT_RE)];
+  for (const m of urlMatches) {
+    const url = m[1];
+    const content = await fetchUrlContent(url);
+    if (content) {
+      blocks.push(`--- @url ${url} ---\n${content}`);
+      injected.push(`@url ${url}`);
+      replacedText = replacedText.replace(m[0], `[url:${url}]`);
+    }
+  }
+
+  const matches: { full: string; token: string; index: number }[] = [];
+  let m: RegExpExecArray | null;
+  FILE_AT_RE.lastIndex = 0; // must reset the global regex before each scan
+  while ((m = FILE_AT_RE.exec(text)) !== null) {
+    matches.push({ full: m[0], token: m[1], index: m.index });
+  }
+
+  for (const { full, token } of matches) {
+    try {
+      if (token === 'diff') {
+        const output = execSync('git diff HEAD', { cwd, encoding: 'utf8', maxBuffer: 200 * 1024 }).trim();
+        if (output) {
+          blocks.push(`--- @diff (git diff HEAD) ---\n${output}`);
+          injected.push('@diff');
+          replacedText = replacedText.replace(full, '[diff attached]');
+        }
+      } else if (token === 'staged') {
+        const output = execSync('git diff --staged', { cwd, encoding: 'utf8', maxBuffer: 200 * 1024 }).trim();
+        if (output) {
+          blocks.push(`--- @staged (git diff --staged) ---\n${output}`);
+          injected.push('@staged');
+          replacedText = replacedText.replace(full, '[staged diff attached]');
+        }
+      } else if (token === 'selection' || token === 'sel') {
+        // IDE selection bridge — inject the exact range the user has selected in their editor.
+        const sel = readIdeSelection(cwd);
+        if (sel) {
+          blocks.push(formatSelectionBlock(sel, cwd));
+          injected.push('@selection');
+          const rel = path.relative(cwd, sel.file) || path.basename(sel.file);
+          replacedText = replacedText.replace(full, `[selection ${rel}:${sel.startLine}-${sel.endLine}]`);
+        }
+      } else {
+        // File or folder path
+        let absPath = token.startsWith('~')
+          ? path.join(os.homedir(), token.slice(1))
+          : path.resolve(cwd, token);
+
+        const stat = await fsAsync.stat(absPath).catch(() => null);
+        if (!stat) continue;
+
+        if (stat.isDirectory()) {
+          const entries = await fsAsync.readdir(absPath, { withFileTypes: true }).catch(() => null);
+          if (!entries) continue;
+          const listing = entries
+            .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+            .slice(0, 80)
+            .map(e => `${e.isDirectory() ? 'd' : 'f'} ${e.name}${e.isDirectory() ? '/' : ''}`)
+            .join('\n');
+          const rel = path.relative(cwd, absPath) || '.';
+          blocks.push(`--- @${token} (directory listing of ${rel}/) ---\n${listing}`);
+          injected.push(`@${token}`);
+          replacedText = replacedText.replace(full, `[dir:${path.basename(absPath)}/]`);
+        } else {
+          // File — read up to 100KB
+          const MAX = 100 * 1024;
+          if (stat.size > MAX) continue;
+          const content = await fsAsync.readFile(absPath, 'utf8').catch(() => null);
+          if (content === null) continue;
+          const rel = path.relative(cwd, absPath) || path.basename(absPath);
+          blocks.push(`--- @${token} (${rel}) ---\n${content}`);
+          injected.push(`@${token}`);
+          replacedText = replacedText.replace(full, `[file:${path.basename(absPath)}]`);
+        }
+      }
+    } catch {
+      // best-effort — leave token as-is
+    }
+  }
+
+  if (blocks.length === 0) return { text, injected: [] };
+
+  const expanded = `${replacedText}\n\n--- File/diff context (from @mentions) ---\n${blocks.join('\n\n')}`;
+  return { text: expanded, injected };
 }

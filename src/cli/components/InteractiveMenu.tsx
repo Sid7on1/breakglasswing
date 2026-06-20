@@ -17,10 +17,13 @@ interface InteractiveMenuProps {
   onCancel: () => void;
   title: string;
   enableSearch?: boolean;
+  /** Start with the pointer on this option index (default 0). Pass the index of the currently
+   *  active option so the pointer reflects the real current state, not always the first item. */
+  initialIndex?: number;
 }
 
-export function InteractiveMenu({ theme, options, onSelect, onCancel, title, enableSearch = false }: InteractiveMenuProps) {
-  const [selectedIndex, setSelectedIndex] = useState(0);
+export function InteractiveMenu({ theme, options, onSelect, onCancel, title, enableSearch = false, initialIndex = 0 }: InteractiveMenuProps) {
+  const [selectedIndex, setSelectedIndex] = useState(() => Math.max(0, Math.min(initialIndex, options.length - 1)));
   const [searchQuery, setSearchQuery] = useState('');
 
   const filteredOptions = useMemo(() => {
@@ -35,7 +38,11 @@ export function InteractiveMenu({ theme, options, onSelect, onCancel, title, ena
     } else if (key.downArrow) {
       setSelectedIndex((i) => (i < filteredOptions.length - 1 ? i + 1 : 0));
     } else if (key.return) {
-      if (filteredOptions.length > 0) onSelect(filteredOptions[selectedIndex]);
+      // onSelect may be async; swallow rejections here so a failing handler can't crash the input
+      // loop with an unhandled rejection (the handler itself surfaces errors to the user).
+      if (filteredOptions.length > 0) {
+        Promise.resolve(onSelect(filteredOptions[selectedIndex])).catch(() => { /* handler reports its own errors */ });
+      }
     } else if (key.escape) {
       onCancel();
     } else if (enableSearch && (key.backspace || key.delete)) {

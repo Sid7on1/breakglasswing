@@ -25,6 +25,7 @@ globalCommandRegistry.register({
         { label: '[ ON ]', value: '/self-critic on', desc: 'Review and revise after each turn' },
         { label: '[ OFF ]', value: '/self-critic off', desc: 'Present the first draft' },
       ],
+      initialIndex: isSelfCriticEnabled() ? 0 : 1,
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };
   }

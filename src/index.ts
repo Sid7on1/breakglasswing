@@ -26,6 +26,9 @@ import { resolveTheme } from './cli/themes';
 import { loadConfig, getConfig } from './cli/config';
 import { setCustomRoutingRules } from './cli/agentRouter';
 import { cliEvents } from './cli/events';
+import { setGlobalPatternStore, GenomePatternStore } from './genome/pattern.store';
+import { setGlobalRecipeLoader, RecipeLoader } from './recipes/recipe.loader';
+import { setContextManagerGraphStore } from './memory/context.manager';
 
 const program = new Command();
 
@@ -108,6 +111,11 @@ async function main() {
   const { toolRegistry, llmAdapter, governor, codebaseIndexer, taskPipeline, graphStore } = container;
   governor.mode = effectiveSkipPerms ? 'bypass' : 'interactive';
 
+  // Wire genome pattern store, recipe loader, and graph store for context injection
+  setGlobalPatternStore(new GenomePatternStore(process.cwd()));
+  setGlobalRecipeLoader(new RecipeLoader(process.cwd()));
+  if (graphStore) setContextManagerGraphStore(graphStore);
+
   if (prompt && cliFlags.print) {
     const { executePrintMode } = await import('./cli/print');
     await executePrintMode(prompt, {
@@ -121,38 +129,13 @@ async function main() {
     process.exit(0);
   }
 
-  if (prompt && !cliFlags.print) {
-    const { executePrintMode } = await import('./cli/print');
-    await executePrintMode(prompt, {
-      agent: effectiveAgent,
-      model: effectiveModel,
-      theme: effectiveTheme,
-      verbose: effectiveVerbose,
-      outputFormat: 'text',
-      printWithTools: cliFlags.printWithTools,
-      ...container,
-    });
-    process.exit(0);
-  }
-
-  const hasTsConfig = fs.existsSync('tsconfig.json');
-  if (config.autoIndex !== false && hasTsConfig) {
-    try {
-      await codebaseIndexer.autoIndex();
-    } catch (e: any) {
-      console.warn(`Codebase indexing failed (continuing without index): ${e.message}`);
-    }
-  } else if (config.autoIndex !== false && !hasTsConfig) {
-    console.log('No tsconfig.json found — skipping codebase index. Run bimax from a project directory to enable AST indexing.');
-  }
-  await container.bootloader.ignite();
-  await container.orchestrator.run();
-
   // Restore console before Ink takes over (Ink's component will re-override)
   console.log = originalConsoleLog;
   console.warn = originalConsoleWarn;
   console.error = originalConsoleError;
 
+  // Start the TUI immediately — indexing runs in the background so the terminal is
+  // responsive within milliseconds instead of after the WASM/TreeSitter cold-start.
   startRepl(taskPipeline, codebaseIndexer, graphStore, {
     agent: effectiveAgent,
     model: effectiveModel,
@@ -165,7 +148,20 @@ async function main() {
     notificationBell: config.notificationBell,
     maxToolIterations: config.maxToolIterations,
     persona: null as any,
+    // When a prompt was passed without -p, auto-submit it as the first turn so the session
+    // stays open for follow-up (fixes: bimax "fix bug" used to print-and-exit).
+    initialPrompt: (prompt && !cliFlags.print) ? prompt : undefined,
   });
+
+  // Background AST indexing — fires after Ink paints the first frame.
+  const hasTsConfig = fs.existsSync('tsconfig.json');
+  if (config.autoIndex !== false && hasTsConfig) {
+    setImmediate(async () => {
+      // interactive=false: we're inside the Ink TUI, which owns stdin in raw mode. A readline
+      // prompt here would fight Ink for the raw TTY and spin a CPU core (idle-overheat bug).
+      try { await codebaseIndexer.autoIndex(false, false); } catch { /* non-fatal; graph tools degrade gracefully */ }
+    });
+  }
 
   if (effectiveVerbose) {
     replayBootLogs();

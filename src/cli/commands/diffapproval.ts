@@ -25,6 +25,7 @@ globalCommandRegistry.register({
         { label: '[ ON ]', value: '/diff-approval on', desc: 'Review each edit as a diff before it writes' },
         { label: '[ OFF ]', value: '/diff-approval off', desc: 'Apply edits immediately' },
       ],
+      initialIndex: isDiffApprovalEnabled() ? 0 : 1,
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };
   }

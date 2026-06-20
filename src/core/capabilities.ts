@@ -25,6 +25,16 @@ export interface ModelCapabilities {
   promptCaching: boolean;
   /** Model emits a structured reasoning channel; we don't need to scrape `<think>` text out of content. */
   nativeThinking: boolean;
+  /**
+   * Model streams chain-of-thought INLINE in the content channel (opener-less `</think>` or
+   * `<think>` tags), typically before a tool call, and reliably terminates it with a closer. Tells
+   * the streaming think-filter to WAIT for that closer instead of applying the short preamble cap
+   * that only exists to stop PLAIN models from buffering-then-bursting. Without this, long
+   * pre-tool-call reasoning trips the cap and leaks into the visible reply (the classic "thinking
+   * leaks as real tokens when a tool is called" bug). Independent of `nativeThinking`: minimax/step
+   * on NIM emit inline CoT even while also exposing a reasoning channel.
+   */
+  inlineReasoning: boolean;
   /** Tool arguments stream as partial-JSON deltas (can render live) vs arriving in one blob at block end. */
   partialJsonTools: boolean;
   /** Model reliably emits more than one tool call per turn (some backends, e.g. NVIDIA NIM, reject it). */
@@ -47,6 +57,7 @@ export interface ModelCapabilities {
 export const FLOOR: ModelCapabilities = {
   promptCaching: false,
   nativeThinking: false,
+  inlineReasoning: false,
   partialJsonTools: false,
   parallelToolCalls: false,
   structuredOutputs: false,
@@ -127,13 +138,49 @@ const RULES: CapabilityRule[] = [
     },
   },
   // --- MiniMax (BiMax's default reasoning MoE): reasoning channel + effort, single-tool-safe. ---
+  // nativeThinking is intentionally LEFT FALSE (the base default): on NVIDIA NIM, minimax emits
+  // opener-less chain-of-thought INLINE in the content channel (the same pattern as its step-3.5
+  // sibling), not solely via `reasoning_content`. Setting nativeThinking=true disabled the implicit
+  // <think>/opener-less scraper (llm.adapter useImplicitThink), so that inline reasoning leaked into
+  // the visible reply. Keeping it false re-enables the scraper; the reasoning_content channel is
+  // handled independently of this flag, so structured reasoning still works.
   {
     match: ['minimax'],
     caps: {
-      nativeThinking: true,
       reasoningEffortKnob: true,
       parallelToolCalls: true,
-      contextWindow: 1_000_000,
+      // Emits opener-less inline chain-of-thought (often before a tool call); wait for the
+      // `</think>` closer rather than capping → no reasoning leak into the reply.
+      inlineReasoning: true,
+      // NIM-hosted minimax serves a 128k effective window — not the 1M the model card advertises.
+      // The prior 1M made the token-meter bar read ~1% (useless) AND let ContextManager defer
+      // compaction to ~700k, well past what the NIM endpoint accepts (→ overflow/API errors).
+      contextWindow: 128_000,
+    },
+  },
+  // --- StepFun step-3.x: MoE reasoning models on NIM. step-3.5 emits opener-less </think>,
+  //     step-3.7 uses <thinking>/<\/thinking> (normalized to <think> by the streaming filter). ---
+  {
+    match: ['stepfun', 'step-3'],
+    caps: {
+      // step-3.5 emits opener-less `</think>`, step-3.7 uses `<thinking>`; both stream inline CoT
+      // before tool calls, so wait for the closer instead of leaking it past the preamble cap.
+      inlineReasoning: true,
+      contextWindow: 32_000,
+    },
+  },
+  // --- GLM (Zhipu AI): strong agentic model family. ---
+  {
+    match: ['glm-'],
+    caps: {
+      contextWindow: 128_000,
+    },
+  },
+  // --- Mistral Medium / Large: good coding, large context. ---
+  {
+    match: ['mistral'],
+    caps: {
+      contextWindow: 128_000,
     },
   },
   // --- Llama 3.x (NVIDIA NIM and others): large-ish window, but NIM rejects multi-tool turns. ---
@@ -162,6 +209,7 @@ function applyOverrides(caps: ModelCapabilities): ModelCapabilities {
   const out = { ...caps };
   const pc = envFlag('BGW_CAP_PROMPT_CACHING');         if (pc !== undefined) out.promptCaching = pc;
   const nt = envFlag('BGW_CAP_NATIVE_THINKING');        if (nt !== undefined) out.nativeThinking = nt;
+  const ir = envFlag('BGW_CAP_INLINE_REASONING');       if (ir !== undefined) out.inlineReasoning = ir;
   const pj = envFlag('BGW_CAP_PARTIAL_JSON_TOOLS');     if (pj !== undefined) out.partialJsonTools = pj;
   const pt = envFlag('BGW_CAP_PARALLEL_TOOL_CALLS');    if (pt !== undefined) out.parallelToolCalls = pt;
   const so = envFlag('BGW_CAP_STRUCTURED_OUTPUTS');     if (so !== undefined) out.structuredOutputs = so;

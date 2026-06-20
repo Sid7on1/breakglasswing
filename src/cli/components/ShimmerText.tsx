@@ -16,7 +16,7 @@ import { getConfig } from '../config';
 export function prefersReducedMotion(): boolean {
   const v = (process.env.BGW_REDUCED_MOTION || '').toLowerCase();
   if (v === '1' || v === 'true' || v === 'yes') return true;
-  try { return (getConfig() as any).reducedMotion === true; } catch { return false; }
+  try { return getConfig().reducedMotion === true; } catch { return false; }
 }
 
 /** Pure: pick a char's color by its distance from the sweep center. Bright at the center, dim away. */

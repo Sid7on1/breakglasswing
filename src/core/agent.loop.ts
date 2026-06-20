@@ -7,6 +7,9 @@ import { Logger } from '../utils';
 import { ContextManager } from '../memory/context.manager';
 import { cliEvents, ToolCallEntry } from '../cli/events';
 import { getActiveTodos } from '../tools/implementations/todo.tool';
+import { LoopDetector, LoopSignal } from './loop-detector';
+import { getGlobalPatternStore } from '../genome/pattern.store';
+import { globalTelemetry } from '../telemetry/telemetry';
 
 export class AgentLoop {
   private contextManager: ContextManager;
@@ -15,7 +18,10 @@ export class AgentLoop {
   constructor(
     private llm: LLMProvider,
     private tools: ToolRegistry,
-    private governor: IGovernor,
+    // Reserved/optional: the loop itself does not enforce policy — each tool carries its own injected
+    // governor (set at buildTool time), so this is unused today. Kept positional for callers that pass
+    // one (worker.agent) and for future loop-level gating. Personas pass `undefined`.
+    private governor?: IGovernor,
     // The active model's context window (tokens). Compaction thresholds scale to this so bimax
     // works correctly whether the chosen model has a 32k or a 1M window. Falls back to a safe default.
     maxContextTokens?: number
@@ -31,8 +37,9 @@ export class AgentLoop {
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
     const maxIter = options?.maxIterations ?? 30;
-    // 'smart' (default) sends only the core + discovered tool schemas; 'full' sends everything.
     const contextMode = options?.contextMode ?? 'smart';
+    // Fresh loop detector per execute() call — tracks tool-call patterns across turns.
+    const loopDetector = new LoopDetector();
     // Bounds the regenerate-on-empty correction below to a single retry, so a model
     // that keeps emitting pure filler can never spin the loop.
     let pureFillerRetried = false;
@@ -202,11 +209,14 @@ export class AgentLoop {
           cliEvents.emit('tool_call', entry);
 
           const finish = (result: string, isError: boolean) => {
+            const endTime = new Date();
+            const durationMs = endTime.getTime() - entry.startTime.getTime();
+            globalTelemetry.recordToolCall(tc.name, durationMs);
             cliEvents.emit('tool_call_result', {
               ...entry,
               output: result,
               status: isError ? 'error' : 'success',
-              endTime: new Date(),
+              endTime,
             } as ToolCallEntry);
             return { id: tc.id, result };
           };
@@ -236,15 +246,51 @@ export class AgentLoop {
         const parallelPromises = parallel.map(tc => executeTool(tc));
         const parallelResults = await Promise.all(parallelPromises);
 
+        const loopSignals: LoopSignal[] = [];
+
         for (const res of parallelResults) {
           this.messages.push({ role: 'tool', tool_call_id: res.id, content: res.result });
+          const tc = parallel.find(t => t.id === res.id);
+          if (tc) {
+            const sig = loopDetector.record(tc.name, tc.args, res.result);
+            if (sig) loopSignals.push(sig);
+          }
         }
 
         for (const tc of sequential) {
           const res = await executeTool(tc);
           this.messages.push({ role: 'tool', tool_call_id: res.id, content: res.result });
+          const sig = loopDetector.record(tc.name, tc.args, res.result);
+          if (sig) loopSignals.push(sig);
         }
-        
+
+        // Handle any loop signals collected this turn
+        if (loopSignals.length > 0) {
+          const worst = loopSignals.sort((a, b) => b.count - a.count)[0];
+          // Log to genome pattern store (best-effort, non-blocking)
+          try { getGlobalPatternStore()?.appendLoopSignal(worst.type, worst.tool, worst.argsHash, worst.severity); } catch { /* ignore */ }
+          if (worst.severity === 'hard') {
+            yield `\n[LoopGuard] Hard loop detected: ${worst.type} on "${worst.tool}" (${worst.count}×). Injecting intervention.\n`;
+            cliEvents.emit('loop_detected' as any, worst);
+            this.messages.push({
+              role: 'user',
+              content:
+                `[LOOP DETECTED — HARD STOP] You called "${worst.tool}" ${worst.count} times with the same ` +
+                `arguments and got the same result. This is a loop. STOP immediately. ` +
+                `Take a completely different approach — try a different tool, a different strategy, or a different argument. ` +
+                `If you are genuinely blocked, explain exactly what is blocking you instead of repeating the same call.`,
+            });
+          } else {
+            Logger.warn(`[LoopGuard] Soft loop: ${worst.type} on "${worst.tool}" (${worst.count}×)`);
+            this.messages.push({
+              role: 'user',
+              content:
+                `[Loop Warning] "${worst.tool}" has been called with similar arguments ${worst.count} times. ` +
+                `Consider whether this approach is making progress, or try a different strategy.`,
+            });
+          }
+        }
+
         // Loop continues so LLM can react to tool results
       } else {
         // A turn with no tool call that collapsed to pure filler gave the user
@@ -280,7 +326,9 @@ export class AgentLoop {
         // model that emitted only `reasoning_content` then ended empty, or a model that went
         // silent right after a tool result). Ending here would leave the user staring at a
         // stopped spinner. Nudge once for a direct answer; bounded so it can't spin.
-        if (!currentContent && !anyTextYielded && !emptyTurnRetried) {
+        // Note: anyTextYielded is intentionally NOT checked here — text from earlier tool-call
+        // rounds (or leaked think> fragments) must not suppress the retry for an empty final turn.
+        if (!currentContent && !emptyTurnRetried) {
           emptyTurnRetried = true;
           this.messages.push({
             role: 'user',

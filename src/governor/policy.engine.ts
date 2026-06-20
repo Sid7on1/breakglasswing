@@ -7,7 +7,10 @@ export const SafetyPolicy = {
   allowedWorkspace: process.env.WORKSPACE_ROOT || process.cwd(),
   forbiddenExtensions: ['.env', '.pem', '.key', '.p12'],
   forbiddenPaths: ['/etc', '/system', '/var', '/root', '/.ssh', '/proc'],
-  forbiddenRegex: [/id_rsa/i, /\.key$/i, /\.pem$/i, /\.env$/i, /password/i, /secret/i]
+  // Path-based patterns — only match specific filename patterns, never broad words like "password"
+  // or "secret" which would block legitimate code files (e.g. password_reset.ts, secret_key.ts).
+  // Extension-based blocks (.env, .pem, .key) are already handled by forbiddenExtensions above.
+  forbiddenRegex: [/id_rsa/i]
 };
 
 const POLICY_FILE = path.join(process.cwd(), '.breakglass/policy.json');
@@ -19,16 +22,20 @@ export function initPolicyEngine() {
     loadPolicy();
   }
 
-  // Watch for runtime changes (GOV-004)
+  // Watch for runtime changes (GOV-004). Watch the .breakglass DIRECTORY, not cwd: fs.watch on a
+  // directory is non-recursive, so watching cwd never reported changes to the nested
+  // .breakglass/policy.json. Directory watches emit the bare basename ("policy.json").
   try {
-    policyWatcher = fs.watch(process.cwd(), (eventType, filename) => {
-      if (filename === '.breakglass/policy.json') {
-        // Debounce or just load directly
-        setTimeout(loadPolicy, 100); 
-      }
-    });
-    // Don't let the watcher keep the process alive
-    policyWatcher.unref();
+    const policyDir = path.dirname(POLICY_FILE);
+    if (fs.existsSync(policyDir)) {
+      policyWatcher = fs.watch(policyDir, (_eventType, filename) => {
+        if (filename === 'policy.json') {
+          setTimeout(loadPolicy, 100); // small debounce — editors write in bursts
+        }
+      });
+      // Don't let the watcher keep the process alive
+      policyWatcher.unref();
+    }
   } catch (e) {
     // Ignore watch errors if platform doesn't support it
   }

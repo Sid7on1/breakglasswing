@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
@@ -8,6 +9,14 @@ import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { sliceLineRange } from '../file-range';
 import { detectCorruptWrite } from '../write-guard';
+import { fileStateCache } from '../../memory/file-state-cache';
+import { globalTransactionManager } from '../../core/transaction.manager';
+
+// Files larger than this get truncated with a note. The full file content is written to
+// a temp path for reference when the file is very large (>1MB).
+const MAX_FILE_BYTES = 100 * 1024;        // 100 KB — read in full
+const OFFLOAD_FILE_BYTES = 1024 * 1024;   // 1 MB — also write to /tmp for reference
+const PREVIEW_LINES = 100;
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -49,14 +58,64 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
     try {
       const currentCwd = context?.cwd || process.cwd();
       const fullPath = resolvePath(args.path, currentCwd);
-      const content = await fs.readFile(fullPath, 'utf8');
-      
+
+      // Get mtime for cache lookup and stale detection
+      const mtime = await fileStateCache.getMtime(fullPath);
+      if (mtime === null) return `Error: File not found at ${args.path}`;
+
+      // When a line range is requested, check the cache first
       if (args.startLine !== undefined || args.endLine !== undefined) {
-        const { text, error } = sliceLineRange(content, args.startLine, args.endLine);
+        const cached = fileStateCache.get(fullPath, mtime, args.startLine, args.endLine);
+        if (cached !== null) return cached;
+
+        const rawContent = await fs.readFile(fullPath, 'utf8');
+        const { text, error } = sliceLineRange(rawContent, args.startLine, args.endLine);
         if (error) return `Error: ${error}`;
-        return text;
+        const slicedText = text ?? '';
+        fileStateCache.set(fullPath, mtime, slicedText, args.startLine, args.endLine);
+        return slicedText;
       }
-      
+
+      // Full-file read — check cache first
+      const cached = fileStateCache.get(fullPath, mtime);
+      if (cached !== null) return cached;
+
+      // Size check before reading large files
+      const stat = await fs.stat(fullPath);
+
+      if (stat.size > MAX_FILE_BYTES) {
+        const rawContent = await fs.readFile(fullPath, 'utf8');
+        const allLines = rawContent.split('\n');
+        const preview = allLines.slice(0, PREVIEW_LINES).join('\n');
+        const sizeKB = Math.round(stat.size / 1024);
+        const remaining = allLines.length - PREVIEW_LINES;
+
+        let result: string;
+
+        if (stat.size > OFFLOAD_FILE_BYTES) {
+          // Very large file — write to /tmp so model can reference it
+          const hash = crypto.createHash('sha256').update(fullPath).digest('hex').slice(0, 8);
+          const tmpPath = path.join(os.tmpdir(), `bimax-file-${hash}.txt`);
+          await fs.writeFile(tmpPath, rawContent, 'utf8');
+          result =
+            `[File too large: ${sizeKB}KB — full content offloaded to ${tmpPath}]\n` +
+            `[Showing first ${PREVIEW_LINES} of ${allLines.length} lines. Use startLine/endLine to read specific sections.]\n\n` +
+            preview +
+            (remaining > 0 ? `\n\n[... ${remaining} more lines — read via startLine/endLine or open ${tmpPath}]` : '');
+        } else {
+          result =
+            `[Large file: ${sizeKB}KB — showing first ${PREVIEW_LINES} of ${allLines.length} lines. Use startLine/endLine to read more.]\n\n` +
+            preview +
+            (remaining > 0 ? `\n\n[... ${remaining} more lines truncated]` : '');
+        }
+
+        // Cache the truncated result (the model only got the preview)
+        fileStateCache.set(fullPath, mtime, result);
+        return result;
+      }
+
+      const content = await fs.readFile(fullPath, 'utf8');
+      fileStateCache.set(fullPath, mtime, content);
       return content;
     } catch (e: any) {
       if (e.code === 'ENOENT') {
@@ -118,10 +177,23 @@ Use this tool to write new code, update configuration files, or generate artifac
           `To modify an existing file use EditFileTool (surgical oldString→newString) and keep real newline characters in multi-line content.`;
       }
     }
+    // Track original content for atomic rollback when a /tx transaction is open (records '' for a
+    // new file so rollback deletes it). Must run before the write so the snapshot is the pre-write state.
+    await globalTransactionManager.trackEdit(fullPath);
     // Snapshot overwrites so /undo and /diff-file can restore the prior version.
     if (exists) await backupFile(fullPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, args.content, 'utf-8');
+    try {
+      await fs.writeFile(fullPath, args.content, 'utf-8');
+    } catch (e: any) {
+      if (globalTransactionManager.isOpen()) {
+        const rb = await globalTransactionManager.autoRollback(args.path, `write failed: ${e.message}`);
+        return `Write to ${args.path} failed: ${e.message}.${rb ? `\n\n${rb}` : ''}`;
+      }
+      throw e;
+    }
+    // Invalidate read cache so post-compact restoration doesn't re-inject stale pre-write content.
+    fileStateCache.invalidate(fullPath);
     const diff = capDiff(compactDiff(prior, args.content, args.path));
     return `${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}`;
   }

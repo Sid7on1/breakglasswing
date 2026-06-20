@@ -88,6 +88,54 @@ describe('ThinkTagFilter', () => {
     expect(all).toContain('answer chunk number 39');
   });
 
+  // The tool-call leak: an inline-reasoning model streams >240 chars of CoT before a tool call and
+  // closes it with `</think>`. With the preamble cap OFF (capPreamble=false, what an inline-reasoning
+  // model gets), the cap must NOT fire mid-stream and leak that reasoning as the reply; it waits for
+  // the closer, so the long preamble lands in `thinking` and only the post-closer text is visible.
+  it('does not leak long pre-closer reasoning when the preamble cap is lifted', () => {
+    const f = new ThinkTagFilter(true, false);
+    let text = '';
+    let thinking = '';
+    for (let i = 0; i < 40; i++) {
+      const r = f.process('reasoning chunk number ' + i + ' ');
+      text += r.text;
+      thinking += r.thinking;
+    }
+    // Nothing leaked as visible text yet, despite blowing past the 240-char cap.
+    expect(text).toBe('');
+    const r = f.process('</think>The visible answer.');
+    text += r.text;
+    thinking += r.thinking;
+    const tail = f.flush();
+    text += tail.text;
+    thinking += tail.thinking;
+    expect(text).toBe('The visible answer.');
+    expect(thinking).toContain('reasoning chunk number 0');
+    expect(thinking).toContain('reasoning chunk number 39');
+  });
+
+  // drainPending: a tool call begins while opener-less reasoning is still buffered (no `</think>`
+  // ever arrives because the answer IS the call). The buffered preamble must be reclaimed as
+  // thinking, never surfaced as text.
+  it('drains still-tentative reasoning to thinking when a tool call starts', () => {
+    const f = new ThinkTagFilter(true, false);
+    const r = f.process('Let me look that up. I should call the search tool');
+    expect(r.text).toBe('');
+    const drained = f.drainPending();
+    expect(drained).toContain('Let me look that up');
+    // After draining, the filter holds nothing and the stream-end flush emits no stray text.
+    const tail = f.flush();
+    expect(tail.text).toBe('');
+    expect(tail.thinking).toBe('');
+  });
+
+  it('drainPending is a no-op once visible text is already streaming', () => {
+    const f = new ThinkTagFilter(true, false);
+    f.process('<think>plan</think>visible answer text');
+    // Leading region resolved and we are streaming the answer — a tool call must not steal it.
+    expect(f.drainPending()).toBe('');
+  });
+
   it('with implicit mode off, leaves an opener-less closer in the text (plain models)', () => {
     const f = new ThinkTagFilter(false);
     const a = f.process('answer</think>more');

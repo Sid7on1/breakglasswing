@@ -6,6 +6,7 @@ import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
+import { globalTransactionManager } from '../../core/transaction.manager';
 
 function resolvePath(p: string, cwd: string): string {
   if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
@@ -118,10 +119,21 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       await governor.approveTaskExecution('FILE_WRITE', { targetPath: full, isDestructive: true });
     }
 
-    // Phase 3 — back up and write every file.
+    // Phase 3 — track (for /tx atomic rollback), back up, and write every file.
+    for (const full of order) {
+      await globalTransactionManager.trackEdit(full);
+    }
     for (const full of order) {
       await backupFile(full);
-      await fs.writeFile(full, working.get(full)!, 'utf8');
+      try {
+        await fs.writeFile(full, working.get(full)!, 'utf8');
+      } catch (e: any) {
+        if (globalTransactionManager.isOpen()) {
+          const rb = await globalTransactionManager.autoRollback(path.relative(cwd, full), `write failed: ${e.message}`);
+          return `MultiEdit failed writing ${path.relative(cwd, full)}: ${e.message}.${rb ? `\n\n${rb}` : ''}`;
+        }
+        throw e;
+      }
     }
 
     const diff = capDiff(order.map(f => compactDiff(originals.get(f)!, working.get(f)!, path.relative(cwd, f))).join('\n'));
