@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // In-memory engine so we can drive the model's Update logic and inspect what it sends back,
@@ -152,15 +154,35 @@ func TestDiffApproval(t *testing.T) {
 	}
 }
 
-func TestMenuRendersOptions(t *testing.T) {
-	m, _ := newTestModel()
+func TestInteractiveMenu(t *testing.T) {
+	m, buf := newTestModel()
+	m.height = 24
 	menu := map[string]any{
-		"title":   "Palette",
-		"options": []map[string]string{{"label": "/git", "value": "/git", "desc": "Git status"}},
+		"title": "Palette",
+		"options": []map[string]string{
+			{"label": "/git", "value": "/git", "desc": "Git status"},
+			{"label": "/diff", "value": "/diff", "desc": "Git diff"},
+		},
 	}
 	m.handleEngine(ev("message", map[string]any{"role": "system", "uiComponent": "menu", "payload": menu}))
-	joined := strings.Join(m.lines, "\n")
-	if !strings.Contains(joined, "Palette") || !strings.Contains(joined, "/git") {
-		t.Fatalf("menu not rendered: %q", joined)
+	if !m.menuOpen || len(m.menuOpts) != 2 {
+		t.Fatalf("menu not opened interactively: %+v", m.menuOpts)
+	}
+	if !strings.Contains(m.menuView(), "Palette") || !strings.Contains(m.menuView(), "/git") {
+		t.Fatal("menu not rendered")
+	}
+
+	// Navigate down and select → the option's value is sent as input.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = m2.(model)
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m3.(model)
+	if m.menuOpen {
+		t.Fatal("menu should close after selection")
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
+	if sent["t"] != "input" || sent["text"] != "/diff" {
+		t.Fatalf("selecting the 2nd option should send /diff, got %v", sent)
 	}
 }

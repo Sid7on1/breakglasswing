@@ -49,12 +49,14 @@ type ToolCall struct {
 
 // Menu — a command result forwarded as a `message` with uiComponent="menu".
 type Menu struct {
-	Title   string `json:"title"`
-	Options []struct {
-		Label string `json:"label"`
-		Value string `json:"value"`
-		Desc  string `json:"desc"`
-	} `json:"options"`
+	Title   string       `json:"title"`
+	Options []menuOption `json:"options"`
+}
+
+type menuOption struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Desc  string `json:"desc"`
 }
 
 // --- Inbound encoders: TUI → engine --------------------------------------------------------

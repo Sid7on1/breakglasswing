@@ -54,6 +54,12 @@ type model struct {
 	compOpen bool
 	queryID  int
 
+	// interactive menu (command palette, pickers) — selecting sends the option's value as input
+	menuOpen  bool
+	menuTitle string
+	menuOpts  []menuOption
+	menuIdx   int
+
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier   string // "lite" | "heavy"
 	fPinned string // pinned tier, if any
@@ -107,6 +113,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		}
+
+		// Interactive menu (command palette / picker) captures navigation + selection.
+		if m.menuOpen {
+			switch msg.String() {
+			case "ctrl+c":
+				m.engine.Close()
+				return m, tea.Quit
+			case "esc":
+				m.menuOpen = false
+				m.relayout()
+				return m, nil
+			case "up", "ctrl+p":
+				m.menuIdx = (m.menuIdx - 1 + len(m.menuOpts)) % len(m.menuOpts)
+				return m, nil
+			case "down", "ctrl+n":
+				m.menuIdx = (m.menuIdx + 1) % len(m.menuOpts)
+				return m, nil
+			case "enter":
+				val := m.menuOpts[m.menuIdx].Value
+				m.menuOpen = false
+				m.relayout()
+				if val != "" {
+					m.engine.Send(encodeInput(val)) // selecting runs the option (e.g. a /command)
+				}
+				return m, nil
+			}
+			return m, nil // swallow other keys while the menu is open
 		}
 
 		// Completion-dropdown navigation takes priority while it's open.
@@ -232,11 +266,18 @@ func (m *model) acceptCompletion() {
 
 // relayout recomputes the viewport height to make room for the dropdown, and re-renders.
 func (m *model) relayout() {
-	compH := 0
+	reserve := 0
 	if m.compOpen {
-		compH = len(m.comps)
+		reserve = len(m.comps)
 	}
-	h := m.height - 5 - compH
+	if m.menuOpen {
+		n := len(m.menuOpts)
+		if n > menuMaxVisible {
+			n = menuMaxVisible
+		}
+		reserve = n + 1 // +1 for the title
+	}
+	h := m.height - 5 - reserve
 	if h < 3 {
 		h = 3
 	}
@@ -319,11 +360,12 @@ func (m *model) handleEvent(o Outbound) {
 func (m *model) renderMessage(me MessageEntry) {
 	if me.UIComponent == "menu" {
 		var menu Menu
-		if json.Unmarshal(me.Payload, &menu) == nil {
-			m.append(asstStyle.Render(menu.Title))
-			for _, op := range menu.Options {
-				m.append(fmt.Sprintf("  %s  %s", userStyle.Render(op.Label), dimStyle.Render(op.Desc)))
-			}
+		if json.Unmarshal(me.Payload, &menu) == nil && len(menu.Options) > 0 {
+			m.menuOpen = true
+			m.menuTitle = menu.Title
+			m.menuOpts = menu.Options
+			m.menuIdx = 0
+			m.relayout()
 		}
 		return
 	}
@@ -389,10 +431,51 @@ func (m model) View() string {
 	}
 
 	mid := status
-	if m.compOpen && len(m.comps) > 0 {
+	switch {
+	case m.menuOpen && len(m.menuOpts) > 0:
+		mid = m.menuView()
+	case m.compOpen && len(m.comps) > 0:
 		mid = m.completionView()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), m.footerLine(), mid, bottom)
+}
+
+const menuMaxVisible = 10
+
+// menuView renders the interactive menu, windowed to menuMaxVisible rows scrolled to keep the
+// selection visible (the command palette has 60+ entries).
+func (m model) menuView() string {
+	var b strings.Builder
+	start := 0
+	if len(m.menuOpts) > menuMaxVisible {
+		start = m.menuIdx - menuMaxVisible/2
+		if start < 0 {
+			start = 0
+		}
+		if start > len(m.menuOpts)-menuMaxVisible {
+			start = len(m.menuOpts) - menuMaxVisible
+		}
+	}
+	end := start + menuMaxVisible
+	if end > len(m.menuOpts) {
+		end = len(m.menuOpts)
+	}
+
+	title := m.menuTitle
+	if len(m.menuOpts) > menuMaxVisible {
+		title += fmt.Sprintf("  (%d/%d)", m.menuIdx+1, len(m.menuOpts))
+	}
+	b.WriteString(asstStyle.Render(title) + "\n")
+	for i := start; i < end; i++ {
+		op := m.menuOpts[i]
+		row := fmt.Sprintf("%-18s %s", op.Label, op.Desc)
+		if i == m.menuIdx {
+			b.WriteString(compSel.Render("▸ "+row) + "\n")
+		} else {
+			b.WriteString("  " + dimStyle.Render(row) + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // completionView renders the autocomplete dropdown, highlighting the selected row.
