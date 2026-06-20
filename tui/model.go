@@ -98,8 +98,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Approval overlay captures number keys + esc.
+		// Request overlay captures input until answered.
 		if m.reqOpen {
+			if m.reqKind == "input" {
+				// Free-form text prompt — the input box becomes the answer field.
+				switch msg.String() {
+				case "ctrl+c":
+					m.engine.Close()
+					return m, tea.Quit
+				case "esc":
+					m.input.SetValue("")
+					m.answer("")
+					return m, nil
+				case "enter":
+					val := m.input.Value()
+					m.input.SetValue("")
+					m.answer(val)
+					return m, nil
+				}
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				return m, cmd
+			}
+			// Option / diff approval — number keys + esc.
 			switch msg.String() {
 			case "ctrl+c":
 				m.engine.Close()
@@ -163,6 +184,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			m.engine.Close()
 			return m, tea.Quit
+		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "shift+up", "shift+down":
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg) // scroll the transcript without touching the input
+			return m, cmd
 		case "tab":
 			if m.compOpen {
 				m.acceptCompletion()
@@ -307,6 +332,18 @@ func (m *model) handleEvent(o Outbound) {
 			m.status = s
 		}
 
+	case "thinking":
+		if t := argString(o.Args, 0); t != "" {
+			t = strings.ReplaceAll(t, "\n", " ")
+			if len(t) > 100 {
+				t = t[:100] + "…"
+			}
+			m.status = "💭 " + t
+		}
+
+	case "thinking_clear":
+		// reasoning finished; spinner_state/status will set the next line
+
 	case "mode_change":
 		m.fMode = argString(o.Args, 0)
 
@@ -386,8 +423,16 @@ func (m *model) renderMessage(me MessageEntry) {
 
 func (m *model) answer(value string) {
 	m.engine.Send(encodeReply(m.reqID, value))
-	m.append(dimStyle.Render(fmt.Sprintf("  → %s", value)))
+	shown := value
+	if m.reqKind == "input" && value != "" {
+		shown = strings.Repeat("•", min(len(value), 8)) // masked-ish echo for free-form answers
+	}
+	if shown != "" {
+		m.append(dimStyle.Render("  → " + shown))
+	}
 	m.reqOpen = false
+	m.reqKind = ""
+	m.reqBody = ""
 	m.reqOpts = nil
 }
 
@@ -414,8 +459,10 @@ func (m model) View() string {
 	header := headerStyle.Render(" BiMax · Bubble Tea ")
 	status := statusStyle.Render(m.status)
 
+	// An option/diff approval takes over the input slot; a free-form prompt keeps the input box
+	// (the user types the answer there) and shows its question in the mid slot.
 	var bottom string
-	if m.reqOpen {
+	if m.reqOpen && m.reqKind != "input" {
 		var b strings.Builder
 		b.WriteString(errStyle.Render("⚠ "+m.reqQ) + "\n")
 		if m.reqKind == "diff" && m.reqBody != "" {
@@ -432,6 +479,8 @@ func (m model) View() string {
 
 	mid := status
 	switch {
+	case m.reqOpen && m.reqKind == "input":
+		mid = footerTier.Render("? " + m.reqQ)
 	case m.menuOpen && len(m.menuOpts) > 0:
 		mid = m.menuView()
 	case m.compOpen && len(m.comps) > 0:

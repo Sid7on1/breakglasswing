@@ -96,8 +96,11 @@ export class HeadlessSession {
       if (!result) return;
       if (result.type === 'message') cliEvents.emit('message', this.msg('system', result.content, result.level));
       else if (result.type === 'menu') cliEvents.emit('message', this.uiMsg('menu', result));
-      else if (result.type === 'prompt') cliEvents.emit('message', this.uiMsg('prompt', result));
-      else if (result.type === 'redirect') void this.dispatch(result.command);
+      else if (result.type === 'prompt') {
+        // Free-form text prompt: bridge its onResolve callback through the request/reply channel.
+        const r: any = result;
+        cliEvents.emit('input_prompt', r.title, (val: string) => r.onResolve?.(val));
+      } else if (result.type === 'redirect') void this.dispatch(result.command);
     } catch (err: any) {
       if (!String(err?.message).includes('Unknown command')) {
         cliEvents.emit('message', this.msg('system', err?.message ?? String(err), 'error'));

@@ -89,6 +89,15 @@ describe('ProtocolHost', () => {
     expect(approved).toBe('Approve');
   });
 
+  it('translates an input_prompt into a free-form input request', () => {
+    let got: string | undefined;
+    emitter.emit('input_prompt', 'Enter API key:', (a: string) => { got = a; });
+    const req = sent.find(m => m.t === 'request') as any;
+    expect(req).toMatchObject({ t: 'request', kind: 'input', question: 'Enter API key:', options: [] });
+    host.ingest({ t: 'reply', id: req.id, value: 'sk-123' } as Inbound);
+    expect(got).toBe('sk-123');
+  });
+
   it('routes inbound input to the handler and ignores stale replies', () => {
     host.ingest({ t: 'input', text: 'refactor the parser' });
     expect(inputs).toEqual(['refactor the parser']);

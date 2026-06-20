@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import {
   Outbound, Inbound, ReplyMsg, CompletionItem,
-  FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
+  FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, INPUT_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
 
 export interface HostHandlers {
@@ -66,6 +66,15 @@ export class ProtocolHost {
     };
     emitter.on(DIFF_PROMPT_EVENT, diffFn);
     this.listeners.push({ event: DIFF_PROMPT_EVENT, fn: diffFn });
+
+    // input_prompt(title, resolve) — a free-form text prompt (e.g. /keys asking for an API key).
+    const inputFn = (title: string, resolve: (a: string) => void) => {
+      const id = this.nextRequestId++;
+      this.pending.set(id, resolve);
+      this.write({ t: 'request', id, kind: 'input', question: title, options: [] });
+    };
+    emitter.on(INPUT_PROMPT_EVENT, inputFn);
+    this.listeners.push({ event: INPUT_PROMPT_EVENT, fn: inputFn });
 
     this.write({ t: 'ready', protocol: PROTOCOL_VERSION });
   }

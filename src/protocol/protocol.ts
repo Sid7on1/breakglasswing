@@ -25,7 +25,7 @@ export interface EventMsg { t: 'event'; name: string; args: JsonValue[]; }
 export interface RequestMsg {
   t: 'request';
   id: number;
-  kind: 'prompt' | 'diff';
+  kind: 'prompt' | 'diff' | 'input'; // option-select | diff-approval | free-form text
   question: string;
   options: string[];
   isAsk?: boolean;  // true for the AskUser tool (free-form) vs a governor yes/no/always veto
@@ -85,6 +85,7 @@ export const FORWARDED_EVENTS: readonly string[] = [
 /** Events the host special-cases into a {@link RequestMsg} (they carry a resolve callback). */
 export const PROMPT_EVENT = 'veto_prompt';
 export const DIFF_PROMPT_EVENT = 'diff_prompt';
+export const INPUT_PROMPT_EVENT = 'input_prompt';
 
 // React element brand — so a `message` event carrying a JSX `content`/`payload` doesn't blow up
 // JSON.stringify; we replace it with a placeholder the front-end can render generically.
