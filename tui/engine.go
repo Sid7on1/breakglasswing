@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -9,6 +11,50 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// hasEmbeddedEngine reports whether a real compiled engine was baked in (release build). The dev
+// build leaves embeddedEngine nil; we also guard against a stray tiny placeholder.
+func hasEmbeddedEngine() bool { return len(embeddedEngine) > 1<<20 }
+
+// extractEmbeddedEngine writes the baked-in engine to the user cache dir (once, content-addressed)
+// and returns its path. This is what makes the shipped binary self-contained — no Node on the host.
+func extractEmbeddedEngine() (string, error) {
+	sum := sha256.Sum256(embeddedEngine)
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	dir = filepath.Join(dir, "bimax")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "bimax-engine-"+hex.EncodeToString(sum[:6]))
+	// Reuse an already-extracted copy of the same content.
+	if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedEngine)) {
+		return path, nil
+	}
+	if err := os.WriteFile(path, embeddedEngine, 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ResolveRoot picks the working directory the engine runs in: the shipped binary runs in the
+// user's project (cwd); the dev runner (npx tsx) needs the BiMax source repo, so from tui/ we
+// step up to the parent. $BIMAX_REPO_ROOT overrides both.
+func ResolveRoot() string {
+	if r := os.Getenv("BIMAX_REPO_ROOT"); r != "" {
+		return r
+	}
+	wd, _ := os.Getwd()
+	if hasEmbeddedEngine() {
+		return wd // self-contained binary → run in whatever project the user launched it from
+	}
+	if filepath.Base(wd) == "tui" {
+		return filepath.Dir(wd)
+	}
+	return wd
+}
 
 // Engine spawns and talks to the headless Node engine (BIMAX_HEADLESS=1). It owns the subprocess,
 // streams decoded outbound messages on Msgs, and forwards inbound NDJSON on stdin. This is the one
@@ -24,11 +70,18 @@ type Engine struct {
 // tui/engine.log so it never corrupts the alt-screen UI or the NDJSON stdout stream.
 func StartEngine(repoRoot string) (*Engine, error) {
 	var c *exec.Cmd
-	if custom := os.Getenv("BIMAX_ENGINE_CMD"); custom != "" {
-		parts := strings.Fields(custom)
+	switch {
+	case os.Getenv("BIMAX_ENGINE_CMD") != "":
+		parts := strings.Fields(os.Getenv("BIMAX_ENGINE_CMD"))
 		c = exec.Command(parts[0], parts[1:]...)
-	} else {
-		c = exec.Command("npx", "tsx", "src/index.ts")
+	case hasEmbeddedEngine():
+		path, err := extractEmbeddedEngine()
+		if err != nil {
+			return nil, err
+		}
+		c = exec.Command(path)
+	default:
+		c = exec.Command("npx", "tsx", "src/index.ts") // dev: run engine from source
 	}
 	c.Dir = repoRoot
 	c.Env = append(os.Environ(), "BIMAX_HEADLESS=1")
@@ -41,7 +94,15 @@ func StartEngine(repoRoot string) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	if logf, ferr := os.Create(filepath.Join(repoRoot, "tui", "engine.log")); ferr == nil {
+	// Engine stderr (boot logs) → a log file so it never corrupts the alt-screen UI or the NDJSON
+	// stream. Prefer the user cache dir (works for a shipped binary); fall back to the temp dir.
+	logDir, err := os.UserCacheDir()
+	if err != nil {
+		logDir = os.TempDir()
+	}
+	logDir = filepath.Join(logDir, "bimax")
+	_ = os.MkdirAll(logDir, 0o755)
+	if logf, ferr := os.Create(filepath.Join(logDir, "engine.log")); ferr == nil {
 		c.Stderr = logf
 	}
 

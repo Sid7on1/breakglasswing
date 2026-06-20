@@ -6,3 +6,4 @@ dist/
 src/**/evolve_staging_*
 *.backup_*
 node_modules/
+build/
