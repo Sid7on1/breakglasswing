@@ -130,6 +130,28 @@ func TestQueryResultOpensDropdown(t *testing.T) {
 	}
 }
 
+func TestDiffApproval(t *testing.T) {
+	m, buf := newTestModel()
+	m.width = 80
+	m.handleEngine(Outbound{
+		T: "request", ID: 9, Kind: "diff", Question: "Edit foo.ts",
+		Options: []string{"Approve", "Reject"}, Body: "@@ -1 +1 @@\n-old\n+new",
+	})
+	if !m.reqOpen || m.reqKind != "diff" || !strings.Contains(m.reqBody, "+new") {
+		t.Fatalf("diff request not captured: %+v", m)
+	}
+	// The overlay renders the diff body.
+	if !strings.Contains(m.View(), "new") {
+		t.Fatal("diff body not rendered in overlay")
+	}
+	m.answer("Approve")
+	var reply map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &reply)
+	if reply["value"] != "Approve" || reply["id"].(float64) != 9 {
+		t.Fatalf("wrong reply: %v", reply)
+	}
+}
+
 func TestMenuRendersOptions(t *testing.T) {
 	m, _ := newTestModel()
 	menu := map[string]any{

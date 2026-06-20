@@ -77,6 +77,18 @@ describe('ProtocolHost', () => {
     expect(host.pendingCount()).toBe(0);
   });
 
+  it('translates a diff_prompt into a diff request carrying the diff body', () => {
+    let approved: string | undefined;
+    emitter.emit('diff_prompt', 'Edit foo.ts', '@@ -1 +1 @@\n-old\n+new', (a: string) => { approved = a; });
+
+    const req = sent.find(m => m.t === 'request') as any;
+    expect(req).toMatchObject({ t: 'request', kind: 'diff', question: 'Edit foo.ts', options: ['Approve', 'Reject'] });
+    expect(req.body).toContain('+new');
+
+    host.ingest({ t: 'reply', id: req.id, value: 'Approve' } as Inbound);
+    expect(approved).toBe('Approve');
+  });
+
   it('routes inbound input to the handler and ignores stale replies', () => {
     host.ingest({ t: 'input', text: 'refactor the parser' });
     expect(inputs).toEqual(['refactor the parser']);

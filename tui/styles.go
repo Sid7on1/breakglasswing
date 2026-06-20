@@ -43,4 +43,9 @@ var (
 
 	// Autocomplete dropdown.
 	compSel = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(colAccent)
+
+	// Diff rendering in the approval overlay.
+	diffAdd  = lipgloss.NewStyle().Foreground(colTool)
+	diffDel  = lipgloss.NewStyle().Foreground(colErr)
+	diffHunk = lipgloss.NewStyle().Foreground(lipgloss.Color("44"))
 )

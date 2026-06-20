@@ -41,6 +41,13 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     onQuery: (text) => completeInput(text, graphStore, process.cwd()),
   });
 
+  // Register the inline diff-approval gate over the protocol (Ink registers its own in FullScreen).
+  // When the user enables /diff-approval, mutating tools surface their diff and wait for a reply.
+  const { registerDiffApprover } = require('../cli/diffApproval');
+  registerDiffApprover((summary: string, diff: string) => new Promise<boolean>((resolve) => {
+    cliEvents.emit('diff_prompt', summary, diff, (answer: string) => resolve(/^(a|y|approve|accept)/i.test(answer)));
+  }));
+
   // Push footer state (model names, goal count) the Go front-end can't read from engine singletons.
   startUiSnapshot();
 

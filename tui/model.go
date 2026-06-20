@@ -45,6 +45,8 @@ type model struct {
 	reqID   int
 	reqQ    string
 	reqOpts []string
+	reqKind string // "prompt" | "diff"
+	reqBody string // diff text for kind:"diff"
 
 	// autocomplete (slash commands + @-mentions), served by the engine
 	comps    []CompletionItem
@@ -174,6 +176,8 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqID = o.ID
 		m.reqQ = o.Question
 		m.reqOpts = o.Options
+		m.reqKind = o.Kind
+		m.reqBody = o.Body
 
 	case "queryResult":
 		if o.ID == m.queryID { // ignore stale results from earlier keystrokes
@@ -372,6 +376,9 @@ func (m model) View() string {
 	if m.reqOpen {
 		var b strings.Builder
 		b.WriteString(errStyle.Render("⚠ "+m.reqQ) + "\n")
+		if m.reqKind == "diff" && m.reqBody != "" {
+			b.WriteString(renderDiff(m.reqBody, 16) + "\n")
+		}
 		for i, op := range m.reqOpts {
 			b.WriteString(fmt.Sprintf("  %d) %s\n", i+1, op))
 		}
@@ -428,6 +435,34 @@ func (m model) footerLine() string {
 		parts = append(parts, footerMode.Render("["+m.fMode+"]"))
 	}
 	return footerBar.Width(m.width).Render(strings.Join(parts, footerSep))
+}
+
+// renderDiff colorizes a unified diff (green adds, red deletes, cyan hunks), capped to maxLines.
+func renderDiff(diff string, maxLines int) string {
+	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	truncated := false
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+	var b strings.Builder
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "+"):
+			b.WriteString(diffAdd.Render(ln))
+		case strings.HasPrefix(ln, "-"):
+			b.WriteString(diffDel.Render(ln))
+		case strings.HasPrefix(ln, "@@"):
+			b.WriteString(diffHunk.Render(ln))
+		default:
+			b.WriteString(dimStyle.Render(ln))
+		}
+		b.WriteString("\n")
+	}
+	if truncated {
+		b.WriteString(dimStyle.Render("  …(diff truncated)"))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // shortModel strips the provider prefix: "minimaxai/minimax-m3" → "minimax-m3".

@@ -18,6 +18,7 @@ type Outbound struct {
 	IsAsk    bool              `json:"isAsk,omitempty"`
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
+	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
 }
 
 // CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.

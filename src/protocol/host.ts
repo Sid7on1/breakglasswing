@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import {
   Outbound, Inbound, ReplyMsg, CompletionItem,
-  FORWARDED_EVENTS, PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
+  FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
 
 export interface HostHandlers {
@@ -56,6 +56,16 @@ export class ProtocolHost {
     };
     emitter.on(PROMPT_EVENT, promptFn);
     this.listeners.push({ event: PROMPT_EVENT, fn: promptFn });
+
+    // diff_prompt(summary, diff, resolve) — the inline diff-approval gate. Same request/reply
+    // mechanism as veto_prompt, but carries the diff body for the front-end to render.
+    const diffFn = (summary: string, diff: string, resolve: (a: string) => void) => {
+      const id = this.nextRequestId++;
+      this.pending.set(id, resolve);
+      this.write({ t: 'request', id, kind: 'diff', question: summary, options: ['Approve', 'Reject'], body: diff });
+    };
+    emitter.on(DIFF_PROMPT_EVENT, diffFn);
+    this.listeners.push({ event: DIFF_PROMPT_EVENT, fn: diffFn });
 
     this.write({ t: 'ready', protocol: PROTOCOL_VERSION });
   }

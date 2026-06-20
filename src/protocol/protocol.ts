@@ -25,10 +25,11 @@ export interface EventMsg { t: 'event'; name: string; args: JsonValue[]; }
 export interface RequestMsg {
   t: 'request';
   id: number;
-  kind: 'prompt';
+  kind: 'prompt' | 'diff';
   question: string;
   options: string[];
-  isAsk?: boolean; // true for the AskUser tool (free-form) vs a governor yes/no/always veto
+  isAsk?: boolean;  // true for the AskUser tool (free-form) vs a governor yes/no/always veto
+  body?: string;    // for kind:'diff', the unified diff to render before the choices
 }
 
 /** Handshake — sent once when the host attaches, so the front-end can version-check. */
@@ -81,8 +82,9 @@ export const FORWARDED_EVENTS: readonly string[] = [
   'ui_snapshot',
 ];
 
-/** The event the host special-cases into a {@link RequestMsg}. */
+/** Events the host special-cases into a {@link RequestMsg} (they carry a resolve callback). */
 export const PROMPT_EVENT = 'veto_prompt';
+export const DIFF_PROMPT_EVENT = 'diff_prompt';
 
 // React element brand — so a `message` event carrying a JSX `content`/`payload` doesn't blow up
 // JSON.stringify; we replace it with a placeholder the front-end can render generically.
