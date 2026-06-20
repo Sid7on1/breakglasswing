@@ -203,7 +203,7 @@ export abstract class AgentPersona {
     return { staticPrefix, dynamicSuffix };
   }
 
-  public async execute(prompt: string, onToken?: (token: string) => void, options?: { maxIterations?: number; planMode?: boolean; useLite?: boolean; images?: string[] }): Promise<string> {
+  public async execute(prompt: string, onToken?: (token: string) => void, options?: { maxIterations?: number; planMode?: boolean; useLite?: boolean; images?: string[]; signal?: AbortSignal }): Promise<string> {
     // Fresh user turn: drop any leftover todos so the loop's persistence check only reacts to items
     // this task actually opens (no spurious "keep going" on an unrelated next message).
     clearActiveTodos();
@@ -248,7 +248,7 @@ export abstract class AgentPersona {
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
     const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, contextMode });
 
-    const generator = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite }, this);
+    const generator = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite, signal: options?.signal }, this);
 
     for await (const token of generator) {
       if (onToken) onToken(token);
@@ -257,8 +257,9 @@ export abstract class AgentPersona {
     this.messages = loop.messages;
 
     // Self-critic loop: review the work and, if defects are found, take one more pass.
-    // Skipped in plan mode (nothing was changed) and for trivial replies.
-    if (isSelfCriticEnabled() && !options?.planMode && executionLog.trim().length > 40) {
+    // Skipped in plan mode (nothing was changed), for trivial replies, and when the turn was
+    // interrupted (don't spend a model call reviewing work the user just cancelled).
+    if (!options?.signal?.aborted && isSelfCriticEnabled() && !options?.planMode && executionLog.trim().length > 40) {
       try {
         const review = await this.critique(prompt, executionLog);
         if (review && !/^\s*done\b/i.test(review.trim())) {
@@ -267,7 +268,7 @@ export abstract class AgentPersona {
             role: 'user',
             content: `Automated self-review of your previous answer flagged these issues:\n${review}\n\nAddress each one now. If a point is mistaken, briefly explain why; otherwise correct it. Then give the final answer.`,
           });
-          const gen2 = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite }, this);
+          const gen2 = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite, signal: options?.signal }, this);
           for await (const token of gen2) {
             if (onToken) onToken(token);
             executionLog += token;
@@ -280,7 +281,7 @@ export abstract class AgentPersona {
     // Adversarial verifier: chains after self-critic. Uses the full model with a red-team
     // framing to find bugs/edge-cases that both the agent and self-critic missed.
     // Only fires when enabled, the turn touched real code, and is NOT in plan mode.
-    if (isAdversarialVerifyEnabled() && !options?.planMode && looksLikeCodeWork(executionLog)) {
+    if (!options?.signal?.aborted && isAdversarialVerifyEnabled() && !options?.planMode && looksLikeCodeWork(executionLog)) {
       try {
         const findings = await runAdversarialVerifier(prompt, executionLog, this.llmAdapter);
         if (findings) {
@@ -292,7 +293,7 @@ export abstract class AgentPersona {
               `Address each point that is a real defect (not a false alarm). If a point is wrong, briefly say why. ` +
               `Then give the corrected implementation or explain why no change is needed.`,
           });
-          const gen3 = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite }, this);
+          const gen3 = loop.execute(this.messages, systemPrompt, { maxIterations, contextMode, useLite: options?.useLite, signal: options?.signal }, this);
           for await (const token of gen3) {
             if (onToken) onToken(token);
             executionLog += token;

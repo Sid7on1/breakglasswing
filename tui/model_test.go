@@ -3,11 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
+
+// ansiRE strips SGR color/style escapes so content assertions don't depend on theming (the warm
+// markdown style colorizes body text, which would otherwise split words with reset codes).
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
 // In-memory engine so we can drive the model's Update logic and inspect what it sends back,
 // without spawning a real engine or needing a TTY.
@@ -55,6 +63,86 @@ func TestFooterState(t *testing.T) {
 	}
 }
 
+func TestInterruptWhileBusy(t *testing.T) {
+	m, buf := newTestModel()
+
+	// Engine signals it's working — Ctrl+C should now cancel the turn, not quit.
+	m.handleEngine(ev("spinner_state", "thinking", "Thinking…"))
+	if !m.busy {
+		t.Fatal("busy not set on spinner_state thinking")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd != nil {
+		t.Fatal("Ctrl+C while busy should not quit (nil cmd expected)")
+	}
+	if !strings.Contains(buf.String(), `"t":"interrupt"`) {
+		t.Fatalf("interrupt not sent to engine; wire = %q", buf.String())
+	}
+
+	// Turn ends → idle. A second Ctrl+C now quits.
+	m.handleEngine(ev("spinner_state", "idle", "Awaiting orders…"))
+	if m.busy {
+		t.Fatal("busy not cleared on spinner_state idle")
+	}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC}); cmd == nil {
+		t.Fatal("Ctrl+C while idle should quit (non-nil cmd expected)")
+	}
+}
+
+func TestTodoUpdateRendersAndDedupes(t *testing.T) {
+	m, _ := newTestModel()
+
+	todos := []map[string]any{
+		{"content": "write parser", "status": "completed"},
+		{"content": "wire the loop", "status": "in_progress"},
+		{"content": "add tests", "status": "pending"},
+	}
+	m.handleEngine(ev("todo_update", todos))
+
+	joined := strings.Join(m.lines, "\n")
+	for _, want := range []string{"Tasks (1/3)", "write parser", "wire the loop", "add tests"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("todo render missing %q in:\n%s", want, joined)
+		}
+	}
+
+	// An identical update must not append a second checklist block.
+	before := len(m.lines)
+	m.handleEngine(ev("todo_update", todos))
+	if len(m.lines) != before {
+		t.Fatalf("identical todo_update was re-appended: %d → %d lines", before, len(m.lines))
+	}
+}
+
+func TestShutdownQuits(t *testing.T) {
+	m, _ := newTestModel()
+	// shutdown event must flag quitting and make the engineMsg path return tea.Quit.
+	next, cmd := m.Update(tea.Msg(engineMsg(ev("shutdown"))))
+	nm := next.(model)
+	if !nm.quitting {
+		t.Fatal("shutdown did not set quitting")
+	}
+	if cmd == nil {
+		t.Fatal("shutdown should return a quit command")
+	}
+}
+
+func TestCwdAndLoopDetected(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("cwd_changed", "/tmp/project"))
+	if m.cwd != "/tmp/project" {
+		t.Fatalf("cwd = %q", m.cwd)
+	}
+	m.handleEngine(ev("loop_detected", map[string]any{
+		"type": "repeat", "tool": "BashTool", "count": 3, "severity": "hard",
+	}))
+	joined := strings.Join(m.lines, "\n")
+	if !strings.Contains(joined, "/tmp/project") || !strings.Contains(joined, "BashTool") || !strings.Contains(joined, "×3") {
+		t.Fatalf("cwd/loop not rendered:\n%s", joined)
+	}
+}
+
 func TestStreamThenFinalMessage(t *testing.T) {
 	m, _ := newTestModel()
 	m.handleEngine(ev("stream_token", "Hel"))
@@ -67,7 +155,7 @@ func TestStreamThenFinalMessage(t *testing.T) {
 	if m.stream != "" {
 		t.Fatalf("stream not cleared after final message: %q", m.stream)
 	}
-	joined := strings.Join(m.lines, "\n")
+	joined := stripANSI(strings.Join(m.lines, "\n"))
 	if !strings.Contains(joined, "Hello world") {
 		t.Fatalf("final message not committed: %q", joined)
 	}
@@ -216,6 +304,121 @@ func TestInteractiveMenu(t *testing.T) {
 	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
 	if sent["t"] != "input" || sent["text"] != "/diff" {
 		t.Fatalf("selecting the 2nd option should send /diff, got %v", sent)
+	}
+}
+
+func TestInputHistory(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 24
+
+	for _, s := range []string{"first", "second"} {
+		m.input.SetValue(s)
+		mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = mm.(model)
+	}
+	if len(m.history) != 2 {
+		t.Fatalf("history = %v", m.history)
+	}
+
+	// Up recalls most-recent-first.
+	up := func() { mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp}); m = mm.(model) }
+	down := func() { mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown}); m = mm.(model) }
+
+	up()
+	if m.input.Value() != "second" {
+		t.Fatalf("up#1 = %q", m.input.Value())
+	}
+	up()
+	if m.input.Value() != "first" {
+		t.Fatalf("up#2 = %q", m.input.Value())
+	}
+	// Down walks forward, restoring the (empty) in-progress line at the end.
+	down()
+	if m.input.Value() != "second" {
+		t.Fatalf("down#1 = %q", m.input.Value())
+	}
+	down()
+	if m.input.Value() != "" {
+		t.Fatalf("down#2 should restore the blank in-progress line, got %q", m.input.Value())
+	}
+}
+
+func TestMultilineInputGrowsAndResets(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 24
+	m.input.SetValue("line1")
+	m.input.CursorEnd()
+
+	// Ctrl+J inserts a newline (paste a code block) — the box grows.
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = mm.(model)
+	if m.input.LineCount() != 2 {
+		t.Fatalf("ctrl+j should add a line, got %d", m.input.LineCount())
+	}
+	if m.input.Height() != 2 {
+		t.Fatalf("input should grow to 2 rows, got %d", m.input.Height())
+	}
+
+	// Enter submits the whole multi-line buffer as one input and resets the box to one row.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(model)
+	if m.input.Height() != 1 {
+		t.Fatalf("height should reset to 1 after submit, got %d", m.input.Height())
+	}
+}
+
+func TestSpinnerShownWhileBusy(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 24
+	m.handleEngine(ev("spinner_state", "thinking", "Working…"))
+	if !m.busy {
+		t.Fatal("busy not set")
+	}
+	// The busy View prefixes the status with the spinner's current frame.
+	if frame := strings.TrimSpace(m.spin.View()); frame != "" && !strings.Contains(m.View(), frame) {
+		t.Fatalf("spinner frame %q not in view", frame)
+	}
+}
+
+func TestViewportHugsShortContent(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 40 // a tall terminal — the old code hard-sized the viewport to ~35 rows here
+
+	// A short conversation: the viewport must take only the rows the content needs, so the input +
+	// footer hug the last line instead of being shoved to the bottom of the screen (the giant gap).
+	m.append("❯ hi")
+	m.append("Hey! What's on your mind today?")
+
+	body := m.transcriptBody()
+	if got, want := m.vp.Height, lipgloss.Height(body); got != want {
+		t.Fatalf("viewport should hug content: height=%d, content=%d", got, want)
+	}
+	if m.vp.Height > 10 {
+		t.Fatalf("viewport over-tall for 2 lines of content: %d (giant-gap regression)", m.vp.Height)
+	}
+
+	// Once content outgrows the available rows it caps and scrolls instead of overflowing.
+	for i := 0; i < 200; i++ {
+		m.append("line")
+	}
+	avail := m.height - (4 + m.input.Height())
+	if m.vp.Height != avail {
+		t.Fatalf("tall content should cap viewport at %d, got %d", avail, m.vp.Height)
+	}
+}
+
+func TestFooterRendersBelowInput(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 24
+	m.handleEngine(ev("model_tier", map[string]any{"tier": "lite"}))
+	v := stripANSI(m.View())
+	foot := strings.Index(v, "◆ lite")
+	input := strings.Index(v, "Ask BiMax")
+	if foot < 0 || input < 0 {
+		t.Fatalf("view missing footer (%d) or input (%d):\n%s", foot, input, v)
+	}
+	if foot < input {
+		t.Fatalf("footer must render below the input (footer@%d, input@%d)", foot, input)
 	}
 }
 

@@ -163,6 +163,62 @@ describe('AgentLoop — recovers from a silent empty turn', () => {
 });
 
 /**
+ * Cooperative cancellation: when the front-end interrupts a turn, the loop must stop at the next
+ * safe boundary — it must not start the next tool batch and must not begin another iteration.
+ */
+describe('AgentLoop — honors an AbortSignal', () => {
+  it('does not execute tools once the signal is aborted mid-stream', async () => {
+    let execCount = 0;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'WriteFileTool', description: 'writes', schema: {},
+      isDestructive: false, isConcurrencySafe: true,
+      execute: async () => { execCount++; return 'OK'; },
+    } as any);
+
+    const ctrl = new AbortController();
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        // The user interrupts while the model is still streaming its tool-call turn.
+        yield { type: 'token', text: 'starting…' };
+        ctrl.abort();
+        yield { type: 'tool_call', id: 'tc1', name: 'WriteFileTool', args: '{"path":"/tmp/x","content":"hi"}' };
+        yield { type: 'done' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, registry, null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 5, signal: ctrl.signal })) {
+      out += t;
+    }
+
+    // The turn stopped before the tool ran, and the loop didn't spin into another iteration.
+    expect(execCount).toBe(0);
+    expect(out).toContain('starting…');
+  });
+
+  it('does not start a new iteration when aborted between turns', async () => {
+    let calls = 0;
+    const ctrl = new AbortController();
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        calls++;
+        ctrl.abort(); // abort right after the first turn's stream opens
+        yield { type: 'token', text: 'partial' };
+        yield { type: 'done' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    // eslint-disable-next-line no-empty
+    for await (const _ of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 5, signal: ctrl.signal })) {}
+
+    expect(calls).toBe(1); // never looped back for a second model call
+  });
+});
+
+/**
  * A transient provider/model error (stalled stream, 5xx, one malformed tool-call
  * emission) must not kill the task: the loop discards the partial turn and re-asks,
  * up to a bound. Past the bound it surfaces the error instead of spinning.

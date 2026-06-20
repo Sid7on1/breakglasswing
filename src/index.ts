@@ -21,7 +21,6 @@ loadGlobalEnv();
 dotenv.config();
 import { Command } from 'commander';
 import { createContainer } from './core/container';
-import { startRepl } from './cli/repl';
 import { resolveTheme } from './cli/themes';
 import { loadConfig, getConfig } from './cli/config';
 import { setCustomRoutingRules } from './cli/agentRouter';
@@ -138,43 +137,22 @@ async function main() {
     process.exit(0);
   }
 
-  // Restore console before Ink takes over (Ink's component will re-override)
+  // Restore console — no Ink to fight for stdout anymore.
   console.log = originalConsoleLog;
   console.warn = originalConsoleWarn;
   console.error = originalConsoleError;
 
-  // Start the TUI immediately — indexing runs in the background so the terminal is
-  // responsive within milliseconds instead of after the WASM/TreeSitter cold-start.
-  startRepl(taskPipeline, codebaseIndexer, graphStore, {
-    agent: effectiveAgent,
-    model: effectiveModel,
-    theme: effectiveTheme,
-    verbose: effectiveVerbose,
-    dangerouslySkipPermissions: effectiveSkipPerms,
-    toolRegistry,
-    llmAdapter,
-    governor,
-    notificationBell: config.notificationBell,
-    maxToolIterations: config.maxToolIterations,
-    persona: null as any,
-    // When a prompt was passed without -p, auto-submit it as the first turn so the session
-    // stays open for follow-up (fixes: bimax "fix bug" used to print-and-exit).
-    initialPrompt: (prompt && !cliFlags.print) ? prompt : undefined,
-  });
-
-  // Background AST indexing — fires after Ink paints the first frame.
-  const hasTsConfig = fs.existsSync('tsconfig.json');
-  if (config.autoIndex !== false && hasTsConfig) {
-    setImmediate(async () => {
-      // interactive=false: we're inside the Ink TUI, which owns stdin in raw mode. A readline
-      // prompt here would fight Ink for the raw TTY and spin a CPU core (idle-overheat bug).
-      try { await codebaseIndexer.autoIndex(false, false); } catch { /* non-fatal; graph tools degrade gracefully */ }
-    });
-  }
-
-  if (effectiveVerbose) {
-    replayBootLogs();
-  }
+  // The interactive TUI is now the `bimax` binary (Go / Bubble Tea), which spawns this engine
+  // headless (BIMAX_HEADLESS=1) and drives it over the NDJSON stdio protocol. The old in-process
+  // Ink frontend has been retired (archived under ~/Desktop/ink-bimax). Reaching here means the
+  // engine was launched directly without a front-end, so there's nothing to render.
+  originalConsoleError(
+    'BiMax engine started with no front-end.\n' +
+    '  • Interactive use:   run the `bimax` binary (the Go/Bubble Tea TUI).\n' +
+    '  • One-shot use:      bimax -p "<prompt>"\n' +
+    '  • Embed a front-end: spawn this with BIMAX_HEADLESS=1 and speak the stdio protocol.',
+  );
+  process.exit(0);
 }
 
 main().catch((e) => {

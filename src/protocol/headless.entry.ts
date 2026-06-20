@@ -1,9 +1,15 @@
 import { cliEvents } from '../cli/events';
+import { goalEvents } from '../memory/goal.manager';
 import { buildPersonas } from '../cli/personas/factory';
 import { HeadlessSession } from './headless.session';
 import { startStdioHost } from './stdio.host';
 import { startUiSnapshot } from './ui.snapshot';
 import { completeInput } from './completions';
+// Register every slash command for its side effect. Commands self-register on import (each module
+// calls globalCommandRegistry.register at top level), and the Ink path got them via FullScreen's
+// imports — but headless imports only the bare registry, so without this the palette is EMPTY:
+// no autocomplete for "/", and every slash command falls through as "Unknown command".
+import '../cli/commands';
 
 /**
  * Run BiMax headless: no Ink, no TTY. The engine's events stream out as NDJSON on stdout and
@@ -37,7 +43,7 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   const dispose = startStdioHost({
     emitter: cliEvents,
     onInput: (text) => { void session.dispatch(text); },
-    onInterrupt: () => { /* TODO: cancel the in-flight turn once persona.execute is cancelable */ },
+    onInterrupt: () => session.interrupt(),
     onQuery: (text) => completeInput(text, graphStore, process.cwd()),
   });
 
@@ -48,12 +54,18 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     cliEvents.emit('diff_prompt', summary, diff, (answer: string) => resolve(/^(a|y|approve|accept)/i.test(answer)));
   }));
 
+  // Goal mutations land on a separate emitter; FullScreen bridges it to cliEvents for Ink, so the
+  // headless path must too — otherwise the footer goal counter (refreshed by ui_snapshot on
+  // goals_changed) never updates out-of-process.
+  const onGoals = () => cliEvents.emit('goals_changed');
+  goalEvents.on('goals_changed', onGoals);
+
   // Push footer state (model names, goal count) the Go front-end can't read from engine singletons.
   startUiSnapshot();
 
   await new Promise<void>((resolve) => {
     let done = false;
-    const shutdown = () => { if (done) return; done = true; dispose(); resolve(); };
+    const shutdown = () => { if (done) return; done = true; goalEvents.off('goals_changed', onGoals); dispose(); resolve(); };
     cliEvents.once('shutdown', shutdown);
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);

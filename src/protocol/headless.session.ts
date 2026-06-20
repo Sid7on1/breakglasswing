@@ -3,6 +3,7 @@ import { AgentPersona } from '../cli/personas/base.persona';
 import { routeQuery } from '../cli/agentRouter';
 import { expandAtMentions, expandFileAtMentions } from '../cli/atMention';
 import { globalCommandRegistry } from '../cli/commands/registry';
+import { decideTier, applyBrief, Tier } from '../cli/model.router';
 import { IGraphStore } from '../graph/models';
 
 export interface HeadlessDeps {
@@ -22,8 +23,23 @@ export interface HeadlessDeps {
  */
 export class HeadlessSession {
   private busy = false;
+  // Aborts the in-flight turn when the front-end sends an interrupt. Non-null only while a turn runs.
+  private turnAbort: AbortController | null = null;
+  // Manual model-tier pin (the /tier command / Ctrl+T). null = automatic routing. Mirrors the
+  // pinnedTierRef FullScreen keeps for the Ink path, so headless honors /tier identically.
+  private pinnedTier: Tier | null = null;
 
-  constructor(private deps: HeadlessDeps) {}
+  constructor(private deps: HeadlessDeps) {
+    // /tier auto|lite|heavy emits set_tier; apply the pin and reflect it in the footer, exactly as
+    // FullScreen.handleSetTier does for Ink. (set_tier is also forwarded to the front-end verbatim.)
+    cliEvents.on('set_tier', (t: 'auto' | 'lite' | 'heavy') => {
+      this.pinnedTier = t === 'auto' ? null : t;
+      cliEvents.emit('model_tier', { tier: this.pinnedTier ?? 'lite', pinned: this.pinnedTier });
+      cliEvents.emit('status', this.pinnedTier === null
+        ? 'Routing → auto (lite decides, escalates as needed)'
+        : `Routing pinned → ${this.pinnedTier} model`);
+    });
+  }
 
   /** A submitted line: a slash command or a user turn. */
   async dispatch(text: string): Promise<void> {
@@ -33,12 +49,23 @@ export class HeadlessSession {
     return this.runTurn(query);
   }
 
+  /**
+   * Cancel the in-flight turn (the front-end's Ctrl-C / Esc). Cooperative: the agent loop stops at
+   * its next safe boundary, then the `finally` in runTurn emits the idle spinner. A no-op when idle.
+   */
+  interrupt(): void {
+    if (!this.busy || !this.turnAbort) return;
+    this.turnAbort.abort();
+    cliEvents.emit('status', 'Interrupting…');
+  }
+
   private async runTurn(query: string): Promise<void> {
     if (this.busy) {
       cliEvents.emit('status', 'Busy — finish the current turn before sending another.');
       return;
     }
     this.busy = true;
+    this.turnAbort = new AbortController();
     cliEvents.emit('message', this.msg('user', query));
 
     const active = this.deps.personas[routeQuery(query)] || this.deps.personas.bimax;
@@ -51,20 +78,39 @@ export class HeadlessSession {
       try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
       try { agentQuery = (await expandAtMentions(agentQuery, this.deps.graphStore, process.cwd())).text; } catch { /* best-effort */ }
 
+      // Model-tier routing (parity with FullScreen): lite is the default responder; escalate to the
+      // heavy coding model only when the turn needs it. A manual pin wins. The footer pointer flips
+      // to whichever model will actually receive this request.
+      let useLite = true;
+      try {
+        const decision = await decideTier(this.deps.options.llmAdapter, query, this.pinnedTier);
+        useLite = decision.tier === 'lite';
+        cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
+        if (!useLite) agentQuery = applyBrief(agentQuery, decision.brief);
+      } catch { /* routing is best-effort; fall back to lite */ }
+
       cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
       await active.execute(
         agentQuery,
         (token: string) => { totalChars += token.length; cliEvents.emit('stream_token', token); },
-        { maxIterations: this.deps.options.maxToolIterations, planMode: this.deps.options.governor?.mode === 'plan' },
+        {
+          maxIterations: this.deps.options.maxToolIterations,
+          planMode: this.deps.options.governor?.mode === 'plan',
+          useLite,
+          signal: this.turnAbort.signal,
+        },
       );
 
       const content = this.collectTurnText(active, before);
       if (content) cliEvents.emit('message', this.msg('assistant', content));
       cliEvents.emit('cost_update', totalChars);
+      // Whatever partial work streamed before the interrupt is kept; tell the user it stopped early.
+      if (this.turnAbort.signal.aborted) cliEvents.emit('message', this.msg('system', '⏹ Turn interrupted.'));
     } catch (e: any) {
       cliEvents.emit('log', { id: Date.now(), level: 'error', text: `Agent error: ${e?.message ?? e}`, timestamp: new Date() });
     } finally {
       this.busy = false;
+      this.turnAbort = null;
       cliEvents.emit('thinking_clear');
       cliEvents.emit('spinner_state', 'idle', 'Awaiting orders…');
     }

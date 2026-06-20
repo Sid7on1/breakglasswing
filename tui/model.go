@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,14 +34,29 @@ func waitForEngine(e *Engine) tea.Cmd {
 type model struct {
 	engine *Engine
 	vp     viewport.Model
-	input  textinput.Model
+	input  textarea.Model // multi-line: Enter submits, Ctrl+J inserts a newline (paste code blocks)
+	spin   spinner.Model  // animated while a turn runs (busy); idle otherwise
 
-	lines  []string // committed transcript
-	stream string   // in-flight assistant tokens (replaced by the final message)
-	status string
-	ready  bool
-	width  int
-	height int
+	// input history — up/down recalls past submissions (a ring buffer). histIdx == len(history)
+	// means "editing a fresh line"; histStash holds that in-progress line while browsing back.
+	history  []string
+	histIdx  int
+	histStash string
+
+	lines    []string // committed transcript
+	stream   string   // in-flight assistant tokens (replaced by the final message)
+	status   string
+	ready    bool
+	busy     bool   // a turn is executing — Ctrl+C cancels it instead of quitting
+	quitting bool   // engine asked us to shut down — quit after this message
+	cwd      string // working directory, updated by cwd_changed
+	width    int
+	height   int
+
+	// live task list (todo_update). Rendered as a checklist panel; deduped so repeated identical
+	// updates don't spam the transcript.
+	todos          []TodoItem
+	lastTodoRender string
 
 	// pending approval (from a `request` message)
 	reqOpen bool
@@ -60,6 +78,12 @@ type model struct {
 	menuOpts  []menuOption
 	menuIdx   int
 
+	welcomed bool // the low-chrome welcome banner has been shown once at the top of the transcript
+
+	// tool-call lines, indexed by call id so a tool_call_result updates its line in place (Ink
+	// re-rendered the same component) instead of printing a second row.
+	toolLine map[string]int
+
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier   string // "lite" | "heavy"
 	fPinned string // pinned tier, if any
@@ -71,21 +95,49 @@ type model struct {
 }
 
 func initialModel(e *Engine) model {
-	ti := textinput.New()
-	ti.Placeholder = "Ask BiMax…"
-	ti.Prompt = "❯ "
-	ti.Focus()
-	ti.CharLimit = 0
+	ta := textarea.New()
+	ta.Placeholder = "Ask BiMax…"
+	ta.Prompt = "❯ "
+	ta.CharLimit = 0
+	ta.ShowLineNumbers = false
+	ta.SetHeight(1) // grows up to inputMaxRows as the user adds lines
+	// The bubbles default focused style paints CursorLine with a solid black background and fills the
+	// end-of-buffer — which renders as a "black box" inside the input and a stray box at the right.
+	// Strip all of that so the field is just the accent caret + bright text on the terminal bg.
+	clean := func(s textarea.Style) textarea.Style {
+		s.Base = lipgloss.NewStyle()
+		s.CursorLine = lipgloss.NewStyle()
+		s.CursorLineNumber = lipgloss.NewStyle()
+		s.EndOfBuffer = lipgloss.NewStyle()
+		s.Prompt = caretStyle
+		s.Text = asstStyle
+		s.Placeholder = subtleStyle
+		return s
+	}
+	ta.FocusedStyle = clean(ta.FocusedStyle)
+	ta.BlurredStyle = clean(ta.BlurredStyle)
+	// Enter submits (handled in Update before the textarea sees it); Ctrl+J inserts a newline so
+	// a pasted code block stays one input.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"))
+	ta.Focus()
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(colAccent)
+
 	return model{
-		engine: e,
-		input:  ti,
-		vp:     viewport.New(80, 20),
-		status: "starting engine…",
+		engine:   e,
+		input:    ta,
+		spin:     sp,
+		histIdx:  0,
+		vp:       viewport.New(80, 20),
+		status:   "starting engine…",
+		toolLine: map[string]int{},
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(waitForEngine(m.engine), textinput.Blink)
+	return tea.Batch(waitForEngine(m.engine), textarea.Blink, m.spin.Tick)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -93,9 +145,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = msg.Width - 4
+		// The input sits inside promptBox (rounded border + 1-col padding each side) whose total
+		// width is m.width-2, so its content area — and thus the input — is m.width-6. Matching this
+		// exactly stops the textarea from overrunning the right border into a stray box.
+		m.input.SetWidth(msg.Width - 6)
 		m.relayout()
 		return m, nil
+
+	case spinner.TickMsg:
+		// Keep the frame animating; it's only painted while busy (see View).
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		// Request overlay captures input until answered.
@@ -180,14 +241,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Input history: up/down at the first/last line recalls past submissions. Mid-text they move
+		// the cursor between lines (textarea), so only intercept at the boundaries.
+		switch msg.String() {
+		case "up":
+			if m.input.Line() == 0 && len(m.history) > 0 {
+				m.histPrev()
+				m.syncInputHeight()
+				m.relayout()
+				return m, nil
+			}
+		case "down":
+			if m.input.Line() == m.input.LineCount()-1 && m.histIdx < len(m.history) {
+				m.histNext()
+				m.syncInputHeight()
+				m.relayout()
+				return m, nil
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
+			// While a turn runs, Ctrl+C cancels it (cooperatively, engine-side) and keeps the
+			// session alive. When idle, it quits. So mid-turn it takes two presses to exit:
+			// first cancels, second (now idle) quits.
+			if m.busy {
+				m.engine.Send(encodeInterrupt())
+				return m, nil
+			}
 			m.engine.Close()
 			return m, tea.Quit
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "shift+up", "shift+down":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg) // scroll the transcript without touching the input
 			return m, cmd
+		case "ctrl+g":
+			// Command palette: prefill "/" and surface the slash-command dropdown (type to filter).
+			m.input.SetValue("/")
+			m.input.CursorEnd()
+			m.requestCompletions()
+			return m, nil
 		case "tab":
 			if m.compOpen {
 				m.acceptCompletion()
@@ -198,7 +291,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text := strings.TrimSpace(m.input.Value())
 			if text != "" {
 				m.engine.Send(encodeInput(text)) // engine echoes the user message back
+				m.pushHistory(text)
 				m.input.SetValue("")
+				m.input.SetHeight(1)
 			}
 			m.compOpen = false
 			m.relayout()
@@ -206,11 +301,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		m.syncInputHeight()    // grow/shrink the box as lines are added (Ctrl+J) or removed
 		m.requestCompletions() // refresh candidates for the new input
+		m.relayout()
 		return m, cmd
 
 	case engineMsg:
 		m.handleEngine(Outbound(msg))
+		if m.quitting { // engine emitted `shutdown` — exit cleanly
+			m.engine.Close()
+			return m, tea.Quit
+		}
 		return m, waitForEngine(m.engine) // keep listening
 
 	case engineClosed:
@@ -228,7 +329,8 @@ func (m *model) handleEngine(o Outbound) {
 	switch o.T {
 	case "ready":
 		m.ready = true
-		m.status = fmt.Sprintf("ready · protocol v%d", o.Protocol)
+		m.status = "Ready"
+		m.showWelcome()
 
 	case "request":
 		m.reqOpen = true
@@ -289,26 +391,79 @@ func (m *model) acceptCompletion() {
 	m.relayout()
 }
 
-// relayout recomputes the viewport height to make room for the dropdown, and re-renders.
-func (m *model) relayout() {
-	reserve := 0
+// relayout re-sizes + re-renders the viewport. Kept as a named entry point for the many call sites
+// that change chrome (open/close a dropdown or menu, grow the input); it just delegates to refresh,
+// which now owns the height calculation so it stays correct as engine events stream content in too.
+func (m *model) relayout() { m.refresh() }
+
+// chromeReserve is the number of rows the dropdown / menu steals from the transcript while open.
+func (m *model) chromeReserve() int {
 	if m.compOpen {
-		reserve = len(m.comps)
+		return len(m.comps)
 	}
 	if m.menuOpen {
 		n := len(m.menuOpts)
 		if n > menuMaxVisible {
 			n = menuMaxVisible
 		}
-		reserve = n + 1 // +1 for the title
+		return n + 1 // +1 for the title
 	}
-	h := m.height - 5 - reserve
-	if h < 3 {
-		h = 3
+	return 0
+}
+
+const inputMaxRows = 6 // the multi-line input grows up to this many rows, then scrolls internally
+
+// syncInputHeight grows or shrinks the input box to fit its content, capped at inputMaxRows.
+func (m *model) syncInputHeight() {
+	n := m.input.LineCount()
+	if n < 1 {
+		n = 1
 	}
-	m.vp.Width = m.width
-	m.vp.Height = h
-	m.refresh()
+	if n > inputMaxRows {
+		n = inputMaxRows
+	}
+	if n != m.input.Height() {
+		m.input.SetHeight(n)
+	}
+}
+
+// pushHistory records a submitted line for up/down recall, skipping a consecutive duplicate, and
+// resets the browse cursor to the fresh-line position.
+func (m *model) pushHistory(text string) {
+	if n := len(m.history); n == 0 || m.history[n-1] != text {
+		m.history = append(m.history, text)
+	}
+	m.histIdx = len(m.history)
+	m.histStash = ""
+}
+
+// histPrev recalls an older submission (up). The in-progress line is stashed on first step back.
+func (m *model) histPrev() {
+	if len(m.history) == 0 {
+		return
+	}
+	if m.histIdx == len(m.history) {
+		m.histStash = m.input.Value()
+	}
+	if m.histIdx > 0 {
+		m.histIdx--
+	}
+	m.input.SetValue(m.history[m.histIdx])
+	m.input.CursorEnd()
+}
+
+// histNext recalls a newer submission (down), restoring the stashed in-progress line at the end.
+func (m *model) histNext() {
+	if m.histIdx >= len(m.history) {
+		return
+	}
+	m.histIdx++
+	if m.histIdx == len(m.history) {
+		m.input.SetValue(m.histStash)
+	} else {
+		m.input.SetValue(m.history[m.histIdx])
+	}
+	m.input.CursorEnd()
 }
 
 func (m *model) handleEvent(o Outbound) {
@@ -328,6 +483,9 @@ func (m *model) handleEvent(o Outbound) {
 		m.status = argString(o.Args, 0)
 
 	case "spinner_state":
+		// args[0] is the state ("thinking"/"idle"), args[1] the label. Track busy so Ctrl+C knows
+		// whether to cancel the turn or quit.
+		m.busy = argString(o.Args, 0) == "thinking"
 		if s := argString(o.Args, 1); s != "" {
 			m.status = s
 		}
@@ -365,7 +523,7 @@ func (m *model) handleEvent(o Outbound) {
 	case "ui_snapshot":
 		var s struct {
 			Models    struct{ Coding, Lite string } `json:"models"`
-			GoalCount int                            `json:"goalCount"`
+			GoalCount int                           `json:"goalCount"`
 		}
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &s) == nil {
 			m.fCoding, m.fLite, m.fGoals = s.Models.Coding, s.Models.Lite, s.GoalCount
@@ -374,13 +532,18 @@ func (m *model) handleEvent(o Outbound) {
 	case "tool_call", "tool_call_result":
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
-			icon := "•"
-			if tc.Status == "success" {
-				icon = "✓"
-			} else if tc.Status == "error" {
-				icon = "✗"
+			line := renderToolCall(tc)
+			// Update the existing line in place when the result for a known call arrives, so a tool
+			// shows as one entry that resolves — not a "running" row followed by a "done" row.
+			if idx, ok := m.toolLine[tc.ID]; ok && tc.ID != "" {
+				m.lines[idx] = line
+				m.refresh()
+			} else {
+				if tc.ID != "" {
+					m.toolLine[tc.ID] = len(m.lines)
+				}
+				m.append(line)
 			}
-			m.append(toolStyle.Render(fmt.Sprintf("  %s %s", icon, tc.ToolName)))
 		}
 
 	case "log":
@@ -391,7 +554,229 @@ func (m *model) handleEvent(o Outbound) {
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &le) == nil && le.Text != "" {
 			m.append(dimStyle.Render("  " + le.Text))
 		}
+
+	case "todo_update":
+		// Full task list (the compact "Tasks: x/y" summary already arrives as a `status` event).
+		// Re-render the checklist into the transcript only when it actually changed.
+		var todos []TodoItem
+		if len(o.Args) > 0 {
+			_ = json.Unmarshal(o.Args[0], &todos)
+		}
+		m.todos = todos
+		if r := renderTodos(todos); r != "" && r != m.lastTodoRender {
+			m.lastTodoRender = r
+			m.append(r)
+		}
+
+	case "cwd_changed":
+		if p := argString(o.Args, 0); p != "" {
+			m.cwd = p
+			m.append(dimStyle.Render("  ⌁ cwd → " + p))
+		}
+
+	case "mcp_changed":
+		m.append(dimStyle.Render("  ⌁ MCP servers changed"))
+
+	case "graph_changed":
+		m.append(dimStyle.Render("  ⌁ code graph updated"))
+
+	case "loop_detected":
+		var sig struct {
+			Type     string `json:"type"`
+			Tool     string `json:"tool"`
+			Count    int    `json:"count"`
+			Severity string `json:"severity"`
+		}
+		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &sig) == nil {
+			detail := sig.Tool
+			if detail == "" {
+				detail = sig.Type
+			}
+			m.append(errStyle.Render(fmt.Sprintf("  ↻ loop detected: %s ×%d (%s)", detail, sig.Count, sig.Severity)))
+		}
+
+	case "rerun_onboarding":
+		m.append(dimStyle.Render("  ⌁ onboarding is only available in the Ink UI; skipped"))
+
+	case "shutdown":
+		m.status = "shutting down…"
+		m.quitting = true // engineMsg handler turns this into tea.Quit
+
+	// config_changed / goals_changed / set_tier are footer-refresh signals. The footer is driven by
+	// the ui_snapshot (config/goals) and model_tier (set_tier) events the engine emits alongside
+	// them, so there's nothing to render here — handled explicitly so they're not silently dropped.
+	case "config_changed", "goals_changed", "set_tier":
 	}
+}
+
+// toolLabels maps tool class names to short action labels so lines read like actions, not classes
+// (mirrors TOOL_LABELS in ToolCallLine.tsx).
+var toolLabels = map[string]string{
+	"BashTool": "Bash", "ReadFileTool": "Read", "WriteFileTool": "Write", "EditFileTool": "Edit",
+	"MultiEditTool": "MultiEdit", "DeleteTool": "Delete", "CreateDirectoryTool": "mkdir",
+	"ChangeDirectoryTool": "cd", "GrepTool": "Grep", "GlobTool": "Glob", "WebFetchTool": "Fetch",
+	"TodoWriteTool": "Todo", "GraphQueryTool": "Graph", "MemoryQueryTool": "Memory",
+	"SpawnSubagentTool": "Subagent", "RegisterAgentTool": "RegisterAgent", "AskUserTool": "Ask",
+	"SkillTool": "Skill", "McpManageTool": "MCP",
+}
+
+func toolLabelFor(name string) string {
+	if l, ok := toolLabels[name]; ok {
+		return l
+	}
+	return strings.TrimSuffix(name, "Tool")
+}
+
+// summarizeToolInput pulls the most meaningful argument (command/path/pattern/…) for the header,
+// truncated, mirroring summarizeInput() in ToolCallLine.tsx.
+func summarizeToolInput(input string) string {
+	var p map[string]any
+	if json.Unmarshal([]byte(input), &p) == nil {
+		for _, k := range []string{"command", "filePath", "path", "pattern", "glob", "url", "query", "question", "directory", "name", "action"} {
+			if v, ok := p[k].(string); ok && v != "" {
+				return clip(strings.ReplaceAll(v, "\n", " "), 70)
+			}
+		}
+		return ""
+	}
+	return clip(strings.ReplaceAll(input, "\n", " "), 70)
+}
+
+// bashOutput unwraps BashTool's {stdout,stderr} JSON; other tools return their raw output.
+func bashOutput(tc ToolCall) string {
+	if tc.ToolName == "BashTool" {
+		var o struct {
+			Stdout string `json:"stdout"`
+			Stderr string `json:"stderr"`
+		}
+		if json.Unmarshal([]byte(tc.Output), &o) == nil && (o.Stdout != "" || o.Stderr != "") {
+			return strings.TrimSpace(strings.TrimSpace(o.Stdout) + "\n" + strings.TrimSpace(o.Stderr))
+		}
+	}
+	return strings.TrimSpace(tc.Output)
+}
+
+// summarizeToolOutput renders the one-line "⎿" summary: first line + "(+N lines)", mirroring
+// summarizeOutput() in ToolCallLine.tsx.
+func summarizeToolOutput(tc ToolCall) string {
+	out := bashOutput(tc)
+	if out == "" {
+		if tc.Status == "success" {
+			return "Done"
+		}
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	preview := clip(lines[0], 80)
+	if len(lines) > 1 {
+		return fmt.Sprintf("%s (+%d lines)", preview, len(lines)-1)
+	}
+	return preview
+}
+
+// renderToolCall draws one tool entry the Ink way: a status dot, the bold label, dim (args), and an
+// indented ⎿ summary line. Running calls show no summary yet; errors show the summary in red.
+func renderToolCall(tc ToolCall) string {
+	dot := toolDot
+	switch tc.Status {
+	case "error":
+		dot = toolDotE
+	case "running", "":
+		dot = toolDotW
+	}
+	header := dot.Render("⏺ ") + toolLabel.Render(toolLabelFor(tc.ToolName))
+	if in := summarizeToolInput(tc.Input); in != "" {
+		header += toolArgs.Render("(" + in + ")")
+	}
+	if tc.Status == "running" || tc.Status == "" {
+		return "  " + header
+	}
+	summary := summarizeToolOutput(tc)
+	if summary == "" {
+		return "  " + header
+	}
+	sumStyle := dimStyle
+	if tc.Status == "error" {
+		sumStyle = errStyle
+	}
+	return "  " + header + "\n    " + toolGut.Render("⎿ ") + sumStyle.Render(summary)
+}
+
+// clip truncates s to n runes with an ellipsis.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+// LOGO is the BiMax wordmark, mirroring Ink's WelcomeBanner.tsx.
+var logoLines = []string{
+	"▗▄▄▄▖ ▗▄▄▄▖ ▗▖  ▗▖  ▗▄▖  ▗▖  ▗▖",
+	"▐▌  █   █   ▐▛▚▞▜▌ ▐▌ ▐▌  ▝▚▞▘ ",
+	"▐▛▀▀▜   █   ▐▌  ▐▌ ▐▛▀▜▌   ▐▌  ",
+	"▐▌▄▄▟ ▗▄█▄▖ ▐▌  ▐▌ ▐▌ ▐▌ ▗▞▘▝▚▖",
+}
+
+// shortPath collapses the home prefix to ~ (mirrors WelcomeBanner.tsx).
+func shortPath(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// showWelcome injects the low-chrome welcome banner at the top of the transcript, once: the accent
+// wordmark, a dim metadata block, and a couple of quiet tips — content-first, like WelcomeBanner.tsx.
+func (m *model) showWelcome() {
+	if m.welcomed {
+		return
+	}
+	m.welcomed = true
+
+	var b strings.Builder
+	b.WriteByte('\n')
+	for i, ln := range logoLines {
+		st := logoStyle
+		if i == 1 {
+			st = logoMid
+		}
+		b.WriteString("  " + st.Render(ln) + "\n")
+	}
+	b.WriteString("\n  " + brandStyle.Render("BiMax ") + tipStyle.Render("v1.0.0 · autonomous agent for your terminal") + "\n\n")
+
+	cwd := m.cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	b.WriteString("  " + metaKey.Render("cwd    ") + metaVal.Render(shortPath(cwd)) + "\n\n")
+	b.WriteString("  " + tipStyle.Render("Ask anything, or describe a task to run it with tools.") + "\n")
+	b.WriteString("  " + tipStyle.Render("/help for commands · Ctrl+G palette · Ctrl+C to stop · Esc to dismiss"))
+
+	m.append(b.String())
+}
+
+// renderTodos draws the task list as a checklist. Empty list → empty string (nothing to show).
+func renderTodos(todos []TodoItem) string {
+	if len(todos) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	done := 0
+	for _, t := range todos {
+		icon := "☐"
+		st := dimStyle
+		switch t.Status {
+		case "completed":
+			icon, st, done = "☑", toolStyle, done+1
+		case "in_progress":
+			icon, st = "◐", asstStyle
+		}
+		b.WriteString(st.Render(fmt.Sprintf("  %s %s", icon, t.Content)) + "\n")
+	}
+	header := asstStyle.Render(fmt.Sprintf("  Tasks (%d/%d)", done, len(todos)))
+	return header + "\n" + strings.TrimRight(b.String(), "\n")
 }
 
 func (m *model) renderMessage(me MessageEntry) {
@@ -408,7 +793,10 @@ func (m *model) renderMessage(me MessageEntry) {
 	}
 	switch me.Role {
 	case "user":
-		m.append(userStyle.Render("❯ " + me.Content))
+		// A new turn begins — scope tool-call dedupe to this turn so a later turn's tool ids can't
+		// collide with an earlier turn's line indices (and the map doesn't grow without bound).
+		m.toolLine = map[string]int{}
+		m.append(caretStyle.Render("❯ ") + userStyle.Render(me.Content))
 	case "assistant":
 		m.stream = "" // the final message supersedes the streamed partial
 		m.append(renderMarkdown(me.Content, m.vp.Width))
@@ -442,8 +830,8 @@ func (m *model) append(line string) {
 	m.refresh()
 }
 
-// refresh rebuilds the viewport content (transcript + any in-flight stream) and pins to bottom.
-func (m *model) refresh() {
+// transcriptBody joins the committed transcript with any in-flight streamed tokens.
+func (m *model) transcriptBody() string {
 	body := strings.Join(m.lines, "\n")
 	if m.stream != "" {
 		if body != "" {
@@ -451,13 +839,42 @@ func (m *model) refresh() {
 		}
 		body += streamStyle.Render(m.stream)
 	}
+	return body
+}
+
+// refresh rebuilds the viewport content and sizes the viewport to HUG that content: when the
+// conversation is short the transcript only takes the rows it needs, so the input + footer sit right
+// under the last line instead of being pushed to the bottom of the screen (the giant gap the Ink UI
+// never had). Once the content outgrows the available rows the viewport caps and scrolls, pinned to
+// the bottom. Called from both key handling (relayout) and engine events (append), so the height
+// tracks streamed output too.
+func (m *model) refresh() {
+	body := m.transcriptBody()
+
+	// Rows consumed by the non-transcript chrome: footer (1) + mid/status (1) + the prompt box's two
+	// border rows + the (variable) input height, plus any open dropdown/menu reservation.
+	avail := m.height - (4 + m.input.Height()) - m.chromeReserve()
+	if avail < 3 {
+		avail = 3
+	}
+	h := lipgloss.Height(body)
+	if h > avail {
+		h = avail
+	}
+	if h < 1 {
+		h = 1
+	}
+	m.vp.Width = m.width
+	m.vp.Height = h
 	m.vp.SetContent(body)
 	m.vp.GotoBottom()
 }
 
 func (m model) View() string {
-	header := headerStyle.Render(" BiMax · Bubble Tea ")
 	status := statusStyle.Render(m.status)
+	if m.busy {
+		status = m.spin.View() + " " + status // animated spinner while a turn runs
+	}
 
 	// An option/diff approval takes over the input slot; a free-form prompt keeps the input box
 	// (the user types the answer there) and shows its question in the mid slot.
@@ -486,7 +903,9 @@ func (m model) View() string {
 	case m.compOpen && len(m.comps) > 0:
 		mid = m.completionView()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, m.vp.View(), m.footerLine(), mid, bottom)
+	// Layout order mirrors Ink's FullScreen: transcript, then the live working/status + any
+	// dropdown/menu, then the input box, and the footer pinned at the very bottom.
+	return lipgloss.JoinVertical(lipgloss.Left, m.vp.View(), mid, bottom, m.footerLine())
 }
 
 const menuMaxVisible = 10

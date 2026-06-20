@@ -32,12 +32,16 @@ export class AgentLoop {
   async *execute(
     initialMessages: Message[],
     systemPrompt: string,
-    options?: { maxIterations?: number; contextMode?: 'smart' | 'full'; useLite?: boolean },
+    options?: { maxIterations?: number; contextMode?: 'smart' | 'full'; useLite?: boolean; signal?: AbortSignal },
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
     const maxIter = options?.maxIterations ?? 30;
     const contextMode = options?.contextMode ?? 'smart';
+    // Cooperative cancellation: the front-end's interrupt aborts this signal. We don't tear the
+    // in-flight fetch down mid-byte; we stop at the next safe boundary (next streamed token, or
+    // before the next tool batch / loop iteration) so history stays well-formed.
+    const signal = options?.signal;
     // Fresh loop detector per execute() call — tracks tool-call patterns across turns.
     const loopDetector = new LoopDetector();
     // Bounds the regenerate-on-empty correction below to a single retry, so a model
@@ -63,6 +67,8 @@ export class AgentLoop {
     const MAX_PERSISTENCE_NUDGES = 4;
 
     for (let i = 0; i < maxIter; i++) {
+      // Interrupted between turns: stop cleanly before spending another model call.
+      if (signal?.aborted) return;
       // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
       //    full mode is a no-op here and relies on reactive compaction if the API rejects the size).
       this.messages = await this.contextManager.checkAndCompact(this.messages, contextMode);
@@ -84,6 +90,9 @@ export class AgentLoop {
       let discardTurn = false;
 
       for await (const event of generator) {
+        // Interrupted mid-stream: stop pulling tokens. Returning here runs the generator's
+        // cleanup (.return()), which closes the underlying LLM stream.
+        if (signal?.aborted) return;
         if (event.type === 'token') {
           currentContent += event.text;
           if (event.text) anyTextYielded = true;
@@ -173,6 +182,9 @@ export class AgentLoop {
       }
 
       if (toolCalls.length > 0) {
+        // Interrupted right after the model asked for tools: don't start running them. The
+        // assistant turn is already persisted above; we just stop before side effects.
+        if (signal?.aborted) return;
         // Build the tool_calls payload for the assistant message
         const asstMsg: Message = { role: 'assistant', tool_calls: [] };
         if (currentContent) asstMsg.content = currentContent;

@@ -138,7 +138,7 @@ func (e *Engine) Send(b []byte) {
 
 func (e *Engine) Close() {
 	_ = e.stdin.Close()
-	if e.cmd.Process != nil {
+	if e.cmd != nil && e.cmd.Process != nil {
 		_ = e.cmd.Process.Kill()
 	}
 }

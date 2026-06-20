@@ -47,6 +47,13 @@ type ToolCall struct {
 	Output   string `json:"output"`
 }
 
+// TodoItem — one entry of a todo_update event's payload (args[0] is []TodoItem). Mirrors
+// src/tools/implementations/todo.tool.ts.
+type TodoItem struct {
+	Content string `json:"content"`
+	Status  string `json:"status"` // "pending" | "in_progress" | "completed"
+}
+
 // Menu — a command result forwarded as a `message` with uiComponent="menu".
 type Menu struct {
 	Title   string       `json:"title"`
