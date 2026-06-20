@@ -411,7 +411,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		m.append(userStyle.Render("❯ " + me.Content))
 	case "assistant":
 		m.stream = "" // the final message supersedes the streamed partial
-		m.append(asstStyle.Render(me.Content))
+		m.append(renderMarkdown(me.Content, m.vp.Width))
 	default: // system
 		st := dimStyle
 		if me.Level == "error" {

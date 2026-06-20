@@ -154,6 +154,38 @@ func TestDiffApproval(t *testing.T) {
 	}
 }
 
+func TestFreeFormInputPrompt(t *testing.T) {
+	m, buf := newTestModel()
+	m.handleEngine(Outbound{T: "request", ID: 5, Kind: "input", Question: "Enter API key:"})
+	if !m.reqOpen || m.reqKind != "input" {
+		t.Fatalf("input prompt not opened: %+v", m)
+	}
+	// The question shows in the mid slot; the input box stays usable.
+	if !strings.Contains(m.View(), "Enter API key:") {
+		t.Fatal("prompt question not rendered")
+	}
+	// Type an answer and press enter → reply carries the typed value.
+	m.input.SetValue("sk-secret")
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(model)
+	if m.reqOpen {
+		t.Fatal("prompt still open after submit")
+	}
+	var reply map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &reply)
+	if reply["t"] != "reply" || reply["value"] != "sk-secret" || reply["id"].(float64) != 5 {
+		t.Fatalf("wrong reply: %v", reply)
+	}
+}
+
+func TestThinkingShowsInStatus(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("thinking", "Considering the parser refactor"))
+	if !strings.Contains(m.status, "Considering the parser") {
+		t.Fatalf("thinking not surfaced: %q", m.status)
+	}
+}
+
 func TestInteractiveMenu(t *testing.T) {
 	m, buf := newTestModel()
 	m.height = 24
@@ -184,5 +216,17 @@ func TestInteractiveMenu(t *testing.T) {
 	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
 	if sent["t"] != "input" || sent["text"] != "/diff" {
 		t.Fatalf("selecting the 2nd option should send /diff, got %v", sent)
+	}
+}
+
+func TestRenderMarkdown(t *testing.T) {
+	out := renderMarkdown("# Title\n\n- one\n- two\n\n`code`", 60)
+	if out == "" || !strings.Contains(out, "one") || !strings.Contains(out, "two") {
+		t.Fatalf("markdown not rendered: %q", out)
+	}
+	// Markdown was processed, not passed through verbatim: glamour turns "- " bullets into "•"
+	// (and applies ANSI styling on a real terminal; color is suppressed in this non-TTY test).
+	if !strings.Contains(out, "•") {
+		t.Fatalf("markdown not transformed (no bullet glyph): %q", out)
 	}
 }
