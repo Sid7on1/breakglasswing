@@ -129,6 +129,15 @@ async function main() {
     process.exit(0);
   }
 
+  // Headless mode — drive the engine over an NDJSON stdio protocol instead of mounting Ink.
+  // This is the process an out-of-process front-end (the Go / Bubble Tea TUI) spawns. Forked here:
+  // after the container is wired, before Ink would take the TTY. The Ink path below is untouched.
+  if (process.env.BIMAX_HEADLESS === '1' || cliFlags.headless) {
+    const { startHeadless } = await import('./protocol/headless.entry');
+    await startHeadless(container, config);
+    process.exit(0);
+  }
+
   // Restore console before Ink takes over (Ink's component will re-override)
   console.log = originalConsoleLog;
   console.warn = originalConsoleWarn;

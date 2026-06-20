@@ -47,8 +47,8 @@ import { extractImagePaths } from '../../core/multimodal';
 import { ToolRegistry } from '../../tools/tool.registry';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { Governor } from '../../governor/governor';
-import { BiMaxPersona, HermesPersona, OpenCodePersona, OpenClawPersona } from '../personas/implementations';
 import { AgentPersona } from '../personas/base.persona';
+import { buildPersonas } from '../personas/factory';
 import { SessionStore, messageEntriesToLLM } from '../session';
 import { routeQuery } from '../agentRouter';
 import { getGitStatus, gitLog, gitDiff } from '../git';
@@ -124,19 +124,8 @@ export function FullScreen({ taskPipeline, codebaseIndexer, graphStore, options 
 
   const personasRef = React.useRef<Record<string, AgentPersona> | null>(null);
   if (!personasRef.current) {
-    const { toolRegistry, llmAdapter } = options;
-    personasRef.current = {
-      bimax: new BiMaxPersona(toolRegistry, llmAdapter),
-      hermes: new HermesPersona(toolRegistry, llmAdapter),
-      opencode: new OpenCodePersona(toolRegistry, llmAdapter),
-      openclaw: new OpenClawPersona(toolRegistry, llmAdapter),
-    };
-    
-    // Load dynamic skills
-    const loadedSkills = SkillLoader.loadSkills();
-    for (const [id, config] of Object.entries(loadedSkills)) {
-      personasRef.current[id] = new DynamicPersona(config, toolRegistry, llmAdapter);
-    }
+    // Built via the shared factory so the headless session driver constructs an identical set.
+    personasRef.current = buildPersonas(options.toolRegistry, options.llmAdapter);
   }
 
   const defaultAgent = options.agent;

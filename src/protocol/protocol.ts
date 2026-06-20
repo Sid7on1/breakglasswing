@@ -60,6 +60,9 @@ export const FORWARDED_EVENTS: readonly string[] = [
   'cost_update', 'todo_update', 'thinking', 'thinking_clear',
   'config_changed', 'graph_changed', 'cwd_changed', 'mcp_changed',
   'rerun_onboarding', 'shutdown', 'loop_detected', 'goals_changed',
+  // Headless-only: the persona streams reply tokens through a direct callback in the Ink path;
+  // in headless mode the driver re-emits each token here so the front-end can render the stream.
+  'stream_token',
 ];
 
 /** The event the host special-cases into a {@link RequestMsg}. */
