@@ -5,13 +5,23 @@ import { BiMaxPersona } from '../cli/personas/implementations';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
+import { BuiltTool } from '../tools/tool.factory';
+
+// A deferred tool that is in BiMaxPersona's allowedTools (so it reaches the prompt) but NOT in the
+// core working set — exercises the LOAD-ON-DEMAND section. (WebFetchTool used to play this role, but
+// it's now part of the core set.)
+const fakeMemoryTool: BuiltTool = {
+  name: 'MemoryQueryTool', description: 'Searches long-term memory.',
+  schema: { type: 'object', properties: {} }, isDestructive: false, isConcurrencySafe: true,
+  execute: async () => 'ok',
+};
 
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
 const llm = {} as unknown as LlmAdapter;
 
 function persona(): BiMaxPersona {
   const r = new ToolRegistry();
-  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor)].forEach(t => r.register(t));
+  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor), fakeMemoryTool].forEach(t => r.register(t));
   return new BiMaxPersona(r, llm);
 }
 
@@ -45,11 +55,11 @@ describe('Persona system prompt — static/dynamic cache split', () => {
     expect(staticPrefix).toContain('OUTPUT CONTRACT');
   });
 
-  it('smart mode defers WebFetchTool — it appears under LOAD-ON-DEMAND in the suffix, not as a sent tool', () => {
+  it('smart mode defers MemoryQueryTool — it appears under LOAD-ON-DEMAND in the suffix, not as a sent tool', () => {
     const p = persona();
     const { dynamicSuffix } = p.getSystemPromptParts({ contextMode: 'smart' });
     expect(dynamicSuffix).toContain('LOAD-ON-DEMAND');
-    expect(dynamicSuffix).toContain('WebFetchTool');
+    expect(dynamicSuffix).toContain('MemoryQueryTool');
   });
 
   it('getSystemPrompt = staticPrefix + dynamicSuffix joined', () => {
