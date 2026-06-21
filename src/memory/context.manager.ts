@@ -27,13 +27,30 @@ export type ContextMode = 'smart' | 'full';
 let _graphStore: IGraphStore | null = null;
 export function setContextManagerGraphStore(store: IGraphStore): void { _graphStore = store; }
 
+// Pull "code-ish" focus terms from the latest user message to personalize the repo map: camelCase,
+// snake_case, paths, or dotted names (setAuthCookie, auth.ts, src/auth). Plain prose words are
+// skipped — boosting on "read"/"improve" would surface unrelated symbols. Empty for a vague request,
+// so the map falls back to pure PageRank ranking.
+export function focusTermsFromMessages(msgs: Message[]): string[] {
+  const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+  const text = lastUser ? contentToText(lastUser.content as any) : '';
+  if (!text) return [];
+  const terms = new Set<string>();
+  for (const w of text.match(/[A-Za-z_][A-Za-z0-9_./-]{2,}/g) || []) {
+    if (/[A-Z]/.test(w) || w.includes('_') || w.includes('/') || w.includes('.')) {
+      terms.add(w);
+      if (terms.size >= 40) break;
+    }
+  }
+  return [...terms];
+}
+
 export class ContextManager {
   private readonly MAX_TOKENS: number;
   private readonly COMPACT_THRESHOLD = 0.7; // summarize when reaching 70% of the window
   private readonly WARN_THRESHOLD = 0.5;    // one-time early warning at 50%
   private currentTokens: number = 0;
   private halfWindowWarnEmitted = false;    // fire the 50% nudge only once per session
-  private repoMapInjected = false;          // inject the outline once per session
 
   // Cheap-pass tuning. Deliberately conservative so multi-step tasks keep the context they need.
   private readonly TOOL_RESULT_MAX_CHARS = 16000; // cap on a single tool result
@@ -77,14 +94,14 @@ export class ContextManager {
     msgs = this.microCompact(msgs);
     msgs = this.snip(msgs);
 
-    // Inject RepoMap outline once per session so the model knows the load-bearing symbols.
-    if (!this.repoMapInjected && _graphStore) {
+    // RepoMap (aider-style): refresh it EVERY turn so it reflects current files and re-ranks toward
+    // THIS request (focus terms from the latest user message). Strip any prior map first so history
+    // keeps exactly one copy — current, personalized, no accumulation.
+    if (_graphStore) {
       try {
-        const outline = formatRepoMapOutline(_graphStore, 1500); // ~1.5k-token budget, aider-style
-        if (outline) {
-          this.repoMapInjected = true;
-          msgs = [{ role: 'system' as const, content: outline }, ...msgs];
-        }
+        msgs = msgs.filter(m => !(m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[RepoMap]')));
+        const outline = formatRepoMapOutline(_graphStore, 1500, focusTermsFromMessages(msgs));
+        if (outline) msgs = [{ role: 'system' as const, content: outline }, ...msgs];
       } catch { /* pagerank optional — never fail the compaction loop */ }
     }
 

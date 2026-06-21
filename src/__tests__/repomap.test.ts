@@ -47,4 +47,36 @@ describe('formatRepoMapOutline — aider-style repo map', () => {
     const out = formatRepoMapOutline(storeWith([node('x', { filePath: 'x.ts', signature: undefined })]), 1500);
     expect(out).toContain('function x');
   });
+
+  it('personalizes: focus terms float matching symbols to the top (aider mentioned_idents)', () => {
+    // `popular` has many callers (high PageRank); `setAuthCookie` is obscure. With no focus, popular
+    // ranks first; with focus "auth", setAuthCookie must come first.
+    const store = new GraphStore(':memory:');
+    store.addNode(node('popular', { filePath: 'util.ts', signature: 'function popular(): void' }));
+    store.addNode(node('setAuthCookie', { filePath: 'auth.ts', signature: 'function setAuthCookie(t: string)' }));
+    // give `popular` inbound edges so PageRank ranks it above setAuthCookie
+    for (let i = 0; i < 5; i++) {
+      store.addNode(node(`caller${i}`, { filePath: `c${i}.ts`, signature: `function caller${i}()` }));
+      store.addEdge({ sourceId: `caller${i}`, targetId: 'popular', type: 'CALLS' });
+    }
+    const plain = formatRepoMapOutline(store, 1500);
+    expect(plain.indexOf('popular')).toBeLessThan(plain.indexOf('setAuthCookie'));
+
+    const focused = formatRepoMapOutline(store, 1500, ['auth']);
+    expect(focused.indexOf('setAuthCookie')).toBeLessThan(focused.indexOf('popular'));
+  });
+});
+
+describe('focusTermsFromMessages', () => {
+  const { focusTermsFromMessages } = require('../memory/context.manager');
+  it('keeps code-ish tokens and drops prose', () => {
+    const terms = focusTermsFromMessages([{ role: 'user', content: 'please fix setAuthCookie in src/auth.ts now' }]);
+    expect(terms).toContain('setAuthCookie');
+    expect(terms).toContain('src/auth.ts');
+    expect(terms).not.toContain('please'); // plain prose word skipped
+    expect(terms).not.toContain('fix');
+  });
+  it('returns [] for a vague request (falls back to pure PageRank)', () => {
+    expect(focusTermsFromMessages([{ role: 'user', content: 'read all the codebase and suggest improvements' }])).toEqual([]);
+  });
 });

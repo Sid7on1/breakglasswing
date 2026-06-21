@@ -127,15 +127,26 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     }
   });
 
-  if (isCodebase(process.cwd()) && nodeCount() === 0 && !onboardingDone()) {
-    // Defer slightly so `ready` + the first snapshot land first.
-    setTimeout(() => {
-      if (nodeCount() !== 0 || onboardingDone()) return;
-      cliEvents.emit('message', uiMenu('New codebase detected — build the map graph?', [
-        { label: '[ Build map graph ]', value: '/index force', desc: 'AST index so I navigate to the exact symbol (skips node_modules, .git, build dirs)' },
-        { label: '[ Skip ]', value: '', desc: 'You can run /index later' },
-      ]));
-    }, 600);
+  const autoIndexEnabled = () => { try { return getConfig().autoIndex !== false; } catch { return true; } };
+
+  if (isCodebase(process.cwd()) && nodeCount() === 0) {
+    if (autoIndexEnabled()) {
+      // autoIndex: true → build the graph in the background automatically (idempotent: autoIndex()
+      // no-ops if a graph already exists on disk). THIS is what unlocks the repo map + GraphContext/
+      // GraphQuery tools without the user clicking a menu or running /index. Previously "autoIndex"
+      // only flipped an enabled flag and nothing ever called it, so the graph stayed empty.
+      cliEvents.emit('status', 'Indexing codebase for symbol-level navigation…');
+      void codebaseIndexer.autoIndex(false, false).catch(() => { /* best-effort; /index retries */ });
+    } else if (!onboardingDone()) {
+      // autoIndex off → ask before building (the original onboarding menu).
+      setTimeout(() => {
+        if (nodeCount() !== 0 || onboardingDone()) return;
+        cliEvents.emit('message', uiMenu('New codebase detected — build the map graph?', [
+          { label: '[ Build map graph ]', value: '/index force', desc: 'AST index so I navigate to the exact symbol (skips node_modules, .git, build dirs)' },
+          { label: '[ Skip ]', value: '', desc: 'You can run /index later' },
+        ]));
+      }, 600);
+    }
   }
 
   await new Promise<void>((resolve) => {

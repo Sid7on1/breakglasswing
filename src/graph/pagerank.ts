@@ -92,17 +92,28 @@ const estTokens = (s: string) => Math.ceil(s.length / 4);
  * ordered by source line so the outline reads top-to-bottom. Falls back to `type name` when a node
  * has no captured signature (older graphs). Empty string when the graph isn't indexed.
  */
-export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500): string {
+export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focusTerms: string[] = []): string {
   const scores = computePageRank(store);
   const graph = store.getGraph();
+
+  // Personalization (aider's `mentioned_idents`): symbols whose name/file matches a term from the
+  // CURRENT request float to the top, so the map is about THIS task — not just globally important
+  // code. Two-tier sort: focus matches first (by PageRank), then everything else (by PageRank).
+  const focus = focusTerms.map(t => t.toLowerCase()).filter(t => t.length > 2);
+  const isFocus = (n: GraphNode): boolean => {
+    if (focus.length === 0) return false;
+    const hay = (n.name + ' ' + (n.filePath || '')).toLowerCase();
+    return focus.some(t => hay.includes(t));
+  };
 
   // Only real top-level definitions — not STATEMENT/VARIABLE/BLOCK nodes, whose "signature" is just
   // a code line (`result = super.emit(...)`) and would fill the map with noise.
   const DEF_TYPES = new Set<GraphNode['type']>(['FUNCTION', 'CLASS', 'INTERFACE']);
   const ranked = Array.from(graph.nodes.values())
     .filter((n: GraphNode) => !!n.filePath && DEF_TYPES.has(n.type))
-    .map((n: GraphNode) => ({ n, score: scores.get(n.id) ?? 0 }))
-    .sort((a, b) => b.score - a.score);
+    .map((n: GraphNode) => ({ n, score: scores.get(n.id) ?? 0, focus: false }))
+    .map(e => ({ ...e, focus: isFocus(e.n) }))
+    .sort((a, b) => (a.focus !== b.focus ? (a.focus ? -1 : 1) : b.score - a.score));
   if (ranked.length === 0) return '';
 
   const header =
