@@ -1,11 +1,6 @@
 {
   "version": "1.0.0",
   "components": {
-    "ActionRouter": {
-      "path": "src/actions/action.router.ts",
-      "purpose": "Routes validated tasks to physical executors.",
-      "riskLevel": "HIGH"
-    },
     "ContextEngine": {
       "path": "src/memory/context.engine.ts",
       "purpose": "Provides LLM with memory injection.",
