@@ -24,14 +24,24 @@ function resolveHref(href: string): string {
   }
 }
 
-/** Parse DuckDuckGo's HTML results page into {title, url, snippet} items. Exported for testing. */
+/**
+ * Parse a DuckDuckGo results page into {title, url, snippet} items. Handles BOTH layouts — the
+ * `html.duckduckgo.com` page (`result__a` / `result__snippet`) and the `lite.duckduckgo.com` page
+ * (`result-link` / `result-snippet`) — and tolerates either attribute order. Exported for testing.
+ */
 export function parseDuckDuckGoHtml(html: string, max: number): { title: string; url: string; snippet: string }[] {
-  const titleRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const snippetRe = /class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  // Any <a> whose attributes mark it a result link (either layout); attribute order is irrelevant.
+  const anchorRe = /<a\b([^>]*(?:result__a|result-link)[^>]*)>([\s\S]*?)<\/a>/g;
+  const hrefRe = /href="([^"]+)"/;
   const titles: { title: string; url: string }[] = [];
-  const snippets: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = titleRe.exec(html)) && titles.length < max) titles.push({ url: resolveHref(m[1]), title: clean(m[2]) });
+  while ((m = anchorRe.exec(html)) && titles.length < max) {
+    const href = m[1].match(hrefRe);
+    if (href) titles.push({ url: resolveHref(href[1]), title: clean(m[2]) });
+  }
+  // Snippet cell/anchor in either layout (ends in </a> on the html page, </td> on lite).
+  const snippetRe = /class=['"][^'"]*result(?:__snippet|-snippet)[^'"]*['"][^>]*>([\s\S]*?)<\/(?:a|td)>/g;
+  const snippets: string[] = [];
   while ((m = snippetRe.exec(html)) && snippets.length < max) snippets.push(clean(m[1]));
   return titles.map((t, i) => ({ ...t, snippet: snippets[i] || '' }));
 }
@@ -62,10 +72,20 @@ export function createWebSearchTool(governor: IGovernor): BuiltTool {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
       try {
-        const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, {
+        // Use the lite endpoint via POST with a real browser UA. The `html.duckduckgo.com` GET path
+        // is aggressively rate-limited (answers automated requests with an HTTP 202 "anomaly" page,
+        // zero results) — which made every search fail and the model retry in a loop. `lite` with a
+        // form POST is served normally.
+        const res = await fetch('https://lite.duckduckgo.com/lite/', {
+          method: 'POST',
           signal: controller.signal,
           redirect: 'follow',
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BiMax-Agent/1.0)', Accept: 'text/html' },
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'text/html',
+          },
+          body: `q=${encodeURIComponent(q)}`,
         });
         const html = await res.text();
         const results = parseDuckDuckGoHtml(html, max);

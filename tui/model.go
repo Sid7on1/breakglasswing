@@ -66,10 +66,6 @@ func waitForEngine(e *Engine) tea.Cmd {
 type model struct {
 	engine *Engine
 	vp     viewport.Model
-	// When true, new content auto-scrolls to the bottom (default). Cleared when the user scrolls up
-	// so streaming tokens / status updates don't yank them away from what they're reading; restored
-	// when they scroll back to the bottom.
-	stickToBottom bool
 	input  textarea.Model // multi-line: Enter submits, Ctrl+J inserts a newline (paste code blocks)
 	spin   spinner.Model  // animated while a turn runs (busy); idle otherwise
 
@@ -215,11 +211,10 @@ func initialModel(e *Engine) model {
 		spin:     sp,
 		history:  hist,
 		histIdx:  len(hist),
-		vp:            viewport.New(80, 20),
-		stickToBottom: true,
-		status:        "starting engine…",
-		toolLine:      map[string]int{},
-		bell:          os.Getenv("BGW_ENABLE_NOTIFICATIONS") != "0",
+		vp:       viewport.New(80, 20),
+		status:   "starting engine…",
+		toolLine: map[string]int{},
+		bell:     os.Getenv("BGW_ENABLE_NOTIFICATIONS") != "0",
 	}
 }
 
@@ -450,13 +445,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "shift+up", "shift+down":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg) // scroll the transcript without touching the input
-			// Follow new content again only once the user has scrolled back to the bottom.
-			m.stickToBottom = m.vp.AtBottom()
 			return m, cmd
 		case "ctrl+l":
 			// Clear the physical terminal and force a clean repaint (parity with the Ink UI). The
 			// transcript itself is untouched — use /clear to reset the conversation.
-			m.stickToBottom = true
 			m.refresh()
 			return m, tea.ClearScreen
 		case "ctrl+f":
@@ -1377,9 +1369,7 @@ func (m *model) refresh() {
 	m.vp.Width = m.width
 	m.vp.Height = h
 	m.vp.SetContent(body)
-	if m.stickToBottom {
-		m.vp.GotoBottom() // only follow new content when the user hasn't scrolled up to read
-	}
+	m.vp.GotoBottom()
 	if n := lipgloss.Height(body) - h; n > 0 {
 		m.clipped = n // earlier lines exist above the window — surfaced as a scroll hint
 	} else {
