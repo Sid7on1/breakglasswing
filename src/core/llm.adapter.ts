@@ -31,6 +31,28 @@ export function markCacheBreakpoint(msg: any): any {
  *   A fresh attempt (new key, re-sampled output) almost always succeeds.
  * - otherwise  : fatal (auth, malformed request, …) — surface and stop.
  */
+/** One accumulated streaming tool call: stable id, name, and the concatenated arguments JSON. */
+export interface ToolCallSlot { id: string; name: string; args: string; }
+
+/**
+ * Apply ONE streaming `delta.tool_calls[]` entry to an index-keyed accumulator and return its index.
+ *
+ * The OpenAI streaming contract keys tool-call fragments by `index`: the first delta for an index
+ * carries id + name + the start of the arguments; later deltas append more `arguments`. Some
+ * providers (minimax/NIM) repeat `id` on every delta, so logic that treated "id present" as "new
+ * call" mis-fired a fresh call per chunk and surfaced truncated args (`{"query": "`). Keying off
+ * `index` (falling back to 0 when absent) accumulates correctly. Pure — exported for testing.
+ */
+export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?: number; id?: string; function?: { name?: string; arguments?: string } }): number {
+  const i = typeof tc.index === 'number' ? tc.index : 0;
+  let slot = acc.get(i);
+  if (!slot) { slot = { id: '', name: '', args: '' }; acc.set(i, slot); }
+  if (tc.id) slot.id = tc.id;
+  if (tc.function?.name) slot.name = tc.function.name;
+  if (tc.function?.arguments) slot.args += tc.function.arguments;
+  return i;
+}
+
 export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient' } {
   const msg = String(e?.message ?? '');
   let status = 500;
@@ -789,9 +811,14 @@ export class LlmAdapter implements LLMProvider {
 
       const stream: any = await client.chat.completions.create(requestOptions, requestInit);
 
-      let activeToolCallId = '';
-      let activeToolName = '';
-      let activeToolArgs = '';
+      // Accumulate streamed tool calls keyed by their delta `index` — the OpenAI streaming contract:
+      // the first delta for an index carries id+name+the start of the args, later deltas append more
+      // args. The previous code keyed off the PRESENCE of `tc.id`, assuming it appears only on the
+      // first delta; minimax/NIM (and others) repeat `id` on every delta, so that mis-fired a "new
+      // call" each chunk and emitted truncated args (`{"query": "`, `richest person`, …) that then
+      // failed to parse. One slot per index, yielded only once the stream is complete, fixes it.
+      const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+      let lastActiveIdx = -1;
       // Throttle live tool-arg partials (C3): a big tool call streams hundreds of arg fragments, and
       // emitting one partial per fragment would drive a UI re-render each time. Coalesce to at most
       // one partial every PARTIAL_EMIT_MS; the final authoritative tool_call always fires regardless.
@@ -885,28 +912,19 @@ export class LlmAdapter implements LLMProvider {
           const stray = thinkFilter.drainPending();
           if (stray) yield { type: 'thinking', text: stray };
           for (const tc of toolCalls) {
-            if (tc.id) {
-              // Yield previous tool call if any
-              if (activeToolCallId) {
-                yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
-              }
-              activeToolCallId = tc.id;
-              activeToolName = tc.function?.name || '';
-              activeToolArgs = tc.function?.arguments || '';
-            } else if (tc.function?.arguments) {
-              activeToolArgs += tc.function.arguments;
-            }
+            lastActiveIdx = applyToolCallDelta(toolAcc, tc);
           }
           // C3 — live tool-arg streaming. When the model streams partial-JSON tool args, surface the
-          // call (name + args-so-far) as it forms so the UI shows activity before the turn finishes.
-          // Additive + display-only: the authoritative `tool_call` still fires at the boundary/end.
+          // most-recently-updated call (name + args-so-far) as it forms so the UI shows activity before
+          // the turn finishes. Display-only: the authoritative `tool_call`(s) fire once at the end.
           // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged. Throttled
           // so a large tool call doesn't flood the UI with a re-render per arg fragment.
-          if (caps.partialJsonTools && activeToolCallId) {
+          if (caps.partialJsonTools && lastActiveIdx >= 0) {
             const now = Date.now();
             if (now - lastPartialAt >= PARTIAL_EMIT_MS) {
               lastPartialAt = now;
-              yield { type: 'tool_call_partial', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+              const slot = toolAcc.get(lastActiveIdx)!;
+              yield { type: 'tool_call_partial', id: slot.id || `idx-${lastActiveIdx}`, name: slot.name, args: slot.args };
             }
           }
         }
@@ -954,9 +972,10 @@ export class LlmAdapter implements LLMProvider {
       if (tail.thinking) yield { type: 'thinking', text: tail.thinking };
       if (tail.text) yield { type: 'token', text: tail.text };
 
-      // Yield the final tool call
-      if (activeToolCallId) {
-        yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+      // Yield every accumulated tool call, in index order, now that the stream is complete and each
+      // one's arguments are whole. (Skips empty slots a provider may have opened without a name.)
+      for (const [, slot] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
+        if (slot.name) yield { type: 'tool_call', id: slot.id || `call-${Date.now()}-${slot.name}`, name: slot.name, args: slot.args };
       }
 
       yield { type: 'done' };
