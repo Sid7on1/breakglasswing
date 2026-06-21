@@ -176,7 +176,15 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     },
     required: ['path', 'oldString', 'newString'],
   },
-  execute: async (args: EditArgs, context?: any) => {
+  execute: async (rawArgs: any, context?: any) => {
+    // Accept Claude-Code-style snake_case keys (file_path / old_string / new_string / replace_all)
+    // as well as our camelCase schema — many models emit the former.
+    const args: EditArgs = {
+      path: rawArgs.path ?? rawArgs.file_path ?? rawArgs.filePath,
+      oldString: rawArgs.oldString ?? rawArgs.old_string,
+      newString: rawArgs.newString ?? rawArgs.new_string,
+      replaceAll: rawArgs.replaceAll ?? rawArgs.replace_all,
+    };
     const cwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, cwd);
 

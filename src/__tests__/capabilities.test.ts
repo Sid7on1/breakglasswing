@@ -79,8 +79,10 @@ describe('capabilitiesFor — model capability resolution', () => {
   // inlineReasoning drives the streaming think-filter's preamble-cap lift: the NIM reasoning models
   // that emit chain-of-thought inline (before a tool call) must be flagged, or their reasoning leaks
   // into the reply. Plain/structured-reasoning models stay false so the cap protects them.
-  it('inlineReasoning: on for the inline-CoT NIM models, off for plain + native-channel models', () => {
-    expect(capabilitiesFor('nvidia', 'minimax-m3').inlineReasoning).toBe(true);
+  it('inlineReasoning: on for the inline-CoT reasoning models (stepfun), off for plain models (incl. minimax)', () => {
+    // minimax is NOT a reasoning model — inlineReasoning false so its tokens stream instead of being
+    // buffered until a `</think>` that never arrives. stepfun IS a reasoning model → true.
+    expect(capabilitiesFor('nvidia', 'minimax-m3').inlineReasoning).toBe(false);
     expect(capabilitiesFor('nvidia', 'step-3.5-flash').inlineReasoning).toBe(true);
     expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').inlineReasoning).toBe(true);
     expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').inlineReasoning).toBe(false);

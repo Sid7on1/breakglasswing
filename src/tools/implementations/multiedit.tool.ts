@@ -55,7 +55,15 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
   },
   execute: async (args: { edits: SingleEdit[] }, context?: any) => {
     const cwd = context?.cwd || process.cwd();
-    const edits = args.edits || [];
+    // Accept BOTH our camelCase schema and Claude-Code-style snake_case keys (file_path / old_string
+    // / new_string / replace_all) — many models emit the latter, which previously arrived as undefined
+    // fields ("edit #1 (undefined): newString must differ from oldString").
+    const edits: SingleEdit[] = (args.edits || []).map((e: any) => ({
+      path: e.path ?? e.file_path ?? e.filePath,
+      oldString: e.oldString ?? e.old_string,
+      newString: e.newString ?? e.new_string,
+      replaceAll: e.replaceAll ?? e.replace_all,
+    }));
     if (edits.length === 0) return 'Error: edits array is empty.';
 
     // Phase 1 — load each distinct file once and validate every edit in order against

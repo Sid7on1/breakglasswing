@@ -53,7 +53,7 @@ export class AgentLoop {
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
-    const maxIter = options?.maxIterations ?? 30;
+    const maxIter = options?.maxIterations ?? 55;
     const contextMode = options?.contextMode ?? 'smart';
     // Cooperative cancellation: the front-end's interrupt aborts this signal. We don't tear the
     // in-flight fetch down mid-byte; we stop at the next safe boundary (next streamed token, or

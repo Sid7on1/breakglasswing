@@ -149,9 +149,11 @@ const RULES: CapabilityRule[] = [
     caps: {
       reasoningEffortKnob: true,
       parallelToolCalls: true,
-      // Emits opener-less inline chain-of-thought (often before a tool call); wait for the
-      // `</think>` closer rather than capping → no reasoning leak into the reply.
-      inlineReasoning: true,
+      // minimax is NOT a reasoning model (confirmed by the user who runs it). The previous
+      // inlineReasoning:true made the think-tag filter buffer ALL leading content waiting for a
+      // `</think>` closer that never arrives — so the whole answer surfaced in one burst at stream
+      // end ("generated whole in one go") instead of streaming. false → tokens stream normally.
+      inlineReasoning: false,
       // NIM-hosted minimax serves a 128k effective window — not the 1M the model card advertises.
       // The prior 1M made the token-meter bar read ~1% (useless) AND let ContextManager defer
       // compaction to ~700k, well past what the NIM endpoint accepts (→ overflow/API errors).
