@@ -80,7 +80,7 @@ export class ContextManager {
     // Inject RepoMap outline once per session so the model knows the load-bearing symbols.
     if (!this.repoMapInjected && _graphStore) {
       try {
-        const outline = formatRepoMapOutline(_graphStore, 15);
+        const outline = formatRepoMapOutline(_graphStore, 1500); // ~1.5k-token budget, aider-style
         if (outline) {
           this.repoMapInjected = true;
           msgs = [{ role: 'system' as const, content: outline }, ...msgs];
