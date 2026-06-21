@@ -142,6 +142,22 @@ export class ThinkTagFilter {
     return '';
   }
 
+  /**
+   * The provider sent reasoning out-of-band via the structured `reasoning_content` channel — so this
+   * turn's CONTENT channel is the ANSWER, not opener-less reasoning. Stop tentatively buffering and
+   * RELEASE whatever leading content we were holding as visible text (the opposite of drainPending,
+   * which diverts to thinking). Idempotent. This is how reasoning is detected at runtime instead of
+   * from a static per-model flag — the moment a `reasoning_content` delta arrives, we know.
+   */
+  releaseAsAnswer(): string {
+    if (this.decided || this.inThink) return '';
+    this.implicit = false;
+    this.decided = true;
+    const t = this.preamble;
+    this.preamble = '';
+    return t;
+  }
+
   /** Returns visible text and thinking text extracted from this token. */
   process(token: string): { text: string; thinking: string } {
     this.pending += token;
@@ -330,6 +346,12 @@ export class LlmAdapter implements LLMProvider {
   // leading content until a closer proves it was thinking. On for the default reasoning models;
   // set BGW_IMPLICIT_THINK=false for plain models so their answers stream token-by-token.
   public implicitThink: boolean = process.env.BGW_IMPLICIT_THINK !== 'false';
+  // RUNTIME reasoning detection (so think-vs-non-think is figured out automatically, per model, with
+  // NO static config to get wrong when you switch models). A model id is added here the first time it
+  // proves it reasons — by emitting a `reasoning_content` delta or a `</think>` closer in content.
+  // Once learned, later turns of that model lift the preamble cap (wait for the closer instead of
+  // capping → no reasoning leak). Unknown/plain models stay capped, so their answers stream normally.
+  private detectedReasoners = new Set<string>();
   // Allow the model to emit several tool calls in ONE turn (batched reads/greps run concurrently in
   // the loop → far faster investigation). Default ON; disable for backends that reject multi-tool
   // turns (e.g. NVIDIA NIM) via config or BGW_PARALLEL_TOOL_CALLS=false.
@@ -832,11 +854,14 @@ export class LlmAdapter implements LLMProvider {
       // Disable implicit mode when the capability is present so the answer streams token-by-token.
       // FLOOR (caps.nativeThinking=false) leaves this exactly as before: `this.implicitThink`.
       const useImplicitThink = this.implicitThink && !caps.nativeThinking;
-      // Lift the preamble cap for inline-reasoning models (minimax, step-3 on NIM): they stream long
-      // chain-of-thought before a tool call and reliably close it with `</think>`, so capping early
-      // leaks that reasoning as the reply (the "thinking leaks when a tool is called" bug). For plain
-      // models the cap stays on so their answer never buffers into a burst.
-      const thinkFilter = new ThinkTagFilter(useImplicitThink, !caps.inlineReasoning);
+      // Lift the preamble cap ONLY for models we've LEARNED reason inline (this session) or that the
+      // capability table seeds as such — they emit long CoT then close it with `</think>`, so capping
+      // early would leak it. Everything else stays capped, so a plain model's answer streams instead
+      // of buffering into one end-of-stream burst (the minimax bug). Detection is automatic at runtime
+      // below, so a model NOT in the table is handled correctly the moment it reveals its behaviour.
+      if (caps.inlineReasoning || caps.nativeThinking) this.detectedReasoners.add(model); // table seed
+      const knownReasoner = this.detectedReasoners.has(model);
+      const thinkFilter = new ThinkTagFilter(useImplicitThink, /* capPreamble */ !knownReasoner);
 
       // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
       // field key the provider sent, then writes them to a dedicated debug file at stream end. This
@@ -885,9 +910,16 @@ export class LlmAdapter implements LLMProvider {
           }
         }
 
-        // Reasoning channel (MiniMax/DeepSeek-style): never surface as the reply
-        const reasoning = chunk.choices[0]?.delta?.reasoning_content;
+        // Reasoning channel (DeepSeek-R1 / o-series style): never surface as the reply. Its mere
+        // presence PROVES this model reasons out-of-band, so the content channel is the answer —
+        // learn it (future turns skip buffering) and release anything the filter held tentatively.
+        const reasoning = chunk.choices[0]?.delta?.reasoning_content ?? (chunk.choices[0]?.delta as any)?.reasoning;
         if (reasoning) {
+          if (!this.detectedReasoners.has(model)) {
+            this.detectedReasoners.add(model);
+            const released = thinkFilter.releaseAsAnswer();
+            if (released) yield { type: 'token', text: released };
+          }
           yield { type: 'thinking', text: reasoning };
         }
 
@@ -897,6 +929,9 @@ export class LlmAdapter implements LLMProvider {
         const rawToken = chunk.choices[0]?.delta?.content;
         if (rawToken) {
           const token = rawToken.replace(/<thinking>/g, '<think>').replace(/<\/thinking>/g, '</think>');
+          // A `</think>` in the content channel PROVES this model reasons inline — learn it so later
+          // turns lift the preamble cap (wait for the closer instead of capping → no reasoning leak).
+          if (token.includes('</think>')) this.detectedReasoners.add(model);
           const { text, thinking } = thinkFilter.process(token);
           if (thinking) yield { type: 'thinking', text: thinking };
           if (text) yield { type: 'token', text };

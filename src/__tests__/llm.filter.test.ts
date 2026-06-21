@@ -143,6 +143,18 @@ describe('ThinkTagFilter', () => {
     expect(a.text + b.text).toContain('answer');
     expect((a.thinking + b.thinking)).toBe('');
   });
+
+  it('releaseAsAnswer() emits buffered preamble as visible text (structured-reasoning detected)', () => {
+    // Implicit mode tentatively holds leading content. When reasoning_content arrives mid-stream, we
+    // now KNOW the content channel is the answer → release the held text as visible, stop buffering.
+    const f = new ThinkTagFilter(true);
+    const held = f.process('Here is the answer so far'); // buffered (tentative, no closer yet)
+    expect(held.text).toBe(''); // nothing surfaced yet
+    const released = f.releaseAsAnswer();
+    expect(released).toContain('Here is the answer so far');
+    // After release, implicit buffering is off — subsequent content streams immediately.
+    expect(f.process(' and the rest.').text).toContain('and the rest');
+  });
 });
 
 describe('stripThink', () => {

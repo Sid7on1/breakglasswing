@@ -137,23 +137,15 @@ const RULES: CapabilityRule[] = [
       contextWindow: 64_000,
     },
   },
-  // --- MiniMax (BiMax's default reasoning MoE): reasoning channel + effort, single-tool-safe. ---
-  // nativeThinking is intentionally LEFT FALSE (the base default): on NVIDIA NIM, minimax emits
-  // opener-less chain-of-thought INLINE in the content channel (the same pattern as its step-3.5
-  // sibling), not solely via `reasoning_content`. Setting nativeThinking=true disabled the implicit
-  // <think>/opener-less scraper (llm.adapter useImplicitThink), so that inline reasoning leaked into
-  // the visible reply. Keeping it false re-enables the scraper; the reasoning_content channel is
-  // handled independently of this flag, so structured reasoning still works.
+  // --- MiniMax (NIM): NOT a reasoning model (confirmed by the user who runs it) — it streams its
+  // answer directly, with no reasoning_content channel and no inline </think>. So inlineReasoning AND
+  // reasoningEffortKnob are FALSE (sending reasoning_effort to a non-reasoning model risks a 400, and
+  // the old inlineReasoning:true buffered the whole answer into one end-of-stream burst). The runtime
+  // reasoning detector (llm.adapter) still auto-handles it correctly if a future variant DOES reason.
   {
     match: ['minimax'],
     caps: {
-      reasoningEffortKnob: true,
       parallelToolCalls: true,
-      // minimax is NOT a reasoning model (confirmed by the user who runs it). The previous
-      // inlineReasoning:true made the think-tag filter buffer ALL leading content waiting for a
-      // `</think>` closer that never arrives — so the whole answer surfaced in one burst at stream
-      // end ("generated whole in one go") instead of streaming. false → tokens stream normally.
-      inlineReasoning: false,
       // NIM-hosted minimax serves a 128k effective window — not the 1M the model card advertises.
       // The prior 1M made the token-meter bar read ~1% (useless) AND let ContextManager defer
       // compaction to ~700k, well past what the NIM endpoint accepts (→ overflow/API errors).

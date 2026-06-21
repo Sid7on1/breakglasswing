@@ -67,10 +67,10 @@ describe('capabilitiesFor — model capability resolution', () => {
 
   // The A3 reasoning_effort send-gate keys off reasoningEffortKnob: only flagged models get the
   // field (others 400 on it). Lock both polarities so a table edit can't silently break the gate.
-  it('reasoningEffortKnob: on for reasoning models (incl. the minimax default), off for the rest', () => {
-    expect(capabilitiesFor('nvidia', 'minimax-m1').reasoningEffortKnob).toBe(true);
+  it('reasoningEffortKnob: on for true reasoning models, off for the rest (incl. minimax)', () => {
     expect(capabilitiesFor('openai', 'o1-preview').reasoningEffortKnob).toBe(true);
     expect(capabilitiesFor('deepseek', 'deepseek-r1').reasoningEffortKnob).toBe(true);
+    expect(capabilitiesFor('nvidia', 'minimax-m1').reasoningEffortKnob).toBe(false); // not a reasoning model
     expect(capabilitiesFor('openai', 'gpt-4o').reasoningEffortKnob).toBe(false);
     expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').reasoningEffortKnob).toBe(false);
     expect(capabilitiesFor('local', 'mystery-7b').reasoningEffortKnob).toBe(false);
