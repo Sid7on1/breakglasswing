@@ -14,11 +14,24 @@ export type ContextMode = 'smart' | 'full';
 const CORE_TOOLS = new Set<string>([
   'ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool',
   'CreateDirectoryTool', 'BashTool', 'GrepTool', 'GlobTool', 'TodoWriteTool',
-  'ChangeDirectoryTool', 'AskUserTool', 'GraphContextTool', 'GitTool',
+  'ChangeDirectoryTool', 'AskUserTool', 'GitTool',
+  // Web lookup is a common, lightweight capability the model reaches for constantly (current facts,
+  // docs, errors). Deferring it behind ToolSearch made the model flail — call ToolSearch, then guess
+  // at a fetch with no URL — instead of just searching. Keep them in the working set (like Claude Code).
+  'WebSearchTool', 'WebFetchTool',
   // SkillTool is itself the progressive-disclosure entry point (the prompt's AVAILABLE SKILLS
   // section tells the model to call it), so it must always be loaded — never deferred.
   'SkillTool',
 ]);
+
+/**
+ * Index-gated tools: they only work against a built dependency graph, so we DISABLE them (don't send
+ * their schemas, don't let ToolSearch surface them) until the repo is indexed — otherwise the model
+ * wastes a turn calling a tool that just answers "the graph is empty." Once the graph has nodes they
+ * are PROMOTED: always sent in both modes (so the model reaches for them first), and the prompt steers
+ * it to prefer them over reading whole files, since they return exactly the relevant code far cheaper.
+ */
+const INDEX_GATED_TOOLS = new Set<string>(['GraphQueryTool', 'GraphContextTool']);
 
 const TOOL_SEARCH_TOOL = 'ToolSearchTool';
 
@@ -34,6 +47,20 @@ export class ToolRegistry {
    * so the model never has to re-search for it.
    */
   private discovered: Set<string> = new Set();
+
+  /**
+   * Live "is the repo indexed?" check. Wired by the container to the graph store (lazy so it always
+   * reflects the current graph, including a graph built mid-session). Defaults to "not indexed" so
+   * index-gated tools stay disabled until something proves the graph exists.
+   */
+  private graphReadyFn: () => boolean = () => false;
+  public setGraphReadyCheck(fn: () => boolean): void { this.graphReadyFn = fn; }
+  public isGraphReady(): boolean {
+    try { return !!this.graphReadyFn(); } catch { return false; }
+  }
+
+  /** A tool that requires the dependency graph (gated until indexed, then promoted + preferred). */
+  public isIndexGated(name: string): boolean { return INDEX_GATED_TOOLS.has(name); }
 
   public register(tool: BuiltTool) {
     if (this.tools.has(tool.name)) {
@@ -64,7 +91,21 @@ export class ToolRegistry {
    * they are never in CORE_TOOLS.
    */
   public isDeferred(name: string): boolean {
-    return this.tools.has(name) && !CORE_TOOLS.has(name) && name !== TOOL_SEARCH_TOOL;
+    // Index-gated tools are never "deferred" (load-on-demand): they're either fully sent (indexed) or
+    // fully hidden (not indexed), never advertised in the LOAD-ON-DEMAND list.
+    return this.tools.has(name) && !CORE_TOOLS.has(name) && name !== TOOL_SEARCH_TOOL && !INDEX_GATED_TOOLS.has(name);
+  }
+
+  /**
+   * Whether a tool's full schema is sent to the model this turn — the single source of truth shared by
+   * getSchemas (what goes on the wire) and the persona prompt (what it lists), so they never drift.
+   */
+  public isSent(name: string, mode: ContextMode): boolean {
+    // Gated tools ride entirely on index readiness, in BOTH modes.
+    if (INDEX_GATED_TOOLS.has(name)) return this.isGraphReady();
+    if (mode === 'full') return name !== TOOL_SEARCH_TOOL;
+    // smart: the core working set + ToolSearch + anything already discovered this session.
+    return CORE_TOOLS.has(name) || name === TOOL_SEARCH_TOOL || this.discovered.has(name);
   }
 
   /** Mark deferred tools as surfaced so their schemas are sent on subsequent turns. */
@@ -147,12 +188,8 @@ export class ToolRegistry {
    */
   public getSchemas(opts?: { mode?: ContextMode }): any[] {
     const mode = opts?.mode ?? 'full';
-    const all = Array.from(this.tools.values());
-    if (mode === 'full') {
-      return all.filter(t => t.name !== TOOL_SEARCH_TOOL).map(toSchema);
-    }
-    return all
-      .filter(t => CORE_TOOLS.has(t.name) || t.name === TOOL_SEARCH_TOOL || this.discovered.has(t.name))
+    return Array.from(this.tools.values())
+      .filter(t => this.isSent(t.name, mode))
       .map(toSchema);
   }
 

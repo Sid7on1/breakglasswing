@@ -22,14 +22,14 @@ describe('ToolRegistry — smart vs full context modes', () => {
     // A couple of core tools, a deferred native tool, a deferred MCP tool.
     reg.register(fakeTool('ReadFileTool'));
     reg.register(fakeTool('BashTool'));
-    reg.register(fakeTool('WebFetchTool'));      // not in CORE → deferred
+    reg.register(fakeTool('ScoutTool'));      // not in CORE → deferred
     reg.register(fakeTool('mcp__github__create')); // mcp__ → always deferred
     reg.register(createToolSearchTool(governor, reg));
   });
 
   it('full mode sends every tool except ToolSearchTool', () => {
     expect(names(reg.getSchemas({ mode: 'full' }))).toEqual(
-      ['BashTool', 'ReadFileTool', 'WebFetchTool', 'mcp__github__create'].sort(),
+      ['BashTool', 'ReadFileTool', 'ScoutTool', 'mcp__github__create'].sort(),
     );
   });
 
@@ -40,7 +40,7 @@ describe('ToolRegistry — smart vs full context modes', () => {
   });
 
   it('classifies deferred tools correctly', () => {
-    expect(reg.isDeferred('WebFetchTool')).toBe(true);
+    expect(reg.isDeferred('ScoutTool')).toBe(true);
     expect(reg.isDeferred('mcp__github__create')).toBe(true);
     expect(reg.isDeferred('ReadFileTool')).toBe(false);
     expect(reg.isDeferred('ToolSearchTool')).toBe(false);
@@ -48,19 +48,19 @@ describe('ToolRegistry — smart vs full context modes', () => {
 
   it('deferredSummary lists undiscovered deferred tools only', () => {
     const before = reg.deferredSummary().map(t => t.name).sort();
-    expect(before).toEqual(['WebFetchTool', 'mcp__github__create'].sort());
+    expect(before).toEqual(['ScoutTool', 'mcp__github__create'].sort());
   });
 
   it('once discovered, a deferred tool is sent in smart mode and drops off the summary', () => {
-    reg.markDiscovered(['WebFetchTool']);
-    expect(names(reg.getSchemas({ mode: 'smart' }))).toContain('WebFetchTool');
-    expect(reg.deferredSummary().map(t => t.name)).not.toContain('WebFetchTool');
+    reg.markDiscovered(['ScoutTool']);
+    expect(names(reg.getSchemas({ mode: 'smart' }))).toContain('ScoutTool');
+    expect(reg.deferredSummary().map(t => t.name)).not.toContain('ScoutTool');
   });
 
   it('searchDeferred by keyword marks matches discovered and returns their schemas', () => {
-    const found = reg.searchDeferred('web fetch');
-    expect(found.map((s: any) => s.name)).toContain('WebFetchTool');
-    expect(reg.isDiscovered('WebFetchTool')).toBe(true);
+    const found = reg.searchDeferred('scout');
+    expect(found.map((s: any) => s.name)).toContain('ScoutTool');
+    expect(reg.isDiscovered('ScoutTool')).toBe(true);
   });
 
   it('searchDeferred supports select:Name syntax', () => {
@@ -70,30 +70,70 @@ describe('ToolRegistry — smart vs full context modes', () => {
   });
 
   it('unregister clears discovery state', () => {
-    reg.markDiscovered(['WebFetchTool']);
-    reg.unregister('WebFetchTool');
-    expect(reg.isDiscovered('WebFetchTool')).toBe(false);
-    expect(names(reg.getSchemas({ mode: 'smart' }))).not.toContain('WebFetchTool');
+    reg.markDiscovered(['ScoutTool']);
+    reg.unregister('ScoutTool');
+    expect(reg.isDiscovered('ScoutTool')).toBe(false);
+    expect(names(reg.getSchemas({ mode: 'smart' }))).not.toContain('ScoutTool');
   });
 });
 
 describe('ToolSearchTool', () => {
   it('loads a deferred tool and reports it as callable', async () => {
     const reg = new ToolRegistry();
-    reg.register(fakeTool('GraphQueryTool', 'GraphQueryTool queries the dependency graph'));
+    reg.register(fakeTool('ScoutTool', 'ScoutTool scouts web pages and APIs'));
     const search = createToolSearchTool(governor, reg);
-    const out = await search.execute({ query: 'graph dependency' });
-    expect(out).toContain('GraphQueryTool');
+    const out = await search.execute({ query: 'scout' });
+    expect(out).toContain('ScoutTool');
     expect(out).toContain('<functions>');
-    expect(reg.isDiscovered('GraphQueryTool')).toBe(true);
+    expect(reg.isDiscovered('ScoutTool')).toBe(true);
   });
 
   it('explains when nothing matches but deferred tools exist', async () => {
     const reg = new ToolRegistry();
-    reg.register(fakeTool('GraphQueryTool'));
+    reg.register(fakeTool('ScoutTool'));
     const search = createToolSearchTool(governor, reg);
     const out = await search.execute({ query: 'select:NopeTool' });
     expect(out).toContain('No deferred tools matched');
-    expect(out).toContain('GraphQueryTool');
+    expect(out).toContain('ScoutTool');
+  });
+});
+
+describe('ToolRegistry — index-gated graph tools', () => {
+  let reg: ToolRegistry;
+  let indexed: boolean;
+
+  beforeEach(() => {
+    reg = new ToolRegistry();
+    indexed = false;
+    reg.setGraphReadyCheck(() => indexed);
+    reg.register(fakeTool('ReadFileTool'));
+    reg.register(fakeTool('GraphQueryTool', 'GraphQueryTool queries the dependency graph'));
+    reg.register(fakeTool('GraphContextTool', 'GraphContextTool builds a token-budgeted context pack'));
+    reg.register(createToolSearchTool(governor, reg));
+  });
+
+  it('disables graph tools (both modes) until the repo is indexed', () => {
+    expect(names(reg.getSchemas({ mode: 'full' }))).not.toContain('GraphQueryTool');
+    expect(names(reg.getSchemas({ mode: 'smart' }))).not.toContain('GraphContextTool');
+    // and they must not leak through the deferred/load-on-demand path either
+    expect(reg.isDeferred('GraphQueryTool')).toBe(false);
+    expect(reg.deferredSummary().map(t => t.name)).not.toContain('GraphQueryTool');
+    expect(reg.searchDeferred('graph').map((s: any) => s.name)).not.toContain('GraphQueryTool');
+  });
+
+  it('sends and promotes graph tools in BOTH modes once indexed', () => {
+    indexed = true;
+    expect(names(reg.getSchemas({ mode: 'smart' }))).toEqual(
+      expect.arrayContaining(['GraphQueryTool', 'GraphContextTool']),
+    );
+    expect(names(reg.getSchemas({ mode: 'full' }))).toEqual(
+      expect.arrayContaining(['GraphQueryTool', 'GraphContextTool']),
+    );
+  });
+
+  it('a throwing readiness check degrades to "not indexed"', () => {
+    reg.setGraphReadyCheck(() => { throw new Error('graph store unavailable'); });
+    expect(reg.isGraphReady()).toBe(false);
+    expect(names(reg.getSchemas({ mode: 'full' }))).not.toContain('GraphQueryTool');
   });
 });

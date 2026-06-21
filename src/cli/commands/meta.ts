@@ -5,7 +5,7 @@ import { cliEvents, getSessionTokenEstimate } from '../events';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
-import { modelMenuOptions } from '../models';
+import { modelMenuOptions, liveModelMenuOptions } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -132,6 +132,16 @@ globalCommandRegistry.register({
     };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
 
+    // The picker offers the IDs the provider actually serves (root fix for "400 — invalid model").
+    // Falls back to the static catalog when the provider has no /models endpoint or we're offline.
+    const pickerOptions = async (cur?: string) => {
+      try {
+        const live = await context.options.llmAdapter?.listProviderModels();
+        if (live && live.length) return liveModelMenuOptions(live, cur);
+      } catch { /* fall back to static catalog */ }
+      return modelMenuOptions(cur);
+    };
+
     // /model lite [id]  |  /model coding [id]
     const slot = (args[0] || '').toLowerCase();
     if (slot === 'lite' || slot === 'coding') {
@@ -142,7 +152,7 @@ globalCommandRegistry.register({
       return {
         type: 'menu',
         title: `Select ${slot === 'lite' ? 'LITE (fast/cheap)' : 'CODING (primary)'} model — current: ${cur}`,
-        options: [...modelMenuOptions(cur), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
+        options: [...(await pickerOptions(cur)), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
         onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustom(apply) : apply(opt.value)),
       };
     }
@@ -156,12 +166,14 @@ globalCommandRegistry.register({
       type: 'menu',
       title: `Models — Coding: ${current}  ·  Lite: ${liteOf() || '(uses coding)'}`,
       options: [
+        { label: '⚙ Set CODING model…', value: '/model coding', desc: `Primary agent model — the heavy/coding slot (current: ${current})`, category: 'Slots' },
         { label: '⚙ Set LITE model…', value: '/model lite', desc: `Fast model for summaries / self-critic / ask-user (current: ${liteOf() || 'uses coding'})`, category: 'Slots' },
-        ...modelMenuOptions(current),
+        ...(await pickerOptions(current)),
         { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' },
       ],
       onSelect: (opt: any) =>
-        opt.value === '/model lite' ? context.executeCommand('/model lite')
+        opt.value === '/model coding' ? context.executeCommand('/model coding')
+        : opt.value === '/model lite' ? context.executeCommand('/model lite')
         : opt.value === '__custom__' ? promptCustom(applyCoding)
         : applyCoding(opt.value),
     };
@@ -288,13 +300,24 @@ globalCommandRegistry.register({
 
 globalCommandRegistry.register({
   name: '/clear',
-  description: 'Clear screen',
+  description: 'Clear the screen and conversation history',
   category: 'Session & Context',
   execute: async (args, context) => {
-    // Redirect to the real `/clear` handler in FullScreen (which shows the clear-confirm menu →
-    // `/clear force`). The old target `clear_screen` was a dead sentinel nobody consumed, so it fell
-    // through to the agent and ran `Bash(clear)` instead of clearing. Routing back through `/clear`
-    // is safe: FullScreen intercepts `query === '/clear'` before the registry, so there's no loop.
-    return { type: 'redirect', command: '/clear' };
+    // Ink's FullScreen used to intercept /clear and show a confirm; that's gone (Ink retired), so do
+    // the work here. `/clear force` resets the conversation history and emits the `clear` event the Go
+    // TUI consumes to wipe its transcript; bare `/clear` asks first.
+    if ((args[0] || '').toLowerCase() === 'force') {
+      try { context.restoreMessages?.([]); } catch { /* best-effort */ }
+      cliEvents.emit('clear');
+      return { type: 'message', level: 'success', content: 'Conversation cleared.' };
+    }
+    return {
+      type: 'menu',
+      title: 'Clear the conversation and screen?',
+      options: [
+        { label: 'Yes, clear it', value: '/clear force', desc: 'Wipe the transcript and reset the conversation history' },
+        { label: 'Cancel', value: '', desc: 'Keep everything' },
+      ],
+    };
   }
 });

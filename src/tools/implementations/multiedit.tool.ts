@@ -1,24 +1,12 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
+import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { globalTransactionManager } from '../../core/transaction.manager';
-
-function resolvePath(p: string, cwd: string): string {
-  if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
-  return path.resolve(cwd, p);
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0, idx = 0;
-  while ((idx = haystack.indexOf(needle, idx)) !== -1) { count++; idx += needle.length; }
-  return count;
-}
 
 interface SingleEdit {
   path: string;
@@ -119,20 +107,34 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       await governor.approveTaskExecution('FILE_WRITE', { targetPath: full, isDestructive: true });
     }
 
-    // Phase 3 — track (for /tx atomic rollback), back up, and write every file.
+    // Phase 3 — track (for /tx atomic rollback) and back up every file, then write them.
     for (const full of order) {
       await globalTransactionManager.trackEdit(full);
-    }
-    for (const full of order) {
       await backupFile(full);
+    }
+    // If a write fails mid-batch, the files written before it are already changed. Restore each of
+    // them to its original on-disk content (held in `originals`) so the batch is truly all-or-nothing
+    // — the atomicity this tool promises. Previously only the failed file was addressed, leaving the
+    // earlier files partially written (data corruption on a coordinated refactor).
+    const written: string[] = [];
+    for (const full of order) {
       try {
         await fs.writeFile(full, working.get(full)!, 'utf8');
+        written.push(full);
       } catch (e: any) {
-        if (globalTransactionManager.isOpen()) {
-          const rb = await globalTransactionManager.autoRollback(path.relative(cwd, full), `write failed: ${e.message}`);
-          return `MultiEdit failed writing ${path.relative(cwd, full)}: ${e.message}.${rb ? `\n\n${rb}` : ''}`;
+        const restoreErrors: string[] = [];
+        for (const done of written) {
+          try { await fs.writeFile(done, originals.get(done)!, 'utf8'); }
+          catch (re: any) { restoreErrors.push(`${path.relative(cwd, done)}: ${re.message}`); }
         }
-        throw e;
+        // Keep an open /tx transaction's bookkeeping consistent with the rollback we just did.
+        if (globalTransactionManager.isOpen()) {
+          await globalTransactionManager.autoRollback(path.relative(cwd, full), `write failed: ${e.message}`);
+        }
+        const ok = written.length - restoreErrors.length;
+        return `MultiEdit failed writing ${path.relative(cwd, full)}: ${e.message}. ` +
+          `Rolled back ${ok} already-written file(s) to their original contents.` +
+          (restoreErrors.length ? ` WARNING — could not restore: ${restoreErrors.join('; ')}.` : '');
       }
     }
 

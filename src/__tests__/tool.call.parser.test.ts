@@ -57,6 +57,16 @@ describe('extractTextToolCalls — recovers tool calls emitted as text', () => {
     const r = extractTextToolCalls('Done: {"name":"BashTool","parameters":{"command":"x"}}', isRegistered);
     expect(r.cleanedText).toBe('Done:');
   });
+
+  it('still finds a real call after an unbalanced brace (regression: premature break)', () => {
+    // A truncated snippet leaves an unclosed `{`; the real tool call comes after it.
+    const r = extractTextToolCalls(
+      'try `const x = {a: 1` then {"name":"BashTool","parameters":{"command":"ls"}}',
+      isRegistered
+    );
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.toolCalls[0].name).toBe('BashTool');
+  });
 });
 
 describe('extractTextToolCalls — safety: never touches non-tool JSON', () => {

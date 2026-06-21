@@ -11,6 +11,23 @@ import { LoopDetector, LoopSignal } from './loop-detector';
 import { getGlobalPatternStore } from '../genome/pattern.store';
 import { globalTelemetry } from '../telemetry/telemetry';
 
+/**
+ * Coerce a model-emitted tool-call arguments string to VALID JSON before it enters the message
+ * history. The OpenAI tool-call contract requires `function.arguments` to be a JSON string, and many
+ * providers (NVIDIA NIM) re-parse it on the NEXT request — so one truncated emission like `{"query": "`
+ * would otherwise 400 every subsequent turn ("Unterminated string … char 10") until the user /clears.
+ * Valid args are re-stringified canonically; anything unparseable becomes `{}`.
+ */
+export function sanitizeToolArgs(raw: any): string {
+  if (raw == null) return '{}';
+  if (typeof raw === 'object') {
+    try { return JSON.stringify(raw); } catch { return '{}'; }
+  }
+  const s = String(raw).trim();
+  if (s === '') return '{}';
+  try { return JSON.stringify(JSON.parse(s)); } catch { return '{}'; }
+}
+
 export class AgentLoop {
   private contextManager: ContextManager;
   public messages: Message[] = [];
@@ -130,7 +147,14 @@ export class AgentLoop {
             discardTurn = true;
             break;
           } else {
-            yield `\n[AgentLoop] API Error: ${event.message}\n`;
+            // A bad/unknown model ID 400s every turn until changed. Don't dump the raw provider
+            // error — tell the user the one thing that fixes it.
+            const m = String(event.message || '');
+            if (/model/i.test(m) && /(not a valid|not found|does not exist|unknown model|invalid)/i.test(m)) {
+              yield `\n[AgentLoop] The provider rejected the current model id. Run /model to pick one it actually serves.\n  (provider said: ${m})\n`;
+            } else {
+              yield `\n[AgentLoop] API Error: ${event.message}\n`;
+            }
             return;
           }
         }
@@ -193,7 +217,12 @@ export class AgentLoop {
           asstMsg.tool_calls!.push({
             id: tc.id,
             type: 'function',
-            function: { name: tc.name, arguments: tc.args }
+            // CRITICAL: tool-call arguments MUST be valid JSON before they go into history. A model can
+            // emit truncated/malformed args (e.g. a cut-off `{"query": "`); storing that raw poisons
+            // EVERY later request — providers re-validate the arguments string as JSON and reject the
+            // whole call ("Unterminated string … char 10"), so the session wedges until /clear. Coerce
+            // to canonical JSON, falling back to `{}` so a bad emission can never corrupt the history.
+            function: { name: tc.name, arguments: sanitizeToolArgs(tc.args) }
           });
         }
         

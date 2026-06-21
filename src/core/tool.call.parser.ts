@@ -80,7 +80,10 @@ export function extractTextToolCalls(
   for (let i = 0; i < content.length; i++) {
     if (content[i] !== '{') continue;
     const end = matchBalancedObject(content, i);
-    if (end === -1) break; // no balanced object from here on
+    // ponytail: this `{` never closes (a truncated snippet, a bare `${`), but a real tool-call
+    // object can still appear later — keep scanning instead of giving up. O(n²) worst case is fine
+    // on turn-sized content; revisit if calls are ever parsed over megabytes.
+    if (end === -1) continue;
     const call = asToolCall(content.slice(i, end + 1), isRegisteredTool);
     if (call) {
       toolCalls.push({ id: `text-call-${toolCalls.length}-${Date.now()}`, name: call.name, args: call.args });

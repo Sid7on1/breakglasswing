@@ -1,16 +1,10 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
+import { resolvePath } from '../path.util';
 import { minimatch } from 'minimatch';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { walkFiles } from '../../utils/fsWalk';
-
-function resolvePath(p: string, cwd: string): string {
-  if (!p) return cwd;
-  if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
-  return path.resolve(cwd, p);
-}
 
 /**
  * Human-readable label for where a search actually ran, relative to cwd. Surfacing this in the

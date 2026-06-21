@@ -31,6 +31,28 @@ export function markCacheBreakpoint(msg: any): any {
  *   A fresh attempt (new key, re-sampled output) almost always succeeds.
  * - otherwise  : fatal (auth, malformed request, …) — surface and stop.
  */
+/** One accumulated streaming tool call: stable id, name, and the concatenated arguments JSON. */
+export interface ToolCallSlot { id: string; name: string; args: string; }
+
+/**
+ * Apply ONE streaming `delta.tool_calls[]` entry to an index-keyed accumulator and return its index.
+ *
+ * The OpenAI streaming contract keys tool-call fragments by `index`: the first delta for an index
+ * carries id + name + the start of the arguments; later deltas append more `arguments`. Some
+ * providers (minimax/NIM) repeat `id` on every delta, so logic that treated "id present" as "new
+ * call" mis-fired a fresh call per chunk and surfaced truncated args (`{"query": "`). Keying off
+ * `index` (falling back to 0 when absent) accumulates correctly. Pure — exported for testing.
+ */
+export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?: number; id?: string; function?: { name?: string; arguments?: string } }): number {
+  const i = typeof tc.index === 'number' ? tc.index : 0;
+  let slot = acc.get(i);
+  if (!slot) { slot = { id: '', name: '', args: '' }; acc.set(i, slot); }
+  if (tc.id) slot.id = tc.id;
+  if (tc.function?.name) slot.name = tc.function.name;
+  if (tc.function?.arguments) slot.args += tc.function.arguments;
+  return i;
+}
+
 export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient' } {
   const msg = String(e?.message ?? '');
   let status = 500;
@@ -345,13 +367,60 @@ export class LlmAdapter implements LLMProvider {
   private createClient(keyResult: KeyResult): OpenAI {
     const apiKey = keyResult.keyStr || '';
     const baseURL = keyResult.baseURL || 'https://integrate.api.nvidia.com/v1';
-    const cacheKey = `${baseURL} ${apiKey}`;
+    const cacheKey = `${baseURL}${apiKey}`;
     let client = this.clientCache.get(cacheKey);
     if (!client) {
       client = new OpenAI({ apiKey, baseURL, maxRetries: 3 });
       this.clientCache.set(cacheKey, client);
     }
     return client;
+  }
+
+  // The IDs the provider ACTUALLY serves, fetched from its OpenAI-compatible `/models` endpoint.
+  // This kills the "400 — not a valid model ID" class of bug at the root: the picker offers real
+  // IDs instead of a hand-typed catalog that drifts out of sync with the provider. Cached for the
+  // session (refresh=true to re-fetch). Empty array on any failure — callers fall back to the
+  // static catalog, so a provider without a /models endpoint degrades to the old behaviour.
+  private liveModelsCache: string[] | null = null;
+  public async listProviderModels(refresh = false): Promise<string[]> {
+    if (this.liveModelsCache && !refresh) return this.liveModelsCache;
+    try {
+      const keyResult = await this.apiKeyManager.getNextKey();
+      if (!keyResult.keyStr) return [];
+      const client = this.createClient(keyResult);
+      const page = await client.models.list();
+      const ids = (page.data || []).map(m => m.id).filter(Boolean).sort();
+      this.liveModelsCache = ids;
+      return ids;
+    } catch (e: any) {
+      Logger.warn(`[LlmAdapter] listProviderModels failed (${e?.message}); falling back to static catalog.`);
+      return [];
+    }
+  }
+
+  // If the configured model isn't one the provider actually serves, switch to a valid one so the very
+  // first turn doesn't 400 forever (the classic symptom: a config.json pinned to a model from a
+  // different provider — e.g. an NVIDIA id while the key is OpenRouter). Returns {from,to} when it
+  // switched so the caller can notify + persist; null when nothing was wrong. Best-effort: a provider
+  // without a /models endpoint returns [] above, so we leave the config untouched.
+  public async healModel(): Promise<{ from: string; to: string } | null> {
+    const ids = await this.listProviderModels();
+    if (ids.length === 0) return null;
+    const current = this.userModel || this.defaultModel;
+    if (current && ids.includes(current)) return null; // already valid
+
+    // Prefer the provider/key's own default if the provider actually serves it; else first available.
+    let fallback = ids[0];
+    try {
+      const kr = await this.apiKeyManager.getNextKey();
+      if (kr.model && ids.includes(kr.model)) fallback = kr.model;
+    } catch { /* use first available */ }
+
+    const from = current || '(unset)';
+    this.userModel = fallback;
+    this.defaultModel = fallback;
+    Logger.warn(`[LlmAdapter] Configured model "${from}" not served by provider; switched to "${fallback}".`);
+    return { from, to: fallback };
   }
 
   /**
@@ -405,13 +474,26 @@ export class LlmAdapter implements LLMProvider {
     return kr;
   }
 
+  // Rough cost estimate at a flat $0.002 / 1K tokens. One place instead of the ~12 copies of this
+  // arithmetic (and the bare 0.002) that used to be scattered through every API method below.
+  private estCost(tokens: number): number {
+    return (tokens / 1000) * 0.002;
+  }
+
+  // Map an OpenAI/network error to a status code: timeout → 408, otherwise the API-reported status,
+  // else 500. Was copy-pasted verbatim in every method's catch block.
+  private errorStatus(e: any): number {
+    if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) return 408;
+    return e?.status || 500;
+  }
+
   async generateTinyPlans(userPrompt: string, systemContext: string) {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     
     // Budget checking heuristics: ~100 tokens out, 50 in for tiny plans
     const estimatedTokens = 150;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002; // Very rough estimate
+    const estimatedCostUsd = this.estCost(estimatedTokens); // Very rough estimate
     if (this.budgetVeto) {
       await this.budgetVeto.checkVeto(estimatedCostUsd);
     }
@@ -435,7 +517,7 @@ export class LlmAdapter implements LLMProvider {
 
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       }
 
@@ -448,10 +530,8 @@ export class LlmAdapter implements LLMProvider {
         await this.budgetVeto.releaseReservation(estimatedCostUsd);
       }
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
+      const status = this.errorStatus(error);
       let retryAfter: number | null = null;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
       if (error.headers?.['retry-after']) retryAfter = parseFloat(error.headers['retry-after']);
       else if (status === 429) retryAfter = 5;
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfter);
@@ -462,7 +542,7 @@ export class LlmAdapter implements LLMProvider {
   async generateXmlCompletion(userPrompt: string, systemContext: string, maxTokens: number = 64) {
     const kr = await this.getKey();
     const client = this.createClient(kr);
-    const estimatedCostUsd = (maxTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(maxTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -478,7 +558,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -487,9 +567,7 @@ export class LlmAdapter implements LLMProvider {
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
+      const status = this.errorStatus(error);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       return { status, content: "", retryAfter: null, error };
     }
@@ -499,7 +577,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -517,7 +595,7 @@ export class LlmAdapter implements LLMProvider {
       if (usage) {
         Logger.info(`[LlmAdapter] Token Usage - Prompt: ${usage.prompt_tokens} | Completion: ${usage.completion_tokens} | Total: ${usage.total_tokens}`);
         if (this.budgetVeto) {
-          const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+          const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
           await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
         }
       } else if (this.budgetVeto) {
@@ -527,9 +605,7 @@ export class LlmAdapter implements LLMProvider {
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
+      const status = this.errorStatus(error);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       return { status, content: "", retryAfter: null, error };
     }
@@ -544,7 +620,7 @@ export class LlmAdapter implements LLMProvider {
     const userPrompt = `Node ID: ${nodeId}\nNode Name: ${nodeName}\nType: ${type}\nCode:\n${codeSnippet}`;
     const kr = await this.getKey();
     const client = this.createClient(kr);
-    const estimatedCostUsd = (200 / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(200);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -565,7 +641,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -583,7 +659,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -599,7 +675,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -619,7 +695,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -641,9 +717,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
-      let status = 500;
-      if (e instanceof OpenAI.APIConnectionTimeoutError || e.code === 'ECONNABORTED' || e.message.includes('timeout')) status = 408;
-      else if (e.status) status = e.status;
+      const status = this.errorStatus(e);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       throw e;
     }
@@ -653,7 +727,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
     // Declared outside the try so the catch can tell whether the reservation was
     // already settled by a mid-stream usage report — otherwise an error after the
@@ -737,9 +811,14 @@ export class LlmAdapter implements LLMProvider {
 
       const stream: any = await client.chat.completions.create(requestOptions, requestInit);
 
-      let activeToolCallId = '';
-      let activeToolName = '';
-      let activeToolArgs = '';
+      // Accumulate streamed tool calls keyed by their delta `index` — the OpenAI streaming contract:
+      // the first delta for an index carries id+name+the start of the args, later deltas append more
+      // args. The previous code keyed off the PRESENCE of `tc.id`, assuming it appears only on the
+      // first delta; minimax/NIM (and others) repeat `id` on every delta, so that mis-fired a "new
+      // call" each chunk and emitted truncated args (`{"query": "`, `richest person`, …) that then
+      // failed to parse. One slot per index, yielded only once the stream is complete, fixes it.
+      const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+      let lastActiveIdx = -1;
       // Throttle live tool-arg partials (C3): a big tool call streams hundreds of arg fragments, and
       // emitting one partial per fragment would drive a UI re-render each time. Coalesce to at most
       // one partial every PARTIAL_EMIT_MS; the final authoritative tool_call always fires regardless.
@@ -762,10 +841,9 @@ export class LlmAdapter implements LLMProvider {
       // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
       // field key the provider sent, then writes them to a dedicated debug file at stream end. This
       // is how we learn the EXACT reasoning delimiter/channel a model uses (e.g. minimax's closer)
-      // without guessing. TEMPORARILY default-ON for diagnosis — opt out with BGW_DEBUG_STREAM=0.
-      // Writes to a separate file (not the console/Logger), so it can't corrupt the TUI. REVERT to
-      // default-off once the format is captured.
-      const debugStream = process.env.BGW_DEBUG_STREAM !== '0' && process.env.BGW_DEBUG_STREAM !== 'false';
+      // without guessing. OPT-IN only — set BGW_DEBUG_STREAM=1 to enable. (It does sync disk writes
+      // at stream end, so leaving it on by default added I/O to every single turn.)
+      const debugStream = process.env.BGW_DEBUG_STREAM === '1' || process.env.BGW_DEBUG_STREAM === 'true';
       let dbgContent = '';
       let dbgReasoning = '';
       const dbgDeltaKeys = new Set<string>();
@@ -834,28 +912,19 @@ export class LlmAdapter implements LLMProvider {
           const stray = thinkFilter.drainPending();
           if (stray) yield { type: 'thinking', text: stray };
           for (const tc of toolCalls) {
-            if (tc.id) {
-              // Yield previous tool call if any
-              if (activeToolCallId) {
-                yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
-              }
-              activeToolCallId = tc.id;
-              activeToolName = tc.function?.name || '';
-              activeToolArgs = tc.function?.arguments || '';
-            } else if (tc.function?.arguments) {
-              activeToolArgs += tc.function.arguments;
-            }
+            lastActiveIdx = applyToolCallDelta(toolAcc, tc);
           }
           // C3 — live tool-arg streaming. When the model streams partial-JSON tool args, surface the
-          // call (name + args-so-far) as it forms so the UI shows activity before the turn finishes.
-          // Additive + display-only: the authoritative `tool_call` still fires at the boundary/end.
+          // most-recently-updated call (name + args-so-far) as it forms so the UI shows activity before
+          // the turn finishes. Display-only: the authoritative `tool_call`(s) fire once at the end.
           // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged. Throttled
           // so a large tool call doesn't flood the UI with a re-render per arg fragment.
-          if (caps.partialJsonTools && activeToolCallId) {
+          if (caps.partialJsonTools && lastActiveIdx >= 0) {
             const now = Date.now();
             if (now - lastPartialAt >= PARTIAL_EMIT_MS) {
               lastPartialAt = now;
-              yield { type: 'tool_call_partial', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+              const slot = toolAcc.get(lastActiveIdx)!;
+              yield { type: 'tool_call_partial', id: slot.id || `idx-${lastActiveIdx}`, name: slot.name, args: slot.args };
             }
           }
         }
@@ -869,7 +938,7 @@ export class LlmAdapter implements LLMProvider {
           globalTelemetry.recordUsage(chunk.usage.prompt_tokens ?? 0, cacheRead, cacheCreate);
           yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
           if (this.budgetVeto) {
-            const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
+            const actualCostUsd = this.estCost(chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
             await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
           }
           usageRecorded = true;
@@ -903,9 +972,10 @@ export class LlmAdapter implements LLMProvider {
       if (tail.thinking) yield { type: 'thinking', text: tail.thinking };
       if (tail.text) yield { type: 'token', text: tail.text };
 
-      // Yield the final tool call
-      if (activeToolCallId) {
-        yield { type: 'tool_call', id: activeToolCallId, name: activeToolName, args: activeToolArgs };
+      // Yield every accumulated tool call, in index order, now that the stream is complete and each
+      // one's arguments are whole. (Skips empty slots a provider may have opened without a name.)
+      for (const [, slot] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
+        if (slot.name) yield { type: 'tool_call', id: slot.id || `call-${Date.now()}-${slot.name}`, name: slot.name, args: slot.args };
       }
 
       yield { type: 'done' };

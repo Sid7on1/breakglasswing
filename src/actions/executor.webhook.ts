@@ -25,10 +25,23 @@ export class WebhookExecutor {
       if (req.method === 'POST' && req.url?.startsWith('/webhook/')) {
         const taskId = req.url.split('/')[2];
         
+        // Cap the request body so a malicious/runaway POST can't exhaust memory (was unbounded).
+        const MAX_BODY = 1 << 20; // 1 MiB — webhook payloads are tiny triggers
         let body = '';
-        req.on('data', chunk => body += chunk.toString());
-        
+        let aborted = false;
+        req.on('data', chunk => {
+          if (aborted) return;
+          body += chunk.toString();
+          if (body.length > MAX_BODY) {
+            aborted = true;
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Payload too large' }));
+            req.destroy();
+          }
+        });
+
         req.on('end', () => {
+          if (aborted) return;
           if (this.registeredTasks.has(taskId)) {
             Logger.info(`[WebhookExecutor] 📥 Received LIVE external HTTP POST for Task ${taskId}! Executing...`);
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -44,13 +57,17 @@ export class WebhookExecutor {
       }
     });
 
-    this.server.listen(8081, () => {
-      Logger.info(`[WebhookExecutor] Native Node.js HTTP Daemon bound to port 8081.`);
+    // Bind to loopback by default so webhooks aren't exposed to the whole network (was 0.0.0.0:8081).
+    // Both host and port are overridable for intentional remote setups.
+    const port = parseInt(process.env.BIMAX_WEBHOOK_PORT || '', 10) || 8081;
+    const host = process.env.BIMAX_WEBHOOK_HOST || '127.0.0.1';
+    this.server.listen(port, host, () => {
+      Logger.info(`[WebhookExecutor] Native Node.js HTTP Daemon bound to ${host}:${port}.`);
     });
-    
+
     this.server.on('error', (e: any) => {
       if (e.code === 'EADDRINUSE') {
-        Logger.warn(`[WebhookExecutor] Port 8081 is in use, assuming server is already running globally.`);
+        Logger.warn(`[WebhookExecutor] Port ${port} is in use, assuming server is already running globally.`);
       } else {
         Logger.error(`[WebhookExecutor] Server error: ${e.message}`);
       }

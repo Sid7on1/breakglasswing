@@ -1,15 +1,18 @@
-import { exec, execFileSync } from 'child_process';
+import { exec, execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorktreeManager } from './worktree.manager';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface Candidate {
   name: string;       // display / branch name
-  bin: string;        // binary to probe with `command -v`
-  build: (prompt: string) => string; // headless invocation
+  bin: string;        // binary to probe on PATH
+  // Headless invocation as an argv array ([bin, ...args]) — run with execFile (no shell), so the
+  // task prompt is always a single argument and can never inject shell metacharacters.
+  build: (prompt: string) => string[];
 }
 
 export interface CouncilMemberResult {
@@ -35,15 +38,11 @@ export type CouncilLogger = (level: 'info' | 'success' | 'error' | 'warn', msg: 
 
 /** Built-in external CLIs we know how to drive headlessly. Pruned to those installed. */
 export const DEFAULT_COUNCIL: Candidate[] = [
-  { name: 'claude', bin: 'claude', build: p => `claude -p ${shq(p)}` },
-  { name: 'gemini', bin: 'gemini', build: p => `gemini -p ${shq(p)}` },
-  { name: 'opencode', bin: 'opencode', build: p => `opencode run ${shq(p)}` },
-  { name: 'bimax', bin: 'bimax', build: p => `bimax -p ${shq(p)}` },
+  { name: 'claude', bin: 'claude', build: p => ['claude', '-p', p] },
+  { name: 'gemini', bin: 'gemini', build: p => ['gemini', '-p', p] },
+  { name: 'opencode', bin: 'opencode', build: p => ['opencode', 'run', p] },
+  { name: 'bimax', bin: 'bimax', build: p => ['bimax', '-p', p] },
 ];
-
-function shq(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
 
 /**
  * Council of Models. Sends one task to every installed external AI CLI, each working
@@ -71,7 +70,8 @@ export class CouncilOrchestrator {
   }
 
   private async available(bin: string): Promise<boolean> {
-    try { await execAsync(`command -v ${bin}`, { cwd: this.projectRoot }); return true; } catch { return false; }
+    // `bin` as a positional arg ($1), never interpolated into the script — so it can't inject.
+    try { await execFileAsync('sh', ['-c', 'command -v "$1"', '_', bin], { cwd: this.projectRoot }); return true; } catch { return false; }
   }
 
   private resolveTestCommand(override?: string): string {
@@ -116,7 +116,8 @@ export class CouncilOrchestrator {
         wt = (await this.worktrees.createWorktree(branch, 'HEAD')).worktreePath;
         this.log('info', `▶ ${c.name} working…`);
         try {
-          await execAsync(`cd ${shq(wt)} && ${c.build(task)}`, { timeout, maxBuffer: 64 * 1024 * 1024, env: process.env });
+          const [argvBin, ...argvRest] = c.build(task);
+          await execFileAsync(argvBin, argvRest, { cwd: wt, timeout, maxBuffer: 64 * 1024 * 1024, env: process.env });
         } catch (e: any) {
           // CLI may exit non-zero yet still have made useful edits — judge by tests/changes.
           this.log('warn', `${c.name} exited non-zero: ${(e.message || '').slice(0, 80)}`);

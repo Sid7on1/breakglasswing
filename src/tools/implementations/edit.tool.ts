@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
+import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
@@ -9,22 +9,6 @@ import { checkBlastRadius } from '../../cli/blastGate';
 import { detectCorruptWrite } from '../write-guard';
 import { fileStateCache } from '../../memory/file-state-cache';
 import { globalTransactionManager } from '../../core/transaction.manager';
-
-function resolvePath(p: string, cwd: string): string {
-  if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
-  return path.resolve(cwd, p);
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let idx = 0;
-  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
-    count++;
-    idx += needle.length;
-  }
-  return count;
-}
 
 interface FallbackMatch {
   resolvedOld: string; // the actual text in the file that will be replaced

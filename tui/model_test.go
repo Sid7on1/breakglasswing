@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -10,6 +12,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// TestMain redirects prompt-history persistence to a throwaway file so the suite never reads or
+// clobbers the user's real ~/.breakglass/history.json.
+func TestMain(m *testing.M) {
+	os.Setenv("BIMAX_HISTORY_PATH", filepath.Join(os.TempDir(), "bimax-test-history.json"))
+	os.Exit(m.Run())
+}
 
 // ansiRE strips SGR color/style escapes so content assertions don't depend on theming (the warm
 // markdown style colorizes body text, which would otherwise split words with reset codes).
@@ -28,6 +37,11 @@ func newTestModel() (model, *bytes.Buffer) {
 	e := &Engine{stdin: nopWC{buf}, Msgs: make(chan Outbound, 8)}
 	m := initialModel(e)
 	m.width = 80
+	// Isolate tests from the on-disk prompt history (~/.breakglass/history.json) the real model
+	// loads at startup, and disable the completion bell so test output stays quiet.
+	m.history = nil
+	m.histIdx = 0
+	m.bell = false
 	return m, buf
 }
 
@@ -55,8 +69,10 @@ func TestFooterState(t *testing.T) {
 		t.Fatalf("footer state wrong: %+v", m)
 	}
 
-	foot := m.footerLine()
-	for _, want := range []string{"heavy", "minimax-m3", "1.0k tok", "2 goals", "[explore]"} {
+	// Footer mirrors Ink Footer.tsx: ⇧ marks the heavy tier, the mode is a "{mode} ·" prefix, plus
+	// the model name, token estimate, goal count and 📌 pin.
+	foot := stripANSI(m.footerLine())
+	for _, want := range []string{"⇧", "minimax-m3", "1.0k tok", "2 goals", "explore ·", "📌"} {
 		if !strings.Contains(foot, want) {
 			t.Errorf("footer missing %q in:\n%s", want, foot)
 		}
@@ -266,11 +282,16 @@ func TestFreeFormInputPrompt(t *testing.T) {
 	}
 }
 
-func TestThinkingShowsInStatus(t *testing.T) {
+func TestThinkingShowsSnippet(t *testing.T) {
 	m, _ := newTestModel()
 	m.handleEngine(ev("thinking", "Considering the parser refactor"))
-	if !strings.Contains(m.status, "Considering the parser") {
-		t.Fatalf("thinking not surfaced: %q", m.status)
+	// The reasoning tail surfaces in the ThinkingText line (Ink relocates it out of the status bar).
+	if !strings.Contains(m.thinkSnip, "Considering the parser") {
+		t.Fatalf("thinking not surfaced: %q", m.thinkSnip)
+	}
+	m.busy = true
+	if !strings.Contains(stripANSI(m.thinkingView()), "Considering the parser") {
+		t.Fatalf("thinking snippet not in thinkingView: %q", m.thinkingView())
 	}
 }
 
@@ -278,6 +299,7 @@ func TestInteractiveMenu(t *testing.T) {
 	m, buf := newTestModel()
 	m.height = 24
 	menu := map[string]any{
+		"id":    "menu-1",
 		"title": "Palette",
 		"options": []map[string]string{
 			{"label": "/git", "value": "/git", "desc": "Git status"},
@@ -292,7 +314,8 @@ func TestInteractiveMenu(t *testing.T) {
 		t.Fatal("menu not rendered")
 	}
 
-	// Navigate down and select → the option's value is sent as input.
+	// Navigate down and select → a menuSelect carrying the option value + menu id is sent, so the
+	// engine can run that menu's onSelect (not dispatch the value as a chat turn).
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = m2.(model)
 	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -302,8 +325,8 @@ func TestInteractiveMenu(t *testing.T) {
 	}
 	var sent map[string]any
 	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
-	if sent["t"] != "input" || sent["text"] != "/diff" {
-		t.Fatalf("selecting the 2nd option should send /diff, got %v", sent)
+	if sent["t"] != "menuSelect" || sent["value"] != "/diff" || sent["id"] != "menu-1" {
+		t.Fatalf("selecting the 2nd option should send menuSelect /diff (id menu-1), got %v", sent)
 	}
 }
 
@@ -374,9 +397,14 @@ func TestSpinnerShownWhileBusy(t *testing.T) {
 	if !m.busy {
 		t.Fatal("busy not set")
 	}
-	// The busy View prefixes the status with the spinner's current frame.
+	// Before the first token the live region shows the rotating ThinkingText (✻ phrase).
+	if !strings.Contains(stripANSI(m.View()), "✻") {
+		t.Fatalf("thinking indicator not shown while busy:\n%s", stripANSI(m.View()))
+	}
+	// Once tokens stream, the WorkingIndicator's braille spinner frame appears.
+	m.handleEngine(ev("stream_token", "hello"))
 	if frame := strings.TrimSpace(m.spin.View()); frame != "" && !strings.Contains(m.View(), frame) {
-		t.Fatalf("spinner frame %q not in view", frame)
+		t.Fatalf("spinner frame %q not in view while streaming", frame)
 	}
 }
 
@@ -397,13 +425,19 @@ func TestViewportHugsShortContent(t *testing.T) {
 		t.Fatalf("viewport over-tall for 2 lines of content: %d (giant-gap regression)", m.vp.Height)
 	}
 
-	// Once content outgrows the available rows it caps and scrolls instead of overflowing.
+	// Once content outgrows the available rows it caps and scrolls instead of overflowing. The cap is
+	// the terminal height minus the measured chrome below the viewport (the same calc refresh uses),
+	// so the whole frame always fits — no overflow that would leave ghost rows on screen.
 	for i := 0; i < 200; i++ {
 		m.append("line")
 	}
-	avail := m.height - (4 + m.input.Height())
+	chrome := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, m.belowSections()...))
+	avail := m.height - chrome
 	if m.vp.Height != avail {
 		t.Fatalf("tall content should cap viewport at %d, got %d", avail, m.vp.Height)
+	}
+	if m.vp.Height+chrome > m.height {
+		t.Fatalf("frame overflows terminal: vp=%d + chrome=%d > %d", m.vp.Height, chrome, m.height)
 	}
 }
 
@@ -412,7 +446,7 @@ func TestFooterRendersBelowInput(t *testing.T) {
 	m.height = 24
 	m.handleEngine(ev("model_tier", map[string]any{"tier": "lite"}))
 	v := stripANSI(m.View())
-	foot := strings.Index(v, "◆ lite")
+	foot := strings.Index(v, "▸ default")
 	input := strings.Index(v, "Ask BiMax")
 	if foot < 0 || input < 0 {
 		t.Fatalf("view missing footer (%d) or input (%d):\n%s", foot, input, v)
@@ -431,5 +465,341 @@ func TestRenderMarkdown(t *testing.T) {
 	// (and applies ANSI styling on a real terminal; color is suppressed in this non-TTY test).
 	if !strings.Contains(out, "•") {
 		t.Fatalf("markdown not transformed (no bullet glyph): %q", out)
+	}
+}
+
+func runeKey(s string) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+}
+
+func TestPasteCollapseAndExpand(t *testing.T) {
+	m, buf := newTestModel()
+	m.height = 24
+	// A bracketed multi-line paste collapses to a single chip in the input.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line1\nline2\nline3"), Paste: true})
+	m = m2.(model)
+	if len(m.pastes) != 1 || m.pastes[0].Lines != 3 {
+		t.Fatalf("paste not collapsed to a 3-line chip: %+v", m.pastes)
+	}
+	if !strings.Contains(m.input.Value(), "[Pasted text #1 +3 lines]") {
+		t.Fatalf("chip placeholder not inserted: %q", m.input.Value())
+	}
+	// On submit the chip expands back to the real text on the wire.
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m3.(model)
+	var sent map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
+	if !strings.Contains(sent["text"].(string), "line1\nline2\nline3") {
+		t.Fatalf("paste not expanded on submit: %v", sent["text"])
+	}
+	if len(m.pastes) != 0 {
+		t.Fatalf("pastes not cleared after submit: %+v", m.pastes)
+	}
+}
+
+func TestStashAndResume(t *testing.T) {
+	m, _ := newTestModel()
+	m.input.SetValue("draft prompt")
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = m2.(model)
+	if m.stash != "draft prompt" || m.input.Value() != "" {
+		t.Fatalf("esc did not stash: stash=%q input=%q", m.stash, m.input.Value())
+	}
+	if !strings.Contains(stripANSI(m.View()), "[Stashed]") {
+		t.Fatalf("stash hint not shown")
+	}
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = m3.(model)
+	if m.input.Value() != "draft prompt" || m.stash != "" {
+		t.Fatalf("ctrl+r did not resume: input=%q stash=%q", m.input.Value(), m.stash)
+	}
+}
+
+func TestSearchMatchesAndNavigation(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 30
+	m.append("❯ fix the parser error")
+	m.append(asstStyle.Render("the error was a missing token"))
+	m.logs = append(m.logs, LogEntry{Level: "error", Text: "compile error here"})
+
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = m2.(model)
+	if !m.searchMode {
+		t.Fatal("ctrl+f did not enter search mode")
+	}
+	for _, r := range "error" {
+		mm, _ := m.Update(runeKey(string(r)))
+		m = mm.(model)
+	}
+	matches := m.searchMatches()
+	if len(matches) < 3 {
+		t.Fatalf("expected ≥3 matches for 'error', got %d", len(matches))
+	}
+	if !strings.Contains(stripANSI(m.searchView()), "of") {
+		t.Fatalf("search results header missing: %q", stripANSI(m.searchView()))
+	}
+	// Enter advances the current match index.
+	before := m.searchIdx
+	m3, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m3.(model)
+	if m.searchIdx == before {
+		t.Fatal("enter did not advance search index")
+	}
+	// Esc exits and restores the prior input.
+	m4, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	m = m4.(model)
+	if m.searchMode {
+		t.Fatal("esc did not exit search mode")
+	}
+}
+
+func TestMenuFuzzyFilter(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 24
+	m.handleEngine(ev("message", map[string]any{
+		"role": "system", "uiComponent": "menu",
+		"payload": map[string]any{"title": "Palette", "options": []map[string]string{
+			{"label": "/git", "value": "/git", "desc": "Git status"},
+			{"label": "/config", "value": "/config", "desc": "Settings"},
+			{"label": "/model", "value": "/model", "desc": "Pick model"},
+		}},
+	}))
+	if !m.menuOpen {
+		t.Fatal("menu not opened")
+	}
+	for _, r := range "conf" {
+		mm, _ := m.Update(runeKey(string(r)))
+		m = mm.(model)
+	}
+	filtered := m.filteredMenu()
+	if len(filtered) != 1 || filtered[0].Value != "/config" {
+		t.Fatalf("fuzzy filter wrong: %+v", filtered)
+	}
+	if !strings.Contains(stripANSI(m.menuView()), "/config") {
+		t.Fatal("filtered menu not rendered")
+	}
+}
+
+func TestHistoryPersistence(t *testing.T) {
+	m, _ := newTestModel()
+	m.pushHistory("alpha")
+	m.pushHistory("beta")
+	got := loadHistory()
+	if len(got) < 2 || got[len(got)-1] != "beta" || got[len(got)-2] != "alpha" {
+		t.Fatalf("history not persisted/loaded: %v", got)
+	}
+}
+
+func TestThoughtTimeDisplay(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("message", map[string]any{"role": "user", "content": "hi"}))
+	m.handleEngine(ev("message", map[string]any{
+		"role": "assistant", "content": "done", "thoughtMs": 1500,
+	}))
+	joined := stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(joined, "Thought for 1s") {
+		t.Fatalf("thought-time line missing: %q", joined)
+	}
+}
+
+func TestToolCallTimingAndAgentLabel(t *testing.T) {
+	tc := ToolCall{
+		ID: "1", ToolName: "BashTool", Status: "success", Input: `{"command":"ls"}`,
+		Output: "a\nb", StartTime: "2026-06-20T10:00:00Z", EndTime: "2026-06-20T10:00:02Z",
+		AgentLabel: "explorer",
+	}
+	out := stripANSI(renderToolCall(tc))
+	if !strings.Contains(out, "2.0s") {
+		t.Fatalf("timing badge missing: %q", out)
+	}
+	if !strings.Contains(out, "[explorer]") {
+		t.Fatalf("agent label missing: %q", out)
+	}
+}
+
+func TestTokenMeterRenders(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"models":         map[string]string{"coding": "x/big-model", "lite": "x/lite"},
+		"contextWindow":  1000,
+		"tokensBaseline": 400, // fixed per-request cost (system prompt + tool schemas)
+	}))
+	// A user + assistant turn adds conversation tokens on top of the baseline.
+	m.handleEngine(ev("message", map[string]any{"role": "user", "content": strings.Repeat("a", 400)})) // ~100 tok
+	// Default (no pin / auto) → the meter shows the LITE model that actually answers.
+	tm := stripANSI(m.tokenMeterView())
+	if !strings.Contains(tm, "lite") || !strings.Contains(tm, "tok") {
+		t.Fatalf("token meter should show the active (lite) model: %q", tm)
+	}
+	// 400 baseline + 100 history = 500 / 1000 = 50%.
+	if !strings.Contains(tm, "50%") {
+		t.Fatalf("token meter percent wrong (want 50%%): %q", tm)
+	}
+	// Pinned heavy → the meter switches to the coding model (matches the footer pointer).
+	m.handleEngine(ev("model_tier", map[string]any{"tier": "heavy", "pinned": "heavy"}))
+	if tmh := stripANSI(m.tokenMeterView()); !strings.Contains(tmh, "big-model") {
+		t.Fatalf("heavy tier: meter should show the coding model: %q", tmh)
+	}
+}
+
+func TestMapPanelRenders(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"models": map[string]string{"coding": "x/m"},
+		"graph": map[string]any{
+			"nodeCount": 42, "fileCount": 7, "aiGraphBuilt": true,
+			"modules": []map[string]string{{"name": "core", "criticality": "CRITICAL"}},
+		},
+	}))
+	if m.graph.NodeCount != 42 {
+		t.Fatalf("graph snapshot not stored: %+v", m.graph)
+	}
+	panel := stripANSI(m.mapPanelView())
+	if !strings.Contains(panel, "42 nodes") || !strings.Contains(panel, "core") {
+		t.Fatalf("map panel missing data: %q", panel)
+	}
+}
+
+func TestDashboardRouting(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("message", map[string]any{
+		"role": "system", "uiComponent": "HelpDashboard",
+		"payload": map[string]any{"sections": []map[string]any{
+			{"title": "Core", "color": "green", "commands": []map[string]string{
+				{"cmd": "/help", "desc": "Show help"},
+			}},
+		}},
+	}))
+	joined := stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(joined, "/help") || !strings.Contains(joined, "Show help") {
+		t.Fatalf("help dashboard not rendered: %q", joined)
+	}
+}
+
+func TestMaskedInputPrompt(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(Outbound{T: "request", ID: 7, Kind: "input", Question: "Enter your API key:"})
+	if !m.reqMasked {
+		t.Fatal("API key prompt not flagged masked")
+	}
+	m.input.SetValue("sk-123456")
+	if strings.Contains(stripANSI(m.promptView()), "sk-123456") {
+		t.Fatal("masked prompt leaked the secret value")
+	}
+	if !strings.Contains(stripANSI(m.promptView()), "•") {
+		t.Fatal("masked prompt not rendered as bullets")
+	}
+}
+
+func TestLogViewToggle(t *testing.T) {
+	m, _ := newTestModel()
+	m.height = 30
+	m.logs = append(m.logs, LogEntry{Level: "warn", Text: "heads up", Timestamp: "2026-06-20T10:00:00Z"})
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m = m2.(model)
+	if !m.showLogs {
+		t.Fatal("ctrl+o did not toggle log view")
+	}
+	lv := stripANSI(m.logView())
+	if !strings.Contains(lv, "WARN") || !strings.Contains(lv, "heads up") {
+		t.Fatalf("log view missing entry: %q", lv)
+	}
+}
+
+func TestShortcutsCommandLocal(t *testing.T) {
+	m, buf := newTestModel()
+	m.input.SetValue("/shortcuts")
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(model)
+	// Handled Go-side: nothing sent to the engine, shortcuts rendered into the transcript.
+	if buf.Len() != 0 {
+		t.Fatalf("/shortcuts should not hit the engine, sent: %q", buf.String())
+	}
+	if !strings.Contains(stripANSI(strings.Join(m.lines, "\n")), "Command palette") {
+		t.Fatal("shortcuts table not rendered")
+	}
+}
+
+func TestMultilineHint(t *testing.T) {
+	m, _ := newTestModel()
+	m.input.SetValue("line1\nline2")
+	if !strings.Contains(stripANSI(m.promptView()), "2 lines") {
+		t.Fatalf("multi-line hint missing: %q", stripANSI(m.promptView()))
+	}
+}
+
+// TestClearFlow reproduces the real /clear keystroke path: type "/clear", the engine returns a
+// completion, Enter runs the command, and the engine's menu message opens the confirm menu.
+func TestClearFlow(t *testing.T) {
+	m, buf := newTestModel()
+	m.height = 24
+
+	// Completion dropdown for "/clear" (as the engine's queryResult would populate it).
+	m.input.SetValue("/clear")
+	m.queryID = 1
+	m.handleEngine(Outbound{T: "queryResult", ID: 1, Items: []CompletionItem{
+		{Value: "/clear", Label: "/clear", Desc: "Clear", Kind: "command"},
+	}})
+	if !m.compOpen {
+		t.Fatal("completion dropdown should be open for /clear")
+	}
+
+	// Enter runs the highlighted command.
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(model)
+	var sent map[string]any
+	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
+	if sent["t"] != "input" || sent["text"] != "/clear" {
+		t.Fatalf("Enter on /clear completion should send input /clear, got %v", sent)
+	}
+
+	// The engine answers with the confirm menu → it must open.
+	menu := map[string]any{
+		"id":    "menu-1",
+		"title": "Clear the conversation and screen?",
+		"options": []map[string]string{
+			{"label": "Yes, clear it", "value": "/clear force", "desc": "wipe"},
+			{"label": "Cancel", "value": "", "desc": "keep"},
+		},
+	}
+	m.handleEngine(ev("message", map[string]any{"role": "system", "uiComponent": "menu", "payload": menu}))
+	if !m.menuOpen {
+		t.Fatal("confirm menu should open after /clear")
+	}
+	if !strings.Contains(m.menuView(), "Clear the conversation") {
+		t.Fatalf("menu not rendered: %q", m.menuView())
+	}
+
+	// The clear event wipes the transcript.
+	m.append("some old line")
+	m.handleEngine(ev("clear"))
+	if len(m.lines) != 0 {
+		// showWelcome re-adds the banner as ONE entry, so after clear lines should be just the banner.
+		if len(m.lines) > 1 {
+			t.Fatalf("clear should wipe transcript (welcome banner only), got %d lines", len(m.lines))
+		}
+	}
+}
+
+// TestTranscriptBounded guards the long-session memory/perf fix: append() must cap m.lines and keep
+// the toolLine index map consistent (rows that scroll off are forgotten; survivors stay in range).
+func TestTranscriptBounded(t *testing.T) {
+	m, _ := newTestModel()
+	m.toolLine["early"] = 3 // a low row that should be evicted once we trim from the front
+
+	for i := 0; i < transcriptCap+300; i++ {
+		m.append("x")
+	}
+
+	if len(m.lines) > transcriptCap {
+		t.Fatalf("transcript exceeded cap: %d > %d", len(m.lines), transcriptCap)
+	}
+	if _, ok := m.toolLine["early"]; ok {
+		t.Errorf("expected the early tool-line row to be evicted after trimming")
+	}
+	for id, idx := range m.toolLine {
+		if idx < 0 || idx >= len(m.lines) {
+			t.Errorf("tool-line %q index %d out of range (len %d)", id, idx, len(m.lines))
+		}
 	}
 }

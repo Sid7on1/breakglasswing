@@ -5,12 +5,12 @@ import { VectorStore } from '../../memory/vector.store';
 export function createMemoryQueryTool(governor: IGovernor, vectorStore: VectorStore): BuiltTool {
   const def: ToolDef = {
     name: 'MemoryQueryTool',
-    description: `Performs a semantic search against the Long-Term Memory VectorStore.
+    description: `Searches your long-term memory by keyword/lexical relevance (word overlap, not true semantic meaning — so match the wording of how a past note was likely written).
 
 Use this tool when you encounter an unfamiliar error, a weird architectural pattern, or need to know how a specific problem was solved in the past.
 
 # Instructions
-- **Query Formulation:** Do not pass raw stack traces as the query. Summarize the conceptual problem (e.g., \`query: "How do we handle FreeCreditsTracker async-mutex race conditions?"\`).
+- **Query Formulation:** Do not pass raw stack traces as the query. Use the salient keywords/terms of the problem (e.g., \`query: "FreeCreditsTracker async-mutex race condition"\`); lexical search rewards overlapping words.
 - **Token Budgeting:** The memories returned by this tool are injected directly into your context window. Only query memory if you are genuinely stuck, to avoid exhausting your Short-Term Memory budget.
 - **Applying Past Solutions:** If a historical memory suggests a fix, adapt it to the *current* codebase context. Do not blindly copy-paste outdated paths.`,
     schema: {

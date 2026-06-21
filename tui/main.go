@@ -18,6 +18,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// No mouse capture: the terminal keeps native text selection/copy (like Claude Code). Scroll the
+	// transcript with PgUp/PgDn, Ctrl+U/Ctrl+D, or Shift+Up/Down. (WithMouseCellMotion would enable
+	// wheel scrolling but hijacks the mouse, breaking copy — not worth the trade.)
 	p := tea.NewProgram(initialModel(eng), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
