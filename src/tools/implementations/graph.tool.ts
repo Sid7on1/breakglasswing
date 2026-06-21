@@ -32,7 +32,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
   description: `Queries the live dependency graph (AST topological map) of the project — classes, functions, files and how they connect. Use it to "zoom out" and understand impact BEFORE editing.
 
 # Query verbs (pass as the \`query\` string)
-- \`SEARCH_NODES <keyword>\` — find where domain logic lives without grepping (matches name, purpose, path).
+- \`SEARCH_NODES *\` — START HERE on an unfamiliar repo: lists the most central nodes so you see what actually exists (don't guess concept names). \`SEARCH_NODES <keyword>\` then finds a specific symbol/file (matches name, purpose, path).
 - \`GET_DEPENDENTS <node>\` — who depends on this symbol (reverse deps). If you change a signature you MUST update these.
 - \`GET_DEPENDENCIES <node>\` — what this symbol depends on (forward deps).
 - \`BLAST_RADIUS <node>\` — downstream reach + highest criticality if you modify this node. Run this before signature-changing edits.
@@ -65,6 +65,14 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     const target = verb ? raw.slice(firstSpace + 1).trim() : raw;
 
     if (verb === 'SEARCH_NODES') {
+      // Discovery: `SEARCH_NODES *` (or no keyword) lists the most central nodes so the model can see
+      // what's actually in the graph and pick real names — instead of guessing concepts.
+      if (!target || target === '*') {
+        const top = getTopNodes(graphStore, 30);
+        if (top.length === 0) return 'The graph is empty.';
+        return `Most central ${top.length} nodes (use these names with READ_SYMBOL / GET_DEPENDENTS / BLAST_RADIUS):\n` +
+          top.map(r => `- ${r.type} ${r.label}${r.filePath ? ` (${r.filePath})` : ''}`).join('\n');
+      }
       const hits = searchNodes(graphStore, target);
       if (hits.length === 0) return `No nodes match "${target}".` + graphOrientation(graphStore);
       return `Found ${hits.length} node(s) for "${target}":\n` + hits.map(n => '- ' + fmtNode(n)).join('\n');

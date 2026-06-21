@@ -32,5 +32,12 @@ export function resolveNodeId(store: IGraphStore, token: string): { id?: string;
   const matches = searchNodes(store, token, 6);
   if (matches.length === 1) return { id: matches[0].id };
   if (matches.length === 0) return {};
+  // A file-path-looking target (e.g. "src/index.ts") matches the FILE node AND every symbol inside
+  // it → "ambiguous". But the model almost always means the FILE itself (its dependents / blast
+  // radius), so if there's exactly one FILE among the matches, pick it instead of asking to clarify.
+  if (/[/.]/.test(token)) {
+    const files = matches.filter(n => n.type === 'FILE');
+    if (files.length === 1) return { id: files[0].id };
+  }
   return { ambiguous: matches };
 }
