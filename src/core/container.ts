@@ -18,7 +18,6 @@ import { CodebaseIndexer } from '../graph/indexer';
 import { StaticAnalyzer } from '../graph/static.analyzer';
 import { SemanticAugmenter } from '../graph/semantic.augmenter';
 import { GenomeRepository } from '../genome/genome.repository';
-import { ArchitectureGuardian } from '../genome/guardian';
 import { TaskPipeline } from '../task';
 import * as path from 'path';
 
@@ -110,6 +109,9 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
 
   // Tools
   const toolRegistry = new ToolRegistry();
+  // Index-gated tools (GraphQueryTool/GraphContextTool) stay disabled until the repo is indexed, then
+  // are promoted + preferred. The check is lazy so it reflects a graph built mid-session (after /index).
+  toolRegistry.setGraphReadyCheck(() => graphStore.getGraph().nodes.size > 0);
   toolRegistry.register(createReadFileTool(governor));
   toolRegistry.register(createWriteFileTool(governor));
   toolRegistry.register(createEditFileTool(governor));
@@ -155,7 +157,6 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Genome & Evolution — used by /evolve (gated by allowSelfEvolution config, off by default).
   const genomeRepo = new GenomeRepository(projectRoot);
   genomeRepo.reload().catch(() => {});
-  new ArchitectureGuardian(projectRoot, genomeRepo);
 
   const semanticAugmenter = new SemanticAugmenter(graphStore, llmAdapter, projectRoot);
   if (cfg.skipSemanticMetadata) semanticAugmenter.enabled = false;
