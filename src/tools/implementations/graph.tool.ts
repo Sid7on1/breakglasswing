@@ -5,6 +5,27 @@ import { ImpactEngine } from '../../graph/impact.engine';
 import { fmtNode, searchNodes, resolveNodeId } from '../../graph/node.search';
 import { readSymbolSource } from '../../graph/symbol.source';
 import { planContext } from '../../graph/context.planner';
+import { getTopNodes } from '../../graph/pagerank';
+
+// When a lookup misses, ORIENT the model instead of dead-ending: tell it what the graph actually
+// holds — node-type counts + the most central REAL symbols — so it searches actual names rather than
+// guessing conceptual ones (the "assumed an Architecture node exists" problem). No hardcoded
+// workflow; just enough signal for the model to self-correct its next call.
+function graphOrientation(store: GraphStore): string {
+  const nodes = [...store.getGraph().nodes.values()];
+  if (nodes.length === 0) return '';
+  // Count only the searchable definition types — STATEMENT/BLOCK/VARIABLE are graph internals the
+  // model can't usefully search for, so they'd just be noise here.
+  const SHOWN = new Set(['FILE', 'CLASS', 'FUNCTION', 'INTERFACE']);
+  const byType = new Map<string, number>();
+  for (const n of nodes) if (SHOWN.has(n.type)) byType.set(n.type, (byType.get(n.type) || 0) + 1);
+  const types = [...byType.entries()].sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c} ${t}`).join(', ');
+  const central = getTopNodes(store, 12).map(r => r.label).filter(Boolean);
+  return `\n\nThis graph indexes ${types || nodes.length + ' nodes'}.` +
+    (central.length ? ` Its most central symbols: ${central.join(', ')}.` : '') +
+    `\nThese are CODE symbols, not domain concepts — search one of the real names above, or run` +
+    ` GET_DEPENDENTS / READ_SYMBOL on it.`;
+}
 
 export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore) => buildTool({
   name: 'GraphQueryTool',
@@ -45,7 +66,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
 
     if (verb === 'SEARCH_NODES') {
       const hits = searchNodes(graphStore, target);
-      if (hits.length === 0) return `No nodes match "${target}".`;
+      if (hits.length === 0) return `No nodes match "${target}".` + graphOrientation(graphStore);
       return `Found ${hits.length} node(s) for "${target}":\n` + hits.map(n => '- ' + fmtNode(n)).join('\n');
     }
 
