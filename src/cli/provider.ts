@@ -16,7 +16,13 @@ const PROVIDERS: LlmProvider[] = [
   { name: 'google', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKeyEnv: 'GOOGLE_API_KEY', defaultModel: 'gemini-2.0-flash' },
 ];
 
-let currentProviderName: string = process.env.BGW_PROVIDER || 'nvidia';
+// Runtime override set by the /provider command; null means "follow BGW_PROVIDER". Resolved lazily
+// (not captured at module load) so the env var is read AFTER env files are loaded — otherwise import
+// hoisting could snapshot it before loadGlobalEnv() runs and silently fall back to 'nvidia'.
+let providerOverride: string | null = null;
+function activeProviderName(): string {
+  return providerOverride || process.env.BGW_PROVIDER || 'nvidia';
+}
 
 export function getProviders(): LlmProvider[] {
   return [...PROVIDERS];
@@ -27,39 +33,42 @@ export function getProvider(name: string): LlmProvider | undefined {
 }
 
 export function getCurrentProvider(): LlmProvider {
-  return getProvider(currentProviderName) || PROVIDERS[0];
+  return getProvider(activeProviderName()) || PROVIDERS[0];
 }
 
 export function setProvider(name: string): LlmProvider | undefined {
   const found = getProvider(name);
-  if (found) currentProviderName = found.name;
+  if (found) providerOverride = found.name;
   return found;
 }
 
+function keysForProvider(provider: LlmProvider): KeyConfig[] {
+  const envVal = process.env[provider.apiKeyEnv];
+  if (!envVal) return [];
+  return envVal.split(',').map(k => k.trim()).filter(Boolean).map((keyStr, i) => ({
+    keyStr,
+    model: process.env[`${provider.apiKeyEnv}_MODEL_${i + 1}`] || process.env[`${provider.apiKeyEnv}_MODEL`] || provider.defaultModel,
+    baseURL: provider.baseURL,
+    provider: provider.name,
+    label: `${provider.name} #${i + 1}`,
+  }));
+}
+
+/**
+ * Build the key rotation for the ACTIVE provider only (BGW_PROVIDER / the /provider command).
+ *
+ * Previously this pooled every provider that had a key into one rotation. That is broken with model
+ * selection: a single chosen model id lives in one provider's namespace, so when a turn rotated to a
+ * different provider's key it 400'd ("model not found") — the intermittent-400 bug. Keys stay
+ * single-provider so the model namespace is consistent; switch providers with /provider. Falls back
+ * to the first provider that has a key, so a misconfigured active provider never empties the pool.
+ */
 export function buildKeyPool(): KeyConfig[] {
-  const pool: KeyConfig[] = [];
-
+  const active = keysForProvider(getCurrentProvider());
+  if (active.length > 0) return active;
   for (const provider of PROVIDERS) {
-    const envVal = process.env[provider.apiKeyEnv];
-    if (!envVal) continue;
-
-    const keys = envVal.split(',').map(k => k.trim()).filter(Boolean);
-    const labelPrefix = provider.name;
-
-    keys.forEach((keyStr, i) => {
-      const modelEnv = process.env[`${provider.apiKeyEnv}_MODEL_${i + 1}`]
-                    || process.env[`${provider.apiKeyEnv}_MODEL`]
-                    || provider.defaultModel;
-
-      pool.push({
-        keyStr,
-        model: modelEnv,
-        baseURL: provider.baseURL,
-        provider: provider.name,
-        label: `${labelPrefix} #${i + 1}`,
-      });
-    });
+    const keys = keysForProvider(provider);
+    if (keys.length > 0) return keys;
   }
-
-  return pool;
+  return [];
 }

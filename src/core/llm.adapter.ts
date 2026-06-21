@@ -376,6 +376,31 @@ export class LlmAdapter implements LLMProvider {
     }
   }
 
+  // If the configured model isn't one the provider actually serves, switch to a valid one so the very
+  // first turn doesn't 400 forever (the classic symptom: a config.json pinned to a model from a
+  // different provider — e.g. an NVIDIA id while the key is OpenRouter). Returns {from,to} when it
+  // switched so the caller can notify + persist; null when nothing was wrong. Best-effort: a provider
+  // without a /models endpoint returns [] above, so we leave the config untouched.
+  public async healModel(): Promise<{ from: string; to: string } | null> {
+    const ids = await this.listProviderModels();
+    if (ids.length === 0) return null;
+    const current = this.userModel || this.defaultModel;
+    if (current && ids.includes(current)) return null; // already valid
+
+    // Prefer the provider/key's own default if the provider actually serves it; else first available.
+    let fallback = ids[0];
+    try {
+      const kr = await this.apiKeyManager.getNextKey();
+      if (kr.model && ids.includes(kr.model)) fallback = kr.model;
+    } catch { /* use first available */ }
+
+    const from = current || '(unset)';
+    this.userModel = fallback;
+    this.defaultModel = fallback;
+    Logger.warn(`[LlmAdapter] Configured model "${from}" not served by provider; switched to "${fallback}".`);
+    return { from, to: fallback };
+  }
+
   /**
    * Resolve the sampling regime for a model. Reasoning MoE models are tuned for a specific
    * temperature/top_p and go pathological off it: minimax's own model card specifies
