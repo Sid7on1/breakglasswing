@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { resolvePath } from '../path.util';
 import * as crypto from 'crypto';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
@@ -17,11 +18,6 @@ import { globalTransactionManager } from '../../core/transaction.manager';
 const MAX_FILE_BYTES = 100 * 1024;        // 100 KB — read in full
 const OFFLOAD_FILE_BYTES = 1024 * 1024;   // 1 MB — also write to /tmp for reference
 const PREVIEW_LINES = 100;
-
-function resolvePath(p: string, cwd: string): string {
-  if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
-  return path.resolve(cwd, p);
-}
 
 export const createReadFileTool = (governor: IGovernor) => buildTool({
   name: 'ReadFileTool',
@@ -227,6 +223,13 @@ Use this tool whenever the user explicitly asks you to delete, remove, or trash 
     if (!exists) {
       return `Error: Nothing to delete — no file or directory found at ${fullPath} (resolved from "${args.path}" relative to ${currentCwd}). Nothing was changed. If the target lives elsewhere, pass its absolute path.`;
     }
+    // Back up a file before deleting so /undo and /rewind can bring it back (parity with edit/write,
+    // which always back up first). Best-effort: a directory can't be content-backed-up, and a failed
+    // backup shouldn't block an explicitly-approved delete.
+    try {
+      const st = await fs.stat(fullPath);
+      if (st.isFile()) { await globalTransactionManager.trackEdit(fullPath); await backupFile(fullPath); }
+    } catch { /* best-effort */ }
     try {
       await fs.rm(fullPath, { recursive: true, force: true });
       return `Successfully deleted ${fullPath}`;

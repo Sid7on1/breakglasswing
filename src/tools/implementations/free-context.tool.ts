@@ -1,13 +1,8 @@
 import * as path from 'path';
-import * as os from 'os';
+import { resolvePath } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { fileStateCache } from '../../memory/file-state-cache';
-
-function resolvePath(p: string, cwd: string): string {
-  if (p === '~' || p.startsWith('~/')) return path.join(os.homedir(), p.slice(p[1] === '/' ? 2 : 1));
-  return path.resolve(cwd, p);
-}
 
 interface FreeContextArgs {
   reason: string;
