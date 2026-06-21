@@ -98,6 +98,11 @@ export class AgentLoop {
         // Tier routing: when the turn was routed to the lite model, every step of this loop
         // (incl. tool-call follow-ups) runs on lite. Heavy turns leave this unset → coding model.
         lite: options?.useLite,
+        // CRITICAL: thread the interrupt signal into the request so Ctrl+C/esc aborts the underlying
+        // fetch IMMEDIATELY. Without it the signal only took effect between stream events — so a hung
+        // cold-starting model (no chunks) couldn't be stopped until the 60–180s timeout ("no stop
+        // button"). Now an abort cancels the in-flight request at once.
+        signal,
       });
 
       const toolCalls: { id: string; name: string; args: string }[] = [];

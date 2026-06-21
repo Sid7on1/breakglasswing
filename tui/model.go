@@ -500,7 +500,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.engine.Send(encodeInput("/tier " + next))
 			return m, nil
 		case "esc":
-			// Stash the current line (Ctrl+R resumes). No-op when empty.
+			// While a turn is running, esc cancels it (matches the "esc to stop" hint, same as Ctrl+C).
+			if m.busy {
+				m.engine.Send(encodeInterrupt())
+				m.status = "Interrupting…"
+				return m, nil
+			}
+			// Idle: stash the current line (Ctrl+R resumes). No-op when empty.
 			if strings.TrimSpace(m.input.Value()) != "" {
 				m.stash = m.input.Value()
 				m.input.SetValue("")
