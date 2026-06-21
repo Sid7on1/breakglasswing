@@ -18,12 +18,11 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Agentic coding, 1M ctx, native multimodal — the coding default', tier: 'coding' },
   { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Flagship agentic + coding + long-horizon reasoning', tier: 'coding' },
   { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Strong text/coding/agentic (slow cold-start)', tier: 'coding' },
-  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Sparse-MoE multimodal reasoning, agentic + coding', tier: 'coding' },
   { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: '230B coding/reasoning/office (slow cold-start)', tier: 'coding' },
 
-  // — Fast / lite (verified; good as the LITE model: summaries, self-critic) —
-  { label: 'Step 3.5 Flash', value: 'stepfun-ai/step-3.5-flash', desc: '200B open-source MoE reasoning, agentic — the lite default', tier: 'lite' },
-  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls (plain, no reasoning)', tier: 'lite' },
+  // — Fast / lite (good as the LITE model: summaries, self-critic) —
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Sparse-MoE multimodal reasoning, agentic + coding — the lite default', tier: 'lite' },
+  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'Fast, reliable tool calls (plain, no reasoning) — pick this if you want lower latency', tier: 'lite' },
   { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual (Indian languages), coding + math', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
@@ -34,15 +33,36 @@ export const MODEL_CATALOG: ModelEntry[] = [
 
 /** Default model for each slot. */
 export const DEFAULT_CODING_MODEL = 'minimaxai/minimax-m3';
-export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.5-flash';
+// step-3.7-flash is the valid NIM id for the Step "flash" model (the old default step-3.5-flash 400s
+// as "not a valid model ID"). Llama 3.1 70B remains available via /model lite for lower latency.
+export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.7-flash';
+
+const TIER_LABEL: Record<ModelEntry['tier'], string> = { coding: 'Coding / agentic', lite: 'Fast / lite', other: 'Other providers (own key)' };
 
 /** Menu options for a model picker, optionally annotated with which slot is current. */
 export function modelMenuOptions(current?: string): { label: string; value: string; desc: string; category: string }[] {
-  const cat: Record<ModelEntry['tier'], string> = { coding: 'Coding / agentic', lite: 'Fast / lite', other: 'Other providers (own key)' };
   return MODEL_CATALOG.map(m => ({
     label: m.value === current ? `● ${m.label}` : m.label,
     value: m.value,
     desc: m.desc,
-    category: cat[m.tier],
+    category: TIER_LABEL[m.tier],
   }));
+}
+
+// Build the picker from the IDs the provider ACTUALLY serves (LlmAdapter.listProviderModels()).
+// A live ID that matches the curated catalog inherits its nice label/description/tier; anything
+// else shows as its raw id under "Available on your provider". This is the fix for the 400s —
+// you can only pick a model the provider confirms it has. Empty list → caller uses the static
+// catalog instead (offline / no /models endpoint).
+export function liveModelMenuOptions(liveIds: string[], current?: string): { label: string; value: string; desc: string; category: string }[] {
+  const byId = new Map(MODEL_CATALOG.map(m => [m.value, m]));
+  return liveIds.map(id => {
+    const known = byId.get(id);
+    return {
+      label: id === current ? `● ${known?.label || id}` : (known?.label || id),
+      value: id,
+      desc: known?.desc || id,
+      category: known ? TIER_LABEL[known.tier] : 'Available on your provider',
+    };
+  });
 }

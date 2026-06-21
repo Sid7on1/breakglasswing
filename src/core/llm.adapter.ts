@@ -345,13 +345,35 @@ export class LlmAdapter implements LLMProvider {
   private createClient(keyResult: KeyResult): OpenAI {
     const apiKey = keyResult.keyStr || '';
     const baseURL = keyResult.baseURL || 'https://integrate.api.nvidia.com/v1';
-    const cacheKey = `${baseURL} ${apiKey}`;
+    const cacheKey = `${baseURL}${apiKey}`;
     let client = this.clientCache.get(cacheKey);
     if (!client) {
       client = new OpenAI({ apiKey, baseURL, maxRetries: 3 });
       this.clientCache.set(cacheKey, client);
     }
     return client;
+  }
+
+  // The IDs the provider ACTUALLY serves, fetched from its OpenAI-compatible `/models` endpoint.
+  // This kills the "400 — not a valid model ID" class of bug at the root: the picker offers real
+  // IDs instead of a hand-typed catalog that drifts out of sync with the provider. Cached for the
+  // session (refresh=true to re-fetch). Empty array on any failure — callers fall back to the
+  // static catalog, so a provider without a /models endpoint degrades to the old behaviour.
+  private liveModelsCache: string[] | null = null;
+  public async listProviderModels(refresh = false): Promise<string[]> {
+    if (this.liveModelsCache && !refresh) return this.liveModelsCache;
+    try {
+      const keyResult = await this.apiKeyManager.getNextKey();
+      if (!keyResult.keyStr) return [];
+      const client = this.createClient(keyResult);
+      const page = await client.models.list();
+      const ids = (page.data || []).map(m => m.id).filter(Boolean).sort();
+      this.liveModelsCache = ids;
+      return ids;
+    } catch (e: any) {
+      Logger.warn(`[LlmAdapter] listProviderModels failed (${e?.message}); falling back to static catalog.`);
+      return [];
+    }
   }
 
   /**
@@ -762,10 +784,9 @@ export class LlmAdapter implements LLMProvider {
       // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
       // field key the provider sent, then writes them to a dedicated debug file at stream end. This
       // is how we learn the EXACT reasoning delimiter/channel a model uses (e.g. minimax's closer)
-      // without guessing. TEMPORARILY default-ON for diagnosis — opt out with BGW_DEBUG_STREAM=0.
-      // Writes to a separate file (not the console/Logger), so it can't corrupt the TUI. REVERT to
-      // default-off once the format is captured.
-      const debugStream = process.env.BGW_DEBUG_STREAM !== '0' && process.env.BGW_DEBUG_STREAM !== 'false';
+      // without guessing. OPT-IN only — set BGW_DEBUG_STREAM=1 to enable. (It does sync disk writes
+      // at stream end, so leaving it on by default added I/O to every single turn.)
+      const debugStream = process.env.BGW_DEBUG_STREAM === '1' || process.env.BGW_DEBUG_STREAM === 'true';
       let dbgContent = '';
       let dbgReasoning = '';
       const dbgDeltaKeys = new Set<string>();
