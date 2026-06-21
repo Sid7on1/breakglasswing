@@ -427,13 +427,26 @@ export class LlmAdapter implements LLMProvider {
     return kr;
   }
 
+  // Rough cost estimate at a flat $0.002 / 1K tokens. One place instead of the ~12 copies of this
+  // arithmetic (and the bare 0.002) that used to be scattered through every API method below.
+  private estCost(tokens: number): number {
+    return (tokens / 1000) * 0.002;
+  }
+
+  // Map an OpenAI/network error to a status code: timeout → 408, otherwise the API-reported status,
+  // else 500. Was copy-pasted verbatim in every method's catch block.
+  private errorStatus(e: any): number {
+    if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) return 408;
+    return e?.status || 500;
+  }
+
   async generateTinyPlans(userPrompt: string, systemContext: string) {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     
     // Budget checking heuristics: ~100 tokens out, 50 in for tiny plans
     const estimatedTokens = 150;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002; // Very rough estimate
+    const estimatedCostUsd = this.estCost(estimatedTokens); // Very rough estimate
     if (this.budgetVeto) {
       await this.budgetVeto.checkVeto(estimatedCostUsd);
     }
@@ -457,7 +470,7 @@ export class LlmAdapter implements LLMProvider {
 
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       }
 
@@ -470,10 +483,8 @@ export class LlmAdapter implements LLMProvider {
         await this.budgetVeto.releaseReservation(estimatedCostUsd);
       }
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
+      const status = this.errorStatus(error);
       let retryAfter: number | null = null;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
       if (error.headers?.['retry-after']) retryAfter = parseFloat(error.headers['retry-after']);
       else if (status === 429) retryAfter = 5;
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfter);
@@ -484,7 +495,7 @@ export class LlmAdapter implements LLMProvider {
   async generateXmlCompletion(userPrompt: string, systemContext: string, maxTokens: number = 64) {
     const kr = await this.getKey();
     const client = this.createClient(kr);
-    const estimatedCostUsd = (maxTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(maxTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -500,7 +511,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -509,9 +520,7 @@ export class LlmAdapter implements LLMProvider {
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
+      const status = this.errorStatus(error);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       return { status, content: "", retryAfter: null, error };
     }
@@ -521,7 +530,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -539,7 +548,7 @@ export class LlmAdapter implements LLMProvider {
       if (usage) {
         Logger.info(`[LlmAdapter] Token Usage - Prompt: ${usage.prompt_tokens} | Completion: ${usage.completion_tokens} | Total: ${usage.total_tokens}`);
         if (this.budgetVeto) {
-          const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+          const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
           await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
         }
       } else if (this.budgetVeto) {
@@ -549,9 +558,7 @@ export class LlmAdapter implements LLMProvider {
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
-      let status = 500;
-      if (error instanceof OpenAI.APIConnectionTimeoutError || error.code === 'ECONNABORTED' || error.message.includes('timeout')) status = 408;
-      else if (error.status) status = error.status;
+      const status = this.errorStatus(error);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       return { status, content: "", retryAfter: null, error };
     }
@@ -566,7 +573,7 @@ export class LlmAdapter implements LLMProvider {
     const userPrompt = `Node ID: ${nodeId}\nNode Name: ${nodeName}\nType: ${type}\nCode:\n${codeSnippet}`;
     const kr = await this.getKey();
     const client = this.createClient(kr);
-    const estimatedCostUsd = (200 / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(200);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -587,7 +594,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -605,7 +612,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -621,7 +628,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
       if (this.budgetVeto && usage) {
-        const actualCostUsd = ((usage.prompt_tokens + usage.completion_tokens) / 1000) * 0.002;
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
         await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
@@ -641,7 +648,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
     try {
@@ -663,9 +670,7 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
-      let status = 500;
-      if (e instanceof OpenAI.APIConnectionTimeoutError || e.code === 'ECONNABORTED' || e.message.includes('timeout')) status = 408;
-      else if (e.status) status = e.status;
+      const status = this.errorStatus(e);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
       throw e;
     }
@@ -675,7 +680,7 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
-    const estimatedCostUsd = (estimatedTokens / 1000) * 0.002;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
     // Declared outside the try so the catch can tell whether the reservation was
     // already settled by a mid-stream usage report — otherwise an error after the
@@ -890,7 +895,7 @@ export class LlmAdapter implements LLMProvider {
           globalTelemetry.recordUsage(chunk.usage.prompt_tokens ?? 0, cacheRead, cacheCreate);
           yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
           if (this.budgetVeto) {
-            const actualCostUsd = ((chunk.usage.prompt_tokens + chunk.usage.completion_tokens) / 1000) * 0.002;
+            const actualCostUsd = this.estCost(chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
             await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
           }
           usageRecorded = true;

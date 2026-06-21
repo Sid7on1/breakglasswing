@@ -151,8 +151,11 @@ export class HeadlessSession {
       setActivePrompt: (prompt: any) => cliEvents.emit('message', this.uiMsg('prompt', prompt)),
       executeCommand: (cmd: string) => { void this.dispatch(cmd); },
       restoreMessages: (msgs: any[]) => {
+        // Refuse to swap the history array while a turn is running — the agent loop is mutating it,
+        // and replacing it mid-flight corrupts the conversation. Same guard as runTurn().
+        if (this.busy) { cliEvents.emit('status', 'Busy — finish the current turn before loading a session.'); return; }
         const active = this.deps.personas.bimax;
-        if (active && Array.isArray(msgs)) active.messages = msgs as any;
+        if (active && Array.isArray(msgs)) active.messages = msgs.slice() as any;
       },
       // Return the live conversation so /cost, /save, /sessions et al. work (was stubbed to [], which
       // made those commands silently show nothing).
