@@ -1131,14 +1131,38 @@ func renderToolCall(tc ToolCall) string {
 			summary = stats + " · " + summary
 		}
 	}
-	if summary == "" {
+	// For edit/write tools, show the actual colorized diff (green adds, red deletes) like Claude
+	// Code — the engine returns a unified diff (@@ hunks) in the output. Shown below the summary.
+	var diffBlock string
+	if tc.Status != "error" {
+		switch tc.ToolName {
+		case "EditFileTool", "MultiEditTool", "WriteFileTool":
+			if d := extractDiff(tc.Output); d != "" {
+				diffBlock = "\n" + indentLines(renderDiff(d, 20), indent+"    ")
+			}
+		}
+	}
+	if summary == "" && diffBlock == "" {
 		return indent + header
 	}
 	sumStyle := dimStyle
 	if tc.Status == "error" {
 		sumStyle = errStyle
 	}
-	return indent + header + "\n" + indent + "  " + toolGut.Render("⎿ ") + sumStyle.Render(summary)
+	out := indent + header
+	if summary != "" {
+		out += "\n" + indent + "  " + toolGut.Render("⎿ ") + sumStyle.Render(summary)
+	}
+	return out + diffBlock
+}
+
+// extractDiff returns the unified-diff portion of a tool's output (from the first @@ hunk), or "" if
+// there is none — so non-edit output never gets diff-colorized.
+func extractDiff(out string) string {
+	if i := strings.Index(out, "@@"); i >= 0 {
+		return out[i:]
+	}
+	return ""
 }
 
 // indentLines prefixes every line of s with the given gutter, so a rendered block (markdown,
