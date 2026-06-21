@@ -1996,19 +1996,33 @@ func (m model) tokenMeterView() string {
 // --- working / thinking indicators ---------------------------------------------------------
 
 // thinkingView is ThinkingText.tsx: a shimmer phrase + animated dots + the last reasoning snippet.
+// fmtElapsed renders seconds as "12s" or "3m 24s" so long waits read clearly (900s → "15m 00s")
+// instead of a giant raw second count.
+func fmtElapsed(secs int) string {
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%dm %02ds", secs/60, secs%60)
+}
+
 func (m model) thinkingView() string {
 	phrase := thinkingPhrases[m.phraseIdx%len(thinkingPhrases)]
 	dots := strings.Repeat(".", m.thinkDots)
-	s := thinkMark.Render("✻ ") + workFrame.Render(phrase) + thinkMark.Render(fmt.Sprintf("%-3s", dots))
+	s := m.spin.View() + " " + thinkMark.Render("✻ ") + workFrame.Render(phrase) + thinkMark.Render(fmt.Sprintf("%-3s", dots))
+	// A live, ticking elapsed clock + cancel hint — so a long reasoning phase (minimax can think for
+	// minutes before the first token) reads as "still working, Ns elapsed", never as a hang.
+	if m.busy && !m.busyStart.IsZero() {
+		s += statusStyle.Render(" · " + fmtElapsed(m.elapsed) + " · esc to stop")
+	}
 	if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
 	}
 	return s
 }
 
-// workingView is WorkingIndicator.tsx: a braille spinner + "Generating · Ns" elapsed clock.
+// workingView is WorkingIndicator.tsx: a braille spinner + "Generating · Ns" elapsed clock + cancel hint.
 func (m model) workingView() string {
-	return m.spin.View() + " " + workLabel.Render(fmt.Sprintf("Generating · %ds", m.elapsed))
+	return m.spin.View() + " " + workLabel.Render("Generating · "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 }
 
 // --- dashboards ----------------------------------------------------------------------------
