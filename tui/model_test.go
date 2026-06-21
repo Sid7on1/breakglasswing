@@ -598,7 +598,7 @@ func TestToolCallTimingAndAgentLabel(t *testing.T) {
 		Output: "a\nb", StartTime: "2026-06-20T10:00:00Z", EndTime: "2026-06-20T10:00:02Z",
 		AgentLabel: "explorer",
 	}
-	out := stripANSI(renderToolCall(tc))
+	out := stripANSI(renderToolCall(tc, 80))
 	if !strings.Contains(out, "2.0s") {
 		t.Fatalf("timing badge missing: %q", out)
 	}

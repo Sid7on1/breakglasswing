@@ -4,6 +4,7 @@ import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
+import { checkEditSyntax } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { detectCorruptWrite } from '../write-guard';
@@ -287,6 +288,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
 
     const n = args.replaceAll ? resolvedCount : 1;
     const matchNote = matchMethod ? ` [matched via ${matchMethod}]` : '';
-    return `Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}${matchNote}):\n${capDiff(compactDiff(content, updated, args.path))}`;
+    const syntaxWarn = checkEditSyntax(fullPath, updated) || '';
+    return `Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}${matchNote}):\n${capDiff(compactDiff(content, updated, args.path))}${syntaxWarn}`;
   },
 }, governor);

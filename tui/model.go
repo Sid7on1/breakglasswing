@@ -880,7 +880,7 @@ func (m *model) handleEvent(o Outbound) {
 	case "tool_call", "tool_call_result":
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
-			line := renderToolCall(tc)
+			line := renderToolCall(tc, m.width)
 			running := tc.Status == "running" || tc.Status == ""
 			if tc.ID != "" && running {
 				// Show it live (in View) until the result arrives — can't update scrollback in place.
@@ -1097,7 +1097,7 @@ func editStats(tc ToolCall) string {
 // renderToolCall draws one tool entry the Ink way: a status dot, the bold label, dim (args), a
 // timing badge, and an indented ⎿ summary line. Sub-agent calls get an [agentLabel] prefix and a
 // 2-space indent. Running calls show no summary yet; errors show the summary in red.
-func renderToolCall(tc ToolCall) string {
+func renderToolCall(tc ToolCall, termWidth int) string {
 	dot := toolDot
 	switch tc.Status {
 	case "error":
@@ -1138,7 +1138,9 @@ func renderToolCall(tc ToolCall) string {
 		switch tc.ToolName {
 		case "EditFileTool", "MultiEditTool", "WriteFileTool":
 			if d := extractDiff(tc.Output); d != "" {
-				diffBlock = "\n" + indentLines(renderDiff(d, 20), indent+"    ")
+				// Background fills to the right edge: terminal width minus the gutter+indent the diff sits under.
+				diffW := termWidth - len(indent) - 4 - 6
+				diffBlock = "\n" + indentLines(renderDiff(d, 20, diffW), indent+"    ")
 			}
 		}
 	}
@@ -1485,7 +1487,7 @@ func (m model) promptView() string {
 		var b strings.Builder
 		b.WriteString(errStyle.Render("⚠ "+m.reqQ) + "\n")
 		if m.reqKind == "diff" && m.reqBody != "" {
-			b.WriteString(renderDiff(m.reqBody, 16) + "\n")
+			b.WriteString(renderDiff(m.reqBody, 16, m.width-8) + "\n")
 		}
 		for i, op := range m.reqOpts {
 			b.WriteString(fmt.Sprintf("  %d) %s\n", i+1, op))
@@ -2139,7 +2141,7 @@ var hunkRe = regexp.MustCompile(`@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 // changed line on a coloured background (dark green = added, dark red = removed) with bright text;
 // context lines stay dim. `@@` hunk headers are consumed to drive line numbers, not shown. Capped to
 // maxLines.
-func renderDiff(diff string, maxLines int) string {
+func renderDiff(diff string, maxLines int, fillWidth int) string {
 	type row struct {
 		num  int
 		sign byte
@@ -2175,16 +2177,19 @@ func renderDiff(diff string, maxLines int) string {
 	if len(rows) == 0 {
 		return ""
 	}
-	// Pad every coloured line to a common width so the backgrounds form clean blocks (capped so a
-	// single very long line can't blow out the row width).
+	// Target width for the coloured block. Default to the longest content line, but if a terminal
+	// fill width was passed, extend the background all the way to the right edge (Claude-Code style).
 	width := 0
 	for _, r := range rows {
 		if w := len([]rune(r.text)) + 2; w > width {
 			width = w
 		}
 	}
-	if width > 100 {
-		width = 100
+	if fillWidth > width {
+		width = fillWidth
+	}
+	if width > 200 {
+		width = 200
 	}
 
 	var b strings.Builder
@@ -2196,7 +2201,11 @@ func renderDiff(diff string, maxLines int) string {
 		}
 		gutter := diffLineNum.Render(fmt.Sprintf("%4d ", r.num))
 		body := string(r.sign) + " " + r.text
-		if pad := width - len([]rune(body)); pad > 0 {
+		// Truncate over-long lines so they don't wrap (which would break the block), else pad so the
+		// background fills uniformly to `width`.
+		if rs := []rune(body); len(rs) > width {
+			body = string(rs[:width-1]) + "…"
+		} else if pad := width - len(rs); pad > 0 {
 			body += strings.Repeat(" ", pad)
 		}
 		switch r.sign {

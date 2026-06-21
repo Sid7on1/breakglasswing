@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
+import { checkEditSyntax } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { sliceLineRange } from '../file-range';
@@ -191,7 +192,8 @@ Use this tool to write new code, update configuration files, or generate artifac
     // Invalidate read cache so post-compact restoration doesn't re-inject stale pre-write content.
     fileStateCache.invalidate(fullPath);
     const diff = capDiff(compactDiff(prior, args.content, args.path));
-    return `${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}`;
+    const syntaxWarn = checkEditSyntax(fullPath, args.content) || '';
+    return `${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}${syntaxWarn}`;
   }
 }, governor);
 

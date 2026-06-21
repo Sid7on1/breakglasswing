@@ -83,8 +83,8 @@ var (
 	// Full-line diff (Claude-Code style): the WHOLE changed line gets a coloured background with
 	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
 	// warm theme). Line numbers sit in a dim gutter.
-	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#13361C")).Foreground(lipgloss.Color("#D6F5DD"))
-	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#3A1A20")).Foreground(lipgloss.Color("#FFD7DD"))
+	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#1B4332")).Foreground(lipgloss.Color("#D8F3DC"))
+	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#5A1E28")).Foreground(lipgloss.Color("#FFD6DD"))
 	diffLineNum = lipgloss.NewStyle().Foreground(colDim)
 
 	// Word-level diff (edit-tool preview): tinted background like Ink's diffWordsWithSpace.

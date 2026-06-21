@@ -4,6 +4,7 @@ import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
+import { checkEditSyntax } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { globalTransactionManager } from '../../core/transaction.manager';
@@ -147,6 +148,7 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
     }
 
     const diff = capDiff(order.map(f => compactDiff(originals.get(f)!, working.get(f)!, path.relative(cwd, f))).join('\n'));
-    return `Applied ${edits.length} edit(s) across ${order.length} file(s):\n${diff}`;
+    const syntaxWarn = order.map(f => checkEditSyntax(f, working.get(f)!) || '').join('');
+    return `Applied ${edits.length} edit(s) across ${order.length} file(s):\n${diff}${syntaxWarn}`;
   },
 }, governor);
