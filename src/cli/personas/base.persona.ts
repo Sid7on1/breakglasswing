@@ -251,7 +251,7 @@ export abstract class AgentPersona {
     // governor is undefined here: tools already carry their own injected governor, and the loop
     // doesn't enforce policy itself (see AgentLoop constructor).
     const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow);
-    const maxIterations = options?.maxIterations ?? 55;
+    const maxIterations = options?.maxIterations ?? 130;
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
     const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, contextMode });
 
