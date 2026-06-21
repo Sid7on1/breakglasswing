@@ -15,6 +15,13 @@ export interface PageRankResult {
  * Uses the standard iterative algorithm with damping factor d (default 0.85).
  * Converges in ~30 iterations for typical code graphs (<50k nodes).
  */
+// ponytail: PageRank is recomputed on EVERY agent-loop iteration (the repo-map injection), ~150ms
+// over a large graph × up to 130 iterations per task = seconds of pure waste — yet the graph only
+// changes on /index. Memoize by a cheap node+edge signature; a re-index changes those counts and
+// invalidates the cache. Rare same-count re-index → a slightly stale orientation map, which is
+// harmless. One cache entry is enough (single active graph).
+let _prCache: { sig: string; scores: Map<string, number> } | null = null;
+
 export function computePageRank(
   store: IGraphStore,
   iterations = 30,
@@ -23,6 +30,11 @@ export function computePageRank(
   const graph = store.getGraph();
   const nodes = Array.from(graph.nodes.values());
   if (nodes.length === 0) return new Map();
+
+  // Include first/last node id (Map preserves insertion order → stable per graph) so two DIFFERENT
+  // graphs that happen to share node/edge counts don't collide on the cache.
+  const sig = `${nodes.length}:${graph.edges.length}:${nodes[0].id}:${nodes[nodes.length - 1].id}:${iterations}:${damping}`;
+  if (_prCache && _prCache.sig === sig) return _prCache.scores;
 
   const N = nodes.length;
   const scores = new Map<string, number>();
@@ -51,6 +63,7 @@ export function computePageRank(
     for (const [id, s] of next) scores.set(id, s);
   }
 
+  _prCache = { sig, scores };
   return scores;
 }
 
@@ -92,9 +105,20 @@ const estTokens = (s: string) => Math.ceil(s.length / 4);
  * ordered by source line so the outline reads top-to-bottom. Falls back to `type name` when a node
  * has no captured signature (older graphs). Empty string when the graph isn't indexed.
  */
+let _mapCache: { key: string; out: string } | null = null;
+
 export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focusTerms: string[] = []): string {
-  const scores = computePageRank(store);
   const graph = store.getGraph();
+  // ponytail: re-injected every loop iteration, but within a task the graph and the focus terms (from
+  // the same user message) are stable — cache the rendered outline keyed by graph size + budget +
+  // focus, so we render once per task instead of sorting 19k nodes 130×. (PageRank itself is cached
+  // separately in computePageRank.)
+  const firstId = graph.nodes.keys().next().value || ''; // O(1) graph identity, avoids count-collisions
+  const cacheKey = `${graph.nodes.size}:${graph.edges.length}:${firstId}:${maxTokens}:${focusTerms.join(',')}`;
+  if (_mapCache && _mapCache.key === cacheKey) return _mapCache.out;
+  const done = (out: string): string => { _mapCache = { key: cacheKey, out }; return out; };
+
+  const scores = computePageRank(store);
 
   // Personalization (aider's `mentioned_idents`): symbols whose name/file matches a term from the
   // CURRENT request float to the top, so the map is about THIS task — not just globally important
@@ -114,7 +138,7 @@ export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focus
     .map((n: GraphNode) => ({ n, score: scores.get(n.id) ?? 0, focus: false }))
     .map(e => ({ ...e, focus: isFocus(e.n) }))
     .sort((a, b) => (a.focus !== b.focus ? (a.focus ? -1 : 1) : b.score - a.score));
-  if (ranked.length === 0) return '';
+  if (ranked.length === 0) return done('');
 
   const header =
     '[RepoMap] PageRank-ranked outline of the most load-bearing symbols in this repository ' +
@@ -140,12 +164,12 @@ export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focus
     }
     byFile.get(file)!.push({ line: n.startLine ?? 0, text });
   }
-  if (byFile.size === 0) return '';
+  if (byFile.size === 0) return done('');
 
   const lines = [header];
   for (const file of fileOrder) {
     lines.push('', file + ':');
     for (const s of byFile.get(file)!.sort((a, b) => a.line - b.line)) lines.push(s.text);
   }
-  return lines.join('\n');
+  return done(lines.join('\n'));
 }
