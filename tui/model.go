@@ -2133,30 +2133,82 @@ func tableRow(cells []string) string {
 	return strings.Join(parts, " ")
 }
 
-// renderDiff colorizes a unified diff (green adds, red deletes, cyan hunks), capped to maxLines.
+var hunkRe = regexp.MustCompile(`@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+
+// renderDiff renders a unified diff Claude-Code style: a dim line-number gutter, and the WHOLE
+// changed line on a coloured background (dark green = added, dark red = removed) with bright text;
+// context lines stay dim. `@@` hunk headers are consumed to drive line numbers, not shown. Capped to
+// maxLines.
 func renderDiff(diff string, maxLines int) string {
-	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
+	type row struct {
+		num  int
+		sign byte
+		text string
 	}
-	var b strings.Builder
-	for _, ln := range lines {
-		switch {
-		case strings.HasPrefix(ln, "+"):
-			b.WriteString(diffAdd.Render(ln))
-		case strings.HasPrefix(ln, "-"):
-			b.WriteString(diffDel.Render(ln))
-		case strings.HasPrefix(ln, "@@"):
-			b.WriteString(diffHunk.Render(ln))
+	var rows []row
+	oldLn, newLn := 0, 0
+	for _, ln := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
+		if m := hunkRe.FindStringSubmatch(ln); m != nil {
+			fmt.Sscanf(m[1], "%d", &oldLn)
+			fmt.Sscanf(m[2], "%d", &newLn)
+			continue
+		}
+		if ln == "" {
+			rows = append(rows, row{newLn, ' ', ""})
+			oldLn++
+			newLn++
+			continue
+		}
+		switch ln[0] {
+		case '+':
+			rows = append(rows, row{newLn, '+', ln[1:]})
+			newLn++
+		case '-':
+			rows = append(rows, row{oldLn, '-', ln[1:]})
+			oldLn++
 		default:
-			b.WriteString(dimStyle.Render(ln))
+			rows = append(rows, row{newLn, ' ', strings.TrimPrefix(ln, " ")})
+			oldLn++
+			newLn++
+		}
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	// Pad every coloured line to a common width so the backgrounds form clean blocks (capped so a
+	// single very long line can't blow out the row width).
+	width := 0
+	for _, r := range rows {
+		if w := len([]rune(r.text)) + 2; w > width {
+			width = w
+		}
+	}
+	if width > 100 {
+		width = 100
+	}
+
+	var b strings.Builder
+	shown := 0
+	for _, r := range rows {
+		if shown >= maxLines {
+			b.WriteString(dimStyle.Render("  …(diff truncated)") + "\n")
+			break
+		}
+		gutter := diffLineNum.Render(fmt.Sprintf("%4d ", r.num))
+		body := string(r.sign) + " " + r.text
+		if pad := width - len([]rune(body)); pad > 0 {
+			body += strings.Repeat(" ", pad)
+		}
+		switch r.sign {
+		case '+':
+			b.WriteString(gutter + diffAddLine.Render(body))
+		case '-':
+			b.WriteString(gutter + diffDelLine.Render(body))
+		default:
+			b.WriteString(gutter + dimStyle.Render(body))
 		}
 		b.WriteString("\n")
-	}
-	if truncated {
-		b.WriteString(dimStyle.Render("  …(diff truncated)"))
+		shown++
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
