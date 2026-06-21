@@ -2008,21 +2008,19 @@ func fmtElapsed(secs int) string {
 func (m model) thinkingView() string {
 	phrase := thinkingPhrases[m.phraseIdx%len(thinkingPhrases)]
 	dots := strings.Repeat(".", m.thinkDots)
-	s := m.spin.View() + " " + thinkMark.Render("✻ ") + workFrame.Render(phrase) + thinkMark.Render(fmt.Sprintf("%-3s", dots))
-	// A live, ticking elapsed clock + cancel hint — so a long reasoning phase (minimax can think for
-	// minutes before the first token) reads as "still working, Ns elapsed", never as a hang.
-	if m.busy && !m.busyStart.IsZero() {
-		s += statusStyle.Render(" · " + fmtElapsed(m.elapsed) + " · esc to stop")
-	}
+	// Bold, unmistakable: spinner + "✻ <phrase>… <elapsed>" so a long reasoning phase (minimax can
+	// think for minutes before the first token) always reads as "still working, Ns elapsed", with a
+	// visible cancel hint — never a hang.
+	s := m.spin.View() + " " + workLabel.Render("✻ "+phrase+dots+" "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 	if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
 	}
 	return s
 }
 
-// workingView is WorkingIndicator.tsx: a braille spinner + "Generating · Ns" elapsed clock + cancel hint.
+// workingView: braille spinner + a bold "⏺ Generating… Ns" clock + cancel hint while the answer streams.
 func (m model) workingView() string {
-	return m.spin.View() + " " + workLabel.Render("Generating · "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	return m.spin.View() + " " + workLabel.Render("⏺ Generating… "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 }
 
 // --- dashboards ----------------------------------------------------------------------------
