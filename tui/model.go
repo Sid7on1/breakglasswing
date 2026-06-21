@@ -75,7 +75,13 @@ type model struct {
 	histIdx   int
 	histStash string
 
-	lines    []string // committed transcript
+	lines    []string // bounded in-memory copy of the transcript (kept only for Ctrl+F search)
+	printQueue []string // lines to flush into the terminal scrollback (tea.Println) this Update cycle
+	started  bool     // true once any transcript line has been emitted (for inter-turn spacing)
+	// In-flight tool calls shown in the live region until their result arrives, then committed to
+	// scrollback as one finished entry. Order keeps the render stable (map iteration would flicker).
+	runningTools map[string]string
+	runningOrder []string
 	stream   string   // in-flight assistant tokens (replaced by the final message)
 	status   string
 	ready    bool
@@ -211,10 +217,11 @@ func initialModel(e *Engine) model {
 		spin:     sp,
 		history:  hist,
 		histIdx:  len(hist),
-		vp:       viewport.New(80, 20),
-		status:   "starting engine…",
-		toolLine: map[string]int{},
-		bell:     os.Getenv("BGW_ENABLE_NOTIFICATIONS") != "0",
+		vp:           viewport.New(80, 20),
+		status:       "starting engine…",
+		toolLine:     map[string]int{},
+		runningTools: map[string]string{},
+		bell:         os.Getenv("BGW_ENABLE_NOTIFICATIONS") != "0",
 	}
 }
 
@@ -222,31 +229,42 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(waitForEngine(m.engine), textarea.Blink, m.spin.Tick, tick())
 }
 
+// Update wraps the real handler (update) and flushes any transcript lines it queued into the
+// terminal's native scrollback via tea.Println — so committed output scrolls/copies natively while
+// the redrawn View stays just the live region.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	res, cmd := m.update(msg)
+	nm, ok := res.(model)
+	if !ok || len(nm.printQueue) == 0 {
+		return res, cmd
+	}
+	joined := strings.Join(nm.printQueue, "\n")
+	nm.printQueue = nil
+	printCmd := tea.Println(joined)
+	if cmd == nil {
+		return nm, printCmd
+	}
+	return nm, tea.Batch(printCmd, cmd)
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.vp.Width = msg.Width // kept only for render-width math (renderMarkdown etc.)
 		// The input sits inside promptBox (rounded border + 1-col padding each side) whose total
 		// width is m.width-2, so its content area — and thus the input — is m.width-6. Matching this
 		// exactly stops the textarea from overrunning the right border into a stray box.
 		m.input.SetWidth(msg.Width - 6)
 		m.relayout()
-		// Wipe the alt-screen on resize: lipgloss-rendered boxes from the OLD width otherwise linger as
-		// stacked ghost frames (the resize-overlay artifact), since a smaller frame doesn't overwrite
-		// the taller previous paint. ClearScreen forces a clean repaint at the new size.
-		return m, tea.ClearScreen
+		// Inline mode: no alt-screen to wipe — the terminal reflows naturally on resize.
+		return m, nil
 
 	case spinner.TickMsg:
 		// Keep the frame animating; it's only painted while busy (see View).
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		return m, cmd
-
-	case tea.MouseMsg:
-		// Mouse wheel / trackpad scrolls the transcript viewport (the only scrollback in alt-screen).
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
 
 	case tickMsg:
@@ -442,10 +460,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.engine.Close()
 			return m, tea.Quit
-		case "pgup", "pgdown", "ctrl+u", "ctrl+d", "shift+up", "shift+down":
-			var cmd tea.Cmd
-			m.vp, cmd = m.vp.Update(msg) // scroll the transcript without touching the input
-			return m, cmd
+		// Scrolling is the TERMINAL's job now (inline mode) — PgUp/PgDn, wheel, trackpad all work
+		// natively against real scrollback. The app no longer intercepts them.
 		case "ctrl+l":
 			// Clear the physical terminal and force a clean repaint (parity with the Ink UI). The
 			// transcript itself is untouched — use /clear to reset the conversation.
@@ -578,9 +594,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	var cmd tea.Cmd
-	m.vp, cmd = m.vp.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 func (m *model) handleEngine(o Outbound) {
@@ -861,14 +875,17 @@ func (m *model) handleEvent(o Outbound) {
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
 			line := renderToolCall(tc)
-			// Update the existing line in place when the result for a known call arrives, so a tool
-			// shows as one entry that resolves — not a "running" row followed by a "done" row.
-			if idx, ok := m.toolLine[tc.ID]; ok && tc.ID != "" {
-				m.lines[idx] = line
-				m.refresh()
+			running := tc.Status == "running" || tc.Status == ""
+			if tc.ID != "" && running {
+				// Show it live (in View) until the result arrives — can't update scrollback in place.
+				if _, seen := m.runningTools[tc.ID]; !seen {
+					m.runningOrder = append(m.runningOrder, tc.ID)
+				}
+				m.runningTools[tc.ID] = line
 			} else {
+				// Finished: drop the live copy and commit the finished entry to scrollback.
 				if tc.ID != "" {
-					m.toolLine[tc.ID] = len(m.lines)
+					delete(m.runningTools, tc.ID)
 				}
 				m.append(line)
 			}
@@ -902,8 +919,11 @@ func (m *model) handleEvent(o Outbound) {
 		// /clear: wipe the transcript and per-turn state, then re-show the welcome banner so the
 		// screen looks freshly launched (the engine has already reset the conversation history).
 		m.lines = nil
+		m.started = false
 		m.stream = ""
 		m.toolLine = map[string]int{}
+		m.runningTools = map[string]string{}
+		m.runningOrder = nil
 		m.todos = nil
 		m.lastTodoRender = ""
 		m.histTokens = 0
@@ -1244,6 +1264,8 @@ func (m *model) renderMessage(me MessageEntry) {
 		// A new turn begins — scope tool-call dedupe to this turn so a later turn's tool ids can't
 		// collide with an earlier turn's line indices (and the map doesn't grow without bound).
 		m.toolLine = map[string]int{}
+		m.runningTools = map[string]string{}
+		m.runningOrder = nil
 		// Reset the per-turn reasoning clock so "Thought for Ns" measures THIS turn, and drop any
 		// leftover streamed partial so a prior turn's text can't bleed into this one.
 		m.turnThinkStart = time.Time{}
@@ -1251,7 +1273,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		m.thinkSnip = ""
 		m.stream = ""
 		m.histTokens += len([]rune(me.Content)) / 4
-		if len(m.lines) > 0 {
+		if m.started {
 			m.append("") // a blank line between turns so the transcript reads as distinct exchanges
 		}
 		m.append(caretStyle.Render("❯ ") + userStyle.Render(me.Content))
@@ -1305,30 +1327,22 @@ func (m *model) answer(value string) {
 	m.reqMasked = false
 }
 
-// append commits a transcript line and re-renders the viewport.
-// Bound the committed transcript so very long sessions don't grow memory without limit and slow
-// refresh() (which re-joins and re-measures the whole transcript). We trim in chunks — down to
-// transcriptKeep once transcriptCap is exceeded — so the O(n) copy is amortized, not per-line.
+// append commits a transcript line: it is QUEUED for the terminal scrollback (flushed via tea.Println
+// by the Update wrapper) and also kept in a bounded in-memory slice purely so Ctrl+F search still has
+// something to grep. We never render m.lines — the terminal owns the visible transcript now.
 const (
 	transcriptCap  = 2000
 	transcriptKeep = 1500
 )
 
 func (m *model) append(line string) {
+	m.printQueue = append(m.printQueue, line)
+	m.started = true
 	m.lines = append(m.lines, line)
 	if len(m.lines) > transcriptCap {
 		drop := len(m.lines) - transcriptKeep
 		m.lines = append(m.lines[:0:0], m.lines[drop:]...) // keep the tail in a fresh backing array
-		// toolLine maps a tool-call ID to its absolute row; shift to match, forget rows that scrolled off.
-		for id, idx := range m.toolLine {
-			if idx < drop {
-				delete(m.toolLine, id)
-			} else {
-				m.toolLine[id] = idx - drop
-			}
-		}
 	}
-	m.refresh()
 }
 
 // transcriptBody joins the committed transcript with any in-flight streamed tokens.
@@ -1345,49 +1359,35 @@ func (m *model) transcriptBody() string {
 	return body
 }
 
-// refresh rebuilds the viewport content and sizes the viewport to HUG that content while never
-// letting the whole frame overflow the terminal. It measures the ACTUAL rendered height of every
-// chrome section below the transcript (footer, prompt box, panels, menu/dropdown, hints) rather than
-// hand-counting rows — so vp.Height + chrome == terminal height exactly, with no stray rows that
-// would scroll the alt-screen and leave ghost/stuck frames (the menu-sticks-up bug). When the
-// transcript is short the viewport shrinks to just its content so the prompt hugs the last line.
-func (m *model) refresh() {
-	body := m.transcriptBody()
+// refresh is a no-op in inline mode — the committed transcript lives in the terminal's own
+// scrollback (printed via tea.Println), so there is no viewport buffer to rebuild. Kept as a method
+// so the handful of existing m.refresh() call sites don't need touching.
+func (m *model) refresh() {}
 
-	chrome := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, m.belowSections()...))
-	avail := m.height - chrome
-	if avail < 1 {
-		avail = 1
-	}
-	h := lipgloss.Height(body)
-	if h > avail {
-		h = avail
-	}
-	if h < 1 {
-		h = 1
-	}
-	m.vp.Width = m.width
-	m.vp.Height = h
-	m.vp.SetContent(body)
-	m.vp.GotoBottom()
-	if n := lipgloss.Height(body) - h; n > 0 {
-		m.clipped = n // earlier lines exist above the window — surfaced as a scroll hint
-	} else {
-		m.clipped = 0
-	}
-}
-
+// View renders ONLY the live region — the in-flight streamed answer plus the chrome (menus,
+// completion dropdown, thinking indicator, map/token panels, prompt box, footer). Everything that
+// has been committed is already in the terminal's scrollback. Redrawn in place each frame.
 func (m model) View() string {
-	out := lipgloss.JoinVertical(lipgloss.Left, append([]string{m.vp.View()}, m.belowSections()...)...)
-	// Safety net against ghosting: never emit more rows than the terminal has. If chrome + transcript
-	// somehow exceed the height (e.g. a very short window where the panels alone overflow), the
-	// alt-screen would scroll and leave stale frames. Clip from the TOP so the prompt + footer — the
-	// interactive part — always stay on screen; the transcript above is reachable via PgUp.
+	var rows []string
+	if m.stream != "" {
+		// Indent the in-flight stream to the same +2 gutter the finalized reply uses, so the text
+		// doesn't jump leftward the instant streaming ends and the committed message replaces it.
+		rows = append(rows, indentLines(streamStyle.Render(m.stream), "  "))
+	}
+	// Tool calls still running show live; each commits to scrollback when its result lands.
+	for _, id := range m.runningOrder {
+		if line, ok := m.runningTools[id]; ok {
+			rows = append(rows, line)
+		}
+	}
+	rows = append(rows, m.belowSections()...)
+	out := strings.Join(rows, "\n")
+	// Safety: never emit more rows than the terminal has, or the inline renderer would push the top
+	// of the live region into scrollback. Clip from the TOP so the prompt + footer stay visible.
 	if m.height > 0 {
 		lines := strings.Split(out, "\n")
 		if len(lines) > m.height {
-			lines = lines[len(lines)-m.height:]
-			out = strings.Join(lines, "\n")
+			out = strings.Join(lines[len(lines)-m.height:], "\n")
 		}
 	}
 	return out
@@ -1400,11 +1400,6 @@ func (m model) View() string {
 // overflows the terminal — the source of the ghost/stuck-frame artifacts).
 func (m model) belowSections() []string {
 	var s []string
-	// When earlier transcript lines have scrolled above the window, tell the user they can scroll up
-	// (the welcome banner + early turns aren't lost, just off-screen — the long-chat "they disappear").
-	if m.clipped > 0 && !m.searchMode && !m.showLogs {
-		s = append(s, subtleStyle.Render(fmt.Sprintf("  ↑ %d earlier line(s) — PgUp / Ctrl+U to scroll", m.clipped)))
-	}
 	if m.searchMode {
 		s = append(s, m.searchView())
 	} else if m.showLogs {

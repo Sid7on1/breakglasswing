@@ -18,10 +18,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// No mouse capture: the terminal keeps native text selection/copy (like Claude Code). Scroll the
-	// transcript with PgUp/PgDn, Ctrl+U/Ctrl+D, or Shift+Up/Down. (WithMouseCellMotion would enable
-	// wheel scrolling but hijacks the mouse, breaking copy — not worth the trade.)
-	p := tea.NewProgram(initialModel(eng), tea.WithAltScreen())
+	// INLINE mode (no alt-screen): committed transcript is printed into the terminal's OWN scrollback
+	// via tea.Println, so native scroll + native copy work and all text stays visible — like Claude
+	// Code. Only the live region (streaming answer, input box, footer, menus) is redrawn in place.
+	p := tea.NewProgram(initialModel(eng))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		eng.Close()

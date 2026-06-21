@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // TestMain redirects prompt-history persistence to a throwaway file so the suite never reads or
@@ -408,36 +407,27 @@ func TestSpinnerShownWhileBusy(t *testing.T) {
 	}
 }
 
-func TestViewportHugsShortContent(t *testing.T) {
+// Inline mode: committed transcript lines are QUEUED for the terminal's native scrollback
+// (flushed via tea.Println), not rendered in the live View. The live View only shows in-flight
+// content (the streaming answer) plus chrome (input/footer/menus).
+func TestInlineCommitsToScrollback(t *testing.T) {
 	m, _ := newTestModel()
-	m.height = 40 // a tall terminal — the old code hard-sized the viewport to ~35 rows here
+	m.height = 40
 
-	// A short conversation: the viewport must take only the rows the content needs, so the input +
-	// footer hug the last line instead of being shoved to the bottom of the screen (the giant gap).
 	m.append("❯ hi")
 	m.append("Hey! What's on your mind today?")
 
-	body := m.transcriptBody()
-	if got, want := m.vp.Height, lipgloss.Height(body); got != want {
-		t.Fatalf("viewport should hug content: height=%d, content=%d", got, want)
+	if len(m.printQueue) != 2 {
+		t.Fatalf("expected 2 lines queued for scrollback, got %d", len(m.printQueue))
 	}
-	if m.vp.Height > 10 {
-		t.Fatalf("viewport over-tall for 2 lines of content: %d (giant-gap regression)", m.vp.Height)
+	if strings.Contains(stripANSI(m.View()), "What's on your mind") {
+		t.Fatalf("committed transcript must NOT be in the live View — it belongs in scrollback")
 	}
 
-	// Once content outgrows the available rows it caps and scrolls instead of overflowing. The cap is
-	// the terminal height minus the measured chrome below the viewport (the same calc refresh uses),
-	// so the whole frame always fits — no overflow that would leave ghost rows on screen.
-	for i := 0; i < 200; i++ {
-		m.append("line")
-	}
-	chrome := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, m.belowSections()...))
-	avail := m.height - chrome
-	if m.vp.Height != avail {
-		t.Fatalf("tall content should cap viewport at %d, got %d", avail, m.vp.Height)
-	}
-	if m.vp.Height+chrome > m.height {
-		t.Fatalf("frame overflows terminal: vp=%d + chrome=%d > %d", m.vp.Height, chrome, m.height)
+	// An in-flight streamed answer DOES render live.
+	m.stream = "thinking out loud"
+	if !strings.Contains(stripANSI(m.View()), "thinking out loud") {
+		t.Fatalf("live stream should render in the View")
 	}
 }
 
@@ -781,25 +771,16 @@ func TestClearFlow(t *testing.T) {
 	}
 }
 
-// TestTranscriptBounded guards the long-session memory/perf fix: append() must cap m.lines and keep
-// the toolLine index map consistent (rows that scroll off are forgotten; survivors stay in range).
+// TestTranscriptBounded guards the in-memory search copy: append() keeps m.lines (used only by
+// Ctrl+F search) bounded on very long sessions. The visible transcript lives in terminal scrollback.
 func TestTranscriptBounded(t *testing.T) {
 	m, _ := newTestModel()
-	m.toolLine["early"] = 3 // a low row that should be evicted once we trim from the front
 
 	for i := 0; i < transcriptCap+300; i++ {
 		m.append("x")
 	}
 
 	if len(m.lines) > transcriptCap {
-		t.Fatalf("transcript exceeded cap: %d > %d", len(m.lines), transcriptCap)
-	}
-	if _, ok := m.toolLine["early"]; ok {
-		t.Errorf("expected the early tool-line row to be evicted after trimming")
-	}
-	for id, idx := range m.toolLine {
-		if idx < 0 || idx >= len(m.lines) {
-			t.Errorf("tool-line %q index %d out of range (len %d)", id, idx, len(m.lines))
-		}
+		t.Fatalf("in-memory search copy exceeded cap: %d > %d", len(m.lines), transcriptCap)
 	}
 }
