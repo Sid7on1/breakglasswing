@@ -34,14 +34,56 @@ func (m model) midView() string {
 func (m model) promptView() string {
 	if m.reqOpen && m.reqKind != "input" {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s\n", errStyle.Render("⚠ "+m.reqQ))
+		fmt.Fprintf(&b, "%s\n", userStyle.Render("⚠ "+m.reqQ))
 		if m.reqKind == "diff" && m.reqBody != "" {
 			fmt.Fprintf(&b, "%s\n", renderDiff(m.reqBody, 16, m.width-8, ""))
 		}
 		for i, op := range m.reqOpts {
-			fmt.Fprintf(&b, "  %d) %s\n", i+1, op)
+			cursor := "  "
+			if i == m.reqIdx {
+				cursor = userStyle.Render("❯ ")
+			}
+			
+			box := ""
+			if m.reqIsMulti {
+				box = "[ ] "
+				if m.reqSelected[i] {
+					box = userStyle.Render("[x] ")
+				}
+				fmt.Fprintf(&b, "%s%s%d) %s\n", cursor, box, i+1, op)
+			} else {
+				// For single-select, just use the number and option text, highlighting the number if selected
+				numStr := fmt.Sprintf("%d) ", i+1)
+				if i == m.reqIdx {
+					numStr = userStyle.Render(numStr)
+				}
+				fmt.Fprintf(&b, "%s%s%s\n", cursor, numStr, op)
+			}
 		}
-		b.WriteString(dimStyle.Render("press 1–" + fmt.Sprint(len(m.reqOpts)) + " · esc to dismiss"))
+		
+		// The extra custom type-in option
+		cursor := "  "
+		if m.reqIdx == len(m.reqOpts) {
+			cursor = userStyle.Render("❯ ")
+		}
+		
+		fmt.Fprintf(&b, "%s%d) Explain your answer:\n", cursor, len(m.reqOpts)+1)
+		if m.reqIdx == len(m.reqOpts) {
+			// Render the textarea directly inline!
+			fmt.Fprintf(&b, "    %s\n", m.input.View())
+		} else {
+			val := m.input.Value()
+			if val == "" {
+				val = "Type your own answer..."
+			}
+			fmt.Fprintf(&b, "    %s\n", dimStyle.Render(val))
+		}
+		
+		if m.reqIsMulti {
+			b.WriteString(dimStyle.Render("↑/↓ navigate · space select · enter to submit · esc to dismiss"))
+		} else {
+			b.WriteString(dimStyle.Render("↑/↓ navigate · enter to submit · esc to dismiss"))
+		}
 		return requestBox.Width(m.width - 6).Render(b.String())
 	}
 

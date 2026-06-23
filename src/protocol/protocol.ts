@@ -29,6 +29,7 @@ export interface RequestMsg {
   question: string;
   options: string[];
   isAsk?: boolean;  // true for the AskUser tool (free-form) vs a governor yes/no/always veto
+  isMulti?: boolean; // true for multi-select checklists
   body?: string;    // for kind:'diff', the unified diff to render before the choices
 }
 

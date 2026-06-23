@@ -24,11 +24,15 @@ The execution will pause until the user selects one of the provided options. The
         type: 'array', 
         items: { type: 'string' },
         description: 'An array of up to 4 options (e.g. ["Overwrite", "Cancel", "Tell me what else to do"])' 
+      },
+      isMultiSelect: {
+        type: 'boolean',
+        description: 'Set to true if the user is allowed to select multiple options. Defaults to false.'
       }
     },
     required: ['question', 'options']
   },
-  execute: async (args: { question: string, options: string[] }) => {
+  execute: async (args: { question: string, options: string[], isMultiSelect?: boolean }) => {
     // Refuse degenerate / gratuitous prompts (greetings, identity, single-option "decisions").
     // The model must answer the user directly instead of blocking the session on a fake choice.
     const degenerate = detectDegenerateAsk(args.question, args.options);
@@ -68,7 +72,7 @@ Reply ONLY with the exact text of the option you choose. Do not provide any conv
       
       cliEvents.emit('veto_prompt', safeQuestion, safeOptions, (answer: string) => {
         resolve(`User selected: ${answer}`);
-      }, true);
+      }, true, args.isMultiSelect);
     });
   }
 }, governor);

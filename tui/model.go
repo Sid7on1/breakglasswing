@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/reflow/wordwrap"
 )
 
 // Bubble Tea messages wrapping engine events so they flow through Update like any other tea.Msg.
@@ -152,12 +153,15 @@ type model struct {
 	lastTodoRender string
 
 	// pending approval (from a `request` message)
-	reqOpen bool
-	reqID   int
-	reqQ    string
-	reqOpts []string
-	reqKind string // "prompt" | "diff"
-	reqBody string // diff text for kind:"diff"
+	reqOpen     bool
+	reqID       int
+	reqQ        string
+	reqOpts     []string
+	reqKind     string // "prompt" | "diff"
+	reqBody     string // diff text for kind:"diff"
+	reqIdx      int
+	reqIsMulti  bool
+	reqSelected map[int]bool
 
 	// autocomplete (slash commands + @-mentions), served by the engine
 	comps    []CompletionItem
@@ -328,6 +332,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return nm, tea.Batch(clearCmd, cmd)
 		}
 	}
+	for i, line := range nm.printQueue {
+		if nm.width > 2 {
+			nm.printQueue[i] = indentAwareWrap(line, nm.width-2)
+		}
+	}
 	joined := strings.Join(nm.printQueue, "\n")
 	nm.printQueue = nil
 	printCmd := tea.Println(joined)
@@ -338,6 +347,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return nm, printCmd
 	}
 	return nm, tea.Batch(printCmd, cmd)
+}
+
+func indentAwareWrap(text string, width int) string {
+	var out []string
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		clean := ansi.Strip(line)
+		
+		indentStr := ""
+		if strings.HasPrefix(clean, "⏺ ") || strings.HasPrefix(clean, "❯ ") {
+			indentStr = "  "
+		} else {
+			for _, r := range clean {
+				if r == ' ' {
+					indentStr += " "
+				} else {
+					break
+				}
+			}
+		}
+		
+		if indentStr == "" || len(indentStr) >= width/2 {
+			out = append(out, wordwrap.String(line, width))
+			continue
+		}
+		
+		// Wrap at a slightly narrower width to leave room for the injected indent on wrapped lines.
+		wrapped := wordwrap.String(line, width-len(indentStr))
+		parts := strings.Split(wrapped, "\n")
+		
+		// The first line natively has the original indent (e.g. "⏺ " or "  ").
+		// We manually inject the matching indent into all subsequent lines created by the wrap.
+		for i := 1; i < len(parts); i++ {
+			parts[i] = indentStr + parts[i]
+		}
+		out = append(out, strings.Join(parts, "\n"))
+	}
+	return strings.Join(out, "\n")
 }
 
 func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -406,17 +453,73 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.reqKind == "input" {
 				return m.handleInputRequest(msg)
 			}
-			// Option / diff approval — number keys + esc.
-			switch msg.String() {
-			case "ctrl+c":
+			// Interactive ask modal
+			switch {
+			case msg.String() == "ctrl+c":
 				m.engine.Close()
 				return m, tea.Quit
-			case "esc":
-				m.answer(firstOr(m.reqOpts, ""))
+			case msg.String() == "esc":
+				// Find a safe "cancel" option, otherwise just say Dismissed so we don't accidentally approve
+				val := "Dismissed"
+				for _, op := range m.reqOpts {
+					lower := strings.ToLower(op)
+					if lower == "cancel" || lower == "reject" || lower == "no" {
+						val = op
+						break
+					}
+				}
+				m.answer(val)
+				return m, nil
+			case msg.String() == "up":
+				if m.reqIdx > 0 {
+					m.reqIdx--
+				}
+				return m, nil
+			case msg.String() == "down":
+				if m.reqIdx < len(m.reqOpts) {
+					m.reqIdx++
+				}
+				return m, nil
+			case msg.String() == " ":
+				if m.reqIsMulti && m.reqIdx < len(m.reqOpts) {
+					if m.reqSelected == nil {
+						m.reqSelected = make(map[int]bool)
+					}
+					m.reqSelected[m.reqIdx] = !m.reqSelected[m.reqIdx]
+				}
+				return m, nil
+			case msg.String() == "enter":
+				if m.reqIdx == len(m.reqOpts) {
+					val := strings.TrimSpace(m.input.Value())
+					if val != "" {
+						m.input.Reset()
+						m.answer(val)
+					}
+				} else {
+					if m.reqIsMulti {
+						var selected []string
+						for i, op := range m.reqOpts {
+							if m.reqSelected[i] {
+								selected = append(selected, op)
+							}
+						}
+						if len(selected) > 0 {
+							m.answer(strings.Join(selected, ", "))
+						} else {
+							m.answer(m.reqOpts[m.reqIdx])
+						}
+					} else {
+						m.answer(m.reqOpts[m.reqIdx])
+					}
+				}
 				return m, nil
 			default:
-				if n := digit(msg.String()); n >= 1 && n <= len(m.reqOpts) {
-					m.answer(m.reqOpts[n-1])
+				// Smart typing: if it's a visible character or backspace, jump to the type-in option and type
+				if len(msg.String()) == 1 || msg.String() == "backspace" {
+					m.reqIdx = len(m.reqOpts)
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(msg)
+					return m, cmd
 				}
 				return m, nil
 			}
@@ -770,6 +873,9 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqOpts = o.Options
 		m.reqKind = o.Kind
 		m.reqBody = o.Body
+		m.reqIdx = 0
+		m.reqIsMulti = o.IsMulti
+		m.reqSelected = make(map[int]bool)
 		// The headless input_prompt carries no isMasked flag, so infer a secret field from the
 		// question text (API keys / tokens / passwords) and render the answer as bullets.
 		m.reqMasked = o.Kind == "input" && secretRE.MatchString(o.Question)

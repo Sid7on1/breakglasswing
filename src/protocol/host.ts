@@ -51,10 +51,10 @@ export class ProtocolHost {
     }
 
     // veto_prompt(question, options, resolve, isAsk?) — the one event carrying a callback.
-    const promptFn = (question: string, options: string[], resolve: (a: string) => void, isAsk?: boolean) => {
+    const promptFn = (question: string, options: string[], resolve: (a: string) => void, isAsk?: boolean, isMultiSelect?: boolean) => {
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
-      this.write({ t: 'request', id, kind: 'prompt', question, options: options || [], isAsk: !!isAsk });
+      this.write({ t: 'request', id, kind: 'prompt', question, options: options || [], isAsk: !!isAsk, isMulti: !!isMultiSelect });
     };
     emitter.on(PROMPT_EVENT, promptFn);
     this.listeners.push({ event: PROMPT_EVENT, fn: promptFn });

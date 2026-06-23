@@ -62,7 +62,7 @@ var (
 			Padding(0, 1)
 
 	requestBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).BorderForeground(colErr).
+			Border(lipgloss.RoundedBorder()).BorderForeground(colAccent).
 			Padding(0, 1)
 
 	welcomeBox = lipgloss.NewStyle().

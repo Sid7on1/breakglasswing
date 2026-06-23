@@ -16,6 +16,7 @@ type Outbound struct {
 	Question string            `json:"question,omitempty"` // request prompt
 	Options  []string          `json:"options,omitempty"`  // request choices
 	IsAsk    bool              `json:"isAsk,omitempty"`
+	IsMulti  bool              `json:"isMulti,omitempty"`
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
 	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
