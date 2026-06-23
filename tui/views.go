@@ -279,7 +279,6 @@ func (m model) footerLine() string {
 
 // --- working / thinking indicators ---------------------------------------------------------
 
-// thinkingView is ThinkingText.tsx: a shimmer phrase + animated dots + the last reasoning snippet.
 func (m model) thinkingView() string {
 	stalledIntensity := 0.0
 	if !m.lastTokenAt.IsZero() {
@@ -292,10 +291,12 @@ func (m model) thinkingView() string {
 		}
 	}
 
-	verb := m.sessionVerb
 	isToolPulse := len(m.runningTools) > 0
-	if isToolPulse {
-		verb = "Executing tool"
+	verb := "Executing tool"
+	if !isToolPulse {
+		// Cycle verbs every 4.0 seconds (80 ticks at 50ms/tick) so the shimmer animation has time to finish
+		verbIdx := (m.thinkTick / 80) % len(spinnerVerbs)
+		verb = spinnerVerbs[verbIdx]
 	}
 
 	shimmerText := renderShimmerVerb(verb, m.thinkTick, stalledIntensity, isToolPulse)
@@ -328,7 +329,7 @@ func lerpRGB(a, b rgb, t float64) rgb {
 
 var (
 	baseRGB    = rgb{215, 119, 87}  // colAccent (#D77757) - terracotta/orange
-	shimmerRGB = rgb{245, 149, 117} // colShimmer (#F59575) - light orange
+	shimmerRGB = rgb{255, 255, 255} // pure bright white for maximum shine
 	errorRGB   = rgb{220, 50, 70}   // colErr (#DC3246) - red
 )
 

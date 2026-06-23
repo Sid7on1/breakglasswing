@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -53,6 +55,12 @@ func (m *model) showWelcome() {
 		cwd, _ = os.Getwd()
 	}
 	fmt.Fprintf(&b, "%s%s\n", metaKey.Render("cwd    "), metaVal.Render(shortPath(cwd)))
+
+	mcpCount := countMcpServers(cwd)
+	if mcpCount > 0 {
+		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("mcp    "), metaVal.Render(fmt.Sprintf("%d server(s) configured", mcpCount)))
+	}
+
 	if m.fMode == "bypass" {
 		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("guard  "), warnStyle.Render("bypassed (YOLO)"))
 	}
@@ -60,4 +68,39 @@ func (m *model) showWelcome() {
 	fmt.Fprintf(&b, "%s", tipStyle.Render("/help · Ctrl+G palette · Ctrl+F search · Ctrl+O logs · Esc stash · Ctrl+R restore"))
 
 	m.append("\n" + welcomeBox.Render(b.String()) + "\n")
+}
+
+func countMcpServers(cwd string) int {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0
+	}
+
+	countActive := func(p string) int {
+		data, err := os.ReadFile(filepath.Join(p, ".bimax", "mcp.json"))
+		if err != nil {
+			return 0
+		}
+		var config struct {
+			Servers []struct {
+				Disabled bool `json:"disabled"`
+			} `json:"servers"`
+		}
+		if json.Unmarshal(data, &config) != nil {
+			return 0
+		}
+		c := 0
+		for _, s := range config.Servers {
+			if !s.Disabled {
+				c++
+			}
+		}
+		return c
+	}
+
+	count := countActive(home)
+	if cwd != "" && cwd != home {
+		count += countActive(cwd)
+	}
+	return count
 }

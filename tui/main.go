@@ -23,10 +23,9 @@ func main() {
 	// the history — smooth, native, no custom scrollbar. Only a small live region (streaming answer,
 	// running tools, input box, footer) is redrawn in place at the bottom.
 	//
-	// "Lock the screen": clear the visible screen AND the scrollback (ESC[3J) ONCE before the UI starts,
-	// so the banner becomes the absolute top — you can't scroll up into pre-launch shell output or empty
-	// space above it. From here on only post-launch transcript fills the scrollback.
-	fmt.Print("\x1b[2J\x1b[3J\x1b[H")
+	// INLINE mode (opencode / Claude-Code style): NO alt-screen. Committed transcript lines are printed
+	// into the terminal's OWN scrollback (via tea.Println), so the terminal's NATIVE scrollbar scrolls
+	// the history — smooth, native, no custom scrollbar.
 	p := tea.NewProgram(initialModel(eng))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

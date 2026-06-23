@@ -200,8 +200,54 @@ func extractDiff(out string) string {
 // toolCollapseThreshold is how many consecutive tool calls trigger collapse into category counts.
 const toolCollapseThreshold = 5
 
-// flushToolRun commits the pending consecutive tool run into the transcript: one category-count line
-// when collapsed (and long enough), otherwise one rendered line per call. Cleared afterwards.
+func isMutatingTool(name string) bool {
+	switch name {
+	case "EditFileTool", "MultiEditTool", "WriteFileTool":
+		return true
+	}
+	return false
+}
+
+// formatRun processes a list of tools. If collapse is true, it groups consecutive non-mutating
+// tools and collapses them into a summary line if the group size >= toolCollapseThreshold. Mutating
+// tools (edits/writes) are ALWAYS rendered fully expanded.
+func formatRun(run []ToolCall, width int, collapse bool) []string {
+	var out []string
+	if !collapse {
+		for _, tc := range run {
+			out = append(out, renderToolCall(tc, width))
+		}
+		return out
+	}
+
+	var boring []ToolCall
+	flushBoring := func() {
+		if len(boring) == 0 {
+			return
+		}
+		if len(boring) >= toolCollapseThreshold {
+			out = append(out, toolRunSummary(boring))
+		} else {
+			for _, tc := range boring {
+				out = append(out, renderToolCall(tc, width))
+			}
+		}
+		boring = nil
+	}
+
+	for _, tc := range run {
+		if isMutatingTool(tc.ToolName) {
+			flushBoring()
+			out = append(out, renderToolCall(tc, width))
+		} else {
+			boring = append(boring, tc)
+		}
+	}
+	flushBoring()
+	return out
+}
+
+// flushToolRun commits the pending consecutive tool run into the transcript.
 func (m *model) flushToolRun() {
 	if len(m.toolRun) == 0 {
 		return
@@ -209,13 +255,12 @@ func (m *model) flushToolRun() {
 	run := m.toolRun
 	m.toolRun = nil
 	m.flushing = true
-	if m.collapseTools && len(run) >= toolCollapseThreshold {
-		m.append(toolRunSummary(run))
-	} else {
-		for _, tc := range run {
-			m.append(renderToolCall(tc, m.width))
-		}
+	
+	lines := formatRun(run, m.width, m.collapseTools)
+	for _, line := range lines {
+		m.append(line)
 	}
+	
 	m.flushing = false
 }
 
@@ -254,21 +299,11 @@ func toolRunSummary(run []ToolCall) string {
 	return head + body + hint
 }
 
-// toolRunLive renders the pending (un-flushed) tool run for the live region — collapsed or expanded,
-// matching how it will commit — so a burst visibly accumulates while it runs.
+// toolRunLive renders the pending (un-flushed) tool run for the live region.
 func (m model) toolRunLive() string {
 	if len(m.toolRun) == 0 {
 		return ""
 	}
-	if m.collapseTools && len(m.toolRun) >= toolCollapseThreshold {
-		return toolRunSummary(m.toolRun)
-	}
-	var b strings.Builder
-	for i, tc := range m.toolRun {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(renderToolCall(tc, m.width))
-	}
-	return b.String()
+	lines := formatRun(m.toolRun, m.width, m.collapseTools)
+	return strings.Join(lines, "\n")
 }

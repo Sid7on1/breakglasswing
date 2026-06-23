@@ -137,9 +137,10 @@ type model struct {
 	collapseTools bool
 	flushing      bool // guard: flushToolRun appends via m.append, which must not re-enter the flush
 	stream   string   // in-flight assistant tokens (replaced by the final message)
-	status   string
-	ready    bool
-	busy     bool   // a turn is executing — Ctrl+C cancels it instead of quitting
+	status        string
+	ready         bool
+	terminalSized bool
+	busy          bool   // a turn is executing — Ctrl+C cancels it instead of quitting
 	quitting bool   // engine asked us to shut down — quit after this message
 	cwd      string // working directory, updated by cwd_changed
 	width    int
@@ -283,8 +284,21 @@ func initialModel(e *Engine) model {
 	}
 }
 
+func clearTerm() tea.Cmd {
+	return func() tea.Msg {
+		fmt.Print("\033[2J\033[3J\033[H")
+		return nil
+	}
+}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(waitForEngine(m.engine), textarea.Blink, m.spin.Tick, tick())
+	return tea.Batch(
+		clearTerm(),
+		waitForEngine(m.engine),
+		textarea.Blink,
+		m.spin.Tick,
+		tick(),
+	)
 }
 
 // Update wraps the real handler (update) and flushes any committed transcript lines it queued into
@@ -332,26 +346,37 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width // kept only for render-width math (renderMarkdown etc.)
-		// The input sits inside promptBox (rounded border + 1-col padding each side) whose total width
-		// is m.width-2, so its content area — and thus the input — is m.width-6. Matching this exactly
-		// stops the textarea from overrunning the right border into a stray box (the "mirror box" bug).
 		m.input.SetWidth(msg.Width - 6)
 		
-		// In inline mode, resizing the terminal narrower causes previously printed lines to wrap, creating
-		// physical rows that Bubble Tea doesn't know about. This breaks the inline `CursorUp` clear, leaving
-		// severe "ghost" artifacts of the old frame permanently on the screen.
-		// To fix this, we MUST clear the physical screen on resize. To prevent the user from losing their
-		// context, we immediately reprint the visible portion of the transcript so it seamlessly fills the
-		// screen again (even though this adds duplicates to the native scrollback buffer above).
+		if m.width == 0 || m.height == 0 {
+			return m, nil
+		}
+
+		if !m.terminalSized {
+			m.terminalSized = true
+			return m, nil
+		}
+
+		// In inline mode, resizing the terminal narrower causes previously printed lines to wrap, breaking
+		// the cursor math and leaving ghost overlay frames.
+		// To fix this without causing infinite duplicates in the scrollback:
+		// 1. We emit a hard terminal clear that wipes the VIEWPORT AND SCROLLBACK (\033[2J\033[3J\033[H).
+		// 2. We queue the entire recent history (m.lines) to be reprinted.
+		// Because the scrollback is wiped, reprinting m.lines will not create duplicates!
 		m.pendingClear = true
 		if len(m.lines) > 0 {
-			start := len(m.lines) - m.height + 15 // buffer for the live UI height
+			start := len(m.lines) - m.height + 15
 			if start < 0 {
 				start = 0
 			}
 			m.printQueue = append(m.printQueue, m.lines[start:]...)
 		}
-		return m, tea.ClearScreen
+		
+		// Custom Cmd that emits the deep-clear ANSI sequence instead of just tea.ClearScreen
+		return m, func() tea.Msg {
+			os.Stdout.WriteString("\033[2J\033[3J\033[H")
+			return nil
+		}
 
 	case spinner.TickMsg:
 		// Keep the frame animating; it's only painted while busy (see View).
@@ -372,7 +397,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.busy && !m.busyStart.IsZero() {
 			m.elapsed = int(time.Since(m.busyStart).Seconds())
 		}
-		m.thinkDots = (m.thinkDots + 1) % 4
+		if m.thinkTick%10 == 0 {
+			m.thinkDots = (m.thinkDots + 1) % 4
+		}
 		m.thinkTick++
 		return m, tick()
 

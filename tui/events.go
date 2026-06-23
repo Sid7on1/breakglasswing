@@ -177,7 +177,7 @@ func (m *model) handleEvent(o Outbound) {
 		}
 
 	case "mcp_changed":
-		m.append(dimStyle.Render("  ⌁ MCP servers changed"))
+		// The footer dynamically updates its tool count; no need to spam the transcript.
 
 	case "graph_changed":
 		m.append(dimStyle.Render("  ⌁ code graph updated"))
