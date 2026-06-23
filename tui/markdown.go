@@ -21,13 +21,13 @@ var warmStyle = []byte(`{
   "block_quote": { "color": "#A0A0A0", "indent": 1, "indent_token": "│ " },
   "paragraph": {},
   "list": { "level_indent": 2 },
-  "heading": { "block_suffix": "\n", "color": "#D77757", "bold": true },
-  "h1": { "prefix": "", "suffix": "", "color": "#F59575", "bold": true },
-  "h2": { "prefix": "## ", "color": "#D77757", "bold": true },
-  "h3": { "prefix": "### ", "color": "#D77757", "bold": true },
-  "h4": { "prefix": "#### ", "color": "#D77757", "bold": true },
-  "h5": { "prefix": "##### ", "color": "#D77757", "bold": true },
-  "h6": { "prefix": "###### ", "color": "#D77757", "bold": true },
+  "heading": { "block_suffix": "\n", "color": "#61AFEF", "bold": true },
+  "h1": { "prefix": "", "suffix": "", "color": "#73B8F8", "bold": true },
+  "h2": { "prefix": "## ", "color": "#61AFEF", "bold": true },
+  "h3": { "prefix": "### ", "color": "#61AFEF", "bold": true },
+  "h4": { "prefix": "#### ", "color": "#61AFEF", "bold": true },
+  "h5": { "prefix": "##### ", "color": "#61AFEF", "bold": true },
+  "h6": { "prefix": "###### ", "color": "#61AFEF", "bold": true },
   "text": {},
   "strong": { "color": "#E6E6E6", "bold": true },
   "emph": { "italic": true },
@@ -88,18 +88,15 @@ var (
 )
 
 func renderMarkdown(src string, width int) string {
-	if width < 20 {
-		width = 80
-	}
-	if mdRenderer == nil || mdWidth != width {
+	if mdRenderer == nil {
 		r, err := glamour.NewTermRenderer(
 			glamour.WithStylesFromJSONBytes(warmStyle),
-			glamour.WithWordWrap(width-2), // leave a small gutter
+			glamour.WithWordWrap(0), // Disable hard wrapping; we reflow dynamically on print
 		)
 		if err != nil {
 			return src
 		}
-		mdRenderer, mdWidth = r, width
+		mdRenderer = r
 	}
 	out, err := mdRenderer.Render(src)
 	if err != nil {
