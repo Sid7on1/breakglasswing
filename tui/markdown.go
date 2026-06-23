@@ -84,10 +84,9 @@ var warmStyle = []byte(`{
 
 var (
 	mdRenderer *glamour.TermRenderer
-	mdWidth    int
 )
 
-func renderMarkdown(src string, width int) string {
+func renderMarkdown(src string) string {
 	if mdRenderer == nil {
 		r, err := glamour.NewTermRenderer(
 			glamour.WithStylesFromJSONBytes(warmStyle),

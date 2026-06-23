@@ -63,7 +63,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		// transcript (tool lines, todos, the welcome block all sit at +2) instead of starting flush at
 		// column 0 with no structure. The first line gets an accent ⏺ marker, Claude-Code style, so a
 		// turn's answer is visually anchored.
-		md := indentLines(renderMarkdown(me.Content, m.vp.Width-2), "  ")
+		md := indentLines(renderMarkdown(me.Content), "  ")
 		if md != "" {
 			md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
 		}

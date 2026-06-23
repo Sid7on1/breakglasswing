@@ -746,7 +746,7 @@ func TestFooterRendersBelowInput(t *testing.T) {
 }
 
 func TestRenderMarkdown(t *testing.T) {
-	out := renderMarkdown("# Title\n\n- one\n- two\n\n`code`", 60)
+	out := renderMarkdown("# Title\n\n- one\n- two\n\n`code`")
 	if out == "" || !strings.Contains(out, "one") || !strings.Contains(out, "two") {
 		t.Fatalf("markdown not rendered: %q", out)
 	}
@@ -757,7 +757,7 @@ func TestRenderMarkdown(t *testing.T) {
 	}
 	// A fenced code block renders (syntax-highlighted on a real TTY; here we just confirm the code
 	// survives and the styled-background config doesn't error the renderer).
-	code := renderMarkdown("```go\nfunc main() {}\n```", 60)
+	code := renderMarkdown("```go\nfunc main() {}\n```")
 	if !strings.Contains(stripANSI(code), "func main()") {
 		t.Fatalf("code block not rendered: %q", code)
 	}
