@@ -58,7 +58,17 @@ globalCommandRegistry.register({
   name: '/index-ai',
   description: 'Run Semantic AI index',
   category: 'Code & Intelligence',
+  isEnabled: (ctx) => {
+    if (!ctx.graphStore || ctx.graphStore.getGraph().nodes.size === 0) {
+      return { enabled: false, reason: 'Requires AST Index — run /index first' };
+    }
+    return { enabled: true };
+  },
   execute: async (args, context) => {
+    const store = context.graphStore;
+    if (!store || store.getGraph().nodes.size === 0) {
+      return { type: 'message', level: 'error', content: 'Dependency graph is empty. Run /index first.' };
+    }
     if (args[0] !== 'force') {
       return {
         type: 'menu',

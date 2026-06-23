@@ -156,6 +156,9 @@ func (e *Engine) readLoop(stdout io.Reader) {
 		}
 		e.Msgs <- m
 	}
+	if err := sc.Err(); err != nil {
+		os.Stderr.WriteString("[engine] scanner error: " + err.Error() + "\n")
+	}
 	close(e.Msgs)
 }
 

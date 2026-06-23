@@ -191,8 +191,42 @@ func TestCompactMapPinnedAndFullViaCommand(t *testing.T) {
 	m.input.SetValue("/map")
 	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = res.(model)
-	if !strings.Contains(stripANSI(strings.Join(m.lines, "\n")), "Codebase Map") {
-		t.Fatalf("/map should commit the full map into the transcript, got:\n%s", stripANSI(strings.Join(m.lines, "\n")))
+	if !m.showFullMap {
+		t.Fatal("/map should toggle showFullMap to true")
+	}
+	v = stripANSI(m.View())
+	if !strings.Contains(v, "Codebase Map") {
+		t.Fatalf("/map should show the full map panel, got:\n%s", v)
+	}
+}
+
+func TestMapViaAutocomplete(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 40
+	m.graph = GraphSummary{NodeCount: 12, FileCount: 3, Modules: []GraphModule{{Name: "core", Criticality: "high"}}}
+
+	m.input.SetValue("/ma")
+	m.compOpen = true
+	m.comps = []CompletionItem{{Value: "/map", Kind: "command"}}
+	m.compIdx = 0
+
+	t.Logf("Before update: input='%s', compOpen=%v, showFullMap=%v", m.input.Value(), m.compOpen, m.showFullMap)
+	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	t.Logf("msg.String() = %q", msg.String())
+	res, _ := m.Update(msg)
+	m = res.(model)
+
+	t.Logf("After update, status is '%s', input is '%s', showFullMap is %v\n", m.status, m.input.Value(), m.showFullMap)
+
+	if m.input.Value() != "" {
+		t.Fatalf("input should be cleared, got '%s'", m.input.Value())
+	}
+	if !m.showFullMap {
+		t.Fatal("/map should toggle showFullMap to true")
+	}
+	v := stripANSI(m.View())
+	if !strings.Contains(v, "Codebase Map") {
+		t.Fatalf("/map should show the full map panel, got:\n%s", v)
 	}
 }
 

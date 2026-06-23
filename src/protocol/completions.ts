@@ -14,10 +14,10 @@ export function completeInput(text: string, store: IGraphStore, cwd: string, lim
     // The slash palette is a scrollable component on the client, so don't truncate it to the small
     // @-mention cap — surface the whole matching command set (just "/" lists every command).
     const cmdLimit = Math.max(limit, 60);
-    return globalCommandRegistry.getPaletteOptions()
+    return globalCommandRegistry.getPaletteOptions(store)
       .filter(o => o.value.toLowerCase().startsWith(kw))
       .slice(0, cmdLimit)
-      .map(o => ({ value: o.value, label: o.label, desc: o.desc, kind: 'command' as const }));
+      .map(o => ({ value: o.value, label: o.label, desc: o.desc, kind: 'command' as const, disabled: o.disabled, disabledReason: o.disabledReason }));
   }
 
   // @-mention: a trailing @token (symbol or filesystem path).

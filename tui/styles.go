@@ -65,6 +65,10 @@ var (
 			Border(lipgloss.RoundedBorder()).BorderForeground(colErr).
 			Padding(0, 1)
 
+	welcomeBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).BorderForeground(colDim).
+			Padding(2, 2)
+
 	// Footer (mirrors Ink's Footer.tsx): a single dim status line.
 	footerBar  = lipgloss.NewStyle().Foreground(colInactive)
 	footerVal  = lipgloss.NewStyle().Foreground(colInactive)

@@ -41,6 +41,8 @@ export interface CompletionItem {
   label: string; // display label
   desc: string;  // short description / category
   kind: 'command' | 'symbol' | 'path';
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 /** Completions for a {@link QueryMsg}, correlated by `id` so stale results can be dropped. */

@@ -65,6 +65,10 @@ async function runWorker() {
     // an empty/stale store relative to the parent project.
     const graphStorePath = path.join(config.cwd || process.cwd(), '.breakglass', 'graph', 'playground.json');
     const graphStore = new GraphStore(graphStorePath);
+    const { isCodebase } = await import('../graph/graph.summary');
+    if (isCodebase(config.cwd || process.cwd())) {
+      await graphStore.loadFromDisk();
+    }
     
     // Register basic tools for the worker
     toolRegistry.register(createBashTool(governor));

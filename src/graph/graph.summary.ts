@@ -67,8 +67,16 @@ export function summarizeGraph(store: IGraphStore, topN: number = 6): GraphSumma
 
 const CODEBASE_MARKERS = ['.git', 'package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'Makefile', '.project'];
 
-/** True if `cwd` looks like a real project root (not a scratch directory). */
+import * as os from 'os';
+
+/** True if `cwd` looks like a real project root (not a scratch directory or the home folder). */
 export function isCodebase(cwd: string): boolean {
+  try {
+    const isHome = path.resolve(cwd) === path.resolve(os.homedir());
+    const isRoot = path.resolve(cwd) === path.resolve('/');
+    if (isHome || isRoot) return false;
+  } catch { /* ignore */ }
+
   return CODEBASE_MARKERS.some((m) => {
     try { return fs.existsSync(path.join(cwd, m)); } catch { return false; }
   });

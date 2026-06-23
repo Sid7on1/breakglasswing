@@ -43,3 +43,13 @@ globalCommandRegistry.register({
     };
   }
 });
+
+globalCommandRegistry.register({
+  name: '/shortcuts',
+  description: 'Show keyboard shortcuts',
+  category: 'General',
+  execute: async (args, context) => {
+    // Handled entirely Go-side in the TUI, just registered here for autocomplete
+    return { type: 'message', level: 'info', content: '' };
+  }
+});

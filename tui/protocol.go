@@ -23,10 +23,12 @@ type Outbound struct {
 
 // CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.
 type CompletionItem struct {
-	Value string `json:"value"`
-	Label string `json:"label"`
-	Desc  string `json:"desc"`
-	Kind  string `json:"kind"` // "command" | "symbol" | "path"
+	Value          string `json:"value"`
+	Label          string `json:"label"`
+	Desc           string `json:"desc"`
+	Kind           string `json:"kind"`
+	Disabled       bool   `json:"disabled,omitempty"`
+	DisabledReason string `json:"disabledReason,omitempty"`
 }
 
 // MessageEntry — the payload of a `message` event (args[0]). Mirrors src/cli/events.ts.

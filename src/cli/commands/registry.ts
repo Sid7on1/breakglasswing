@@ -31,6 +31,7 @@ export interface Command {
   aliases?: string[];
   description: string;
   category: CommandCategory;
+  isEnabled?: (context: Partial<CommandContext>) => { enabled: boolean; reason?: string };
   execute(args: string[], context: CommandContext): Promise<CommandResult>;
 }
 
@@ -78,9 +79,19 @@ export class CommandRegistry {
    * (built-ins + user `.bimax/commands/*.md`), so it can never drift from reality the way a
    * hardcoded list does.
    */
-  getPaletteOptions(): { label: string; value: string; desc: string; category: string }[] {
+  getPaletteOptions(store?: any): { label: string; value: string; desc: string; category: string; disabled?: boolean; disabledReason?: string }[] {
+    const ctx: Partial<CommandContext> = { graphStore: store };
     return this.getAllCommands()
-      .map(c => ({ label: c.name, value: c.name, desc: c.description, category: c.category }))
+      .map(c => {
+        let disabled = false;
+        let disabledReason: string | undefined;
+        if (c.isEnabled) {
+          const res = c.isEnabled(ctx);
+          disabled = !res.enabled;
+          disabledReason = res.reason;
+        }
+        return { label: c.name, value: c.name, desc: c.description, category: c.category, disabled, disabledReason };
+      })
       .sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
   }
 }

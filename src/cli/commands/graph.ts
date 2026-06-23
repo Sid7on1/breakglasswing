@@ -22,13 +22,19 @@ globalCommandRegistry.register({
   name: '/impact',
   description: 'Blast-radius preview for a symbol/file',
   category: 'Code & Intelligence',
+  isEnabled: (ctx) => {
+    if (!ctx.graphStore || ctx.graphStore.getGraph().nodes.size === 0) {
+      return { enabled: false, reason: 'Requires AST Index — run /index first' };
+    }
+    return { enabled: true };
+  },
   execute: async (args, context) => {
     const store = context.graphStore;
-    const target = args.join(' ').trim();
-    if (!target) return { type: 'message', level: 'error', content: 'Usage: /impact <symbol or node id>' };
     if (!store || store.getGraph().nodes.size === 0) {
       return { type: 'message', level: 'error', content: 'Dependency graph is empty. Run /index first.' };
     }
+    const target = args.join(' ').trim();
+    if (!target) return { type: 'message', level: 'error', content: 'Usage: /impact <symbol or node id>' };
 
     let id = store.getNode(target) ? target : undefined;
     if (!id) {
@@ -56,32 +62,40 @@ globalCommandRegistry.register({
   name: '/map',
   description: 'Top-level codebase map overview',
   category: 'Code & Intelligence',
+  isEnabled: (ctx) => {
+    if (!ctx.graphStore || ctx.graphStore.getGraph().nodes.size === 0) {
+      return { enabled: false, reason: 'Requires AST Index — run /index first' };
+    }
+    return { enabled: true };
+  },
   execute: async (args, context) => {
     const store = context.graphStore;
     if (!store || store.getGraph().nodes.size === 0) {
-      return { type: 'message', level: 'error', content: 'No map graph yet. Run /index to build it.' };
+      return { type: 'message', level: 'error', content: 'Dependency graph is empty. Run /index first.' };
     }
-    const s = summarizeGraph(store);
-    const lines = [
-      `Codebase Map — ${s.nodeCount} nodes, ${s.fileCount} files`,
-      `AI graph: ${s.aiGraphBuilt ? '✓ built' : '✗ not built — run /index-ai'}`,
-    ];
-    if (s.topModules.length) {
-      lines.push('TOP MODULES (by risk/criticality):');
-      for (const m of s.topModules) {
-        const tag = m.criticality ? ` [${m.criticality}${m.riskScore != null ? ` risk=${m.riskScore}` : ''}]` : '';
-        lines.push(`  • ${m.name}${m.filePath ? ` (${m.filePath})` : ''}${tag}`);
-      }
-    }
-    return { type: 'message', level: 'info', content: lines.join('\n') };
+    // The UI handles /map by displaying an interactive overlay panel.
+    // This is a no-op so the engine doesn't print static text into the chat transcript.
+    return { type: 'message', level: 'info', content: '' };
   }
 });
+
+
 
 globalCommandRegistry.register({
   name: '/ask',
   description: 'Ask the architecture (answered from the graph)',
   category: 'Code & Intelligence',
-  execute: async (args) => {
+  isEnabled: (ctx) => {
+    if (!ctx.graphStore || ctx.graphStore.getGraph().nodes.size === 0) {
+      return { enabled: false, reason: 'Requires AST Index — run /index first' };
+    }
+    return { enabled: true };
+  },
+  execute: async (args, context) => {
+    const store = context.graphStore;
+    if (!store || store.getGraph().nodes.size === 0) {
+      return { type: 'message', level: 'error', content: 'Dependency graph is empty. Run /index first.' };
+    }
     const question = args.join(' ').trim();
     if (!question) return { type: 'message', level: 'error', content: 'Usage: /ask <question about the codebase architecture>' };
     // Re-enter as an agent turn, steering it to answer from the dependency graph.

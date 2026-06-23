@@ -105,7 +105,10 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();
   const graphStore = new GraphStore(path.join(projectRoot, '.breakglass/graph', 'playground.json'));
-  await graphStore.loadFromDisk();
+  const { isCodebase } = await import('../graph/graph.summary');
+  if (isCodebase(projectRoot)) {
+    await graphStore.loadFromDisk();
+  }
 
   // Tools
   const toolRegistry = new ToolRegistry();
