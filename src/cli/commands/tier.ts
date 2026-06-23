@@ -17,11 +17,11 @@ globalCommandRegistry.register({
     const sub = (args[0] || '').toLowerCase();
 
     if (VALID.has(sub)) {
+      // set_tier already emits a `status` (shown in the footer) AND `model_tier` (flips the footer's
+      // model pointer), so the change is visible without a transcript line. Returning a message too
+      // means rapid Ctrl+T cycling stacks redundant "Routing pinned →" lines in the chat — so we don't.
       cliEvents.emit('set_tier', sub as 'auto' | 'lite' | 'heavy');
-      const msg = sub === 'auto'
-        ? 'Routing → auto (lite decides, escalates to the coding model as needed).'
-        : `Routing pinned → ${sub} model. Every turn now uses the ${sub === 'heavy' ? 'coding' : 'lite'} model until you /tier auto.`;
-      return { type: 'message', level: 'success', content: msg };
+      return { type: 'none' } as any;
     }
 
     return {

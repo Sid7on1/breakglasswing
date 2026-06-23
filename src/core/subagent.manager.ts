@@ -1,5 +1,6 @@
 import { Worker } from 'worker_threads';
 import * as path from 'path';
+import { existsSync } from 'fs';
 import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
 
@@ -13,13 +14,24 @@ export interface SubAgentConfig {
 export class SubAgentManager {
   private activeWorkers = new Map<string, Worker>();
   private workerScriptPath: string;
+  // Extra Node args for the worker thread. In dev the engine runs from TypeScript source via `tsx`,
+  // so the worker must load the tsx hooks to parse the .ts entry — otherwise `new Worker(...ts)`
+  // throws "Cannot find module" / can't parse TS. Empty in prod (compiled .js needs no loader).
+  private readonly workerExecArgv: string[];
   // A sub-agent that hangs (stalled stream, infinite loop) must not block the parent
   // forever. Configurable; defaults to 10 minutes — generous for slow reasoning models.
   private readonly workerTimeoutMs: number;
 
   // opts is a test seam: production callers use the default worker entrypoint and timeout.
   constructor(opts?: { workerScriptPath?: string; timeoutMs?: number }) {
-    this.workerScriptPath = opts?.workerScriptPath ?? path.resolve(__dirname, '../cli/worker.entry.js');
+    // Resolve the worker entry next to this file. When running compiled (`node dist/...`) __dirname is
+    // dist/core and the sibling .js exists. When running from source (`tsx src/index.ts`) __dirname is
+    // src/core and only the .ts exists — use it, and tell the worker to load tsx so it can run TS.
+    const jsPath = path.resolve(__dirname, '../cli/worker.entry.js');
+    const tsPath = path.resolve(__dirname, '../cli/worker.entry.ts');
+    const useTs = !existsSync(jsPath) && existsSync(tsPath);
+    this.workerScriptPath = opts?.workerScriptPath ?? (useTs ? tsPath : jsPath);
+    this.workerExecArgv = useTs ? ['--import', 'tsx'] : [];
     this.workerTimeoutMs = opts?.timeoutMs ?? parseInt(process.env.BGW_WORKER_TIMEOUT_MS || '600000', 10);
   }
 
@@ -28,7 +40,8 @@ export class SubAgentManager {
       Logger.info(`[SubAgentManager] Spawning worker for task ${taskId} (Agent: ${config.agentType})`);
 
       const worker = new Worker(this.workerScriptPath, {
-        workerData: config
+        workerData: config,
+        execArgv: this.workerExecArgv,
       });
 
       this.activeWorkers.set(taskId, worker);

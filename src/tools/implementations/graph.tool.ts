@@ -1,6 +1,7 @@
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { GraphStore } from '../../graph/graph.store';
+import { GraphNode } from '../../graph/models';
 import { ImpactEngine } from '../../graph/impact.engine';
 import { fmtNode, searchNodes, resolveNodeId } from '../../graph/node.search';
 import { readSymbolSource } from '../../graph/symbol.source';
@@ -33,8 +34,8 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
 
 # Query verbs (pass as the \`query\` string)
 - \`SEARCH_NODES *\` — START HERE on an unfamiliar repo: lists the most central nodes so you see what actually exists (don't guess concept names). \`SEARCH_NODES <keyword>\` then finds a specific symbol/file (matches name, purpose, path).
-- \`GET_DEPENDENTS <node>\` — who depends on this symbol (reverse deps). If you change a signature you MUST update these.
-- \`GET_DEPENDENCIES <node>\` — what this symbol depends on (forward deps).
+- \`GET_DEPENDENTS <node>\` — DIRECT callers/users of this symbol (the immediate call sites you MUST update if you change its signature). For transitive reach use BLAST_RADIUS.
+- \`GET_DEPENDENCIES <node>\` — what this symbol DIRECTLY depends on (the symbols it calls/uses).
 - \`BLAST_RADIUS <node>\` — downstream reach + highest criticality if you modify this node. Run this before signature-changing edits.
 - \`READ_SYMBOL <node>\` — return ONLY that symbol's source (its exact line range), with a header (file, signature, criticality). Prefer this over reading a whole file when you just need one function/class.
 - \`<node>\` (bare) — the node plus its direct edges.
@@ -86,12 +87,26 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
         return `"${target}" is ambiguous. Candidates:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
       }
       if (!resolved.id) return `No node found for "${target}". Try SEARCH_NODES ${target}.`;
-      const nodes = verb === 'GET_DEPENDENTS'
-        ? engine.getReverseDependencies(resolved.id, 4)
-        : engine.getForwardDependencies(resolved.id, 4);
-      const dir = verb === 'GET_DEPENDENTS' ? 'depend on' : 'are depended on by';
+      // Resolve DIRECT callers/callees, mirroring context.planner so the two never disagree:
+      //  • depth 2 crosses the analyzer's block layer (symbol --CONTAINS--> block --CALLS--> neighbor),
+      //  • non-symbol intermediaries (blocks/statements/vars) are dropped,
+      //  • for dependents the target's own structural parents (the file/class that CONTAINS it) are
+      //    excluded — they OWN the symbol, they don't depend on it.
+      // This is the fix for the "6 dependents vs 2 real callers" overcount (owners + transitive noise).
+      const isSym = (n: GraphNode) => n.type === 'FUNCTION' || n.type === 'CLASS' || n.type === 'INTERFACE';
+      let nodes: GraphNode[];
+      let dir: string;
+      if (verb === 'GET_DEPENDENTS') {
+        const parents = new Set(graph.edges.filter(e => e.targetId === resolved.id && e.type === 'CONTAINS').map(e => e.sourceId));
+        nodes = engine.getReverseDependencies(resolved.id, 2).filter(isSym).filter(n => !parents.has(n.id));
+        dir = 'directly depend on';
+      } else {
+        nodes = engine.getForwardDependencies(resolved.id, 2).filter(isSym);
+        dir = 'are directly depended on by';
+      }
       if (nodes.length === 0) return `Nothing ${dir} ${resolved.id} in the graph.`;
-      return `${nodes.length} node(s) that ${dir} ${resolved.id}:\n` + nodes.slice(0, 40).map(n => '- ' + fmtNode(n)).join('\n');
+      return `${nodes.length} node(s) that ${dir} ${resolved.id} (direct only — use BLAST_RADIUS for transitive reach):\n` +
+        nodes.slice(0, 40).map(n => '- ' + fmtNode(n)).join('\n');
     }
 
     if (verb === 'BLAST_RADIUS') {

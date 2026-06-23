@@ -39,9 +39,12 @@ func extractEmbeddedEngine() (string, error) {
 	return path, nil
 }
 
-// ResolveRoot picks the working directory the engine runs in: the shipped binary runs in the
-// user's project (cwd); the dev runner (npx tsx) needs the BiMax source repo, so from tui/ we
-// step up to the parent. $BIMAX_REPO_ROOT overrides both.
+// ResolveRoot picks the directory the engine subprocess STARTS in. For the shipped binary that's the
+// user's cwd (self-contained, no source needed). For the dev runner (npx tsx src/index.ts) it must
+// be the BiMax source repo — found, in order: $BIMAX_REPO_ROOT, the repo next to the binary itself
+// (so the dev build runs from any directory), then the cwd / its parent as a last resort. The user's
+// actual project dir is passed separately as BIMAX_CWD, so the engine works on the launch dir
+// regardless of where its source lives.
 func ResolveRoot() string {
 	if r := os.Getenv("BIMAX_REPO_ROOT"); r != "" {
 		return r
@@ -49,6 +52,18 @@ func ResolveRoot() string {
 	wd, _ := os.Getwd()
 	if hasEmbeddedEngine() {
 		return wd // self-contained binary → run in whatever project the user launched it from
+	}
+	// Dev build: locate src/index.ts relative to the binary (it lives at <repo>/tui/bimax-tui), so
+	// `bimax-tui` works when launched from anywhere — not just from the repo or tui/.
+	if exe, err := os.Executable(); err == nil {
+		for _, cand := range []string{filepath.Dir(exe), filepath.Dir(filepath.Dir(exe))} {
+			if _, err := os.Stat(filepath.Join(cand, "src", "index.ts")); err == nil {
+				return cand
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(wd, "src", "index.ts")); err == nil {
+		return wd
 	}
 	if filepath.Base(wd) == "tui" {
 		return filepath.Dir(wd)
@@ -85,6 +100,14 @@ func StartEngine(repoRoot string) (*Engine, error) {
 	}
 	c.Dir = repoRoot
 	c.Env = append(os.Environ(), "BIMAX_HEADLESS=1")
+	// The engine must START in repoRoot so the dev runner (`tsx src/index.ts`) resolves, but the
+	// user's actual project is wherever they launched the TUI. Pass that through so the engine can
+	// chdir into it — otherwise the dev build always treats the repo as the project (e.g. the codebase
+	// map shows the repo's graph even when launched from ~/Desktop). For the shipped binary repoRoot
+	// already equals the launch dir, so this is a harmless no-op.
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		c.Env = append(c.Env, "BIMAX_CWD="+wd)
+	}
 
 	stdin, err := c.StdinPipe()
 	if err != nil {
@@ -125,9 +148,13 @@ func (e *Engine) readLoop(stdout io.Reader) {
 			continue
 		}
 		var m Outbound
-		if json.Unmarshal([]byte(line), &m) == nil {
-			e.Msgs <- m
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			// Don't silently drop a malformed line — a desync is invisible otherwise. stderr only,
+			// so it never corrupts the transcript (stdout is the protocol pipe, not this).
+			os.Stderr.WriteString("[engine] dropped malformed line: " + err.Error() + "\n")
+			continue
 		}
+		e.Msgs <- m
 	}
 	close(e.Msgs)
 }

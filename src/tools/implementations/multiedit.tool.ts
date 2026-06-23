@@ -8,6 +8,7 @@ import { checkEditSyntax } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { globalTransactionManager } from '../../core/transaction.manager';
+import { findFuzzyMatch, closestRegion } from './edit.tool';
 
 interface SingleEdit {
   path: string;
@@ -91,10 +92,26 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
         }
       }
       const content = working.get(full)!;
-      const occ = countOccurrences(content, e.oldString);
-      if (occ === 0) return `Error: edit #${i + 1} (${e.path}): oldString not found (after preceding edits). Match the file exactly.`;
+      // Match exactly, then fall back to the same 9-step fuzzy chain EditFileTool uses — MultiEdit was
+      // previously exact-only, so a single whitespace/indentation drift in one edit failed the entire
+      // batch (the brittle "edit #1 not found" abort). resolvedOld is the ACTUAL file text to replace.
+      let resolvedOld = e.oldString;
+      let occ = countOccurrences(content, resolvedOld);
+      if (occ === 0) {
+        const fuzzy = findFuzzyMatch(content, e.oldString);
+        if (!fuzzy) {
+          const hint = closestRegion(content, e.oldString);
+          return `Error: edit #${i + 1} (${e.path}): oldString not found (after preceding edits).` +
+            (hint
+              ? `\n\nThe closest region currently in the file is:\n\n${hint}\n\n` +
+                `Copy oldString VERBATIM from there, or split this into smaller edits anchored on a single unique line.`
+              : ` Re-read the file and match it exactly, including whitespace and indentation.`);
+        }
+        resolvedOld = fuzzy.resolvedOld;
+        occ = countOccurrences(content, resolvedOld);
+      }
       if (occ > 1 && !e.replaceAll) return `Error: edit #${i + 1} (${e.path}): oldString appears ${occ} times — add context or set replaceAll: true.`;
-      const updated = e.replaceAll ? content.split(e.oldString).join(e.newString) : content.replace(e.oldString, e.newString);
+      const updated = e.replaceAll ? content.split(resolvedOld).join(e.newString) : content.replace(resolvedOld, e.newString);
       working.set(full, updated);
     }
 

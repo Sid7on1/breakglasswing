@@ -62,9 +62,12 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
       }
 
       try {
+        // Show which tool is running, but do NOT emit 'idle' when it finishes — the TURN is still
+        // active (more tools / more text may follow, and tools run in parallel). Only runTurn's
+        // finally emits 'idle'. Emitting idle per-tool flipped the front-end's busy flag off between
+        // tools, which killed the "working" indicator AND the esc-to-interrupt gate mid-turn.
         cliEvents.emit('spinner_state', 'executing', `${def.name}...`);
         const result = await def.execute(args, context);
-        cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
         // PostToolUse hooks (A2): react to the result and optionally append to it (e.g. the
         // B2 verify loop feeds typecheck errors back so the model self-corrects). Non-fatal.
         const appended = await runPostHooks(def.name, args, result, context);
@@ -72,7 +75,6 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
         return result;
       } catch (error: any) {
         Logger.error(`[Tool:${def.name}] ❌ ${error.message}`);
-        cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
         throw error;
       }
     }

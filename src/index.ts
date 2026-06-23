@@ -95,6 +95,15 @@ async function main() {
     return;
   }
 
+  // Honor the front-end's working directory BEFORE anything reads config or the graph. In dev the Go
+  // TUI launches the engine with its CWD set to the repo (so `tsx src/index.ts` resolves), but the
+  // user's actual PROJECT is wherever they ran the TUI — passed as BIMAX_CWD. This must run before
+  // loadConfig(), or the project config (`<cwd>/.breakglass/config.json`) is read from the engine's
+  // repo and cached — e.g. the repo's pinned llama model would override the user's minimax default.
+  if (process.env.BIMAX_CWD) {
+    try { process.chdir(process.env.BIMAX_CWD); } catch { /* keep current cwd on failure */ }
+  }
+
   const config = await loadConfig();
   if (config.customRoutingRules.length > 0) {
     setCustomRoutingRules(config.customRoutingRules);

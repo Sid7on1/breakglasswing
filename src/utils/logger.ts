@@ -45,19 +45,22 @@ export const Logger = {
   setEventBus: (bus: any) => {
     telemetryBus = bus;
   },
+  // Write directly to stderr, never console.* — stdout is the NDJSON protocol pipe in headless mode,
+  // and console.log/warn/error are patched at boot (capture stub), so going through them would either
+  // swallow logs or, once console is restored, corrupt the protocol stream. stderr is always safe.
   info: (message: string) => {
     const prefix = correlationPrefix();
-    console.log(`[INFO] ${new Date().toISOString()} - ${prefix}${message}`);
+    process.stderr.write(`[INFO] ${new Date().toISOString()} - ${prefix}${message}\n`);
     writeToFile('INFO', `${prefix}${message}`);
   },
   warn: (message: string) => {
     const prefix = correlationPrefix();
-    console.warn(`\x1b[33m[WARN] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m`);
+    process.stderr.write(`\x1b[33m[WARN] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
     writeToFile('WARN', `${prefix}${message}`);
   },
   error: (message: string) => {
     const prefix = correlationPrefix();
-    console.error(`\x1b[31m[ERROR] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m`);
+    process.stderr.write(`\x1b[31m[ERROR] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
     writeToFile('ERROR', `${prefix}${message}`);
   },
 };

@@ -33,7 +33,7 @@ export type ChatEvent =
   | { type: 'usage'; prompt: number; completion: number }
   // `kind` tells the agent loop *how* to recover: 'context' → compact and retry;
   // 'transient' → bounded re-ask (new key / re-sampled output). Absent when fatal.
-  | { type: 'error'; message: string; recoverable: boolean; kind?: 'context' | 'transient' }
+  | { type: 'error'; message: string; recoverable: boolean; kind?: 'context' | 'transient'; retryAfterSecs?: number }
   | { type: 'done' };
 
 export interface LLMProvider {

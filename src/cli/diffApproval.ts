@@ -30,6 +30,8 @@ export async function requestDiffApproval(summary: string, diff: string): Promis
   try {
     return await approver(summary, diff);
   } catch {
-    return true; // never block the agent on an approver failure
+    // Approval is ON and an approver is registered — the user asked to gate writes. A failure here
+    // must fail CLOSED (reject), not silently auto-approve, or it's a security bypass.
+    return false;
   }
 }

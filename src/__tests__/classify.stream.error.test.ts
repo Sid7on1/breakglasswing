@@ -36,6 +36,15 @@ describe('classifyStreamError', () => {
       .toMatchObject({ recoverable: true, kind: 'transient' });
   });
 
+  it('marks a 429 rate limit as transient and surfaces Retry-After for backoff', () => {
+    // No header → recoverable transient, no explicit wait (loop falls back to exponential backoff).
+    expect(classifyStreamError({ status: 429, message: 'rate limit exceeded' }))
+      .toMatchObject({ status: 429, recoverable: true, kind: 'transient', retryAfterSecs: undefined });
+    // Provider sent Retry-After → it's parsed and carried through so the loop can honor it.
+    expect(classifyStreamError({ status: 429, message: 'slow down', headers: { 'retry-after': '12' } }))
+      .toMatchObject({ recoverable: true, kind: 'transient', retryAfterSecs: 12 });
+  });
+
   it('treats genuine client errors as fatal', () => {
     expect(classifyStreamError({ status: 401, message: 'invalid api key' }))
       .toMatchObject({ recoverable: false });

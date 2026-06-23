@@ -145,10 +145,16 @@ export class AgentLoop {
             discardTurn = true;
             break;
           } else if (event.recoverable && event.kind === 'transient' && transientRetries < MAX_TRANSIENT_RETRIES) {
-            // A stalled stream or a single bad model emission — discard the partial
-            // turn and re-ask. A fresh chat() call rotates the API key and re-samples.
+            // A stalled stream, rate limit, or a single bad model emission — discard the partial
+            // turn and re-ask. A fresh chat() call rotates the API key and re-samples. BACK OFF
+            // first: honor the provider's Retry-After if it sent one, else exponential (1s, 2s),
+            // so a 429 isn't immediately hammered (which only deepens the limit).
             transientRetries++;
-            yield `\n[AgentLoop] Transient API error (${event.message}). Retrying (${transientRetries}/${MAX_TRANSIENT_RETRIES})...\n`;
+            const backoffMs = event.retryAfterSecs != null
+              ? Math.min(event.retryAfterSecs * 1000, 30_000)
+              : Math.min(1000 * 2 ** (transientRetries - 1), 8000);
+            yield `\n[AgentLoop] Transient API error (${event.message}). Backing off ${Math.round(backoffMs / 1000)}s, retrying (${transientRetries}/${MAX_TRANSIENT_RETRIES})...\n`;
+            await new Promise(r => setTimeout(r, backoffMs));
             discardTurn = true;
             break;
           } else {
@@ -280,7 +286,9 @@ export class AgentLoop {
           }
 
           try {
-            const toolContext = context || { cwd: process.cwd() };
+            // Thread the interrupt signal into the tool so a long-running one (e.g. a 30s Bash)
+            // is killed the instant esc is hit, rather than running to completion first.
+            const toolContext = { ...(context || { cwd: process.cwd() }), signal };
             const result = await tool.execute(argsObj, toolContext);
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
             return finish(resultStr, false);
@@ -304,6 +312,9 @@ export class AgentLoop {
         }
 
         for (const tc of sequential) {
+          // Interrupted mid-chain: stop before starting the next tool so esc halts a continuous
+          // run of tool calls promptly, instead of waiting out the whole batch + another model call.
+          if (signal?.aborted) return;
           const res = await executeTool(tc);
           this.messages.push({ role: 'tool', tool_call_id: res.id, content: res.result });
           const sig = loopDetector.record(tc.name, tc.args, res.result);

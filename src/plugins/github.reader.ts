@@ -1,24 +1,34 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { Logger } from '../utils';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+// Only accept well-formed https / git / ssh repo URLs. This is a defence-in-depth check on top of the
+// argv-level execFile call below (no shell), so a URL can never inject flags or shell metacharacters.
+const SAFE_REPO_URL = /^(https:\/\/|git:\/\/|ssh:\/\/|git@)[\w.@:/~+-]+$/;
 
 export class GithubReader {
   async fetchRepo(url: string): Promise<string> {
     Logger.info(`[GithubReader] Fetching repository: ${url}`);
-    
+
+    const trimmed = (url || '').trim();
+    if (!SAFE_REPO_URL.test(trimmed)) {
+      throw new Error(`[GithubReader] Refusing to clone — "${url}" is not a valid https/git/ssh repository URL.`);
+    }
+
     const rootDir = path.join(process.cwd(), '.breakglass/plugins_staging');
     await fs.mkdir(rootDir, { recursive: true });
-    
+
     const pluginId = `plugin_${Date.now()}`;
     const tempDir = path.join(rootDir, pluginId);
-    
+
     try {
       Logger.info(`[GithubReader] Executing: git clone --depth 1 <url> ${tempDir}`);
-      await execAsync(`git clone --depth 1 ${url} ${tempDir}`);
+      // execFile (no shell) + a leading `--` so the URL can never be parsed as a git flag.
+      await execFileAsync('git', ['clone', '--depth', '1', '--', trimmed, tempDir]);
       
       // Verification Step: Integrity & Safety Check (PLUG-002)
       Logger.info(`[GithubReader] Verifying package integrity...`);

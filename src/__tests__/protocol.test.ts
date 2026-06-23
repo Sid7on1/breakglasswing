@@ -37,6 +37,13 @@ describe('sanitizeArgs', () => {
     // A bare function arg is not valid JSON, so it collapses to null on the wire (not undefined).
     expect(out).toEqual(['hello', 42, null, { __ui: 'Menu' }, { ok: true }]);
   });
+
+  it('passes primitives through unchanged (the per-token fast path)', () => {
+    // null/undefined → null, booleans pass, bigint → string. No stringify→parse roundtrip.
+    expect(sanitizeArgs([null, undefined, true, false, 7n])).toEqual([null, null, true, false, '7']);
+    // A streamed token is a plain string — the hot case — and must survive verbatim.
+    expect(sanitizeArgs(['the token'])).toEqual(['the token']);
+  });
 });
 
 describe('ProtocolHost', () => {

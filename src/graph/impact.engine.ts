@@ -111,7 +111,7 @@ export class ImpactEngine implements IImpactEngine {
 
       for (const edge of edges) {
         const nextId = direction === 'forward' ? edge.targetId : edge.sourceId;
-        
+
         if (!visited.has(nextId)) {
           visited.add(nextId);
           const nextNode = this.store.getNode(nextId);

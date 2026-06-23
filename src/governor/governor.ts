@@ -20,8 +20,17 @@ export interface ToolPermissionRule {
 export class Governor implements IGovernor {
   public budget: BudgetVeto;
   public fs: FileSystemVeto;
-  public mode: SessionPermissionMode = 'interactive';
+  private _mode: SessionPermissionMode = 'interactive';
   private bashAnalyzer = new BashStaticAnalyzer();
+
+  // mode is assigned directly in many places (index.ts, /governor, /plan, …). Route those writes
+  // through a setter so disabling the governor (bypass) ALSO lifts the budget veto, which the LLM
+  // adapter holds directly — otherwise "/governor off" left the daily cap blocking every response.
+  public get mode(): SessionPermissionMode { return this._mode; }
+  public set mode(m: SessionPermissionMode) {
+    this._mode = m;
+    if (this.budget) this.budget.enabled = m !== 'bypass';
+  }
   public rules: ToolPermissionRule[] = [];
 
   constructor(private eventBus: IEventBus, private yolo?: YoloClassifier) {

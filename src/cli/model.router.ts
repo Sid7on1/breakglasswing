@@ -50,6 +50,11 @@ Reply with ONLY a JSON object, no prose: {"tier":"lite"} or {"tier":"heavy","bri
  * runs first, then the lite model classifies. Any failure falls back to LITE — the default
  * responder — so routing can never block a turn.
  */
+// The classifier is a pre-flight call that runs BEFORE the user sees anything, so it must never be
+// the thing that hangs a turn. If the lite model cold-starts, we'd rather just answer with lite than
+// make the user wait for the router. Cap it tightly and fall back to lite on timeout.
+const CLASSIFIER_TIMEOUT_MS = 6000;
+
 export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier | null): Promise<RouteDecision> {
   if (pinned) return { tier: pinned, via: 'pinned' };
 
@@ -57,7 +62,10 @@ export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier 
   if (h) return { tier: h, via: 'heuristic' };
 
   try {
-    const raw = await llm.chatCompletion([{ role: 'user', content: prompt }], CLASSIFIER_SYSTEM, { lite: true });
+    const raw = await Promise.race([
+      llm.chatCompletion([{ role: 'user', content: prompt }], CLASSIFIER_SYSTEM, { lite: true }),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('classifier timeout')), CLASSIFIER_TIMEOUT_MS)),
+    ]);
     const parsed = JSON.parse(extractJson(raw) || '{}');
     if (parsed?.tier === 'heavy') {
       const brief = typeof parsed.brief === 'string' && parsed.brief.trim() ? parsed.brief.trim() : undefined;

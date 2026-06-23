@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import {
-  Outbound, Inbound, ReplyMsg, CompletionItem,
+  Outbound, Inbound, ReplyMsg, MenuSelectMsg, CompletionItem,
   FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, INPUT_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
 
@@ -11,6 +11,8 @@ export interface HostHandlers {
   onInterrupt?: () => void;
   /** The front-end asked for autocomplete candidates for the current input. */
   onQuery?: (text: string) => CompletionItem[] | Promise<CompletionItem[]>;
+  /** The front-end picked an option in a menu the engine emitted — run that menu's onSelect. */
+  onMenuSelect?: (id: string, value: string) => void;
 }
 
 /**
@@ -91,6 +93,11 @@ export class ProtocolHost {
       case 'input':
         this.handlers.onInput?.(msg.text);
         return;
+      case 'menuSelect': {
+        const { id, value } = msg as MenuSelectMsg;
+        this.handlers.onMenuSelect?.(id, value);
+        return;
+      }
       case 'interrupt':
         this.handlers.onInterrupt?.();
         return;

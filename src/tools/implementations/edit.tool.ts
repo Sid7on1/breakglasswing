@@ -32,7 +32,7 @@ interface FallbackMatch {
  *   8. ContextAware        — anchor on the most distinctive line, extract expected-length block
  *   9. MultiOccurrence     — take the first match when multiple exist (last resort)
  */
-function findFuzzyMatch(content: string, oldString: string): FallbackMatch | null {
+export function findFuzzyMatch(content: string, oldString: string): FallbackMatch | null {
   // Try: transform oldString into something that appears verbatim in content (character-level)
   const tryCharTransform = (transform: (s: string) => string, method: string): FallbackMatch | null => {
     const t = transform(oldString);
@@ -148,6 +148,48 @@ function findFuzzyMatch(content: string, oldString: string): FallbackMatch | nul
   return null;
 }
 
+/**
+ * When an edit can't be located (exact + 9-step fuzzy both failed), find the file region that most
+ * resembles oldString and return it with line numbers. Surfacing the ACTUAL current text in the
+ * error turns blind "not found" retries — the loop where a model re-emits the same near-miss
+ * oldString over and over — into informed ones: it can copy the real text verbatim or anchor a
+ * smaller edit. Anchors on the most distinctive line of oldString; scores file lines by word
+ * overlap (cheap, robust to indentation/punctuation drift). Returns null if nothing is close enough.
+ */
+export function closestRegion(content: string, oldString: string): string | null {
+  const oldLines = oldString.split('\n').map(l => l.trim()).filter(l => l.length > 3);
+  if (oldLines.length === 0) return null;
+
+  const cLines = content.split('\n');
+  let bestIdx = -1;
+  let bestScore = 0;
+  // Score every oldString line against every file line by word overlap and keep the single best
+  // pairing — robust to indentation, punctuation, and the surrounding lines being slightly off.
+  for (const ol of oldLines) {
+    const olTokens = new Set(ol.split(/\s+/).filter(Boolean));
+    if (olTokens.size === 0) continue;
+    for (let i = 0; i < cLines.length; i++) {
+      const toks = cLines[i].trim().split(/\s+/).filter(Boolean);
+      if (toks.length === 0) continue;
+      let shared = 0;
+      for (const tok of toks) if (olTokens.has(tok)) shared++;
+      const score = shared / Math.max(olTokens.size, toks.length);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+  }
+  if (bestIdx < 0 || bestScore < 0.34) return null; // nothing resembles it — a hint would mislead
+
+  const start = Math.max(0, bestIdx - 3);
+  const end = Math.min(cLines.length, bestIdx + 4);
+  return cLines
+    .slice(start, end)
+    .map((l, k) => `${String(start + k + 1).padStart(5)}  ${l}`)
+    .join('\n');
+}
+
 /** Render a compact unified-style preview of the change for the transcript. */
 
 interface EditArgs {
@@ -163,7 +205,8 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
 
 # Instructions
 - **oldString** must match the file content EXACTLY, including indentation and line breaks.
-- **oldString must be unique** in the file, or the edit fails — include more surrounding lines to disambiguate. Alternatively pass \`replaceAll: true\` to replace every occurrence.
+- **Keep oldString SMALL** — prefer one line, or a few lines, anchored on a single unique line. Large multi-line blocks with deep indentation are error-prone to reproduce verbatim and are the #1 cause of failed edits. Make several small edits instead of one big one.
+- **oldString must be unique** in the file, or the edit fails — include just enough surrounding context to disambiguate. Alternatively pass \`replaceAll: true\` to replace every occurrence.
 - **newString** must differ from oldString.
 - The file must already exist; use WriteFileTool to create new files.`,
   isDestructive: true,
@@ -226,11 +269,16 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     if (occurrences === 0) {
       const fuzzy = findFuzzyMatch(content, args.oldString);
       if (!fuzzy) {
+        const hint = closestRegion(content, args.oldString);
         return fail(
-          `Error: oldString not found in ${args.path}. ` +
-          `9-step fuzzy fallback also failed (TrimmedBoundary → LineTrimmed → WhitespaceNormalized → ` +
-          `IndentationFlexible → EscapeNormalized → BlockAnchor → ContextAware → MultiOccurrence). ` +
-          `Make sure oldString matches the file verbatim (including whitespace and indentation).`,
+          `Error: oldString not found in ${args.path}. The 9-step fuzzy fallback also failed ` +
+          `(TrimmedBoundary → LineTrimmed → WhitespaceNormalized → IndentationFlexible → ` +
+          `EscapeNormalized → BlockAnchor → ContextAware → MultiOccurrence).` +
+          (hint
+            ? `\n\nThe closest region currently in the file is:\n\n${hint}\n\n` +
+              `Copy oldString VERBATIM from there (exact whitespace and indentation), or make a ` +
+              `smaller edit anchored on a single unique line. Do NOT re-send the same oldString.`
+            : ` Re-read the file and copy oldString exactly, including whitespace and indentation.`),
           'oldString not found',
         );
       }

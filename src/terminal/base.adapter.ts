@@ -100,9 +100,11 @@ export abstract class BaseAdapter {
       this.child!.stdout.on('data', onData);
       this.child!.stderr.on('data', onStdErr);
 
-      // 3. Inject command via stdin (Mitigated TERM-001 by base64 wrapping)
+      // 3. Inject command via stdin (Mitigated TERM-001 by base64 wrapping). Decode portably: GNU
+      // base64 uses -d, BSD/macOS uses -D — try -d, fall back to -D, re-feeding fresh input to each
+      // branch (base64 is single-quote-safe, so the literal can't break out of the quoting).
       const b64Cmd = Buffer.from(command).toString('base64');
-      this.child!.stdin.write(`eval "$(echo ${b64Cmd} | base64 -d)"\n`);
+      this.child!.stdin.write(`eval "$(printf %s '${b64Cmd}' | base64 -d 2>/dev/null || printf %s '${b64Cmd}' | base64 -D)"\n`);
       this.child!.stdin.write(`echo ${delimiter}\n`);
     });
   }

@@ -43,6 +43,16 @@ export interface ModelCapabilities {
   structuredOutputs: boolean;
   /** Accepts a `reasoning_effort` knob (thinking models); sending it to a model that lacks it can 400. */
   reasoningEffortKnob: boolean;
+  /**
+   * CONFIRMED non-reasoning model: its content channel is ALWAYS the answer — it never emits an
+   * opener-less `</think>` closer or an out-of-band reasoning channel. Tells the streaming filter to
+   * skip implicit think-buffering entirely and stream from the very first token, instead of holding
+   * the leading content tentatively (up to the preamble cap) waiting for a closer that never comes.
+   * Without this, a plain model buffers its head-of-reply and reveals it in one delayed chunk — the
+   * "spinner spins, no text → feels very slow / hangs" symptom. Only set it when truly certain the
+   * model never reasons inline, or its genuine reasoning WOULD leak as the reply.
+   */
+  plainContent: boolean;
   /** Image input. */
   visionInput: boolean;
   /** Approximate context window in tokens — compaction thresholds scale to this. */
@@ -62,6 +72,7 @@ export const FLOOR: ModelCapabilities = {
   parallelToolCalls: false,
   structuredOutputs: false,
   reasoningEffortKnob: false,
+  plainContent: false,
   visionInput: false,
   contextWindow: 32_000,
 };
@@ -146,6 +157,10 @@ const RULES: CapabilityRule[] = [
     match: ['minimax'],
     caps: {
       parallelToolCalls: true,
+      // Confirmed non-reasoning on NIM: stream the answer from token 1, never buffer it waiting for a
+      // `</think>` closer that never arrives (that head-of-reply hold is what made minimax feel "very
+      // very slow" — the spinner span with no visible text while the filter sat on the leading chunk).
+      plainContent: true,
       // NIM-hosted minimax serves a 128k effective window — not the 1M the model card advertises.
       // The prior 1M made the token-meter bar read ~1% (useless) AND let ContextManager defer
       // compaction to ~700k, well past what the NIM endpoint accepts (→ overflow/API errors).
@@ -208,6 +223,7 @@ function applyOverrides(caps: ModelCapabilities): ModelCapabilities {
   const pt = envFlag('BGW_CAP_PARALLEL_TOOL_CALLS');    if (pt !== undefined) out.parallelToolCalls = pt;
   const so = envFlag('BGW_CAP_STRUCTURED_OUTPUTS');     if (so !== undefined) out.structuredOutputs = so;
   const re = envFlag('BGW_CAP_REASONING_EFFORT');       if (re !== undefined) out.reasoningEffortKnob = re;
+  const pl = envFlag('BGW_CAP_PLAIN_CONTENT');          if (pl !== undefined) out.plainContent = pl;
   const vi = envFlag('BGW_CAP_VISION');                 if (vi !== undefined) out.visionInput = vi;
   const cw = process.env.BGW_CAP_CONTEXT_WINDOW;        if (cw && !Number.isNaN(parseInt(cw, 10))) out.contextWindow = parseInt(cw, 10);
   return out;

@@ -99,13 +99,18 @@ globalCommandRegistry.register({
       };
     }
     if (args.length === 0) {
+      const isOn = context.options.governor.mode !== 'bypass';
       return {
         type: 'menu',
-        title: `Governor is currently ${context.options.governor.mode === 'bypass' ? 'OFF' : 'ON'}`,
+        title: `Governor is currently ${isOn ? 'ON' : 'OFF'}`,
         options: [
-          { label: 'Turn ON (Active)', value: 'on', desc: 'Constraints and vetoes will apply' },
-          { label: 'Turn OFF (Bypass)', value: 'off', desc: 'All actions will be auto-approved' }
-        ]
+          // Values are full commands so selecting one in the TUI actually toggles (a bare "on"/"off"
+          // got dispatched as a chat message and silently did nothing).
+          { label: '[ ON ] Active', value: '/governor on', desc: 'Constraints, vetoes, and the daily budget cap apply' },
+          { label: '[ OFF ] Bypass', value: '/governor off', desc: 'Auto-approve everything and lift the budget cap' },
+        ],
+        initialIndex: isOn ? 0 : 1,
+        onSelect: (opt: any) => context.executeCommand(opt.value),
       };
     } else if (args[0] === 'off') {
       context.options.governor.mode = 'bypass';

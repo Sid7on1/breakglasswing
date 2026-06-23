@@ -52,15 +52,16 @@ export class CodebaseIndexer {
     }
     const graphPath = path.join(this.projectRoot, '.breakglass/graph', 'playground.json');
     
-    // Check if the graph already exists and has nodes
+    // Check if the graph already exists and actually has nodes. Byte size is a bad proxy — an
+    // empty-but-structured `{"nodes":[],"edges":[]}` can clear a size threshold yet have 0 nodes,
+    // so we count the nodes instead.
     let needsIndexing = true;
     if (fs.existsSync(graphPath)) {
       try {
-        const stats = fs.statSync(graphPath);
-        if (stats.size > 100) { // arbitrary small size to check if it's empty
-          needsIndexing = false;
-        }
-      } catch { /* stat failed — treat as needing indexing */ }
+        const parsed = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+        const nodeCount = Array.isArray(parsed.nodes) ? parsed.nodes.length : Object.keys(parsed.nodes || {}).length;
+        if (nodeCount > 0) needsIndexing = false;
+      } catch { /* unreadable / corrupt — treat as needing indexing */ }
     }
 
     if (!force && !needsIndexing) {
@@ -71,8 +72,7 @@ export class CodebaseIndexer {
       this.graphStore.clear(); // Clear existing graph if forced
     }
 
-    console.log(`Indexing codebase (AST)... this may take a moment.`);
-    Logger.info(`[CodebaseIndexer] Triggering autonomous indexing for ${this.projectRoot}`);
+    Logger.info(`[CodebaseIndexer] Indexing codebase (AST) for ${this.projectRoot}…`);
 
     // 1. Physical Indexing — never let an unreadable/invalid tsconfig kill the boot. The TS
     // pass and the tree-sitter pass are independent: a failure in one must not skip the other.
@@ -89,7 +89,7 @@ export class CodebaseIndexer {
       Logger.warn(`[CodebaseIndexer] No indexable source found in ${this.projectRoot}.`);
       return;
     }
-    console.log(`Codebase index complete: ${nodeCount} nodes extracted.`);
+    Logger.info(`[CodebaseIndexer] Codebase index complete: ${nodeCount} nodes extracted.`);
 
     // 2. Semantic ingestion prompt — ONLY for a standalone CLI run. Never under the Ink TUI:
     // readline + Ink both reading the raw TTY deadlock-spin on stdin (100% CPU, frozen UI).

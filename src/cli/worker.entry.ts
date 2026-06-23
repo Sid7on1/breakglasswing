@@ -23,6 +23,7 @@ import { createGraphQueryTool, createGraphContextTool } from '../tools/implement
 import { createGitTool } from '../tools/implementations/git.tool';
 import { createRememberTool } from '../tools/implementations/remember.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
+import { createSkillInstallTool } from '../tools/implementations/skill.install.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { globalSkillService } from '../skills/skill.service';
@@ -84,6 +85,7 @@ async function runWorker() {
     toolRegistry.register(createRememberTool(governor, globalProjectMemory));
     globalSkillService.load(config.cwd || process.cwd());
     toolRegistry.register(createSkillTool(governor, globalSkillService));
+    toolRegistry.register(createSkillInstallTool(governor, globalSkillService));
     loadHooksConfig(config.cwd || process.cwd());
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
     toolRegistry.register(createWebSearchTool(governor));

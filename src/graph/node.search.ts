@@ -32,6 +32,11 @@ export function resolveNodeId(store: IGraphStore, token: string): { id?: string;
   const matches = searchNodes(store, token, 6);
   if (matches.length === 1) return { id: matches[0].id };
   if (matches.length === 0) return {};
+  // Exact NAME match wins over substring matches: a bare "IncrementalAnalyzer" matches the class AND
+  // its methods (IncrementalAnalyzer.bootstrap, …) and used to bail as "ambiguous" — but the node
+  // named exactly that is unambiguously what was meant. Same for a unique method short name.
+  const exactName = matches.filter(n => (n.name || '').toLowerCase() === token.toLowerCase());
+  if (exactName.length === 1) return { id: exactName[0].id };
   // A file-path-looking target (e.g. "src/index.ts") matches the FILE node AND every symbol inside
   // it → "ambiguous". But the model almost always means the FILE itself (its dependents / blast
   // radius), so if there's exactly one FILE among the matches, pick it instead of asking to clarify.

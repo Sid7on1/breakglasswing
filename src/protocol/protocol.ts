@@ -62,7 +62,14 @@ export interface InterruptMsg { t: 'interrupt'; }
 /** Ask the engine for autocomplete candidates for the current input `text`. */
 export interface QueryMsg { t: 'query'; id: number; text: string; }
 
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg;
+/**
+ * The user picked an option in an interactive menu. `id` correlates to the menu the engine emitted;
+ * `value` is the chosen option's value. The engine runs that menu's `onSelect` (which can't cross the
+ * wire as a callback) — falling back to dispatching `value` as a command for menus that have none.
+ */
+export interface MenuSelectMsg { t: 'menuSelect'; id: string; value: string; }
+
+export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg;
 
 // --- Event vocabulary ----------------------------------------------------------------------
 
@@ -75,6 +82,8 @@ export const FORWARDED_EVENTS: readonly string[] = [
   'cost_update', 'todo_update', 'thinking', 'thinking_clear',
   'config_changed', 'graph_changed', 'cwd_changed', 'mcp_changed',
   'rerun_onboarding', 'shutdown', 'loop_detected', 'goals_changed',
+  // /clear wipes the front-end transcript (the engine has no Ink FullScreen to intercept it).
+  'clear',
   // Headless-only: the persona streams reply tokens through a direct callback in the Ink path;
   // in headless mode the driver re-emits each token here so the front-end can render the stream.
   'stream_token',
@@ -106,7 +115,16 @@ export function sanitizeArgs(args: any[]): JsonValue[] {
     return value;
   };
   return args.map(a => {
-    try { return JSON.parse(JSON.stringify(a ?? null, replacer)); }
+    // Fast path: primitives are already JSON-safe, so skip the stringify→parse clone. This runs
+    // once per streamed token (the hottest event on the wire) — avoiding two JSON passes per token
+    // is the cheapest real win here; the final encode() stringifies the whole message exactly once.
+    if (a == null) return null;
+    const t = typeof a;
+    if (t === 'string' || t === 'number' || t === 'boolean') return a;
+    if (t === 'bigint') return (a as bigint).toString();
+    if (t === 'function') return null;
+    // Objects/arrays: clone through JSON to drop functions, mark React elements, ISO-ify Dates.
+    try { return JSON.parse(JSON.stringify(a, replacer)); }
     catch { return null; }
   });
 }

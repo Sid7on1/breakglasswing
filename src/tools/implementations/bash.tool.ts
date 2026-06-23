@@ -51,9 +51,12 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       // profile + the command pass as discrete argv (no shell re-quoting). Otherwise run it
       // through the shell exactly as before.
       const sbArgv = sandboxArgv(cmd, currentCwd);
+      // signal: when the user hits esc mid-turn, the agent loop aborts it and Node kills this child
+      // process immediately instead of waiting out the command / its timeout.
+      const execOpts = { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, signal: context?.signal as AbortSignal | undefined };
       const { stdout, stderr } = sbArgv
-        ? await execFileAsync('sandbox-exec', sbArgv, { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 })
-        : await execAsync(cmd, { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+        ? await execFileAsync('sandbox-exec', sbArgv, execOpts)
+        : await execAsync(cmd, execOpts);
       const out = stdout.trim();
       const err = stderr.trim();
       return {
@@ -61,6 +64,10 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
         stderr: err.length > MAX_OUTPUT_CHARS ? err.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : err,
       };
     } catch (e: any) {
+      // Interrupted by esc (signal abort) — also sets e.killed, so check it BEFORE the timeout case.
+      if (e?.name === 'AbortError' || e?.code === 'ABORT_ERR' || context?.signal?.aborted) {
+        throw new Error(`Command interrupted: ${args.command}`, { cause: e });
+      }
       if (e.killed) {
         throw new Error(`Command timed out after ${timeoutMs}ms: ${args.command}`, { cause: e });
       }

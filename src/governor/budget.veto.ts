@@ -11,6 +11,12 @@ export class BudgetVeto {
   private reservedSpend: number = 0;
   private readonly spendFilePath: string;
   private budgetMutex = new Mutex();
+  // When the governor is bypassed (/governor off), the budget stops vetoing — it still TRACKS spend
+  // so the running total stays accurate, but it never blocks a call. The adapter holds this instance
+  // directly (container.setBudgetVeto), so without this flag disabling the governor left the daily
+  // cap silently killing every LLM response ("Budget limit exceeded" with no output). The Governor
+  // keeps this in sync with its mode.
+  public enabled: boolean = true;
 
   constructor() {
     const creditsDir = path.join(process.cwd(), '.breakglass/credits');
@@ -76,9 +82,10 @@ export class BudgetVeto {
 
   async checkVeto(estimatedCostUsd: number): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
-      if (this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
+      // Bypassed governor → reserve (to keep the running estimate honest) but never veto.
+      if (this.enabled && this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
-        throw new GovernorVetoError('Budget limit exceeded.');
+        throw new GovernorVetoError(`Daily budget of $${SafetyPolicy.maxDailySpendUsd.toFixed(2)} reached (spent $${this.currentDailySpend.toFixed(2)}). Disable the cap with /governor off, or raise it via MAX_DAILY_SPEND.`);
       }
       this.reservedSpend += estimatedCostUsd;
     });
@@ -92,9 +99,9 @@ export class BudgetVeto {
 
   async executeWithBudget<T>(estimatedCostUsd: number, action: () => Promise<{ actualCostUsd: number, result: T }>): Promise<T> {
     return await this.budgetMutex.runExclusive(async () => {
-      if (this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
+      if (this.enabled && this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
-        throw new GovernorVetoError('Budget limit exceeded.');
+        throw new GovernorVetoError(`Daily budget of $${SafetyPolicy.maxDailySpendUsd.toFixed(2)} reached (spent $${this.currentDailySpend.toFixed(2)}). Disable the cap with /governor off, or raise it via MAX_DAILY_SPEND.`);
       }
       
       const { actualCostUsd, result } = await action();

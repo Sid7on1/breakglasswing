@@ -133,7 +133,7 @@ Use this tool to write new code, update configuration files, or generate artifac
 - **Supports \`~/Desktop/...\` paths** — home directory is automatically resolved.
 - **Directory Creation:** If the parent directories do not exist, the tool will automatically create them for you.
 - **Do NOT create empty directories:** Do NOT use this tool if you only want to create a new folder/directory. This tool creates FILES. If you need to create an empty directory, use \`BashTool\` with \`mkdir\`.
-- **Overwriting:** By default, writing to an existing file will fail to prevent accidental data loss. To explicitly replace an existing file, you must pass \`overwrite: true\`. 
+- **Overwriting:** Writing to an existing file replaces it (a backup is kept for \`/undo\`). You do NOT need to pass anything special to overwrite.
 - **Modifying existing code:** Do NOT rewrite a whole file to change part of it. Use \`EditFileTool\` for a surgical oldString→newString replacement — it is safer and avoids accidentally dropping newlines. A full-file overwrite that collapses a multi-line file to one line will be REFUSED.
 - **Multi-line content:** Always emit real newline characters between lines. Never flatten code onto a single line.
 - **Validation:** After writing a complex script or TypeScript file, immediately use the \`BashTool\` to run a syntax check (e.g., \`npx tsc --noEmit\`) to verify your write didn't introduce syntax errors.`,
@@ -143,7 +143,7 @@ Use this tool to write new code, update configuration files, or generate artifac
     properties: {
       path: { type: 'string', description: 'Path to the file (supports ~/ for home dir)' },
       content: { type: 'string', description: 'Content to write' },
-      overwrite: { type: 'boolean', description: 'Must be true to overwrite an existing file' }
+      overwrite: { type: 'boolean', description: 'Deprecated/ignored — Write always creates or overwrites.' }
     },
     required: ['path', 'content']
   },
@@ -151,9 +151,11 @@ Use this tool to write new code, update configuration files, or generate artifac
     const currentCwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, currentCwd);
     const exists = await fs.access(fullPath).then(() => true).catch(() => false);
-    if (exists && !args.overwrite) {
-      throw new Error(`File already exists: ${args.path}. Pass overwrite: true to replace it.`);
-    }
+    // Write creates OR overwrites (standard agent behavior — models emit Write expecting it to
+    // replace an existing file, and erroring "file already exists" just wedged them into a retry
+    // loop). Accidental clobbering is already guarded against by the corrupt-write check (refuses a
+    // flattened/newline-stripped overwrite), the blast-radius gate, the inline diff approval, and the
+    // pre-write backup below — so the old hard `overwrite: true` requirement was redundant friction.
     // Blast-radius gate — only meaningful when overwriting an existing, indexed file.
     if (exists && !(await checkBlastRadius(fullPath))) {
       return `Write to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`;

@@ -90,6 +90,15 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('local', 'mystery-7b').inlineReasoning).toBe(false);
   });
 
+  // plainContent marks confirmed non-reasoning models so the streaming filter skips implicit
+  // buffering and streams the answer from token 1 (the minimax "feels very slow" head-of-reply stall).
+  it('plainContent: on for minimax (confirmed non-reasoning), off for reasoning + unknown models', () => {
+    expect(capabilitiesFor('nvidia', 'minimaxai/minimax-m3').plainContent).toBe(true);
+    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').plainContent).toBe(false); // reasons inline
+    expect(capabilitiesFor('deepseek', 'deepseek-r1').plainContent).toBe(false);
+    expect(capabilitiesFor('local', 'mystery-7b').plainContent).toBe(false); // FLOOR default
+  });
+
   it('BGW_CAP_INLINE_REASONING can force the cap-lift for an unlisted inline-CoT model', () => {
     process.env.BGW_CAP_INLINE_REASONING = 'true';
     expect(capabilitiesFor('local', 'some-qwq-clone').inlineReasoning).toBe(true);

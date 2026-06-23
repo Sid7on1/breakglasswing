@@ -13,14 +13,15 @@ describe('/tier — manual model-tier control', () => {
     expect(getCmd('/route')).toBe(getCmd('/tier'));
   });
 
-  it.each(['auto', 'lite', 'heavy'])('emits set_tier "%s" and confirms', async (sub) => {
+  it.each(['auto', 'lite', 'heavy'])('emits set_tier "%s" without a transcript message', async (sub) => {
     const seen: string[] = [];
     const onSet = (t: string) => seen.push(t);
     cliEvents.on('set_tier', onSet);
     try {
       const res = await getCmd('/tier').execute([sub], {} as any);
-      expect(res.type).toBe('message');
-      expect(res.level).toBe('success');
+      // Returns 'none' (no transcript line) — feedback rides on the set_tier → status/model_tier
+      // events so rapid Ctrl+T cycling doesn't stack redundant "Routing pinned →" lines.
+      expect(res.type).toBe('none');
     } finally {
       cliEvents.off('set_tier', onSet);
     }

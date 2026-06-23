@@ -53,7 +53,7 @@ export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?:
   return i;
 }
 
-export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient' } {
+export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient'; retryAfterSecs?: number } {
   const msg = String(e?.message ?? '');
   let status = 500;
   if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(msg)) {
@@ -65,6 +65,14 @@ export function classifyStreamError(e: any): { status: number; recoverable: bool
   // Context overflow: recoverable by compaction.
   if (/maximum context length/i.test(msg) || e?.code === 'context_length_exceeded' || status === 413) {
     return { status, recoverable: true, kind: 'context' };
+  }
+
+  // Rate limited (429): recoverable, but the loop must BACK OFF before retrying (honor Retry-After
+  // if the provider sent one) — retrying immediately just deepens the limit.
+  if (status === 429) {
+    const ra = e?.headers?.['retry-after'] ?? e?.retryAfterSecs;
+    const n = ra != null ? parseFloat(String(ra)) : NaN;
+    return { status, recoverable: true, kind: 'transient', retryAfterSecs: isNaN(n) ? undefined : n };
   }
 
   // Transient: stalled streams, server errors, or a one-off bad model emission the
@@ -853,7 +861,13 @@ export class LlmAdapter implements LLMProvider {
       // closer never comes, so it only adds latency (the answer arrives in one burst at stream end).
       // Disable implicit mode when the capability is present so the answer streams token-by-token.
       // FLOOR (caps.nativeThinking=false) leaves this exactly as before: `this.implicitThink`.
-      const useImplicitThink = this.implicitThink && !caps.nativeThinking;
+      //
+      // Also disable it for CONFIRMED non-reasoning models (caps.plainContent, e.g. minimax): their
+      // content channel is always the answer, with no opener-less `</think>` closer to wait for. In
+      // implicit mode the filter would hold the leading content tentatively (up to the preamble cap)
+      // before releasing it — a visible head-of-reply stall that read as "minimax is very very slow".
+      // Streaming from token 1 cannot leak reasoning for these models (they don't reason inline).
+      const useImplicitThink = this.implicitThink && !caps.nativeThinking && !caps.plainContent;
       // Lift the preamble cap ONLY for models we've LEARNED reason inline (this session) or that the
       // capability table seeds as such — they emit long CoT then close it with `</think>`, so capping
       // early would leak it. Everything else stays capped, so a plain model's answer streams instead
@@ -1027,9 +1041,9 @@ export class LlmAdapter implements LLMProvider {
       // reservation, otherwise we would release it a second time.
       if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
 
-      const { status, recoverable, kind } = classifyStreamError(e);
-      this.apiKeyManager.reportKeyResult(kr.idx!, status);
-      yield { type: 'error', message: e.message, recoverable, kind };
+      const { status, recoverable, kind, retryAfterSecs } = classifyStreamError(e);
+      this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
+      yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
     }
   }
 }

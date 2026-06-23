@@ -71,8 +71,12 @@ export interface CliConfig {
 
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
-  model: 'minimaxai/minimax-m3',
-  liteModel: 'stepfun-ai/step-3.5-flash',
+  // Coding/heavy model: the fast REASONING model drives the main agent loop. minimax-m3 was the
+  // coding model but ran very slow on NIM, while step-3.7-flash reasons AND streams fast — so it does
+  // the real work now. (Restore minimax here if you prefer it; the plainContent cap now streams it
+  // from token 1 so it no longer feels like it hangs.)
+  model: 'stepfun-ai/step-3.7-flash',
+  liteModel: 'stepfun-ai/step-3.7-flash', // valid NIM id (step-3.5-flash 400s "not a valid model ID")
   timeout: 120000,
   temperature: 0.7,
   topP: 0.95,

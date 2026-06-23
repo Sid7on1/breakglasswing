@@ -92,7 +92,9 @@ export class SkillService {
           continue; // no SKILL.md in this dir
         }
         const { meta, body } = parseSkillFile(content);
-        const name = (meta.name || entry.name).toLowerCase();
+        // Normalise the key the SAME way install() names the folder (lowercase, non-alnum → '-'), so a
+        // frontmatter `name:` with spaces/caps still matches SkillTool("the-installed-name").
+        const name = (meta.name || entry.name).toLowerCase().replace(/[^a-z0-9-]/g, '-');
         if (this.skills.has(name)) continue; // earlier (higher-precedence) dir already provided it
         if (!meta.description) {
           Logger.warn(`[SkillService] ${skillFile} has no description — skipping.`);
@@ -113,12 +115,75 @@ export class SkillService {
     return this.skills;
   }
 
+  /** Dirs (bounded walk) that directly contain a SKILL.md. For installing from a repo. */
+  private findSkillDirs(root: string, depth = 4): string[] {
+    const out: string[] = [];
+    const walk = (dir: string, d: number) => {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      if (entries.some(e => e.isFile() && e.name.toLowerCase() === 'skill.md')) out.push(dir);
+      if (d <= 0) return;
+      for (const e of entries) {
+        if (e.isDirectory() && e.name !== 'node_modules' && e.name !== '.git') walk(path.join(dir, e.name), d - 1);
+      }
+    };
+    walk(root, depth);
+    return out;
+  }
+
+  /**
+   * Install a skill from a local repo/folder/SKILL.md into `~/.bimax/skills/<name>/` (global —
+   * available to every project). `source` may be a SKILL.md, a skill dir, or a repo containing one.
+   * If the repo has several skills, pass `requestedName` to pick one. Copies the whole skill dir
+   * (bundled files included), then reloads.
+   */
+  public install(source: string, requestedName?: string): { ok: boolean; message: string; name?: string } {
+    const src = path.resolve(source.replace(/^~(?=\/|$)/, os.homedir()));
+    let skillDir: string | undefined;
+    let stat: fs.Stats;
+    try { stat = fs.statSync(src); } catch { return { ok: false, message: `Path does not exist: ${src}` }; }
+
+    if (stat.isFile()) {
+      if (path.basename(src).toLowerCase() === 'skill.md') skillDir = path.dirname(src);
+    } else if (fs.existsSync(path.join(src, 'SKILL.md'))) {
+      skillDir = src;
+    } else {
+      const found = this.findSkillDirs(src);
+      if (found.length === 0) return { ok: false, message: `No SKILL.md found anywhere under ${src}. Is this a skill repo?` };
+      if (requestedName) skillDir = found.find(d => path.basename(d).toLowerCase() === requestedName.toLowerCase());
+      if (!skillDir) skillDir = found.length === 1 ? found[0] : undefined;
+      if (!skillDir) {
+        return { ok: false, message: `Multiple skills found — re-run with the name you want:\n${found.map(d => '  - ' + path.basename(d)).join('\n')}` };
+      }
+    }
+    if (!skillDir) return { ok: false, message: `No SKILL.md at ${src}.` };
+
+    const { meta } = parseSkillFile(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'));
+    if (!meta.description) return { ok: false, message: `${skillDir}/SKILL.md is missing a 'description' in its frontmatter — can't install it.` };
+
+    const name = (requestedName || meta.name || path.basename(skillDir)).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const dest = path.join(os.homedir(), '.bimax', 'skills', name);
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(skillDir, dest, { recursive: true });
+    this.load();
+    return { ok: true, name, message: `Installed skill '${name}' globally → ${dest}. It's now available in every project; call SkillTool("${name}") to use it.` };
+  }
+
   public list(): Skill[] {
     return Array.from(this.skills.values());
   }
 
   public get(name: string): Skill | undefined {
-    return this.skills.get((name || '').toLowerCase());
+    const q = (name || '').toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    const direct = this.skills.get(q);
+    if (direct) return direct;
+    // Fallback: match by the installed FOLDER name. install() names the dir from the requested name,
+    // which can differ from the SKILL.md `name:` that load() keys on — so a freshly-installed skill
+    // referenced by its folder name still resolves (the post-install "not installed" false positive).
+    for (const s of this.skills.values()) {
+      if (path.basename(s.dir).toLowerCase().replace(/[^a-z0-9-]/g, '-') === q) return s;
+    }
+    return undefined;
   }
 
   /** Compact `name — description` lines for progressive disclosure in the system prompt. */

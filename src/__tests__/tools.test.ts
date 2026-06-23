@@ -251,6 +251,16 @@ describe('Flattened-file corruption guard', () => {
     expect(res).toContain('Updated');
     expect(res).not.toContain('refused');
   });
+
+  it('overwrites an existing file WITHOUT overwrite:true (no more "file already exists" wedge)', async () => {
+    const file = path.join(dir, 'exists.ts');
+    await fs.writeFile(file, 'export const a = 1;\nexport const b = 2;\n');
+    const next = 'export const a = 1;\nexport const c = 3;\n';
+    const res = await writeTool.execute({ path: file, content: next }, { cwd: dir });
+    expect(String(res)).not.toMatch(/already exists/i);
+    expect(String(res)).toContain('Updated');
+    expect(await fs.readFile(file, 'utf8')).toBe(next);
+  });
 });
 
 describe('Degenerate AskUserTool guard', () => {

@@ -13,7 +13,6 @@
 import { EventBus } from './event.bus';
 import { Logger } from '../utils/logger';
 import { GraphStore } from '../graph/graph.store';
-import { GraphObserver } from '../graph/graph.observer';
 import { CodebaseIndexer } from '../graph/indexer';
 import { StaticAnalyzer } from '../graph/static.analyzer';
 import { SemanticAugmenter } from '../graph/semantic.augmenter';
@@ -40,6 +39,7 @@ import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { createSkillTool } from '../tools/implementations/skill.tool';
+import { createSkillInstallTool } from '../tools/implementations/skill.install.tool';
 import { globalSkillService } from '../skills/skill.service';
 import { loadHooksConfig } from '../tools/hooks.loader';
 import { createMemoryQueryTool } from '../tools/implementations/memory.tool';
@@ -141,6 +141,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
   globalSkillService.load(projectRoot);
   toolRegistry.register(createSkillTool(governor, globalSkillService));
+  toolRegistry.register(createSkillInstallTool(governor, globalSkillService));
   // Shell-command hooks: PreToolUse can block a tool, PostToolUse runs for side effects.
   loadHooksConfig(projectRoot);
   // Agent-driven MCP setup: gated by the Governor (the tool is destructive → user confirms).
@@ -164,10 +165,6 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   const staticAnalyzer = new StaticAnalyzer(projectRoot, graphStore, cfg.excludeFromIndex);
   const codebaseIndexer = new CodebaseIndexer(projectRoot, graphStore, staticAnalyzer, semanticAugmenter);
   if (cfg.autoIndex === false) codebaseIndexer.enabled = false;
-
-  // Graph Observer — watches file changes and updates the graph.
-  const graphObserver = new GraphObserver(eventBus, graphStore, projectRoot, semanticAugmenter);
-  graphObserver.start();
 
   // Task Pipeline — used by /watch watchers.
   const taskPipeline = new TaskPipeline(eventBus, llmAdapter);

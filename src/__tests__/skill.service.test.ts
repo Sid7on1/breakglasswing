@@ -42,6 +42,17 @@ describe('SkillService', () => {
     expect(svc.listForPrompt()).toContain('pdf-fill: Fill PDF forms from JSON');
   });
 
+  it('resolves a skill by folder name even when frontmatter name differs (post-install false positive)', () => {
+    // Folder "demo-skill" but frontmatter "Demo Skill": load() keys by the sanitized frontmatter name,
+    // and get() also falls back to the folder name — so both references resolve and SkillTool stops
+    // reporting a just-installed skill as "not installed".
+    writeSkill(dir, 'demo-skill', 'name: Demo Skill\ndescription: a demo', 'BODY');
+    const svc = new SkillService();
+    svc.load(dir);
+    expect(svc.get('demo-skill')?.description).toBe('a demo'); // by folder name
+    expect(svc.get('Demo Skill')?.description).toBe('a demo');  // by frontmatter name (sanitized)
+  });
+
   it('skips a SKILL.md with no description', () => {
     writeSkill(dir, 'broken', 'name: broken', 'body');
     const svc = new SkillService();
@@ -64,6 +75,38 @@ describe('SkillService', () => {
     const svc = new SkillService();
     svc.load(dir);
     expect(svc.renderBody('nope')).toContain('demo');
+  });
+});
+
+describe('SkillService.install', () => {
+  let repo: string;
+  // Unique throwaway name so we never clobber a real installed skill; cleaned up after.
+  const name = `bgw-install-test-${process.pid}`;
+  const dest = path.join(os.homedir(), '.bimax', 'skills', name);
+  beforeEach(() => { repo = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-repo-')); });
+  afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+  });
+
+  it('installs a skill nested in a repo into ~/.bimax/skills globally and exposes it', () => {
+    // Mirrors the ponytail layout: repo/skills/<name>/SKILL.md, plus a bundled file.
+    const skillDir = path.join(repo, 'skills', name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), `---\nname: ${name}\ndescription: be lazy\n---\nBE LAZY`);
+    fs.writeFileSync(path.join(skillDir, 'helper.sh'), 'echo hi');
+
+    const svc = new SkillService();
+    const res = svc.install(repo); // point at the repo root, not the skill dir
+    expect(res.ok).toBe(true);
+    expect(res.name).toBe(name);
+    expect(fs.existsSync(path.join(dest, 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(dest, 'helper.sh'))).toBe(true); // bundled files copied
+    expect(svc.get(name)?.description).toBe('be lazy'); // reloaded, now usable
+  });
+
+  it('fails clearly when there is no SKILL.md', () => {
+    expect(new SkillService().install(repo).ok).toBe(false);
   });
 });
 

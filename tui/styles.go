@@ -11,7 +11,7 @@ var (
 	colAccent   = lipgloss.Color("#D77757") // terracotta — BiMax brand (was neon magenta)
 	colShimmer  = lipgloss.Color("#F59575") // lighter accent for the logo's middle row
 	colText     = lipgloss.Color("#E6E6E6") // bright text
-	colInactive = lipgloss.Color("#787878") // secondary text / summaries
+	colInactive = lipgloss.Color("#999999") // secondary text / summaries (Claude Code's `inactive`; was too dark at #787878)
 	colSubtle   = lipgloss.Color("#787878") // dim chrome (gutters, hints) — Ink subtle is darker but
 	//                                          #505050 is invisible on many terminals, so we lift it.
 	colDim     = lipgloss.Color("#5A5A5A")
@@ -22,8 +22,8 @@ var (
 	colWarn    = lipgloss.Color("#DCB432") // amber (running / in-progress)
 	colOK      = lipgloss.Color("#50C850")
 	colInfo    = lipgloss.Color("#5769F7") // blue (info / agent labels)
-	colDiffAdd = lipgloss.Color("#69DB7C")
-	colDiffDel = lipgloss.Color("#FFA8B4")
+	colDiffAdd = lipgloss.Color("#4ade80") // tailwind green-400 — add prefix / word fg
+	colDiffDel = lipgloss.Color("#f87171") // tailwind red-400 — remove prefix / word fg
 	colHunk    = lipgloss.Color("#57C7C7")
 
 	// Welcome banner / wordmark.
@@ -83,9 +83,12 @@ var (
 	// Full-line diff (Claude-Code style): the WHOLE changed line gets a coloured background with
 	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
 	// warm theme). Line numbers sit in a dim gutter.
-	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#1B4332")).Foreground(lipgloss.Color("#D8F3DC"))
-	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#5A1E28")).Foreground(lipgloss.Color("#FFD6DD"))
-	diffLineNum = lipgloss.NewStyle().Foreground(colDim)
+	// Tailwind green-950/50 + green-400 / red-950/50 + red-400 (the spec'd terminal diff pair).
+	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#052e16")).Foreground(lipgloss.Color("#4ade80"))
+	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#450a0a")).Foreground(lipgloss.Color("#f87171"))
+	// Diff gutter line numbers: bright white + bold so they read as a clear, prominent column (the
+	// dim grey was nearly invisible). Terminals can't change font size, so "big" = bold/bright.
+	diffLineNum = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 
 	// Word-level diff (edit-tool preview): tinted background like Ink's diffWordsWithSpace.
 	diffAddWord = lipgloss.NewStyle().Background(lipgloss.Color("#1F3A1F")).Foreground(colDiffAdd)
@@ -108,6 +111,12 @@ var (
 	logInfo  = lipgloss.NewStyle().Foreground(colText)
 	logDim   = lipgloss.NewStyle().Foreground(colDim) // debug level — dimmer than info
 	logPanel = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)
+
+	// Task-list panel — a bordered box pinned above the prompt (Claude-Code TaskListV2 style).
+	todoPanel  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)
+	todoTitle  = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	todoDone   = lipgloss.NewStyle().Foreground(colOK)
+	todoActive = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 
 	// Codebase-map panel — a quiet bordered box, right-aligned above the prompt.
 	mapPanel = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)

@@ -137,3 +137,28 @@ describe('ToolRegistry — index-gated graph tools', () => {
     expect(names(reg.getSchemas({ mode: 'full' }))).not.toContain('GraphQueryTool');
   });
 });
+
+// Models (esp. MiniMax) emit mangled tool names natively. getTool resolves common near-misses to the
+// right tool instead of erroring "tool not found" — so a turn isn't wasted on a typo'd name.
+describe('ToolRegistry — getTool resolves mangled/aliased names', () => {
+  let reg: ToolRegistry;
+  beforeEach(() => {
+    reg = new ToolRegistry();
+    reg.register(fakeTool('ReadFileTool'));
+    reg.register(fakeTool('EditFileTool'));
+    reg.register(fakeTool('MultiEditTool'));
+  });
+
+  it('resolves the observed "ReadFileFile" mangle to ReadFileTool', () => {
+    expect(reg.getTool('ReadFileFile')?.name).toBe('ReadFileTool');
+  });
+  it('resolves snake_case / missing-suffix / short aliases', () => {
+    expect(reg.getTool('read_file')?.name).toBe('ReadFileTool');
+    expect(reg.getTool('Read')?.name).toBe('ReadFileTool');
+    expect(reg.getTool('edit')?.name).toBe('EditFileTool');
+  });
+  it('still returns exact matches and undefined for true unknowns', () => {
+    expect(reg.getTool('MultiEditTool')?.name).toBe('MultiEditTool');
+    expect(reg.getTool('xyz')).toBeUndefined();
+  });
+});

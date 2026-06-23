@@ -11,9 +11,12 @@ export function completeInput(text: string, store: IGraphStore, cwd: string, lim
   // Slash command: only while the whole input is a single /token (no space yet).
   if (text.startsWith('/') && !text.includes(' ')) {
     const kw = text.toLowerCase();
+    // The slash palette is a scrollable component on the client, so don't truncate it to the small
+    // @-mention cap — surface the whole matching command set (just "/" lists every command).
+    const cmdLimit = Math.max(limit, 60);
     return globalCommandRegistry.getPaletteOptions()
       .filter(o => o.value.toLowerCase().startsWith(kw))
-      .slice(0, limit)
+      .slice(0, cmdLimit)
       .map(o => ({ value: o.value, label: o.label, desc: o.desc, kind: 'command' as const }));
   }
 

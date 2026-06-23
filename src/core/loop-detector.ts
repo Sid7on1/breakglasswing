@@ -68,18 +68,16 @@ export class LoopDetector {
       };
     }
 
-    // Generic repeat — same (tool, argsHash) HARD_THRESHOLD times in a row
-    if (this.history.length >= HARD_THRESHOLD) {
-      const tail = this.history.slice(-HARD_THRESHOLD);
-      if (tail.every(c => c.tool === toolName && c.argsHash === argsHash)) {
-        return {
-          type: 'generic_repeat',
-          tool: toolName,
-          argsHash,
-          count: HARD_THRESHOLD,
-          severity: 'hard',
-        };
-      }
+    // Generic repeat — same (tool, argsHash) repeated across the window, NOT necessarily in a row.
+    // Weak models interleave the same Read/grep/search between other calls (read A, read B, read A,
+    // read C, read A …), so the old strict "N-in-a-row" check never fired and the agent thrashed for
+    // minutes re-reading identical files. Count occurrences anywhere in the rolling window instead.
+    const repeats = this.history.filter(c => c.tool === toolName && c.argsHash === argsHash).length;
+    if (repeats >= HARD_THRESHOLD - 1) {
+      return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'hard' };
+    }
+    if (repeats >= SOFT_THRESHOLD) {
+      return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'soft' };
     }
 
     // No-progress poll — same (tool, argsHash, resultHash) SOFT_THRESHOLD times in a row

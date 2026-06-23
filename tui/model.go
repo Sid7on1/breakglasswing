@@ -14,12 +14,17 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Bubble Tea messages wrapping engine events so they flow through Update like any other tea.Msg.
 type engineMsg Outbound
+type engineBatch []Outbound
 type engineClosed struct{}
 
 // tickMsg drives the once-a-second chrome animation: the working-indicator elapsed clock and the
@@ -55,11 +60,27 @@ var thinkingPhrases = []string{
 // after every engine message so the stream is continuous — the standard Bubble Tea external-IO loop.
 func waitForEngine(e *Engine) tea.Cmd {
 	return func() tea.Msg {
-		m, ok := <-e.Msgs
+		first, ok := <-e.Msgs
 		if !ok {
 			return engineClosed{}
 		}
-		return engineMsg(m)
+		// Coalesce every message ALREADY queued (a fast model floods stream_token events) into one
+		// batch so Update re-renders ONCE per burst, not once per token. Without this the view
+		// re-renders the whole transcript thousands of times for a single response — the engine
+		// finishes in seconds but the TUI takes minutes to drain, and "Generating" hangs the whole time.
+		batch := engineBatch{first}
+		for len(batch) < 1024 {
+			select {
+			case m, ok := <-e.Msgs:
+				if !ok {
+					return batch // channel closed mid-drain; the next call's blocking read returns engineClosed
+				}
+				batch = append(batch, m)
+			default:
+				return batch // nothing more immediately available
+			}
+		}
+		return batch
 	}
 }
 
@@ -76,12 +97,19 @@ type model struct {
 	histStash string
 
 	lines    []string // bounded in-memory copy of the transcript (kept only for Ctrl+F search)
-	printQueue []string // lines to flush into the terminal scrollback (tea.Println) this Update cycle
+	printQueue []string // committed lines to flush into the terminal's native scrollback (tea.Println)
+	pendingClear bool   // /clear requested: wipe the physical screen + scrollback before re-banner
 	started  bool     // true once any transcript line has been emitted (for inter-turn spacing)
 	// In-flight tool calls shown in the live region until their result arrives, then committed to
 	// scrollback as one finished entry. Order keeps the render stable (map iteration would flicker).
 	runningTools map[string]string
 	runningOrder []string
+	// Finished tool calls in the current consecutive run, held un-committed so a long burst can be
+	// collapsed into category counts ("⏺ 7 tools · 4 reads · 2 edits"). Flushed into the transcript
+	// when any non-tool content commits. Ctrl+B toggles collapse (collapseTools).
+	toolRun       []ToolCall
+	collapseTools bool
+	flushing      bool // guard: flushToolRun appends via m.append, which must not re-enter the flush
 	stream   string   // in-flight assistant tokens (replaced by the final message)
 	status   string
 	ready    bool
@@ -109,6 +137,7 @@ type model struct {
 	compIdx  int
 	compOpen bool
 	queryID  int
+	compSeq  int // debounce sequence: a newer keystroke invalidates an in-flight completion timer
 
 	// interactive menu (command palette, pickers) — selecting sends the option's value as input.
 	// menuFilter fuzzy-filters menuOpts as the user types (Ink InteractiveMenu enableSearch).
@@ -125,6 +154,9 @@ type model struct {
 
 	// input stash (Esc stashes the current line, Ctrl+R restores it).
 	stash string
+
+	// prompts submitted while a turn is running — dispatched one-by-one as each turn ends.
+	queued []string
 
 	// transcript/log search (Ctrl+F). searchSaved holds the input swapped out while searching.
 	searchMode  bool
@@ -159,14 +191,9 @@ type model struct {
 	turnThinkStart time.Time
 	turnThoughtMs  int
 
-	bell    bool // emit a terminal bell when a turn completes
-	clipped int  // transcript lines scrolled off the top of the viewport (0 = all visible)
+	bell bool // emit a terminal bell when a turn completes
 
 	welcomed bool // the low-chrome welcome banner has been shown once at the top of the transcript
-
-	// tool-call lines, indexed by call id so a tool_call_result updates its line in place (Ink
-	// re-rendered the same component) instead of printing a second row.
-	toolLine map[string]int
 
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier   string // "lite" | "heavy"
@@ -211,17 +238,18 @@ func initialModel(e *Engine) model {
 	sp.Style = workFrame
 
 	hist := loadHistory()
+	vp := viewport.New(80, 20) // kept only for render-width math (renderMarkdown etc.)
 	return model{
 		engine:   e,
 		input:    ta,
 		spin:     sp,
 		history:  hist,
 		histIdx:  len(hist),
-		vp:           viewport.New(80, 20),
+		vp:            vp,
+		collapseTools: true,
 		status:       "starting engine…",
-		toolLine:     map[string]int{},
 		runningTools: map[string]string{},
-		bell:         os.Getenv("BGW_ENABLE_NOTIFICATIONS") != "0",
+		bell:         os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
 	}
 }
 
@@ -229,18 +257,39 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(waitForEngine(m.engine), textarea.Blink, m.spin.Tick, tick())
 }
 
-// Update wraps the real handler (update) and flushes any transcript lines it queued into the
-// terminal's native scrollback via tea.Println — so committed output scrolls/copies natively while
-// the redrawn View stays just the live region.
+// Update wraps the real handler (update) and flushes any committed transcript lines it queued into
+// the terminal's native scrollback via tea.Println — so committed output scrolls/copies natively
+// while the redrawn View stays just the live region. /clear additionally wipes screen + scrollback.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	res, cmd := m.update(msg)
 	nm, ok := res.(model)
-	if !ok || len(nm.printQueue) == 0 {
+	if !ok {
 		return res, cmd
+	}
+	// /clear: wipe the visible screen BEFORE the new banner is flushed, else the banner would be erased.
+	// tea.Sequence guarantees the order. (tea.ClearScreen is the renderer-safe clear; the launch-time
+	// scrollback lock lives in main.go, run before the program starts.)
+	var clearCmd tea.Cmd
+	if nm.pendingClear {
+		nm.pendingClear = false
+		clearCmd = tea.ClearScreen
+	}
+	if len(nm.printQueue) == 0 {
+		switch {
+		case clearCmd == nil:
+			return nm, cmd
+		case cmd == nil:
+			return nm, clearCmd
+		default:
+			return nm, tea.Batch(clearCmd, cmd)
+		}
 	}
 	joined := strings.Join(nm.printQueue, "\n")
 	nm.printQueue = nil
 	printCmd := tea.Println(joined)
+	if clearCmd != nil {
+		printCmd = tea.Sequence(clearCmd, printCmd)
+	}
 	if cmd == nil {
 		return nm, printCmd
 	}
@@ -253,12 +302,13 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width // kept only for render-width math (renderMarkdown etc.)
-		// The input sits inside promptBox (rounded border + 1-col padding each side) whose total
-		// width is m.width-2, so its content area — and thus the input — is m.width-6. Matching this
-		// exactly stops the textarea from overrunning the right border into a stray box.
+		// The input sits inside promptBox (rounded border + 1-col padding each side) whose total width
+		// is m.width-2, so its content area — and thus the input — is m.width-6. Matching this exactly
+		// stops the textarea from overrunning the right border into a stray box (the "mirror box" bug).
 		m.input.SetWidth(msg.Width - 6)
-		m.relayout()
-		// Inline mode: no alt-screen to wipe — the terminal reflows naturally on resize.
+		// Inline mode: the terminal owns scroll + reflow. We deliberately do NOT clear here (with native
+		// scrollback that duplicates committed content on every zoom step). The live region is kept
+		// small + width-clamped (View) so the resize ghost stays minimal.
 		return m, nil
 
 	case spinner.TickMsg:
@@ -266,6 +316,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
+
+	case compTickMsg:
+		// Debounce window elapsed: query the engine only if no newer keystroke superseded this tick.
+		if msg.seq == m.compSeq {
+			m.queryID++
+			m.engine.Send(encodeQuery(m.queryID, msg.text))
+		}
+		return m, nil
 
 	case tickMsg:
 		// Once-a-second chrome: elapsed clock + rotating thinking phrase/dots (Ink ThinkingText).
@@ -454,18 +512,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// While a turn runs, Ctrl+C cancels it (cooperatively, engine-side) and keeps the
 			// session alive. When idle, it quits. So mid-turn it takes two presses to exit:
 			// first cancels, second (now idle) quits.
-			if m.busy {
+			if m.working() {
 				m.engine.Send(encodeInterrupt())
 				return m, nil
 			}
 			m.engine.Close()
 			return m, tea.Quit
-		// Scrolling is the TERMINAL's job now (inline mode) — PgUp/PgDn, wheel, trackpad all work
-		// natively against real scrollback. The app no longer intercepts them.
+		// Scrolling is the TERMINAL's job in inline mode — PgUp/PgDn, wheel, trackpad all act on the
+		// real native scrollback (opencode / Claude style). The app does not intercept them.
 		case "ctrl+l":
-			// Clear the physical terminal and force a clean repaint (parity with the Ink UI). The
-			// transcript itself is untouched — use /clear to reset the conversation.
-			m.refresh()
+			// Clear the physical terminal for a clean repaint (parity with the Ink UI). The transcript
+			// itself is untouched — use /clear to reset the conversation.
 			return m, tea.ClearScreen
 		case "ctrl+f":
 			// Enter transcript/log search; stash the in-progress input until we exit.
@@ -480,6 +537,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+o":
 			// Toggle the structured log view in place of the transcript.
 			m.showLogs = !m.showLogs
+			m.relayout()
+			return m, nil
+		case "ctrl+b":
+			// Toggle tool-call collapse: long runs of tool calls fold into category counts ("7 tools ·
+			// 4 reads · 2 edits") or expand back to one line each. Affects the live/current run.
+			m.collapseTools = !m.collapseTools
+			if m.collapseTools {
+				m.status = "Tool calls collapse when long (Ctrl+B to expand)"
+			} else {
+				m.status = "Tool calls expanded (Ctrl+B to collapse)"
+			}
 			m.relayout()
 			return m, nil
 		case "ctrl+t":
@@ -500,8 +568,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.engine.Send(encodeInput("/tier " + next))
 			return m, nil
 		case "esc":
-			// While a turn is running, esc cancels it (matches the "esc to stop" hint, same as Ctrl+C).
-			if m.busy {
+			// While a turn is running (incl. the tool-call phase), esc cancels it.
+			if m.working() {
 				m.engine.Send(encodeInterrupt())
 				m.status = "Interrupting…"
 				return m, nil
@@ -533,14 +601,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Command palette: prefill "/" and surface the slash-command dropdown (type to filter).
 			m.input.SetValue("/")
 			m.input.CursorEnd()
-			m.requestCompletions()
-			return m, nil
+			return m, m.requestCompletions()
 		case "tab":
 			if m.compOpen {
 				m.acceptCompletion()
 			}
-			m.requestCompletions() // open, or refine after accept (e.g. descend a dir)
-			return m, nil
+			return m, m.requestCompletions() // open, or refine after accept (e.g. descend a dir)
 		case "enter":
 			raw := m.input.Value()
 			text := strings.TrimSpace(m.expandPastes(raw))
@@ -555,8 +621,32 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.relayout()
 				return m, nil
 			}
+			if text == "/map" {
+				// The map isn't pinned (a tall pinned panel duplicates under the inline renderer), so
+				// /map commits it into the scrollback transcript on demand instead. Rendered Go-side from
+				// the ui_snapshot graph state we already hold.
+				if m.graph.NodeCount > 0 {
+					m.append(m.mapPanelView())
+				} else {
+					m.append(dimStyle.Render("  no codebase map yet — run /index to build it"))
+				}
+				m.pushHistory(text)
+				m.input.SetValue("")
+				m.input.SetHeight(1)
+				m.clearPastes()
+				m.compOpen = false
+				m.relayout()
+				return m, nil
+			}
 			if text != "" {
-				m.engine.Send(encodeInput(text)) // engine echoes the user message back
+				if m.working() {
+					// A turn is in flight — queue this prompt and run it when the turn ends, instead of
+					// the engine rejecting it as "busy". Drained in the spinner_state idle handler.
+					m.queued = append(m.queued, text)
+					m.status = fmt.Sprintf("Queued (%d) — runs after the current turn", len(m.queued))
+				} else {
+					m.engine.Send(encodeInput(text)) // engine echoes the user message back
+				}
 				m.pushHistory(strings.TrimSpace(raw))
 				m.input.SetValue("")
 				m.input.SetHeight(1)
@@ -582,9 +672,9 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.pastes) > 0 && !m.inputHasChips() {
 			m.clearPastes()
 		}
-		m.requestCompletions() // refresh candidates for the new input
+		ccmd := m.requestCompletions() // refresh candidates (debounced) for the new input
 		m.relayout()
-		return m, cmd
+		return m, tea.Batch(cmd, ccmd)
 
 	case engineMsg:
 		m.handleEngine(Outbound(msg))
@@ -593,6 +683,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, waitForEngine(m.engine) // keep listening
+
+	case engineBatch:
+		// Apply a coalesced burst, then render once (see waitForEngine).
+		for _, o := range msg {
+			m.handleEngine(o)
+			if m.quitting {
+				m.engine.Close()
+				return m, tea.Quit
+			}
+		}
+		return m, waitForEngine(m.engine)
 
 	case engineClosed:
 		m.status = "engine exited"
@@ -636,17 +737,32 @@ func (m *model) handleEngine(o Outbound) {
 
 // requestCompletions asks the engine for candidates for the current input. Empty input closes the
 // dropdown without a round-trip. Each query carries a fresh id so stale results are dropped.
-func (m *model) requestCompletions() {
+// completionDebounce is how long typing must settle before we ask the engine for completions.
+// Each keystroke used to fire a query — and an @-mention query is a full graph-node scan engine-side
+// — so on a large repo fast typing meant a scan per keystroke. We debounce instead.
+const completionDebounce = 70 * time.Millisecond
+
+// compTickMsg fires when a debounce window elapses; seq lets a later keystroke supersede it.
+type compTickMsg struct {
+	seq  int
+	text string
+}
+
+// requestCompletions schedules a debounced completion query. Clearing the dropdown on empty input is
+// immediate; the actual engine query waits out completionDebounce and only fires if no newer
+// keystroke arrived. Returns the timer cmd for the caller to run.
+func (m *model) requestCompletions() tea.Cmd {
 	v := m.input.Value()
+	m.compSeq++ // any pending debounce is now stale
 	if v == "" {
 		if m.compOpen {
 			m.compOpen = false
 			m.relayout()
 		}
-		return
+		return nil
 	}
-	m.queryID++
-	m.engine.Send(encodeQuery(m.queryID, v))
+	seq := m.compSeq
+	return tea.Tick(completionDebounce, func(time.Time) tea.Msg { return compTickMsg{seq: seq, text: v} })
 }
 
 var trailingAt = regexp.MustCompile(`@[A-Za-z0-9_./~-]*$`)
@@ -675,11 +791,6 @@ func (m *model) acceptCompletion() {
 	m.compOpen = false
 	m.relayout()
 }
-
-// relayout re-sizes + re-renders the viewport. Kept as a named entry point for the many call sites
-// that change chrome (open/close a dropdown or menu, grow the input); it just delegates to refresh,
-// which now owns the height calculation so it stays correct as engine events stream content in too.
-func (m *model) relayout() { m.refresh() }
 
 const inputMaxRows = 6 // the multi-line input grows up to this many rows, then scrolls internally
 
@@ -825,8 +936,23 @@ func (m *model) handleEvent(o Outbound) {
 			m.busyStart = time.Now()
 			m.elapsed = 0
 		}
-		if wasBusy && !m.busy && m.bell {
-			fmt.Print("\a") // notification bell when a turn completes
+		if wasBusy && !m.busy {
+			// Turn ended (or was interrupted): drop any live tool lines that never got a result,
+			// so working() doesn't stay stuck true and the indicator clears cleanly.
+			m.runningTools = map[string]string{}
+			m.runningOrder = nil
+			if m.bell {
+				fmt.Print("\a") // notification bell when a turn completes
+			}
+			// Drain one queued prompt (FIFO). The next turn's idle dispatches the following one.
+			if len(m.queued) > 0 {
+				next := m.queued[0]
+				m.queued = m.queued[1:]
+				m.engine.Send(encodeInput(next))
+				if len(m.queued) > 0 {
+					m.status = fmt.Sprintf("Running queued prompt — %d still queued", len(m.queued))
+				}
+			}
 		}
 		if s := argString(o.Args, 1); s != "" {
 			m.status = s
@@ -889,11 +1015,14 @@ func (m *model) handleEvent(o Outbound) {
 				}
 				m.runningTools[tc.ID] = line
 			} else {
-				// Finished: drop the live copy and commit the finished entry to scrollback.
+				// Finished: drop the live copy and add it to the current consecutive tool RUN. The run
+				// is rendered live (collapsed into category counts once it's long, expanded otherwise)
+				// and flushed into the transcript as soon as any non-tool content commits (flushToolRun
+				// runs from append) — so a burst of reads/greps collapses to one line instead of pages.
 				if tc.ID != "" {
 					delete(m.runningTools, tc.ID)
 				}
-				m.append(line)
+				m.toolRun = append(m.toolRun, tc)
 			}
 		}
 
@@ -916,27 +1045,27 @@ func (m *model) handleEvent(o Outbound) {
 			_ = json.Unmarshal(o.Args[0], &todos)
 		}
 		m.todos = todos
-		if r := renderTodos(todos); r != "" && r != m.lastTodoRender {
-			m.lastTodoRender = r
-			m.append(r)
-		}
+		// Pinned above the prompt by belowSections() while any task is unfinished, so it stays
+		// visible instead of scrolling off into the transcript.
 
 	case "clear":
-		// /clear: wipe the transcript and per-turn state, then re-show the welcome banner so the
-		// screen looks freshly launched (the engine has already reset the conversation history).
+		// /clear: wipe the transcript + per-turn state, then re-show the welcome banner so the screen
+		// looks freshly launched (the engine has already reset the conversation history). Committed lines
+		// live in the terminal's scrollback, so resetting m.lines isn't enough — pendingClear makes the
+		// Update wrapper wipe screen + scrollback (ESC[3J) BEFORE the new banner flushes.
 		m.lines = nil
+		m.printQueue = nil // drop anything queued this cycle; it would land below the cleared screen
 		m.started = false
 		m.stream = ""
-		m.toolLine = map[string]int{}
 		m.runningTools = map[string]string{}
 		m.runningOrder = nil
+		m.toolRun = nil
 		m.todos = nil
 		m.lastTodoRender = ""
 		m.histTokens = 0
-		m.clipped = 0
 		m.welcomed = false
+		m.pendingClear = true
 		m.showWelcome()
-		m.refresh()
 
 	case "cwd_changed":
 		if p := argString(o.Args, 0); p != "" {
@@ -1140,7 +1269,7 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 			if d := extractDiff(tc.Output); d != "" {
 				// Background fills to the right edge: terminal width minus the gutter+indent the diff sits under.
 				diffW := termWidth - len(indent) - 4 - 6
-				diffBlock = "\n" + indentLines(renderDiff(d, 20, diffW), indent+"    ")
+				diffBlock = "\n" + indentLines(renderDiff(d, 20, diffW, diffPath(tc.Input)), indent+"    ")
 			}
 		}
 	}
@@ -1246,26 +1375,65 @@ func (m *model) showWelcome() {
 	m.append(b.String())
 }
 
-// renderTodos draws the task list as a checklist. Empty list → empty string (nothing to show).
-func renderTodos(todos []TodoItem) string {
+// activeTodoPanel returns the boxed task list while any task is still unfinished, else "" (a
+// fully-done list disappears rather than lingering above the prompt).
+func (m model) activeTodoPanel() string {
+	for _, t := range m.todos {
+		if t.Status != "completed" {
+			// width-1, never full width: a box that fills the last column auto-wraps and the inline
+			// renderer's row count desyncs → the panel ghosts/multiplies. (Same rule as the footer/map.)
+			return renderTodos(m.todos, m.width-1)
+		}
+	}
+	return ""
+}
+
+// renderTodos draws the task list as a bordered panel (Claude-Code TaskListV2 style): ✔/▪/□ icons,
+// unfinished tasks first, and an "… +N more" summary when the list is long. Task text is clipped to
+// the terminal width so a long task can't blow out the box border. Empty list → "".
+func renderTodos(todos []TodoItem, width int) string {
 	if len(todos) == 0 {
 		return ""
 	}
-	var b strings.Builder
+	// Border (2) + padding (2) + "icon " (2) = 6 cells of chrome around the text.
+	textW := width - 6
+	if textW < 10 {
+		textW = 10
+	}
+	// Unfinished first so the cap never hides what's actually pending.
+	ordered := make([]TodoItem, 0, len(todos))
 	done := 0
 	for _, t := range todos {
-		icon := "☐"
-		st := dimStyle
+		if t.Status == "completed" {
+			done++
+		} else {
+			ordered = append(ordered, t)
+		}
+	}
+	for _, t := range todos {
+		if t.Status == "completed" {
+			ordered = append(ordered, t)
+		}
+	}
+
+	const maxShow = 8
+	var b strings.Builder
+	for i, t := range ordered {
+		if i >= maxShow {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("… +%d more", len(ordered)-maxShow)) + "\n")
+			break
+		}
+		icon, st := "□", dimStyle
 		switch t.Status {
 		case "completed":
-			icon, st, done = "☑", toolStyle, done+1
+			icon, st = "✔", todoDone
 		case "in_progress":
-			icon, st = "◐", asstStyle
+			icon, st = "▪", todoActive
 		}
-		b.WriteString(st.Render(fmt.Sprintf("  %s %s", icon, t.Content)) + "\n")
+		b.WriteString(st.Render(icon+" "+clip(t.Content, textW)) + "\n")
 	}
-	header := asstStyle.Render(fmt.Sprintf("  Tasks (%d/%d)", done, len(todos)))
-	return header + "\n" + strings.TrimRight(b.String(), "\n")
+	title := todoTitle.Render(fmt.Sprintf("Tasks (%d/%d)", done, len(todos)))
+	return todoPanel.Render(title + "\n" + strings.TrimRight(b.String(), "\n"))
 }
 
 func (m *model) renderMessage(me MessageEntry) {
@@ -1295,7 +1463,6 @@ func (m *model) renderMessage(me MessageEntry) {
 	case "user":
 		// A new turn begins — scope tool-call dedupe to this turn so a later turn's tool ids can't
 		// collide with an earlier turn's line indices (and the map doesn't grow without bound).
-		m.toolLine = map[string]int{}
 		m.runningTools = map[string]string{}
 		m.runningOrder = nil
 		// Reset the per-turn reasoning clock so "Thought for Ns" measures THIS turn, and drop any
@@ -1359,15 +1526,21 @@ func (m *model) answer(value string) {
 	m.reqMasked = false
 }
 
-// append commits a transcript line: it is QUEUED for the terminal scrollback (flushed via tea.Println
-// by the Update wrapper) and also kept in a bounded in-memory slice purely so Ctrl+F search still has
-// something to grep. We never render m.lines — the terminal owns the visible transcript now.
+// append commits a transcript line: QUEUED for the terminal's native scrollback (flushed via
+// tea.Println by the Update wrapper) and also kept in a bounded in-memory slice for Ctrl+F search.
+// We never re-render committed lines — the terminal owns the visible transcript + its native scrollbar.
 const (
 	transcriptCap  = 2000
 	transcriptKeep = 1500
 )
 
 func (m *model) append(line string) {
+	// Any non-tool content marks the end of a consecutive tool run — flush it (collapsed or expanded)
+	// so it lands in the transcript BEFORE this line, preserving order. Guarded against re-entry since
+	// the flush itself appends.
+	if !m.flushing {
+		m.flushToolRun()
+	}
 	m.printQueue = append(m.printQueue, line)
 	m.started = true
 	m.lines = append(m.lines, line)
@@ -1377,28 +1550,108 @@ func (m *model) append(line string) {
 	}
 }
 
-// transcriptBody joins the committed transcript with any in-flight streamed tokens.
-func (m *model) transcriptBody() string {
-	body := strings.Join(m.lines, "\n")
-	if m.stream != "" {
-		if body != "" {
-			body += "\n"
-		}
-		// Indent the in-flight stream to the same +2 gutter the finalized assistant reply uses, so the
-		// answer doesn't jump leftward the instant streaming ends and the rendered message replaces it.
-		body += indentLines(streamStyle.Render(m.stream), "  ")
+// toolCollapseThreshold is how many consecutive tool calls trigger collapse into category counts.
+const toolCollapseThreshold = 5
+
+// flushToolRun commits the pending consecutive tool run into the transcript: one category-count line
+// when collapsed (and long enough), otherwise one rendered line per call. Cleared afterwards.
+func (m *model) flushToolRun() {
+	if len(m.toolRun) == 0 {
+		return
 	}
-	return body
+	run := m.toolRun
+	m.toolRun = nil
+	m.flushing = true
+	if m.collapseTools && len(run) >= toolCollapseThreshold {
+		m.append(toolRunSummary(run))
+	} else {
+		for _, tc := range run {
+			m.append(renderToolCall(tc, m.width))
+		}
+	}
+	m.flushing = false
 }
 
-// refresh is a no-op in inline mode — the committed transcript lives in the terminal's own
-// scrollback (printed via tea.Println), so there is no viewport buffer to rebuild. Kept as a method
-// so the handful of existing m.refresh() call sites don't need touching.
-func (m *model) refresh() {}
+// toolCategory buckets a tool name for the collapsed summary.
+func toolCategory(name string) string {
+	switch {
+	case strings.Contains(name, "Read") || strings.Contains(name, "Cat"):
+		return "reads"
+	case strings.Contains(name, "Edit") || strings.Contains(name, "Write"):
+		return "edits"
+	case strings.Contains(name, "Bash") || strings.Contains(name, "Shell"):
+		return "bash"
+	case strings.Contains(name, "Grep") || strings.Contains(name, "Glob") || strings.Contains(name, "Search") || strings.Contains(name, "Find"):
+		return "searches"
+	default:
+		return "other"
+	}
+}
 
-// View renders ONLY the live region — the in-flight streamed answer plus the chrome (menus,
-// completion dropdown, thinking indicator, map/token panels, prompt box, footer). Everything that
-// has been committed is already in the terminal's scrollback. Redrawn in place each frame.
+// toolRunSummary renders a collapsed run as "⏺ N tool calls · 4 reads · 2 edits · 1 bash (ctrl+b to expand)".
+func toolRunSummary(run []ToolCall) string {
+	counts := map[string]int{}
+	order := []string{"reads", "edits", "bash", "searches", "other"}
+	for _, tc := range run {
+		counts[toolCategory(tc.ToolName)]++
+	}
+	var parts []string
+	for _, cat := range order {
+		if counts[cat] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[cat], cat))
+		}
+	}
+	head := toolDot.Render("⏺ ") + toolLabel.Render(fmt.Sprintf("%d tool calls", len(run)))
+	body := toolArgs.Render(" · " + strings.Join(parts, " · "))
+	hint := subtleStyle.Render("  (ctrl+b to expand)")
+	return head + body + hint
+}
+
+// toolRunLive renders the pending (un-flushed) tool run for the live region — collapsed or expanded,
+// matching how it will commit — so a burst visibly accumulates while it runs.
+func (m model) toolRunLive() string {
+	if len(m.toolRun) == 0 {
+		return ""
+	}
+	if m.collapseTools && len(m.toolRun) >= toolCollapseThreshold {
+		return toolRunSummary(m.toolRun)
+	}
+	var b strings.Builder
+	for i, tc := range m.toolRun {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(renderToolCall(tc, m.width))
+	}
+	return b.String()
+}
+
+// relayout / refresh are no-ops in inline mode — the committed transcript lives in the terminal's own
+// scrollback (printed via tea.Println), so there is no viewport buffer to rebuild. Kept so the many
+// existing m.relayout()/m.refresh() call sites don't need touching.
+func (m *model) relayout() {}
+func (m *model) refresh()  {}
+
+// chromeLines is the live region below the committed transcript: the pending (un-flushed) tool run +
+// any in-flight running tool calls, then the ambient chrome (search/log panel, menu/completion
+// dropdown, working/thinking indicator, task list, compact map, token meter, prompt box, footer).
+func (m model) chromeLines() []string {
+	var c []string
+	// Pending finished tool calls (collapsed or expanded) accumulate live before they flush to scrollback.
+	if tr := m.toolRunLive(); tr != "" {
+		c = append(c, strings.Split(tr, "\n")...)
+	}
+	for _, id := range m.runningOrder {
+		if line, ok := m.runningTools[id]; ok {
+			c = append(c, line)
+		}
+	}
+	return append(c, m.belowSections()...)
+}
+
+// View renders ONLY the live region — the in-flight streamed answer plus the chrome. Everything
+// committed is already in the terminal's native scrollback (printed via tea.Println), so the terminal
+// owns the visible transcript, its NATIVE scrollbar, and scrolling. Redrawn in place each frame.
 func (m model) View() string {
 	var rows []string
 	if m.stream != "" {
@@ -1406,21 +1659,24 @@ func (m model) View() string {
 		// doesn't jump leftward the instant streaming ends and the committed message replaces it.
 		rows = append(rows, indentLines(streamStyle.Render(m.stream), "  "))
 	}
-	// Tool calls still running show live; each commits to scrollback when its result lands.
-	for _, id := range m.runningOrder {
-		if line, ok := m.runningTools[id]; ok {
-			rows = append(rows, line)
-		}
-	}
-	rows = append(rows, m.belowSections()...)
+	rows = append(rows, m.chromeLines()...)
 	out := strings.Join(rows, "\n")
-	// Safety: never emit more rows than the terminal has, or the inline renderer would push the top
-	// of the live region into scrollback. Clip from the TOP so the prompt + footer stay visible.
-	if m.height > 0 {
+	if m.width > 1 {
+		// Wrap the live region to width-1 so no line reaches the last column. A full-width line trips
+		// the terminal's auto-wrap at the last column (cursor slides to the next row), which desyncs
+		// Bubble Tea's inline cursor-up clear → the footer/meter/input "multiply" or leave a mirror box
+		// on resize/zoom. width-1 keeps logical rows == physical rows so the renderer clears exactly.
+		out = ansi.Hardwrap(out, m.width-1, true)
+	}
+	// Never emit more rows than the terminal has, or the renderer pushes the top of the live region into
+	// scrollback every frame (the "footer multiplies itself" bug). Clip whole lines from the TOP, keeping
+	// the prompt + footer visible.
+	if m.height > 0 && m.width > 0 {
 		lines := strings.Split(out, "\n")
-		if len(lines) > m.height {
-			out = strings.Join(lines[len(lines)-m.height:], "\n")
+		for len(lines) > 1 && len(lines) > m.height {
+			lines = lines[1:]
 		}
+		out = strings.Join(lines, "\n")
 	}
 	return out
 }
@@ -1442,18 +1698,29 @@ func (m model) belowSections() []string {
 	if m.menuOpen || (m.compOpen && len(m.comps) > 0) {
 		s = append(s, "")
 	}
-	s = append(s, m.midView())
+	// The mid-region (menu/completion/working-indicator) is only a row when there's something to show;
+	// when idle it's blank, so skip it rather than pinning an empty status line above the input (P5 —
+	// keeps the bottom chrome compact instead of a tall stack of near-empty rows).
+	if mv := m.midView(); strings.TrimSpace(mv) != "" {
+		s = append(s, mv)
+	}
 	// The map panel + token meter are ambient chrome — hide them while an overlay (menu, completion
 	// dropdown, search, log view, or a request) is up, both to keep the focus on the overlay and to
 	// keep the total frame within the terminal height (a tall menu + panels would overflow and leave
 	// ghost rows on small terminals).
 	overlay := m.menuOpen || m.compOpen || m.searchMode || m.showLogs || m.reqOpen
 	if !overlay {
-		if m.graph.NodeCount > 0 {
-			s = append(s, m.mapPanelView())
+		// Pin the task list above the prompt while any task is unfinished (Claude-Code-style live
+		// panel) so it doesn't scroll off into the transcript.
+		if td := m.activeTodoPanel(); td != "" {
+			s = append(s, td)
 		}
-		if tm := m.tokenMeterView(); tm != "" {
-			s = append(s, tm)
+		// Pin a COMPACT, left-aligned codebase-map line above the prompt (P2). It is deliberately short
+		// and NOT padded to full width — a full-width line is what multiplied on zoom. The token meter
+		// is intentionally NOT pinned: it was a fragile right-aligned full-width line AND it duplicates
+		// the model + token count the footer already shows. Use /map for the full panel.
+		if cm := m.compactMapView(); cm != "" {
+			s = append(s, cm)
 		}
 	}
 	// A blank spacer above the prompt box (Ink's marginTop on the input container) so the answer and
@@ -1461,6 +1728,11 @@ func (m model) belowSections() []string {
 	s = append(s, "", m.promptView(), m.footerLine())
 	return s
 }
+
+// working reports whether the model is still mid-turn — either the engine flagged busy, or tools
+// are running. Used to gate esc/Ctrl+C interrupt and to keep the "still working" indicator up
+// continuously (incl. the tool-call phase), not just during text streaming.
+func (m model) working() bool { return m.busy || len(m.runningTools) > 0 }
 
 // midView is the live region between the transcript and the prompt: an interactive menu, the
 // completion dropdown, the input-request question, or the working/thinking indicator.
@@ -1472,6 +1744,8 @@ func (m model) midView() string {
 		return m.menuView()
 	case m.compOpen && len(m.comps) > 0:
 		return m.completionView()
+	case len(m.runningTools) > 0:
+		return m.toolingView()
 	case m.busy && strings.TrimSpace(m.stream) == "":
 		return m.thinkingView()
 	case m.busy:
@@ -1487,13 +1761,13 @@ func (m model) promptView() string {
 		var b strings.Builder
 		b.WriteString(errStyle.Render("⚠ "+m.reqQ) + "\n")
 		if m.reqKind == "diff" && m.reqBody != "" {
-			b.WriteString(renderDiff(m.reqBody, 16, m.width-8) + "\n")
+			b.WriteString(renderDiff(m.reqBody, 16, m.width-8, "") + "\n")
 		}
 		for i, op := range m.reqOpts {
 			b.WriteString(fmt.Sprintf("  %d) %s\n", i+1, op))
 		}
 		b.WriteString(dimStyle.Render("press 1–" + fmt.Sprint(len(m.reqOpts)) + " · esc to dismiss"))
-		return requestBox.Width(m.width - 2).Render(b.String())
+		return requestBox.Width(m.width - 3).Render(b.String())
 	}
 
 	var b strings.Builder
@@ -1501,11 +1775,19 @@ func (m model) promptView() string {
 	// so a secret never shows on screen even though it still flows through the input field.
 	if m.reqOpen && m.reqKind == "input" && m.reqMasked {
 		b.WriteString(caretStyle.Render("❯ ") + asstStyle.Render(strings.Repeat("•", len([]rune(m.input.Value())))))
-		return promptBox.Width(m.width - 2).Render(b.String())
+		return promptBox.Width(m.width - 3).Render(b.String())
 	}
 
 	if m.stash != "" {
 		b.WriteString(subtleStyle.Render("[Stashed] Press Ctrl+R to resume") + "\n")
+	}
+	if n := len(m.queued); n > 0 {
+		next := clip(m.queued[0], 48)
+		more := ""
+		if n > 1 {
+			more = fmt.Sprintf(" (+%d more)", n-1)
+		}
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("⧖ %d queued · next: %s%s", n, next, more)) + "\n")
 	}
 	if n := len(m.pastes); n > 0 && !m.searchMode {
 		plural := ""
@@ -1523,7 +1805,7 @@ func (m model) promptView() string {
 			b.WriteString("\n" + subtleStyle.Render(fmt.Sprintf("  ↵ send · Ctrl+J newline · %d lines", lines)))
 		}
 	}
-	return promptBox.Width(m.width - 2).Render(b.String())
+	return promptBox.Width(m.width - 3).Render(b.String())
 }
 
 const menuMaxVisible = 8
@@ -1686,16 +1968,22 @@ func (m model) footerLine() string {
 	modelRendered := modelStyle.Render(mstr)
 	hints := footerHint.Render("Ctrl+G palette · Ctrl+F search · Ctrl+O logs · Esc stash")
 
+	// Build to m.width-2, NOT the full width. A line that fills the last column trips the terminal's
+	// auto-wrap, which slides the cursor to the next row and desyncs Bubble Tea's inline clear — the
+	// whole live region then stacks/multiplies on every update (the doubled footer + repeated meters).
+	// The -2 (vs -1) leaves a 1-cell margin so an ambiguous-width glyph (✻/⇧/📌) rendered wider than
+	// measured still can't push the line into the last column.
+	w := m.width - 2
 	withHints := strings.Join(append(append([]string{}, core...), hints, modelRendered), footerSep)
 	rightStr := withHints
-	if lipgloss.Width(left)+lipgloss.Width(withHints)+1 > m.width {
+	if lipgloss.Width(left)+lipgloss.Width(withHints)+1 > w {
 		rightStr = strings.Join(append(append([]string{}, core...), modelRendered), footerSep)
 	}
 
 	leftW, rightW := lipgloss.Width(left), lipgloss.Width(rightStr)
-	gap := m.width - leftW - rightW
+	gap := w - leftW - rightW
 	if gap < 1 {
-		if avail := m.width - rightW - 1; avail >= 0 {
+		if avail := w - rightW - 1; avail >= 0 {
 			left = lipgloss.NewStyle().MaxWidth(avail).Render(left)
 		}
 		gap = 1
@@ -1913,7 +2201,7 @@ func (m model) logView() string {
 	b.WriteString(logHdr.Render(fmt.Sprintf("%-10s %-7s %s", "TIME", "LEVEL", "MESSAGE")) + "\n")
 	if len(logs) == 0 {
 		b.WriteString(subtleStyle.Render("No logs available yet."))
-		return logPanel.Width(m.width - 2).Render(b.String())
+		return logPanel.Width(m.width - 3).Render(b.String())
 	}
 	for _, lg := range logs {
 		st := logInfo
@@ -1931,7 +2219,7 @@ func (m model) logView() string {
 			st.Render(fmt.Sprintf("%-7s", strings.ToUpper(lg.Level))) + " " +
 			st.Render(clip(lg.Text, m.width-24)) + "\n")
 	}
-	return logPanel.Width(m.width - 2).Render(strings.TrimRight(b.String(), "\n"))
+	return logPanel.Width(m.width - 3).Render(strings.TrimRight(b.String(), "\n"))
 }
 
 // logTimeStr formats an ISO timestamp to HH:MM:SS (best-effort).
@@ -1946,6 +2234,15 @@ func logTimeStr(iso string) string {
 
 // mapPanelView renders the right-aligned CodebaseMapPanel (Ink CodebaseMapPanel.tsx).
 func (m model) mapPanelView() string {
+	// Fix the inner content width so the box stays one column SHORT of the terminal. Border (2) +
+	// padding (2) = 4 cols of chrome, plus 1 spare column so the placed line is m.width-1 wide. A
+	// full-width line auto-wraps the cursor, which desyncs the inline renderer's row count and makes
+	// this box ghost/duplicate on resize (and overflow when zoomed narrow). Keeping it < m.width fixes
+	// both.
+	inner := m.width - 5
+	if inner < 12 {
+		return "" // too narrow for the panel — skip it rather than spill over the transcript
+	}
 	var b strings.Builder
 	b.WriteString(mapHdr.Render("Codebase Map · ") + mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)) + "\n")
 	if len(m.graph.Modules) > 0 {
@@ -1955,7 +2252,16 @@ func (m model) mapPanelView() string {
 			if mod.Criticality != "" {
 				dot = "● "
 			}
-			line := critStyle(mod.Criticality).Render(dot) + mapVal.Render(mod.Name)
+			// Clip the (plain) name before styling so each row stays one line within inner.
+			budget := inner - 2 // the dot
+			if mod.Criticality != "" {
+				budget -= len(mod.Criticality) + 2
+			}
+			name := mod.Name
+			if budget > 1 && len(name) > budget {
+				name = clip(name, budget)
+			}
+			line := critStyle(mod.Criticality).Render(dot) + mapVal.Render(name)
 			if mod.Criticality != "" {
 				line += mapHdr.Render("  " + mod.Criticality)
 			}
@@ -1967,8 +2273,38 @@ func (m model) mapPanelView() string {
 		ai = logOK.Render("✓")
 	}
 	b.WriteString(mapHdr.Render("AI graph: ") + ai)
-	box := mapPanel.Render(b.String())
-	return lipgloss.PlaceHorizontal(m.width, lipgloss.Right, box)
+	box := mapPanel.Width(inner).Render(b.String())
+	// Place within m.width-1, never the full width — see the inner-width note above.
+	return lipgloss.PlaceHorizontal(m.width-1, lipgloss.Right, box)
+}
+
+// compactMapView is the one-line pinned codebase-map summary (right-aligned above the prompt): node
+// count + the top few modules by criticality, colour-dotted. Empty until the graph is indexed. The
+// full multi-line panel is still available via /map.
+func (m model) compactMapView() string {
+	if m.graph.NodeCount == 0 {
+		return ""
+	}
+	// LEFT-aligned, plain (no wide/ambiguous glyphs), and truncated to width-2 — NOT right-aligned and
+	// padded to full width. A full-width line with a width-miscounted glyph (the old ⛁/● right-aligned
+	// version) overflows the terminal, wraps, and desyncs Bubble Tea's inline cursor-up clear → the
+	// whole live region multiplies on every tea.Println / zoom. A short left-aligned line can't wrap.
+	var b strings.Builder
+	b.WriteString(mapHdr.Render("Map ") + mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)))
+	shown := 0
+	for _, mod := range m.graph.Modules {
+		if shown >= 3 {
+			break
+		}
+		b.WriteString(mapHdr.Render(" · ") + mapVal.Render(clip(mod.Name, 18)))
+		shown++
+	}
+	line := b.String()
+	// width-2 (not width-1): a 1-cell safety margin in case any glyph is rendered wider than measured.
+	if max := m.width - 2; max > 0 && lipgloss.Width(line) > max {
+		line = ansi.Truncate(line, max, "…")
+	}
+	return line
 }
 
 // --- token meter ---------------------------------------------------------------------------
@@ -2022,7 +2358,8 @@ func (m model) tokenMeterView() string {
 		b.WriteString(meterFill.Render(strings.Repeat("█", filled)) + meterEmpty.Render(strings.Repeat("░", w-filled)) + meterText.Render(fmt.Sprintf(" %d%%  ", pct)))
 	}
 	b.WriteString(meterText.Render(fmt.Sprintf("%s · ~%s tok", shortModel(model), humanCount(tokens))))
-	return lipgloss.PlaceHorizontal(m.width, lipgloss.Right, b.String())
+	// m.width-1, not full width — a line that fills the terminal auto-wraps and ghosts on resize.
+	return lipgloss.PlaceHorizontal(m.width-1, lipgloss.Right, b.String())
 }
 
 // --- working / thinking indicators ---------------------------------------------------------
@@ -2055,6 +2392,17 @@ func (m model) workingView() string {
 	return m.spin.View() + " " + workLabel.Render("⏺ Generating… "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 }
 
+// toolingView: the same persistent indicator while the model is running tools, so "still working,
+// Ns elapsed, esc to stop" stays visible through the tool-call phase (not just text generation).
+func (m model) toolingView() string {
+	n := len(m.runningTools)
+	label := "⚙ Running tool… "
+	if n > 1 {
+		label = fmt.Sprintf("⚙ Running %d tools… ", n)
+	}
+	return m.spin.View() + " " + workLabel.Render(label+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+}
+
 // --- dashboards ----------------------------------------------------------------------------
 
 // renderShortcuts returns the /shortcuts key table (handled Go-side; the headless engine has no
@@ -2067,6 +2415,7 @@ func renderShortcuts() string {
 		{"Ctrl+G", "Command palette"},
 		{"Ctrl+F", "Search transcript & logs"},
 		{"Ctrl+O", "Toggle log view"},
+		{"Ctrl+B", "Collapse/expand tool calls"},
 		{"Ctrl+P", "Preview pasted blocks"},
 		{"Esc", "Stash input / dismiss"},
 		{"Ctrl+R", "Resume stashed input"},
@@ -2141,7 +2490,7 @@ var hunkRe = regexp.MustCompile(`@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 // changed line on a coloured background (dark green = added, dark red = removed) with bright text;
 // context lines stay dim. `@@` hunk headers are consumed to drive line numbers, not shown. Capped to
 // maxLines.
-func renderDiff(diff string, maxLines int, fillWidth int) string {
+func renderDiff(diff string, maxLines int, fillWidth int, filename string) string {
 	type row struct {
 		num  int
 		sign byte
@@ -2177,20 +2526,31 @@ func renderDiff(diff string, maxLines int, fillWidth int) string {
 	if len(rows) == 0 {
 		return ""
 	}
-	// Target width for the coloured block. Default to the longest content line, but if a terminal
-	// fill width was passed, extend the background all the way to the right edge (Claude-Code style).
-	width := 0
+	// Gutter width grows with the largest line number (was a fixed %4d that misaligned past 9999).
+	digits := 3
 	for _, r := range rows {
-		if w := len([]rune(r.text)) + 2; w > width {
-			width = w
+		if d := len(fmt.Sprint(r.num)); d > digits {
+			digits = d
 		}
 	}
-	if fillWidth > width {
-		width = fillWidth
+	gutterCols := digits + 1 // "%*d " — line number + one trailing space
+	// Claude-Code-style diffs: changed lines get a full-width green/red BACKGROUND (added/removed),
+	// context lines are syntax-highlighted on the default background. The background is the source of
+	// the old "red/green bleeds to column 0" bug — a background-styled line that exceeds the terminal
+	// auto-wraps and the colour continues at column 0 on the wrapped row. We defeat that two ways:
+	//   1. pad each changed line to EXACTLY `fillWidth` so the bg fills the row and no further,
+	//   2. hard-clamp every emitted line to `fillWidth` with an ANSI-aware truncate (closes the SGR),
+	// so it is mathematically impossible for a diff line to be wider than its budget and wrap. codeW
+	// excludes the gutter + the 2-char "+ "/"- " sign prefix.
+	clampW := fillWidth
+	if clampW <= 0 {
+		clampW = 80
 	}
-	if width > 200 {
-		width = 200
+	codeW := clampW - gutterCols - 2
+	if codeW < 1 {
+		codeW = 1
 	}
+	lexer := lexers.Match(filename) // resolved once for the whole diff
 
 	var b strings.Builder
 	shown := 0
@@ -2199,27 +2559,91 @@ func renderDiff(diff string, maxLines int, fillWidth int) string {
 			b.WriteString(dimStyle.Render("  …(diff truncated)") + "\n")
 			break
 		}
-		gutter := diffLineNum.Render(fmt.Sprintf("%4d ", r.num))
-		body := string(r.sign) + " " + r.text
-		// Truncate over-long lines so they don't wrap (which would break the block), else pad so the
-		// background fills uniformly to `width`.
-		if rs := []rune(body); len(rs) > width {
-			body = string(rs[:width-1]) + "…"
-		} else if pad := width - len(rs); pad > 0 {
-			body += strings.Repeat(" ", pad)
+		num := fmt.Sprintf("%*d ", digits, r.num)
+		txt := r.text
+		if rs := []rune(txt); len(rs) > codeW {
+			txt = string(rs[:codeW-1]) + "…"
 		}
+		pad := codeW - len([]rune(txt))
+		if pad < 0 {
+			pad = 0
+		}
+		// Gutter line number: bright white + bold on every line type (prominent column, per request).
+		// On changed lines it keeps the diff background; on context lines it has none.
+		var line string
 		switch r.sign {
 		case '+':
-			b.WriteString(gutter + diffAddLine.Render(body))
+			line = diffAddLine.Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(num) + diffAddLine.Render("+ ") +
+				chromaRender(diffAddLine, lexer, txt) + diffAddLine.Render(strings.Repeat(" ", pad))
 		case '-':
-			b.WriteString(gutter + diffDelLine.Render(body))
+			line = diffDelLine.Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(num) + diffDelLine.Render("- ") +
+				chromaRender(diffDelLine, lexer, txt) + diffDelLine.Render(strings.Repeat(" ", pad))
 		default:
-			b.WriteString(gutter + dimStyle.Render(body))
+			// Context: white+bold line number (diffLineNum) + subtle syntax colours (dim fallback), no bg.
+			line = diffLineNum.Render(num) + " " + chromaRender(dimStyle, lexer, txt)
 		}
-		b.WriteString("\n")
+		// Belt-and-suspenders: never let a row exceed its width budget, whatever the content.
+		b.WriteString(ansi.Truncate(line, clampW, "") + "\n")
 		shown++
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// Nord — a calm, muted, low-pink palette for subtle syntax highlighting (keywords steel-blue, not
+// the neon pink of monokai/onedark). Used for diff code so it reads as "normal", not rainbow.
+var syntaxTheme = styles.Get("nord")
+
+type codeSeg struct {
+	color string // "#rrggbb", or "" for the base/default foreground
+	text  string
+}
+
+// chromaSegs tokenises one line of code into coloured runs. Nil lexer / error → one uncoloured run.
+func chromaSegs(lexer chroma.Lexer, code string) []codeSeg {
+	if lexer == nil {
+		return []codeSeg{{"", code}}
+	}
+	it, err := lexer.Tokenise(nil, code)
+	if err != nil {
+		return []codeSeg{{"", code}}
+	}
+	var out []codeSeg
+	for _, t := range it.Tokens() {
+		hex := ""
+		if c := syntaxTheme.Get(t.Type).Colour; c.IsSet() {
+			hex = c.String()
+		}
+		out = append(out, codeSeg{hex, t.Value})
+	}
+	return out
+}
+
+// chromaRender colours each token with its nord syntax foreground over the given base style. The base
+// carries the background (the diff add/remove fill) and the fallback foreground for uncoloured tokens,
+// so a changed line keeps its green/red bg and a context line stays dim.
+func chromaRender(base lipgloss.Style, lexer chroma.Lexer, code string) string {
+	var b strings.Builder
+	for _, seg := range chromaSegs(lexer, code) {
+		st := base
+		if seg.color != "" {
+			st = base.Foreground(lipgloss.Color(seg.color))
+		}
+		b.WriteString(st.Render(seg.text))
+	}
+	return b.String()
+}
+
+// diffPath pulls the edited file path out of a tool-call input so the diff can be syntax-highlighted.
+func diffPath(input string) string {
+	var p map[string]any
+	if json.Unmarshal([]byte(input), &p) == nil {
+		for _, k := range []string{"filePath", "file_path", "path"} {
+			if v, ok := p[k].(string); ok && v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // shortModel strips the provider prefix: "minimaxai/minimax-m3" → "minimax-m3".

@@ -71,7 +71,23 @@ export class ToolRegistry {
   }
 
   public getTool(name: string): BuiltTool | undefined {
-    return this.tools.get(name);
+    const exact = this.tools.get(name);
+    if (exact) return exact;
+    // Fallback for mangled/aliased names (MiniMax in particular emits these: snake_case, missing the
+    // "Tool" suffix, wrong case, a duplicated word like "ReadFileFile", or a bare "Read"). Match on a
+    // normalized form so a near-miss runs the right tool instead of erroring "tool not found".
+    const norm = (s: string) => s.toLowerCase().replace(/tool$/, '').replace(/[^a-z0-9]/g, '');
+    const q = norm(name);
+    if (q.length < 3) return undefined;
+    let best: BuiltTool | undefined;
+    for (const [k, t] of this.tools) {
+      const nk = norm(k);
+      // Either name contains the other (e.g. "readfile" ⊂ "readfilefile", or "read" ⊂ "readfile").
+      if (nk === q || nk.startsWith(q) || q.startsWith(nk)) {
+        if (!best || norm(best.name).length < nk.length) best = t; // prefer the most specific match
+      }
+    }
+    return best;
   }
 
   /** Remove a tool (e.g. when an MCP server is disconnected). No-op if absent. */

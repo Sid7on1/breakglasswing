@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestMain redirects prompt-history persistence to a throwaway file so the suite never reads or
@@ -36,6 +37,7 @@ func newTestModel() (model, *bytes.Buffer) {
 	e := &Engine{stdin: nopWC{buf}, Msgs: make(chan Outbound, 8)}
 	m := initialModel(e)
 	m.width = 80
+	m.height = 40
 	// Isolate tests from the on-disk prompt history (~/.breakglass/history.json) the real model
 	// loads at startup, and disable the completion bell so test output stays quiet.
 	m.history = nil
@@ -105,7 +107,148 @@ func TestInterruptWhileBusy(t *testing.T) {
 	}
 }
 
-func TestTodoUpdateRendersAndDedupes(t *testing.T) {
+func TestEngineBatchCoalesces(t *testing.T) {
+	// A fast model floods stream_token events. waitForEngine must coalesce everything already queued
+	// into ONE engineBatch so Update renders once per burst, not once per token (the 6-min stall).
+	e := &Engine{stdin: nopWC{&bytes.Buffer{}}, Msgs: make(chan Outbound, 16)}
+	for i := 0; i < 5; i++ {
+		e.Msgs <- ev("stream_token", "tok")
+	}
+	msg := waitForEngine(e)()
+	batch, ok := msg.(engineBatch)
+	if !ok {
+		t.Fatalf("expected engineBatch, got %T", msg)
+	}
+	if len(batch) != 5 {
+		t.Fatalf("expected 5 coalesced messages in one batch, got %d", len(batch))
+	}
+}
+
+func TestQueueWhileBusy(t *testing.T) {
+	m, buf := newTestModel()
+
+	// A turn is running — a submitted prompt is queued, NOT sent to the engine.
+	m.handleEngine(ev("spinner_state", "thinking", "Thinking…"))
+	m.input.SetValue("queued task")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(model)
+	if len(m.queued) != 1 {
+		t.Fatalf("prompt not queued while busy: %v", m.queued)
+	}
+	if strings.Contains(buf.String(), "queued task") {
+		t.Fatalf("queued prompt was sent to the engine immediately; wire = %q", buf.String())
+	}
+
+	// Turn ends → idle drains the queue and dispatches the prompt.
+	m.handleEngine(ev("spinner_state", "idle", "Awaiting orders…"))
+	if len(m.queued) != 0 {
+		t.Fatalf("queue not drained on idle: %v", m.queued)
+	}
+	if !strings.Contains(buf.String(), "queued task") {
+		t.Fatalf("queued prompt not dispatched after the turn; wire = %q", buf.String())
+	}
+}
+
+func TestAmbientPanelsNeverFullWidth(t *testing.T) {
+	// A line that fills the whole terminal width auto-wraps the cursor and desyncs the inline
+	// renderer, making the map panel / token meter ghost & duplicate on resize. They must always
+	// stay at least one column short of m.width — even with an over-long module name.
+	m, _ := newTestModel()
+	m.width = 80
+	m.graph = GraphSummary{
+		NodeCount: 1234, FileCount: 56, AIGraphBuilt: false,
+		Modules: []GraphModule{{Name: "some/absurdly/long/module/path/that/would/overflow/the/box/edge", Criticality: "high"}},
+	}
+	m.fLite = "stepfun-ai/step-3.5-flash"
+	m.ctxBaseline, m.ctxWindow = 2000, 100000
+
+	for name, view := range map[string]string{"map": m.mapPanelView(), "meter": m.tokenMeterView()} {
+		for _, ln := range strings.Split(view, "\n") {
+			if w := lipgloss.Width(ln); w >= m.width {
+				t.Errorf("%s line is full-width (%d >= %d) — will ghost on resize: %q", name, w, m.width, stripANSI(ln))
+			}
+		}
+	}
+}
+
+// Alt-screen: a COMPACT one-line map is pinned above the prompt (P2 — it used to be hidden because a
+// tall pinned panel multiplied under the inline renderer). The full multi-line panel is still shown
+// on demand via /map, committed into the transcript.
+func TestCompactMapPinnedAndFullViaCommand(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 40
+	m.graph = GraphSummary{NodeCount: 12, FileCount: 3, Modules: []GraphModule{{Name: "core", Criticality: "high"}}}
+
+	v := stripANSI(m.View())
+	if !strings.Contains(v, "Map") || !strings.Contains(v, "12 nodes") {
+		t.Fatalf("compact map should be pinned above the prompt, got:\n%s", v)
+	}
+	// The compact line is one row — the full multi-line "Codebase Map" panel only appears via /map.
+	if strings.Contains(v, "Codebase Map") {
+		t.Fatal("the full multi-line panel must NOT be pinned — only the compact one-liner")
+	}
+
+	m.input.SetValue("/map")
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = res.(model)
+	if !strings.Contains(stripANSI(strings.Join(m.lines, "\n")), "Codebase Map") {
+		t.Fatalf("/map should commit the full map into the transcript, got:\n%s", stripANSI(strings.Join(m.lines, "\n")))
+	}
+}
+
+// P6: a long run of consecutive finished tool calls collapses into category counts in the live
+// region; Ctrl+B expands it back to one line per call.
+func TestToolCallCollapse(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 40
+
+	fin := func(id, name string) Outbound {
+		return ev("tool_call_result", map[string]any{"id": id, "toolName": name, "status": "completed"})
+	}
+	m.handleEngine(fin("1", "ReadTool"))
+	m.handleEngine(fin("2", "ReadTool"))
+	m.handleEngine(fin("3", "ReadTool"))
+	m.handleEngine(fin("4", "EditTool"))
+	m.handleEngine(fin("5", "BashTool"))
+
+	v := stripANSI(m.View())
+	if !strings.Contains(v, "5 tool calls") || !strings.Contains(v, "3 reads") || !strings.Contains(v, "1 edits") || !strings.Contains(v, "1 bash") {
+		t.Fatalf("expected collapsed category summary, got:\n%s", v)
+	}
+
+	// Ctrl+B expands: each tool's own line is now shown (no summary).
+	res, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = res.(model)
+	if m.collapseTools {
+		t.Fatal("Ctrl+B should have toggled collapse off")
+	}
+	if strings.Contains(stripANSI(m.View()), "5 tool calls") {
+		t.Fatal("expanded run must not show the collapsed summary")
+	}
+}
+
+func TestCompletionDebounce(t *testing.T) {
+	m, buf := newTestModel()
+	m.input.SetValue("/he")
+	if cmd := m.requestCompletions(); cmd == nil {
+		t.Fatal("non-empty input should schedule a debounce cmd")
+	}
+	cur := m.compSeq
+
+	// A stale tick (superseded by a newer keystroke) must NOT query the engine.
+	m.Update(compTickMsg{seq: cur - 1, text: "/h"})
+	if strings.Contains(buf.String(), `"t":"query"`) {
+		t.Fatalf("stale debounce tick queried the engine; wire = %q", buf.String())
+	}
+
+	// The current tick fires exactly one query.
+	m.Update(compTickMsg{seq: cur, text: "/he"})
+	if !strings.Contains(buf.String(), `"t":"query"`) {
+		t.Fatalf("current debounce tick did not query; wire = %q", buf.String())
+	}
+}
+
+func TestTodoUpdatePinsPanel(t *testing.T) {
 	m, _ := newTestModel()
 
 	todos := []map[string]any{
@@ -115,18 +258,26 @@ func TestTodoUpdateRendersAndDedupes(t *testing.T) {
 	}
 	m.handleEngine(ev("todo_update", todos))
 
-	joined := strings.Join(m.lines, "\n")
+	// The list is pinned above the prompt (not appended into scrollback) while work is unfinished.
+	if strings.Contains(strings.Join(m.lines, "\n"), "write parser") {
+		t.Fatalf("todos leaked into the transcript scrollback")
+	}
+	panel := m.activeTodoPanel()
 	for _, want := range []string{"Tasks (1/3)", "write parser", "wire the loop", "add tests"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("todo render missing %q in:\n%s", want, joined)
+		if !strings.Contains(panel, want) {
+			t.Errorf("pinned todo panel missing %q in:\n%s", want, panel)
 		}
 	}
 
-	// An identical update must not append a second checklist block.
-	before := len(m.lines)
-	m.handleEngine(ev("todo_update", todos))
-	if len(m.lines) != before {
-		t.Fatalf("identical todo_update was re-appended: %d → %d lines", before, len(m.lines))
+	// Once every task is completed, the panel disappears rather than lingering above the prompt.
+	allDone := []map[string]any{
+		{"content": "write parser", "status": "completed"},
+		{"content": "wire the loop", "status": "completed"},
+		{"content": "add tests", "status": "completed"},
+	}
+	m.handleEngine(ev("todo_update", allDone))
+	if p := m.activeTodoPanel(); p != "" {
+		t.Fatalf("completed task list should not pin, got:\n%s", p)
 	}
 }
 
@@ -232,6 +383,64 @@ func TestQueryResultOpensDropdown(t *testing.T) {
 	m.handleEngine(Outbound{T: "queryResult", ID: 1, Items: nil})
 	if !m.compOpen {
 		t.Fatal("stale queryResult wrongly closed the dropdown")
+	}
+}
+
+func TestRenderDiffHighlightsAndAligns(t *testing.T) {
+	// A Go diff with a line number past 9999 — the gutter must widen (was a fixed %4d).
+	diff := "@@ -1,1 +10000,1 @@\n-x := 1\n+const y = 2\n"
+	const fill = 60
+	out := renderDiff(diff, 20, fill, "main.go")
+	if !strings.Contains(out, "10000") {
+		t.Fatalf("dynamic gutter dropped the 5-digit line number:\n%s", out)
+	}
+	// THE invariant that kills the bleed: no diff line may exceed the fill width. Changed lines carry
+	// a full-width background, so any overflow would wrap and the colour would bleed back to column 0.
+	// renderDiff pads to exactly fillWidth and hard-clamps with an ANSI-aware truncate, so this holds
+	// for every row regardless of content/width.
+	for _, l := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(l); w > fill {
+			t.Fatalf("diff line width %d exceeds fill %d (will wrap → bleed): %q", w, fill, l)
+		}
+	}
+	// Sign prefixes + content survive (colour escapes are stripped in this non-TTY test, so we assert
+	// on structure, not ANSI). Diff code is solid green/red (git-style) — no per-token syntax colours.
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "+ const y = 2") || !strings.Contains(plain, "- x := 1") {
+		t.Fatalf("diff lost its +/- sign prefixes or content:\n%s", plain)
+	}
+}
+
+// A changed line far longer than the fill width must be clamped, never emitted at full length — that
+// overflow is exactly what wrapped and bled the background back to column 0.
+func TestRenderDiffClampsLongLines(t *testing.T) {
+	long := strings.Repeat("x = veryLongIdentifier + ", 20) // ~500 cols, well over the fill
+	diff := "@@ -1,1 +1,1 @@\n+" + long + "\n"
+	const fill = 50
+	out := renderDiff(diff, 20, fill, "main.go")
+	for _, l := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(l); w > fill {
+			t.Fatalf("long diff line not clamped: width %d > fill %d", w, fill)
+		}
+	}
+}
+
+// Every changed (add/remove) diff line must render to the SAME width regardless of content length —
+// a short comment line and a long code line both fill their green/red background to the fill width.
+// (User report: the comment's coloured line looked shorter than the code's.)
+func TestRenderDiffChangedLinesEqualWidth(t *testing.T) {
+	diff := "@@ -1,2 +1,2 @@\n+// short comment\n+const reallyLongVariableNameHere = computeSomething(a, b, c)\n"
+	const fill = 60
+	out := renderDiff(diff, 20, fill, "main.go")
+	var widths []int
+	for _, l := range strings.Split(out, "\n") {
+		widths = append(widths, lipgloss.Width(l))
+	}
+	if len(widths) != 2 {
+		t.Fatalf("expected 2 changed lines, got %d", len(widths))
+	}
+	if widths[0] != widths[1] {
+		t.Fatalf("changed diff lines differ in width: comment=%d code=%d (bg fill must be uniform)", widths[0], widths[1])
 	}
 }
 
@@ -407,9 +616,9 @@ func TestSpinnerShownWhileBusy(t *testing.T) {
 	}
 }
 
-// Inline mode: committed transcript lines are QUEUED for the terminal's native scrollback
-// (flushed via tea.Println), not rendered in the live View. The live View only shows in-flight
-// content (the streaming answer) plus chrome (input/footer/menus).
+// Inline mode (native scrollbar): committed transcript lines are QUEUED for the terminal's native
+// scrollback (flushed via tea.Println), NOT rendered in the live View. The live View shows only
+// in-flight content (the streaming answer) plus chrome (input/footer/menus).
 func TestInlineCommitsToScrollback(t *testing.T) {
 	m, _ := newTestModel()
 	m.height = 40
@@ -421,13 +630,69 @@ func TestInlineCommitsToScrollback(t *testing.T) {
 		t.Fatalf("expected 2 lines queued for scrollback, got %d", len(m.printQueue))
 	}
 	if strings.Contains(stripANSI(m.View()), "What's on your mind") {
-		t.Fatalf("committed transcript must NOT be in the live View — it belongs in scrollback")
+		t.Fatalf("committed transcript must NOT be in the live View — it belongs in native scrollback")
 	}
-
 	// An in-flight streamed answer DOES render live.
 	m.stream = "thinking out loud"
 	if !strings.Contains(stripANSI(m.View()), "thinking out loud") {
 		t.Fatalf("live stream should render in the View")
+	}
+}
+
+// The live region (View) must never exceed the terminal height, or the inline renderer pushes its top
+// into scrollback every frame (the "footer multiplies itself" bug). Committed lines go to scrollback,
+// so even a huge transcript leaves the live region bounded.
+func TestLiveRegionFitsHeight(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 24
+	for i := 0; i < 200; i++ {
+		m.append("line " + string(rune('a'+i%26)))
+	}
+	m.busy = true
+	rows := strings.Count(m.View(), "\n") + 1
+	if rows > m.height {
+		t.Fatalf("live region overflows terminal height: %d rows > %d", rows, m.height)
+	}
+}
+
+// No View line may reach the LAST column. A line == width trips the terminal's auto-wrap (cursor
+// slides to the next row) and a line > width wraps — either desyncs Bubble Tea's inline clear and the
+// live region stacks/multiplies every update. The invariant is therefore width ≤ m.width-1 for every
+// line. Exercised with a long stream AND the full footer/meter/map chrome present.
+// No live-region line may reach the LAST column. A line == width trips the terminal's auto-wrap (cursor
+// slides to the next row) and a line > width wraps — either desyncs Bubble Tea's inline clear and the
+// live region stacks/multiplies (or leaves a mirror box) every update. Invariant: width ≤ m.width-1.
+func TestViewLinesStayInsideLastColumn(t *testing.T) {
+	// Exercise the FULL live region — pinned map, pinned todo, busy indicator, input box, footer — at
+	// several widths (incl. the exact zoom widths from the bug report). EVERY line must be ≤ width-1,
+	// or a full-width line wraps and the whole region multiplies on the next tea.Println / zoom.
+	for _, w := range []int{40, 80, 100, 120, 158} {
+		m, _ := newTestModel()
+		m.width, m.height = w, 30
+		m.busy = true
+		m.handleEngine(ev("model_tier", map[string]any{"tier": "heavy", "pinned": "heavy"})) // footer + 📌
+		m.handleEngine(ev("ui_snapshot", map[string]any{
+			"models": map[string]string{"coding": "stepfun-ai/step-3.7-flash", "lite": "stepfun-ai/step-3.7-flash"},
+			"graph":  map[string]any{"nodeCount": 1384, "fileCount": 33, "modules": []map[string]any{{"name": "IncrementalParser", "criticality": "HIGH"}, {"name": "KnowledgeGraph", "criticality": "HIGH"}, {"name": "CSTLowering", "criticality": "MEDIUM"}}},
+		}))
+		m.handleEngine(ev("todo_update", []map[string]any{{"content": "wire the loop", "status": "in_progress"}}))
+		m.stream = strings.Repeat("verylongtoken ", 30) // far wider than the terminal
+		for _, l := range strings.Split(m.View(), "\n") {
+			if lw := lipgloss.Width(l); lw > m.width-1 {
+				t.Fatalf("width=%d: View line reaches/exceeds last column (auto-wrap → multiply/mirror): lineWidth=%d max=%d %q", w, lw, m.width-1, l)
+			}
+		}
+	}
+}
+
+// The footer specifically must stay inside the last column — it was full-width and the prime cause of
+// the multiplying live region.
+func TestFooterStaysInsideLastColumn(t *testing.T) {
+	m, _ := newTestModel()
+	m.width = 80
+	m.handleEngine(ev("model_tier", map[string]any{"tier": "lite"}))
+	if w := lipgloss.Width(m.footerLine()); w > m.width-1 {
+		t.Fatalf("footer reaches last column (auto-wrap → multiply): width=%d max=%d", w, m.width-1)
 	}
 }
 
@@ -455,6 +720,12 @@ func TestRenderMarkdown(t *testing.T) {
 	// (and applies ANSI styling on a real terminal; color is suppressed in this non-TTY test).
 	if !strings.Contains(out, "•") {
 		t.Fatalf("markdown not transformed (no bullet glyph): %q", out)
+	}
+	// A fenced code block renders (syntax-highlighted on a real TTY; here we just confirm the code
+	// survives and the styled-background config doesn't error the renderer).
+	code := renderMarkdown("```go\nfunc main() {}\n```", 60)
+	if !strings.Contains(stripANSI(code), "func main()") {
+		t.Fatalf("code block not rendered: %q", code)
 	}
 }
 
@@ -771,8 +1042,8 @@ func TestClearFlow(t *testing.T) {
 	}
 }
 
-// TestTranscriptBounded guards the in-memory search copy: append() keeps m.lines (used only by
-// Ctrl+F search) bounded on very long sessions. The visible transcript lives in terminal scrollback.
+// TestTranscriptBounded guards the in-app transcript buffer: append() keeps m.lines (the source fed
+// into the scroll viewport, also searched by Ctrl+F) bounded on very long sessions.
 func TestTranscriptBounded(t *testing.T) {
 	m, _ := newTestModel()
 
