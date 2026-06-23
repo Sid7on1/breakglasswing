@@ -360,23 +360,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// In inline mode, resizing the terminal narrower causes previously printed lines to wrap, breaking
 		// the cursor math and leaving ghost overlay frames.
 		// To fix this without causing infinite duplicates in the scrollback:
-		// 1. We emit a hard terminal clear that wipes the VIEWPORT AND SCROLLBACK (\033[2J\033[3J\033[H).
-		// 2. We queue the entire recent history (m.lines) to be reprinted.
-		// Because the scrollback is wiped, reprinting m.lines will not create duplicates!
+		// 1. We trigger tea.ClearScreen via m.pendingClear to wipe the viewport.
+		// 2. We inject \033[3J (wipe scrollback) and \033[H (move to top) directly into the first line
+		//    of the history reprint.
+		// This guarantees the deep-clear and the reprint happen synchronously in one unbroken stream,
+		// preventing the async race condition that caused "black space" above the history.
 		m.pendingClear = true
 		if len(m.lines) > 0 {
-			start := len(m.lines) - m.height + 15
-			if start < 0 {
-				start = 0
-			}
-			m.printQueue = append(m.printQueue, m.lines[start:]...)
+			lines := make([]string, len(m.lines))
+			copy(lines, m.lines)
+			// Attach the deep-clear modifiers to the very first line so no extra newlines are printed
+			lines[0] = "\033[3J\033[H" + lines[0]
+			m.printQueue = append(m.printQueue, lines...)
 		}
-		
-		// Custom Cmd that emits the deep-clear ANSI sequence instead of just tea.ClearScreen
-		return m, func() tea.Msg {
-			os.Stdout.WriteString("\033[2J\033[3J\033[H")
-			return nil
-		}
+		return m, nil
 
 	case spinner.TickMsg:
 		// Keep the frame animating; it's only painted while busy (see View).
