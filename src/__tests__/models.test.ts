@@ -1,0 +1,39 @@
+import { MODEL_CATALOG, modelMenuOptions, DEFAULT_CODING_MODEL, DEFAULT_LITE_MODEL } from '../cli/models';
+
+describe('model catalog', () => {
+  it('includes the verified working models across tiers', () => {
+    const ids = MODEL_CATALOG.map(m => m.value);
+    // Only NIM-verified ids remain. step-3.5-flash was removed — it 400s as "not a valid model ID";
+    // the valid Step "flash" id is step-3.7-flash (now the lite default).
+    expect(ids).toEqual(expect.arrayContaining([
+      'minimaxai/minimax-m3', 'z-ai/glm-5.1', 'mistralai/mistral-medium-3.5-128b',
+      'stepfun-ai/step-3.7-flash', 'minimaxai/minimax-m2.7',
+      'meta/llama-3.1-70b-instruct', 'sarvamai/sarvam-m',
+    ]));
+    expect(ids).not.toContain('stepfun-ai/step-3.5-flash'); // invalid on NIM
+    expect(MODEL_CATALOG.some(m => m.tier === 'coding')).toBe(true);
+    expect(MODEL_CATALOG.some(m => m.tier === 'lite')).toBe(true);
+  });
+
+  it('uses the correct GLM publisher slug (z-ai, not zai) and omits the non-responding giants', () => {
+    const ids = MODEL_CATALOG.map(m => m.value);
+    expect(ids).toContain('z-ai/glm-5.1');
+    expect(ids).not.toContain('zai/glm-5.1'); // the 404 typo
+    for (const bad of ['deepseek-ai/deepseek-v4-pro', 'deepseek-ai/deepseek-v4-flash', 'google/gemma-4-31b-it']) {
+      expect(ids).not.toContain(bad);
+    }
+  });
+
+  it('defaults are valid catalog entries', () => {
+    const ids = MODEL_CATALOG.map(m => m.value);
+    expect(ids).toContain(DEFAULT_CODING_MODEL);
+    expect(ids).toContain(DEFAULT_LITE_MODEL);
+  });
+
+  it('modelMenuOptions marks the current model and carries category labels', () => {
+    const opts = modelMenuOptions('minimaxai/minimax-m3');
+    const cur = opts.find(o => o.value === 'minimaxai/minimax-m3');
+    expect(cur!.label.startsWith('●')).toBe(true);
+    expect(opts.every(o => typeof o.category === 'string' && o.category.length > 0)).toBe(true);
+  });
+});

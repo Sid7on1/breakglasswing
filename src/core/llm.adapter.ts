@@ -1,0 +1,1049 @@
+import OpenAI from 'openai';
+import { Logger } from '../utils';
+import { ApiKeyManager, KeyResult } from '../credits/api.key.manager';
+import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
+import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capabilities';
+import { contentToText } from './multimodal';
+import { globalTelemetry } from '../telemetry/telemetry';
+
+/**
+ * Mark a chat message's content as a prompt-cache breakpoint (Anthropic `cache_control`,
+ * forwarded by OpenRouter / native Anthropic / Bedrock for Claude models). Converts the plain
+ * string content into the single-text-part array form the cache marker requires. Pure; only ever
+ * called when the active model advertises `promptCaching`, so non-capable models keep plain
+ * string content untouched. Returns a NEW message (no mutation of the caller's array).
+ */
+export function markCacheBreakpoint(msg: any): any {
+  if (!msg || typeof msg.content !== 'string' || msg.content.length === 0) return msg;
+  return {
+    ...msg,
+    content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }],
+  };
+}
+
+/**
+ * Classify an error thrown while streaming a chat completion so the agent loop knows
+ * whether — and how — to recover. Pure (no side effects) so it can be unit-tested.
+ *
+ * - `context`  : the prompt overflowed the model window → compact and retry.
+ * - `transient`: a stalled/timed-out stream, a 5xx, or the provider rejecting a single
+ *   bad model emission (malformed tool-call JSON, multiple tool calls, out-of-range arg).
+ *   A fresh attempt (new key, re-sampled output) almost always succeeds.
+ * - otherwise  : fatal (auth, malformed request, …) — surface and stop.
+ */
+/** One accumulated streaming tool call: stable id, name, and the concatenated arguments JSON. */
+export interface ToolCallSlot { id: string; name: string; args: string; }
+
+/**
+ * Apply ONE streaming `delta.tool_calls[]` entry to an index-keyed accumulator and return its index.
+ *
+ * The OpenAI streaming contract keys tool-call fragments by `index`: the first delta for an index
+ * carries id + name + the start of the arguments; later deltas append more `arguments`. Some
+ * providers (minimax/NIM) repeat `id` on every delta, so logic that treated "id present" as "new
+ * call" mis-fired a fresh call per chunk and surfaced truncated args (`{"query": "`). Keying off
+ * `index` (falling back to 0 when absent) accumulates correctly. Pure — exported for testing.
+ */
+export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?: number; id?: string; function?: { name?: string; arguments?: string } }): number {
+  const i = typeof tc.index === 'number' ? tc.index : 0;
+  let slot = acc.get(i);
+  if (!slot) { slot = { id: '', name: '', args: '' }; acc.set(i, slot); }
+  if (tc.id) slot.id = tc.id;
+  if (tc.function?.name) slot.name = tc.function.name;
+  if (tc.function?.arguments) slot.args += tc.function.arguments;
+  return i;
+}
+
+export function classifyStreamError(e: any): { status: number; recoverable: boolean; kind?: 'context' | 'transient'; retryAfterSecs?: number } {
+  const msg = String(e?.message ?? '');
+  let status = 500;
+  if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(msg)) {
+    status = 408;
+  } else if (e?.status) {
+    status = e.status;
+  }
+
+  // Context overflow: recoverable by compaction.
+  if (/maximum context length/i.test(msg) || e?.code === 'context_length_exceeded' || status === 413) {
+    return { status, recoverable: true, kind: 'context' };
+  }
+
+  // Rate limited (429): recoverable, but the loop must BACK OFF before retrying (honor Retry-After
+  // if the provider sent one) — retrying immediately just deepens the limit.
+  if (status === 429) {
+    const ra = e?.headers?.['retry-after'] ?? e?.retryAfterSecs;
+    const n = ra != null ? parseFloat(String(ra)) : NaN;
+    return { status, recoverable: true, kind: 'transient', retryAfterSecs: isNaN(n) ? undefined : n };
+  }
+
+  // Transient: stalled streams, server errors, or a one-off bad model emission the
+  // provider rejected. Bounded by the loop's retry cap, so this can be liberal.
+  const transientMsg = /Unterminated string|Expecting value|is out of range|single tool-call|tool call/i.test(msg);
+  if (status === 408 || status >= 500 || transientMsg) {
+    return { status, recoverable: true, kind: 'transient' };
+  }
+
+  return { status, recoverable: false };
+}
+
+/**
+ * Streaming filter that separates <think>...</think> spans from visible content.
+ * Reasoning models (MiniMax, DeepSeek, step-3.5, QwQ...) interleave thinking inside the
+ * content channel; without this the internal monologue leaks into the user-facing reply.
+ *
+ * Two emission shapes are handled:
+ *  - Paired:   `<think>reasoning</think>answer` — divert the span between the tags.
+ *  - Opener-less: `reasoning</think>answer` — several models (step-3.5, minimax on NIM)
+ *    emit the reasoning first and ONLY a closing tag. The old filter, looking for `<think>`
+ *    first, treated all the reasoning as the answer and leaked it. So in "implicit" mode the
+ *    filter buffers leading content silently until it can tell which it is: a `</think>`
+ *    proves the buffer was reasoning (divert it); the stream ending with no closer proves it
+ *    was the answer (emit it). This never leaks reasoning, at the cost of the answer from a
+ *    NON-reasoning model arriving in one burst at stream end — acceptable since the product's
+ *    default models are reasoning models; disable with implicit=false for plain models.
+ */
+export class ThinkTagFilter {
+  private pending = '';
+  private inThink = false;
+  private seenOpen = false; // a real <think> opener has appeared this turn
+  private decided = false;  // leading region resolved → subsequent content streams visibly
+  private preamble = '';    // leading content held back while still tentative (implicit mode)
+  private static readonly OPEN = '<think>';
+  private static readonly CLOSE = '</think>';
+  // Upper bound on tentative preamble buffering (implicit mode). Opener-less reasoning
+  // is always short and front-loaded; if this much leading content arrives with no
+  // `</think>` closer in sight, it is the answer, not reasoning — stop holding it back and
+  // stream it live. Without this cap, a model that never emits a closer (most coding models)
+  // would buffer its ENTIRE reply and only reveal it in one burst at stream end, which looks
+  // like a hang ("spinner rolls forever, no text"). Override with BGW_IMPLICIT_THINK_CAP.
+  private static readonly MAX_PREAMBLE = parseInt(process.env.BGW_IMPLICIT_THINK_CAP || '240', 10);
+  // Effective cap for THIS filter. Inline-reasoning models (caps.inlineReasoning) stream long CoT
+  // before a tool call and reliably close it with `</think>`, so the cap is lifted (Infinity): we
+  // wait for the closer instead of leaking the reasoning as the reply. A tool call (drainPending)
+  // or the stream-end flush still bounds the wait, so there's no plain-model "hang" regression.
+  private readonly maxPreamble: number;
+
+  constructor(private implicit: boolean = true, capPreamble: boolean = true) {
+    this.maxPreamble = capPreamble ? ThinkTagFilter.MAX_PREAMBLE : Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * A tool call has started, which proves this turn's content-channel text (if any) was reasoning,
+   * not the answer — the answer IS the call. Divert whatever the filter is still holding tentatively
+   * (opener-less reasoning not yet terminated by `</think>`, or text mid-`<think>` block) to the
+   * thinking channel so it can never surface as the reply. No-op once the leading region is resolved
+   * or the filter is already streaming visible text. Returns the diverted thinking text.
+   */
+  drainPending(): string {
+    if (this.inThink) {
+      const t = this.preamble + this.pending;
+      this.preamble = '';
+      this.pending = '';
+      return t;
+    }
+    if (this.implicit && !this.seenOpen && !this.decided) {
+      const t = this.preamble + this.pending;
+      this.preamble = '';
+      this.pending = '';
+      this.decided = true;
+      return t;
+    }
+    return '';
+  }
+
+  /**
+   * The provider sent reasoning out-of-band via the structured `reasoning_content` channel — so this
+   * turn's CONTENT channel is the ANSWER, not opener-less reasoning. Stop tentatively buffering and
+   * RELEASE whatever leading content we were holding as visible text (the opposite of drainPending,
+   * which diverts to thinking). Idempotent. This is how reasoning is detected at runtime instead of
+   * from a static per-model flag — the moment a `reasoning_content` delta arrives, we know.
+   */
+  releaseAsAnswer(): string {
+    if (this.decided || this.inThink) return '';
+    this.implicit = false;
+    this.decided = true;
+    const t = this.preamble;
+    this.preamble = '';
+    return t;
+  }
+
+  /** Returns visible text and thinking text extracted from this token. */
+  process(token: string): { text: string; thinking: string } {
+    this.pending += token;
+    // Normalize <thinking>/<\/thinking> (step-3.7, QwQ, etc.) to <think>/<\/think> INSIDE
+    // the pending buffer — so split tags that straddle two chunks are also normalized once
+    // the second chunk assembles the full tag in pending. Outer per-token normalization in
+    // chat() handles the common single-token case; this catches the rest.
+    this.pending = this.pending.replace(/<thinking>/g, '<think>').replace(/<\/thinking>/g, '</think>');
+    let text = '';
+    let thinking = '';
+
+    for (;;) {
+      if (this.inThink) {
+        const idx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+        if (idx !== -1) {
+          thinking += this.pending.slice(0, idx);
+          this.pending = this.pending.slice(idx + ThinkTagFilter.CLOSE.length);
+          this.inThink = false;
+          this.decided = true;
+          continue;
+        }
+        const hold = this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE);
+        thinking += this.pending.slice(0, this.pending.length - hold);
+        this.pending = this.pending.slice(this.pending.length - hold);
+        break;
+      }
+
+      const openIdx = this.pending.indexOf(ThinkTagFilter.OPEN);
+
+      // Tentative leading region (implicit mode, before any tag): could be opener-less
+      // reasoning or just the answer. Resolve only on a definite signal.
+      if (this.implicit && !this.seenOpen && !this.decided) {
+        const closeIdx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+        if (closeIdx !== -1 && (openIdx === -1 || closeIdx < openIdx)) {
+          // Opener-less closer: everything buffered + up to the tag was reasoning.
+          thinking += this.preamble + this.pending.slice(0, closeIdx);
+          this.preamble = '';
+          this.pending = this.pending.slice(closeIdx + ThinkTagFilter.CLOSE.length);
+          this.seenOpen = true;
+          this.decided = true;
+          continue;
+        }
+        if (openIdx !== -1) {
+          // A real opener: the buffered preamble was answer text preceding an explicit block.
+          text += this.preamble + this.pending.slice(0, openIdx);
+          this.preamble = '';
+          this.pending = this.pending.slice(openIdx + ThinkTagFilter.OPEN.length);
+          this.inThink = true;
+          this.seenOpen = true;
+          this.decided = true;
+          continue;
+        }
+        // No full tag yet — buffer, holding back any suffix that could be a split tag.
+        const hold = Math.max(
+          this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN),
+          this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE),
+        );
+        this.preamble += this.pending.slice(0, this.pending.length - hold);
+        this.pending = this.pending.slice(this.pending.length - hold);
+        // Cap reached without any closer: this is the answer, not opener-less reasoning.
+        // Resolve the tentative region now and emit what we held so the reply streams live
+        // instead of arriving in one burst at stream end (which reads as a hang).
+        if (this.preamble.length >= this.maxPreamble) {
+          text += this.preamble;
+          this.preamble = '';
+          this.decided = true;
+        }
+        break;
+      }
+
+      // Visible streaming region: emit text, but a new <think> block may still open.
+      if (openIdx !== -1) {
+        text += this.pending.slice(0, openIdx);
+        this.pending = this.pending.slice(openIdx + ThinkTagFilter.OPEN.length);
+        this.inThink = true;
+        this.seenOpen = true;
+        continue;
+      }
+      // Strip a spurious </think> closer that arrived without a matching opener (e.g.
+      // minimax on NIM sometimes leaks a bare </think> or </thinking> in the content
+      // channel alongside reasoning_content). Also prevents split-tag fragments like
+      // `</thin` from being flushed as visible text before `king>` arrives.
+      const closeIdx = this.pending.indexOf(ThinkTagFilter.CLOSE);
+      if (closeIdx !== -1) {
+        text += this.pending.slice(0, closeIdx);
+        this.pending = this.pending.slice(closeIdx + ThinkTagFilter.CLOSE.length);
+        continue;
+      }
+      const hold = Math.max(
+        this.partialTagSuffix(this.pending, ThinkTagFilter.OPEN),
+        this.partialTagSuffix(this.pending, ThinkTagFilter.CLOSE),
+      );
+      text += this.pending.slice(0, this.pending.length - hold);
+      this.pending = this.pending.slice(this.pending.length - hold);
+      break;
+    }
+
+    return { text, thinking };
+  }
+
+  /** Flush whatever is held back (call when the stream ends). */
+  flush(): { text: string; thinking: string } {
+    const rest = this.pending;
+    this.pending = '';
+    if (this.inThink) return { text: '', thinking: this.preamble + rest };
+    // Tentative buffer never resolved → the stream had no closing tag, so the leading
+    // region was the answer all along. Emit it as visible text.
+    if (!this.decided && this.preamble) {
+      const t = this.preamble + rest;
+      this.preamble = '';
+      return { text: t, thinking: '' };
+    }
+    return { text: rest, thinking: '' };
+  }
+
+  private partialTagSuffix(s: string, tag: string): number {
+    const max = Math.min(s.length, tag.length - 1);
+    for (let len = max; len > 0; len--) {
+      if (s.endsWith(tag.slice(0, len))) return len;
+    }
+    return 0;
+  }
+}
+
+/** Remove <think>/<thinking> spans from a complete (non-streamed) response. */
+export function stripThink(content: string): string {
+  return content
+    .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/^[\s\S]*<\/thinking>/, '') // opener-less </thinking>
+    .replace(/^[\s\S]*<\/think>/, '')    // opener-less </think>
+    .trim();
+}
+
+/**
+ * Pull a JSON value out of a model response that may wrap it in a markdown code
+ * fence or surrounding prose (e.g. "Here's a JSON array: ```json [...] ```").
+ * Returns the first balanced array/object found, or the trimmed input unchanged.
+ */
+export function extractJson(content: string): string {
+  let s = content.trim();
+  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) s = fenced[1].trim();
+  const start = s.search(/[[{]/);
+  if (start === -1) return s;
+  const open = s[start];
+  const close = open === '[' ? ']' : '}';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) return s.slice(start, i + 1);
+  }
+  return s.slice(start);
+}
+
+export class LlmAdapter implements LLMProvider {
+  public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
+  public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
+  public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
+  // Nucleus sampling cap. Clipping the low-probability tail is what actually curbs the
+  // "dropped a tool argument / fabricated a path" failures on reasoning models — far more
+  // than lowering temperature, which on a tuned MoE just pushes it off-distribution. Default
+  // 0.95 (minimax model card + opencode's provider/transform.ts).
+  public topP: number = parseFloat(process.env.BGW_TOP_P || '0.95');
+  public maxTokens: number = parseInt(process.env.BGW_MAX_TOKENS || '4096', 10);
+  // Inter-chunk stall timeout: how long to wait for the NEXT streamed chunk once the stream
+  // is already flowing, before assuming it stalled.
+  public streamReadTimeoutMs = parseInt(process.env.BGW_STREAM_TIMEOUT_MS || '60000', 10);
+  // Time-to-first-token budget. Cold starts on slow reasoning models (minimax) routinely run
+  // 60–90s before the first token while later chunks arrive quickly, so the first chunk gets a
+  // longer budget than the inter-chunk one — a real cold start isn't killed as a "stall," but a
+  // genuinely dead stream is still caught. Default 180s: NVIDIA NIM queues a cold heavy reasoning
+  // model (minimax-m3) well past 120s before the first token, which surfaced as a spurious
+  // "stream timeout" + retry loop. Also covers the whole reasoning phase (see chat()).
+  public firstChunkTimeoutMs = parseInt(process.env.BGW_FIRST_CHUNK_TIMEOUT_MS || '180000', 10);
+  // Optional reasoning budget for thinking models (e.g. minimax). Off by default —
+  // when set ('low'|'medium'|'high'), sent as reasoning_effort to trade depth for speed.
+  public reasoningEffort?: string = process.env.BGW_REASONING_EFFORT || undefined;
+  // Handle opener-less reasoning (`reasoning</think>answer`, no leading <think>) by buffering
+  // leading content until a closer proves it was thinking. On for the default reasoning models;
+  // set BGW_IMPLICIT_THINK=false for plain models so their answers stream token-by-token.
+  public implicitThink: boolean = process.env.BGW_IMPLICIT_THINK !== 'false';
+  // RUNTIME reasoning detection (so think-vs-non-think is figured out automatically, per model, with
+  // NO static config to get wrong when you switch models). A model id is added here the first time it
+  // proves it reasons — by emitting a `reasoning_content` delta or a `</think>` closer in content.
+  // Once learned, later turns of that model lift the preamble cap (wait for the closer instead of
+  // capping → no reasoning leak). Unknown/plain models stay capped, so their answers stream normally.
+  private detectedReasoners = new Set<string>();
+  // Allow the model to emit several tool calls in ONE turn (batched reads/greps run concurrently in
+  // the loop → far faster investigation). Default ON; disable for backends that reject multi-tool
+  // turns (e.g. NVIDIA NIM) via config or BGW_PARALLEL_TOOL_CALLS=false.
+  public parallelToolCalls: boolean = process.env.BGW_PARALLEL_TOOL_CALLS !== 'false';
+  // The LITE model — used for cheap auxiliary calls (history summaries, self-critic, ask-user
+  // auto-decisions). Falls back to the main (coding) model when unset. Set via /model lite.
+  public liteModel?: string = process.env.BGW_LITE_MODEL || undefined;
+  // The model the user EXPLICITLY chose (config.model / /model). Takes precedence over a key's
+  // provider-default model so the picker actually changes the model. Unset = use the key/default.
+  public userModel?: string = process.env.BGW_MODEL || undefined;
+
+  private budgetVeto?: any; // Will be typed as BudgetVeto but avoiding circular imports or just use any here
+
+  constructor(private apiKeyManager: ApiKeyManager) {}
+
+  public setBudgetVeto(budgetVeto: any) {
+    this.budgetVeto = budgetVeto;
+  }
+
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
+    if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
+    if (cfg.timeout) this.requestTimeout = cfg.timeout;
+    if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
+    if (cfg.topP !== undefined) this.topP = cfg.topP;
+    if (cfg.maxTokens) this.maxTokens = cfg.maxTokens;
+    if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
+    if (cfg.parallelToolCalls !== undefined) this.parallelToolCalls = cfg.parallelToolCalls;
+    if (cfg.liteModel !== undefined) this.liteModel = cfg.liteModel || undefined;
+  }
+
+  // Reuse one OpenAI client per (baseURL, key) instead of constructing a fresh one — with its own
+  // connection pool — on every request. Keep-alive then survives across calls (faster, fewer TLS
+  // handshakes). Per-request options like timeout are still passed at call time, so this is safe.
+  private clientCache = new Map<string, OpenAI>();
+  private createClient(keyResult: KeyResult): OpenAI {
+    const apiKey = keyResult.keyStr || '';
+    const baseURL = keyResult.baseURL || 'https://integrate.api.nvidia.com/v1';
+    const cacheKey = `${baseURL}${apiKey}`;
+    let client = this.clientCache.get(cacheKey);
+    if (!client) {
+      client = new OpenAI({ apiKey, baseURL, maxRetries: 3 });
+      this.clientCache.set(cacheKey, client);
+    }
+    return client;
+  }
+
+  // The IDs the provider ACTUALLY serves, fetched from its OpenAI-compatible `/models` endpoint.
+  // This kills the "400 — not a valid model ID" class of bug at the root: the picker offers real
+  // IDs instead of a hand-typed catalog that drifts out of sync with the provider. Cached for the
+  // session (refresh=true to re-fetch). Empty array on any failure — callers fall back to the
+  // static catalog, so a provider without a /models endpoint degrades to the old behaviour.
+  private liveModelsCache: string[] | null = null;
+  public async listProviderModels(refresh = false): Promise<string[]> {
+    if (this.liveModelsCache && !refresh) return this.liveModelsCache;
+    try {
+      const keyResult = await this.apiKeyManager.getNextKey();
+      if (!keyResult.keyStr) return [];
+      const client = this.createClient(keyResult);
+      const page = await client.models.list();
+      const ids = (page.data || []).map(m => m.id).filter(Boolean).sort();
+      this.liveModelsCache = ids;
+      return ids;
+    } catch (e: any) {
+      Logger.warn(`[LlmAdapter] listProviderModels failed (${e?.message}); falling back to static catalog.`);
+      return [];
+    }
+  }
+
+  // If the configured model isn't one the provider actually serves, switch to a valid one so the very
+  // first turn doesn't 400 forever (the classic symptom: a config.json pinned to a model from a
+  // different provider — e.g. an NVIDIA id while the key is OpenRouter). Returns {from,to} when it
+  // switched so the caller can notify + persist; null when nothing was wrong. Best-effort: a provider
+  // without a /models endpoint returns [] above, so we leave the config untouched.
+  public async healModel(): Promise<{ from: string; to: string } | null> {
+    const ids = await this.listProviderModels();
+    if (ids.length === 0) return null;
+    const current = this.userModel || this.defaultModel;
+    if (current && ids.includes(current)) return null; // already valid
+
+    // Prefer the provider/key's own default if the provider actually serves it; else first available.
+    let fallback = ids[0];
+    try {
+      const kr = await this.apiKeyManager.getNextKey();
+      if (kr.model && ids.includes(kr.model)) fallback = kr.model;
+    } catch { /* use first available */ }
+
+    const from = current || '(unset)';
+    this.userModel = fallback;
+    this.defaultModel = fallback;
+    Logger.warn(`[LlmAdapter] Configured model "${from}" not served by provider; switched to "${fallback}".`);
+    return { from, to: fallback };
+  }
+
+  /**
+   * Resolve the sampling regime for a model. Reasoning MoE models are tuned for a specific
+   * temperature/top_p and go pathological off it: minimax's own model card specifies
+   * temperature 1.0 + top_p 0.95, and a blanket 0.7-with-no-top_p (the prior default) measurably
+   * increased dropped tool arguments, fabricated paths, and run-to-run variance. So minimax is
+   * pinned to its recommended regime; everything else uses the configured temperature. In all
+   * cases we apply the top_p tail-clip, which is the real lever against those failures. An
+   * explicit per-call `temperature` (e.g. the deterministic aux callers) always wins. Mirrors
+   * opencode's provider/transform.ts.
+   */
+  public resolveSampling(model: string, override?: number): { temperature: number; top_p: number } {
+    const id = (model || '').toLowerCase();
+    if (id.includes('minimax')) return { temperature: override ?? 1.0, top_p: this.topP };
+    return { temperature: override ?? this.temperature, top_p: this.topP };
+  }
+
+  private pickModel(keyResult: KeyResult, lite?: boolean): string {
+    if (lite && this.liteModel) return this.liteModel;
+    // The user's explicit choice (set via /model → applyConfig) must win. Previously the key's
+    // baked-in provider default (keyResult.model) shadowed it, so /model appeared to do nothing.
+    return this.userModel || keyResult.model || this.defaultModel;
+  }
+
+  /**
+   * Resolve the capability descriptor for the model THIS call will actually use. Critically this
+   * keys off `pickModel(...)`, not a global env var: a key-pool can map different keys to
+   * different models (`<ENV>_MODEL_<n>`), so the model a call lands on — and thus what it
+   * supports — is only known per-call. Conservative FLOOR for anything unrecognised, so a model
+   * the table doesn't know behaves exactly as before the capability layer existed.
+   */
+  public capabilitiesForKey(keyResult: KeyResult, lite?: boolean): ModelCapabilities {
+    return capabilitiesFor(keyResult.provider, this.pickModel(keyResult, lite));
+  }
+
+  /** Best-effort capabilities for the currently-configured model — for UI/status surfacing. */
+  public async activeCapabilities(lite?: boolean): Promise<ModelCapabilities> {
+    const model = this.userModel || this.defaultModel;
+    if (lite && this.liteModel) return capabilitiesFor(undefined, this.liteModel);
+    return capabilitiesFor(undefined, model);
+  }
+
+  private async getKey(): Promise<KeyResult> {
+    const kr = await this.apiKeyManager.getNextKey();
+    if (!kr.keyStr || kr.idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
+    if (kr.waitTimeSecs > 0) {
+      Logger.warn(`[LlmAdapter] All keys exhausted! Sleeping ${kr.waitTimeSecs.toFixed(1)}s...`);
+      await new Promise(resolve => setTimeout(resolve, kr.waitTimeSecs * 1000));
+    }
+    return kr;
+  }
+
+  // Rough cost estimate at a flat $0.002 / 1K tokens. One place instead of the ~12 copies of this
+  // arithmetic (and the bare 0.002) that used to be scattered through every API method below.
+  private estCost(tokens: number): number {
+    return (tokens / 1000) * 0.002;
+  }
+
+  // Map an OpenAI/network error to a status code: timeout → 408, otherwise the API-reported status,
+  // else 500. Was copy-pasted verbatim in every method's catch block.
+  private errorStatus(e: any): number {
+    if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) return 408;
+    return e?.status || 500;
+  }
+
+  async generateTinyPlans(userPrompt: string, systemContext: string) {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    
+    // Budget checking heuristics: ~100 tokens out, 50 in for tiny plans
+    const estimatedTokens = 150;
+    const estimatedCostUsd = this.estCost(estimatedTokens); // Very rough estimate
+    if (this.budgetVeto) {
+      await this.budgetVeto.checkVeto(estimatedCostUsd);
+    }
+    
+    try {
+      // Native fast-path: a model with constrained-output support is told to emit a JSON object,
+      // so the plan comes back well-formed instead of wrapped in prose/fences. `extractJson` below
+      // remains the universal fallback (and handles models that ignore the hint), so floor models —
+      // for whom this field is omitted — are unaffected.
+      const planReq: any = {
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          { role: 'user', content: userPrompt }
+        ]
+      };
+      if (this.capabilitiesForKey(kr).structuredOutputs) {
+        planReq.response_format = { type: 'json_object' };
+      }
+      const response = await client.chat.completions.create(planReq, { timeout: this.requestTimeout });
+
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      }
+
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      // Models often wrap the plan in a markdown fence or prose; extract the raw JSON before parsing.
+      const content = extractJson(stripThink(response.choices[0].message.content || ""));
+      return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
+    } catch (error: any) {
+      if (this.budgetVeto) {
+        await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      }
+      Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
+      const status = this.errorStatus(error);
+      let retryAfter: number | null = null;
+      if (error.headers?.['retry-after']) retryAfter = parseFloat(error.headers['retry-after']);
+      else if (status === 429) retryAfter = 5;
+      this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfter);
+      return { status, data: null, retryAfter, error };
+    }
+  }
+
+  async generateXmlCompletion(userPrompt: string, systemContext: string, maxTokens: number = 64) {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedCostUsd = this.estCost(maxTokens);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: maxTokens,
+        temperature: 0.0
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
+    } catch (error: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
+      const status = this.errorStatus(error);
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      return { status, content: "", retryAfter: null, error };
+    }
+  }
+
+  async generateChatResponse(messages: any[], systemContext: string) {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          ...messages
+        ],
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (usage) {
+        Logger.info(`[LlmAdapter] Token Usage - Prompt: ${usage.prompt_tokens} | Completion: ${usage.completion_tokens} | Total: ${usage.total_tokens}`);
+        if (this.budgetVeto) {
+          const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
+          await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+        }
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
+    } catch (error: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
+      const status = this.errorStatus(error);
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      return { status, content: "", retryAfter: null, error };
+    }
+  }
+
+  async generateSemanticMetadata(nodeId: string, nodeName: string, type: string, codeSnippet: string) {
+    const systemContext = `You are a structural semantic analyzer. Return a JSON object with:
+    - purpose (string, max 15 words)
+    - criticality (string: 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL')
+    - riskScore (number: 0 to 100)
+    Based on the following code snippet.`;
+    const userPrompt = `Node ID: ${nodeId}\nNode Name: ${nodeName}\nType: ${type}\nCode:\n${codeSnippet}`;
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedCostUsd = this.estCost(200);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      // Capability-gated structured output: only ask for a JSON object when the model supports it
+      // (sending response_format to a model that lacks it 400s — e.g. the minimax default). extractJson
+      // below is the universal fallback that recovers JSON from fenced/prose output for the rest.
+      const metaReq: any = {
+        model: this.pickModel(kr),
+        messages: [
+          { role: 'system', content: systemContext },
+          { role: 'user', content: userPrompt }
+        ],
+      };
+      if (this.capabilitiesForKey(kr).structuredOutputs) {
+        metaReq.response_format = { type: "json_object" };
+      }
+      const response = await client.chat.completions.create(metaReq, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return JSON.parse(extractJson(stripThink(response.choices[0].message.content || "")) || "{}");
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
+      Logger.error(`[LlmAdapter] Failed semantic analysis for ${nodeId}`);
+      return null;
+    }
+  }
+
+  async chatCompletion(messages: any[], systemContext?: string, opts?: { lite?: boolean }): Promise<string> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const finalMessages = systemContext
+        ? [{ role: 'system', content: systemContext }, ...messages]
+        : messages;
+      const response = await client.chat.completions.create({
+        model: this.pickModel(kr, opts?.lite),
+        messages: finalMessages,
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      const usage = response.usage;
+      if (this.budgetVeto && usage) {
+        const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
+        await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+      } else if (this.budgetVeto) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      }
+      return stripThink(response.choices[0].message.content || "");
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
+      throw e;
+    }
+  }
+
+  async *generateChatResponseStream(
+    messages: any[],
+    systemContext?: string,
+  ): AsyncGenerator<string> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = this.maxTokens || 4096;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+
+    try {
+      const finalMessages = systemContext
+        ? [{ role: 'system', content: systemContext }, ...messages]
+        : messages;
+      const stream = await client.chat.completions.create({
+        model: this.pickModel(kr),
+        messages: finalMessages,
+        stream: true,
+        temperature: this.temperature,
+        max_tokens: this.maxTokens,
+      }, { timeout: this.requestTimeout });
+      for await (const chunk of stream) {
+        const token = chunk.choices[0]?.delta?.content || '';
+        if (token) yield token;
+      }
+      if (this.budgetVeto) await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+    } catch (e: any) {
+      if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+      const status = this.errorStatus(e);
+      this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      throw e;
+    }
+  }
+
+  async *chat(messages: Message[], options: ChatOptions): AsyncGenerator<ChatEvent> {
+    const kr = await this.getKey();
+    const client = this.createClient(kr);
+    const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
+    const estimatedCostUsd = this.estCost(estimatedTokens);
+    if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
+    // Declared outside the try so the catch can tell whether the reservation was
+    // already settled by a mid-stream usage report — otherwise an error after the
+    // usage chunk would release the same reservation twice (under-counting spend).
+    let usageRecorded = false;
+
+    try {
+      const caps = this.capabilitiesForKey(kr, options.lite);
+
+      let finalMessages: any[] = options.system
+        ? [{ role: 'system', content: options.system }, ...messages]
+        : messages;
+
+      // Vision safety net: image content is built upstream from the *configured* model's caps, but a
+      // key-pool can route THIS call to a different model. If the resolved model can't see images,
+      // flatten any image_url parts to a "[image]" text placeholder so we never send multimodal
+      // content to a model that would 400 on it. Vision-capable models pass through untouched.
+      if (!caps.visionInput && finalMessages.some(m => Array.isArray(m.content))) {
+        finalMessages = finalMessages.map(m => Array.isArray(m.content) ? { ...m, content: contentToText(m.content) } : m);
+      }
+
+      // Native fast-path: prompt caching. When the active model supports Anthropic `cache_control`
+      // (Claude, via OpenRouter/native/Bedrock), mark the large stable system prompt as a cache
+      // breakpoint so repeated turns in a session re-bill it at the cheap cached rate. For every
+      // other model this branch is skipped and messages stay as plain strings (FLOOR = unchanged).
+      // BiMax's universal answer to the same problem is the graph-native context engine (send less),
+      // which runs regardless — caching simply stacks on top when the model can do it.
+      if (caps.promptCaching && options.system && finalMessages.length > 0) {
+        finalMessages = [markCacheBreakpoint(finalMessages[0]), ...finalMessages.slice(1)];
+      }
+
+      const model = this.pickModel(kr, options.lite);
+      const sampling = this.resolveSampling(model, options.temperature);
+      const requestOptions: any = {
+        model,
+        messages: finalMessages,
+        stream: true,
+        stream_options: { include_usage: true },
+        temperature: sampling.temperature,
+        top_p: sampling.top_p,
+        max_tokens: options.maxTokens ?? this.maxTokens,
+      };
+
+      if (options.tools && options.tools.length > 0) {
+        requestOptions.tools = options.tools.map((t: any) => ({
+          type: 'function',
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.input_schema || t.parameters
+          }
+        }));
+        requestOptions.tool_choice = 'auto';
+        // NVIDIA NIM and several other OpenAI-compatible backends reject any
+        // assistant turn that emits more than one tool call ("This model only
+        // supports single tool-calls at once!"), which hard-aborts the task.
+        // The agent loop already executes tool calls sequentially, so constrain
+        // the model to one call per turn by default. Opt back in with
+        // BGW_PARALLEL_TOOL_CALLS=true for providers that support it.
+        // Default ON now (batched tool calls = faster). Only constrain to single-call for backends
+        // that reject multi-tool turns, via config / BGW_PARALLEL_TOOL_CALLS=false.
+        if (!this.parallelToolCalls) {
+          requestOptions.parallel_tool_calls = false;
+        }
+      }
+
+      // Optional reasoning budget — only sent when explicitly configured, so default
+      // behavior is unchanged. Lets thinking models (minimax) trade depth for speed.
+      // Only send reasoning_effort to a model that advertises the knob — several backends 400 on an
+      // unknown sampling field. Reasoning models (o-series, deepseek-r1, minimax) are flagged in the
+      // table; unknowns can opt in with BGW_CAP_REASONING_EFFORT=true.
+      const effort = options.reasoningEffort ?? this.reasoningEffort;
+      if (effort && caps.reasoningEffortKnob) requestOptions.reasoning_effort = effort;
+
+      // C6 — Anthropic beta-header features (1M context, token-efficient tools, interleaved
+      // thinking). Host-gated to the genuine Anthropic endpoint and opt-in via BGW_ANTHROPIC_BETA,
+      // so on every other backend (the default) this is undefined and the request is unchanged.
+      const requestInit: any = { timeout: this.requestTimeout, signal: options.signal as any };
+      const betaHeaders = anthropicBetaHeaders(kr.baseURL);
+      if (betaHeaders) requestInit.headers = betaHeaders;
+
+      const stream: any = await client.chat.completions.create(requestOptions, requestInit);
+
+      // Accumulate streamed tool calls keyed by their delta `index` — the OpenAI streaming contract:
+      // the first delta for an index carries id+name+the start of the args, later deltas append more
+      // args. The previous code keyed off the PRESENCE of `tc.id`, assuming it appears only on the
+      // first delta; minimax/NIM (and others) repeat `id` on every delta, so that mis-fired a "new
+      // call" each chunk and emitted truncated args (`{"query": "`, `richest person`, …) that then
+      // failed to parse. One slot per index, yielded only once the stream is complete, fixes it.
+      const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+      let lastActiveIdx = -1;
+      // Throttle live tool-arg partials (C3): a big tool call streams hundreds of arg fragments, and
+      // emitting one partial per fragment would drive a UI re-render each time. Coalesce to at most
+      // one partial every PARTIAL_EMIT_MS; the final authoritative tool_call always fires regardless.
+      const PARTIAL_EMIT_MS = 80;
+      let lastPartialAt = 0;
+      // Native-thinking fast-path: a model with a structured reasoning channel (Claude, o-series,
+      // DeepSeek-R1, minimax) delivers its reasoning out-of-band via `reasoning_content`; the
+      // content channel is the answer, with no opener-less `</think>` to guard against. Implicit
+      // mode buffers leading content until a closer proves it was reasoning — for these models that
+      // closer never comes, so it only adds latency (the answer arrives in one burst at stream end).
+      // Disable implicit mode when the capability is present so the answer streams token-by-token.
+      // FLOOR (caps.nativeThinking=false) leaves this exactly as before: `this.implicitThink`.
+      //
+      // Also disable it for CONFIRMED non-reasoning models (caps.plainContent, e.g. minimax): their
+      // content channel is always the answer, with no opener-less `</think>` closer to wait for. In
+      // implicit mode the filter would hold the leading content tentatively (up to the preamble cap)
+      // before releasing it — a visible head-of-reply stall that read as "minimax is very very slow".
+      // Streaming from token 1 cannot leak reasoning for these models (they don't reason inline).
+      const useImplicitThink = this.implicitThink && !caps.nativeThinking && !caps.plainContent;
+      // Lift the preamble cap ONLY for models we've LEARNED reason inline (this session) or that the
+      // capability table seeds as such — they emit long CoT then close it with `</think>`, so capping
+      // early would leak it. Everything else stays capped, so a plain model's answer streams instead
+      // of buffering into one end-of-stream burst (the minimax bug). Detection is automatic at runtime
+      // below, so a model NOT in the table is handled correctly the moment it reveals its behaviour.
+      if (caps.inlineReasoning || caps.nativeThinking) this.detectedReasoners.add(model); // table seed
+      const knownReasoner = this.detectedReasoners.has(model);
+      const thinkFilter = new ThinkTagFilter(useImplicitThink, /* capPreamble */ !knownReasoner);
+
+      // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
+      // field key the provider sent, then writes them to a dedicated debug file at stream end. This
+      // is how we learn the EXACT reasoning delimiter/channel a model uses (e.g. minimax's closer)
+      // without guessing. OPT-IN only — set BGW_DEBUG_STREAM=1 to enable. (It does sync disk writes
+      // at stream end, so leaving it on by default added I/O to every single turn.)
+      const debugStream = process.env.BGW_DEBUG_STREAM === '1' || process.env.BGW_DEBUG_STREAM === 'true';
+      let dbgContent = '';
+      let dbgReasoning = '';
+      const dbgDeltaKeys = new Set<string>();
+
+      const iterator = stream[Symbol.asyncIterator]();
+      let receivedFirstChunk = false;
+      while (true) {
+        const nextPromise = iterator.next();
+        // Guard against a silently stalled stream. The first chunk (time-to-first-token) gets a
+        // longer budget than later chunks: a cold start is a legitimate long pause, a mid-stream
+        // gap is not. The timer MUST be cleared once the chunk arrives, or every chunk leaks a
+        // timer (and a later unhandled rejection) — a long reasoning stream would spawn hundreds.
+        const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : this.firstChunkTimeoutMs;
+        const phase = receivedFirstChunk ? 'mid-stream' : 'first token';
+        let timeoutHandle: ReturnType<typeof setTimeout>;
+        const timeoutPromise = new Promise<any>((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error(`LLM stream timeout: model '${model}' sent no ${phase} for ${Math.round(chunkTimeoutMs / 1000)}s (provider ${kr.provider || 'NIM'} cold/slow — not a tool error)`)), chunkTimeoutMs);
+        });
+
+        let result: any;
+        try {
+          result = await Promise.race([nextPromise, timeoutPromise]);
+        } finally {
+          clearTimeout(timeoutHandle!);
+        }
+        if (result.done) break;
+        receivedFirstChunk = true;
+
+        const chunk = result.value;
+
+        if (debugStream) {
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta && typeof delta === 'object') {
+            for (const k of Object.keys(delta)) dbgDeltaKeys.add(k);
+            if (typeof delta.content === 'string') dbgContent += delta.content;
+            if (typeof delta.reasoning_content === 'string') dbgReasoning += delta.reasoning_content;
+            // Some providers use `reasoning` instead of `reasoning_content`; capture it too.
+            if (typeof (delta as any).reasoning === 'string') dbgReasoning += (delta as any).reasoning;
+          }
+        }
+
+        // Reasoning channel (DeepSeek-R1 / o-series style): never surface as the reply. Its mere
+        // presence PROVES this model reasons out-of-band, so the content channel is the answer —
+        // learn it (future turns skip buffering) and release anything the filter held tentatively.
+        const reasoning = chunk.choices[0]?.delta?.reasoning_content ?? (chunk.choices[0]?.delta as any)?.reasoning;
+        if (reasoning) {
+          if (!this.detectedReasoners.has(model)) {
+            this.detectedReasoners.add(model);
+            const released = thinkFilter.releaseAsAnswer();
+            if (released) yield { type: 'token', text: released };
+          }
+          yield { type: 'thinking', text: reasoning };
+        }
+
+        // Yield tokens, with inline <think> spans diverted to the thinking channel.
+        // Normalize <thinking>/<\/thinking> (step-3.7, QwQ, etc.) to the canonical
+        // <think>/<\/think> form so the filter handles both tag variants uniformly.
+        const rawToken = chunk.choices[0]?.delta?.content;
+        if (rawToken) {
+          const token = rawToken.replace(/<thinking>/g, '<think>').replace(/<\/thinking>/g, '</think>');
+          // A `</think>` in the content channel PROVES this model reasons inline — learn it so later
+          // turns lift the preamble cap (wait for the closer instead of capping → no reasoning leak).
+          if (token.includes('</think>')) this.detectedReasoners.add(model);
+          const { text, thinking } = thinkFilter.process(token);
+          if (thinking) yield { type: 'thinking', text: thinking };
+          if (text) yield { type: 'token', text };
+        }
+
+        // Handle tool calls streaming
+        const toolCalls = chunk.choices[0]?.delta?.tool_calls;
+        if (toolCalls && toolCalls.length > 0) {
+          // The turn is producing a tool call, so any leading content-channel text the model emitted
+          // was reasoning (the answer is the call). Divert whatever the filter still holds tentatively
+          // to the thinking channel — covers models that reason inline then jump straight to a tool
+          // call without ever emitting a `</think>` closer. Idempotent: a no-op after it first fires.
+          const stray = thinkFilter.drainPending();
+          if (stray) yield { type: 'thinking', text: stray };
+          for (const tc of toolCalls) {
+            lastActiveIdx = applyToolCallDelta(toolAcc, tc);
+          }
+          // C3 — live tool-arg streaming. When the model streams partial-JSON tool args, surface the
+          // most-recently-updated call (name + args-so-far) as it forms so the UI shows activity before
+          // the turn finishes. Display-only: the authoritative `tool_call`(s) fire once at the end.
+          // FLOOR (caps.partialJsonTools=false) never emits this, so behavior is unchanged. Throttled
+          // so a large tool call doesn't flood the UI with a re-render per arg fragment.
+          if (caps.partialJsonTools && lastActiveIdx >= 0) {
+            const now = Date.now();
+            if (now - lastPartialAt >= PARTIAL_EMIT_MS) {
+              lastPartialAt = now;
+              const slot = toolAcc.get(lastActiveIdx)!;
+              yield { type: 'tool_call_partial', id: slot.id || `idx-${lastActiveIdx}`, name: slot.name, args: slot.args };
+            }
+          }
+        }
+        
+        // Handle usage if present in the stream (requires stream_options in some models).
+        // Guard against a provider sending more than one usage chunk: record once, or
+        // the reservation would be released repeatedly.
+        if (chunk.usage && !usageRecorded) {
+          const cacheRead = chunk.usage.cache_read_input_tokens ?? 0;
+          const cacheCreate = chunk.usage.cache_creation_input_tokens ?? 0;
+          globalTelemetry.recordUsage(chunk.usage.prompt_tokens ?? 0, cacheRead, cacheCreate);
+          yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
+          if (this.budgetVeto) {
+            const actualCostUsd = this.estCost(chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
+            await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
+          }
+          usageRecorded = true;
+        }
+      }
+
+      if (debugStream && (dbgContent || dbgReasoning)) {
+        // Write to a dedicated file (not console/Logger) so the TUI is never corrupted. JSON.stringify
+        // shows whitespace/special tokens literally, so the exact reasoning delimiter is visible.
+        try {
+          const fs = require('fs');
+          const path = require('path');
+          const dir = path.join(process.cwd(), '.breakglass', 'logs');
+          fs.mkdirSync(dir, { recursive: true });
+          const rec = {
+            ts: new Date().toISOString(),
+            model,
+            hadTools: !!(options.tools && options.tools.length),
+            deltaKeys: [...dbgDeltaKeys],
+            reasoningLen: dbgReasoning.length,
+            contentLen: dbgContent.length,
+            content: dbgContent.slice(0, 4000),
+            reasoning_content: dbgReasoning.slice(0, 2000),
+          };
+          fs.appendFileSync(path.join(dir, 'stream-debug.log'), JSON.stringify(rec) + '\n', 'utf-8');
+        } catch { /* diagnostic only — never break the stream */ }
+      }
+
+      // Flush any text held back by the think-tag filter
+      const tail = thinkFilter.flush();
+      if (tail.thinking) yield { type: 'thinking', text: tail.thinking };
+      if (tail.text) yield { type: 'token', text: tail.text };
+
+      // Yield every accumulated tool call, in index order, now that the stream is complete and each
+      // one's arguments are whole. (Skips empty slots a provider may have opened without a name.)
+      for (const [, slot] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
+        if (slot.name) yield { type: 'tool_call', id: slot.id || `call-${Date.now()}-${slot.name}`, name: slot.name, args: slot.args };
+      }
+
+      yield { type: 'done' };
+
+      // Only fall back to the estimate if the stream never reported real usage,
+      // otherwise we would double-count the spend already recorded above.
+      if (this.budgetVeto && !usageRecorded) {
+        await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd); // Rough fallback
+      }
+      this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      
+    } catch (e: any) {
+      // Only release if a mid-stream usage report hasn't already settled the
+      // reservation, otherwise we would release it a second time.
+      if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
+
+      const { status, recoverable, kind, retryAfterSecs } = classifyStreamError(e);
+      this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
+      yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
+    }
+  }
+}
