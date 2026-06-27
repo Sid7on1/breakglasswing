@@ -207,6 +207,7 @@ type model struct {
 	graph       GraphSummary
 	ctxWindow   int
 	ctxBaseline int // system prompt + tool schemas (fixed per-request cost), from ui_snapshot
+	ctxSaved    int // cumulative tokens saved by Headroom backlog compression, from ui_snapshot
 	histTokens  int // running estimate of the conversation tokens (sum of message contents / 4)
 
 	// animation state (driven by tickMsg): per-turn elapsed clock + thinking phrase/dot rotation.
@@ -852,7 +853,17 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case engineClosed:
 		m.status = "engine exited"
-		m.append(errStyle.Render("— engine process exited —"))
+		if !m.ready {
+			// Died during boot — surface the REAL cause (from the engine log), not just the symptom.
+			// This is the difference between a baffling "engine process exited" and an actionable error.
+			m.append(errStyle.Render("— engine failed to start —"))
+			if tail := engineLogTail(12); tail != "" {
+				m.append(errStyle.Render(tail))
+			}
+			m.append(errStyle.Render("Hint: try `npm run build`; if node_modules looks corrupt (iCloud can do this on ~/Desktop) reinstall it. Full log: " + engineLogPath()))
+		} else {
+			m.append(errStyle.Render("— engine process exited —"))
+		}
 		return m, nil
 	}
 

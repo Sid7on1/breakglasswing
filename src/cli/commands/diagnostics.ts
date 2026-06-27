@@ -1,8 +1,53 @@
 import * as os from 'os';
 import { globalCommandRegistry } from './registry';
 import { getConfig } from '../config';
+import { buildKeyPool, getCurrentProvider } from '../provider';
 import { capabilitiesFor, capabilityGlyphs } from '../../core/capabilities';
 import { globalTelemetry } from '../../telemetry/telemetry';
+import * as headroomProxy from '../../memory/headroomProxy';
+import { getHeadroomReport } from '../../memory/headroom.compress';
+
+// One actionable health line. status drives the glyph; detail says what to do when not OK.
+function healthLine(status: 'ok' | 'warn' | 'fail', label: string, detail: string): string {
+  const glyph = status === 'ok' ? '✓' : status === 'warn' ? '⚠' : '✗';
+  return `- ${glyph} ${label}: ${detail}`;
+}
+
+// The real failure modes a user hits — surfaced as pass/warn/fail so "it's broken" becomes actionable.
+// Decoupled on purpose: reads the same key pool / proxy singleton / report the engine uses, no DI.
+function healthChecks(): string[] {
+  const lines: string[] = ['', '**Health checks**'];
+
+  // API keys — an empty pool is why requests silently fail.
+  try {
+    const keys = buildKeyPool();
+    lines.push(keys.length > 0
+      ? healthLine('ok', 'API keys', `${keys.length} key(s) · provider ${getCurrentProvider()}`)
+      : healthLine('fail', 'API keys', 'none configured — set one in /config or the provider env var'));
+  } catch (e: any) {
+    lines.push(healthLine('warn', 'API keys', `could not read key pool (${e?.message})`));
+  }
+
+  // Headroom compression — live proxy vs. native fallback vs. still provisioning.
+  try {
+    const r = getHeadroomReport();
+    if (headroomProxy.isHeadroomReady?.()) {
+      lines.push(healthLine('ok', 'Compression', `Kompress proxy live · ${r.totalSaved.toLocaleString()} tok saved this session`));
+    } else if (r.totalSaved > 0) {
+      lines.push(healthLine('warn', 'Compression', `native fallback (proxy still provisioning) · ${r.totalSaved.toLocaleString()} tok saved`));
+    } else {
+      lines.push(healthLine('warn', 'Compression', 'Kompress proxy provisioning — native fallback until ready'));
+    }
+    // Guard the report invariant the "100% → 0 tok" bug violated, in case it ever regresses live.
+    if (r.totalSaved > 0 && r.totalAfter <= 0) {
+      lines.push(healthLine('fail', 'Compression math', 'report shows after=0 — this is the old "100% smaller" bug; please report it'));
+    }
+  } catch (e: any) {
+    lines.push(healthLine('warn', 'Compression', `unavailable (${e?.message})`));
+  }
+
+  return lines;
+}
 
 function fmtDuration(totalSec: number): string {
   const s = Math.floor(totalSec % 60);
@@ -72,6 +117,7 @@ globalCommandRegistry.register({
       `- Coding: ${model.split('/').pop()}${liteModel ? ` · Lite: ${liteModel.split('/').pop()}` : ''}`,
       `- Context window: ${caps.contextWindow.toLocaleString()} tokens`,
       `- Capabilities: ${glyphs || '(floor — no special capabilities)'}`,
+      ...healthChecks(),
       ...toolLines,
       ...cacheLines,
       '',

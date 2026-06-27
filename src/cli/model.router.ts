@@ -1,6 +1,6 @@
 import { LlmAdapter } from '../core/llm.adapter';
 import { extractJson } from '../core/llm.adapter';
-import { Logger } from '../utils';
+import { Logger, withTimeout } from '../utils';
 
 /**
  * Model-tier routing. Two slots are configured: the LITE model (fast, cheap — the default
@@ -19,7 +19,7 @@ export interface RouteDecision {
   /** One-line framing for the heavy model; only set when escalating. */
   brief?: string;
   /** How the decision was reached — for logging / the footer tooltip. */
-  via: 'heuristic' | 'classifier' | 'pinned' | 'fallback';
+  via: 'heuristic' | 'classifier' | 'pinned' | 'fallback' | 'cache';
 }
 
 // Obvious conversational turns that never need the heavy model. Anchored to the whole (short)
@@ -55,26 +55,51 @@ Reply with ONLY a JSON object, no prose: {"tier":"lite"} or {"tier":"heavy","bri
 // make the user wait for the router. Cap it tightly and fall back to lite on timeout.
 const CLASSIFIER_TIMEOUT_MS = 6000;
 
+// Bounded cache of classifier decisions so identical/repeated prompts (re-asks after an error,
+// "yes"/"continue", retried turns) skip the pre-flight LLM round-trip — saving latency and a lite-model
+// call each time. Keyed by the normalized prompt; oldest entry evicted at the cap (plain FIFO is plenty
+// for this access pattern). Only genuine classifier results are cached — never a timeout/fallback.
+const CLASSIFIER_CACHE_MAX = 256;
+const _classifierCache = new Map<string, RouteDecision>();
+function classifierKey(prompt: string): string {
+  return prompt.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 512);
+}
+function cacheDecision(key: string, decision: RouteDecision): RouteDecision {
+  if (_classifierCache.size >= CLASSIFIER_CACHE_MAX) {
+    const oldest = _classifierCache.keys().next().value;
+    if (oldest !== undefined) _classifierCache.delete(oldest);
+  }
+  _classifierCache.set(key, decision);
+  return decision;
+}
+/** Test/maintenance hook — drop all cached routing decisions. */
+export function clearClassifierCache(): void { _classifierCache.clear(); }
+
 export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier | null): Promise<RouteDecision> {
   if (pinned) return { tier: pinned, via: 'pinned' };
 
   const h = heuristicTier(prompt);
   if (h) return { tier: h, via: 'heuristic' };
 
+  const key = classifierKey(prompt);
+  const hit = _classifierCache.get(key);
+  if (hit) return { ...hit, via: 'cache' };
+
   try {
-    const raw = await Promise.race([
+    const raw = await withTimeout(
       llm.chatCompletion([{ role: 'user', content: prompt }], CLASSIFIER_SYSTEM, { lite: true }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('classifier timeout')), CLASSIFIER_TIMEOUT_MS)),
-    ]);
+      CLASSIFIER_TIMEOUT_MS,
+      'classifier',
+    );
     const parsed = JSON.parse(extractJson(raw) || '{}');
     if (parsed?.tier === 'heavy') {
       const brief = typeof parsed.brief === 'string' && parsed.brief.trim() ? parsed.brief.trim() : undefined;
-      return { tier: 'heavy', brief, via: 'classifier' };
+      return cacheDecision(key, { tier: 'heavy', brief, via: 'classifier' });
     }
-    return { tier: 'lite', via: 'classifier' };
+    return cacheDecision(key, { tier: 'lite', via: 'classifier' });
   } catch (e: any) {
     Logger.warn(`[ModelRouter] classifier failed (${e?.message}); defaulting to lite.`);
-    return { tier: 'lite', via: 'fallback' };
+    return { tier: 'lite', via: 'fallback' }; // not cached — a transient failure shouldn't pin the route
   }
 }
 

@@ -104,6 +104,7 @@ func (m *model) handleEvent(o Outbound) {
 			m.graph = s.Graph
 			m.ctxWindow = s.ContextWindow
 			m.ctxBaseline = s.TokensBaseline
+			m.ctxSaved = s.CompressionSaved
 		}
 
 	case "tool_call", "tool_call_result":

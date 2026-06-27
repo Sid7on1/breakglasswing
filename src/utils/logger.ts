@@ -41,6 +41,14 @@ function correlationPrefix(): string {
   return id ? `[req:${id}] ` : '';
 }
 
+// stderr is best-effort console output; the file write below is the durable log. When the reader closes
+// the pipe (e.g. the Go TUI exits), process.stderr.write throws EPIPE *synchronously* — uncaught, that
+// FATALs the whole engine on a mere log line. Swallow write errors here so logging can never crash boot
+// or shutdown.
+function writeStderr(s: string): void {
+  try { process.stderr.write(s); } catch { /* closed pipe (EPIPE) / EOF — drop the console copy, keep the file log */ }
+}
+
 export const Logger = {
   setEventBus: (bus: any) => {
     telemetryBus = bus;
@@ -50,17 +58,17 @@ export const Logger = {
   // swallow logs or, once console is restored, corrupt the protocol stream. stderr is always safe.
   info: (message: string) => {
     const prefix = correlationPrefix();
-    process.stderr.write(`[INFO] ${new Date().toISOString()} - ${prefix}${message}\n`);
+    writeStderr(`[INFO] ${new Date().toISOString()} - ${prefix}${message}\n`);
     writeToFile('INFO', `${prefix}${message}`);
   },
   warn: (message: string) => {
     const prefix = correlationPrefix();
-    process.stderr.write(`\x1b[33m[WARN] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
+    writeStderr(`\x1b[33m[WARN] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
     writeToFile('WARN', `${prefix}${message}`);
   },
   error: (message: string) => {
     const prefix = correlationPrefix();
-    process.stderr.write(`\x1b[31m[ERROR] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
+    writeStderr(`\x1b[31m[ERROR] ${new Date().toISOString()} - ${prefix}${message}\x1b[0m\n`);
     writeToFile('ERROR', `${prefix}${message}`);
   },
 };

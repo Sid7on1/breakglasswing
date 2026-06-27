@@ -172,3 +172,28 @@ func (e *Engine) Close() {
 		_ = e.cmd.Process.Kill()
 	}
 }
+
+// engineLogPath returns where StartEngine sends the engine's stderr (boot logs) — the same cache-dir
+// location used above. Kept in one place so the crash-diagnostics reader and the writer never drift.
+func engineLogPath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "bimax", "engine.log")
+}
+
+// engineLogTail returns the last maxLines of the engine log — the actual reason a boot failed. Shown
+// when the engine dies before it ever reports `ready`, so the user sees the real error (a broken
+// node_modules, a missing module, a stack trace) instead of just "engine process exited".
+func engineLogTail(maxLines int) string {
+	b, err := os.ReadFile(engineLogPath())
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n")
+}

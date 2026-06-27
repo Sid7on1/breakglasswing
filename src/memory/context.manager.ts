@@ -5,6 +5,8 @@ import { Logger } from '../utils/logger';
 import { fileStateCache } from './file-state-cache';
 import { IGraphStore } from '../graph/models';
 import { formatRepoMapOutline } from '../graph/pagerank';
+import { compressBacklog, proxyCompress, recordCompression } from './headroom.compress';
+import { cliEvents } from '../cli/events';
 
 export type ContextMode = 'smart' | 'full';
 
@@ -90,7 +92,62 @@ export class ContextManager {
   async checkAndCompact(messages: Message[], mode: ContextMode = 'smart'): Promise<Message[]> {
     if (mode === 'full') return messages;
 
-    let msgs = this.capToolResults(messages);
+    // Layer 0 — Headroom Kompress compression. The REAL ML compressor (chopratejas/kompress-v2-base
+    // ONNX via the localhost proxy) crushes the noisy bulk of the context (tool outputs, logs, file
+    // dumps) ~30-40% while protecting error/signal lines. It costs ~5-9s of CPU, so we only fire it
+    // under TOKEN PRESSURE — once the backlog is near the compaction threshold, where it pays for
+    // itself; cheap turns stay instant. Opt out with BIMAX_DISABLE_COMPRESSION=1.
+    let msgs: Message[] = messages;
+    const pressureRatio = this.estimateTokens(messages) / this.MAX_TOKENS;
+    if (process.env.BIMAX_DISABLE_COMPRESSION !== '1' && pressureRatio >= this.COMPACT_THRESHOLD) {
+      // Which model the saving is attributed to (for the per-model /headroom report).
+      let model = 'unknown';
+      try { const c = require('../cli/config').getConfig(); model = c.model || c.liteModel || 'unknown'; } catch { /* config optional */ }
+
+      let saved = 0, n = 0;
+      // Give the proxy a brief beat to finish coming up before this pressured pass: the startup context
+      // can cross the threshold on turn one, before the ~4s sidecar boot completes — without this wait
+      // that first pass goes native and (since compaction may not recur) stays the only recorded engine.
+      try {
+        const hp = require('./headroomProxy');
+        if (!hp.isHeadroomReady()) await hp.awaitHeadroomReady(8000);
+      } catch { /* headroom optional */ }
+      // Prefer the real Headroom Kompress proxy; fall back to the native heuristic only if the sidecar
+      // isn't up yet (provisioning/first-run model download) so a turn under pressure never goes uncompacted.
+      const proxied = await proxyCompress(messages as any, model === 'unknown' ? '' : model, this.MAX_TOKENS);
+      if (proxied) {
+        // Measure the REAL before/after of the context so the /headroom ratio is honest. The proxy only
+        // returns `saved`, so deriving after = before - saved (vs. the old before=saved, after=0) is what
+        // stops the report claiming "100% smaller (… → 0 tok)". Trust whichever savings estimate is larger:
+        // our cheap char/4 estimate, or the proxy's own re-tokenized count.
+        const before = this.estimateTokens(messages);
+        const after = this.estimateTokens(proxied.messages as Message[]);
+        if (after > before) {
+          // Sanity net: a compactor that GROWS the context is a regression (bad proxy build, model
+          // misconfig). Never swap in a larger array — keep the original and record nothing.
+          Logger.warn(`[Headroom] proxy returned a LARGER context (${before} → ${after} tok); discarding its result.`);
+        } else {
+          msgs = proxied.messages as Message[];
+          saved = Math.max(0, before - after, proxied.saved);
+          if (saved > 0) recordCompression(model, before, Math.max(0, before - saved), 'proxy');
+        }
+        n = -1;
+      } else {
+        // Native safety net (proxy not ready): collapse repetitive log/ANSI spam in ALL tool outputs.
+        // Lossless on code and always keeps error/warning lines.
+        const { messages: compressed, stats } = compressBacklog(messages as any, { protectRecent: 0 });
+        msgs = compressed as Message[];
+        saved = stats.saved;
+        n = stats.compressedMessages;
+        if (saved > 0) recordCompression(model, stats.compressedBefore, stats.compressedAfter, 'native');
+      }
+      if (saved > 0) {
+        Logger.info(`[Headroom] ${proxied ? 'Kompress proxy' : 'native'} compression saved ~${saved} tokens${n >= 0 ? ` across ${n} output(s)` : ''} (model ${model})`);
+        try { cliEvents.emit('graph_changed'); } catch { /* refresh the token meter; best-effort */ }
+      }
+    }
+
+    msgs = this.capToolResults(msgs);
     msgs = this.microCompact(msgs);
     msgs = this.snip(msgs);
 

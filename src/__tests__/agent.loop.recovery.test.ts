@@ -245,7 +245,7 @@ describe('AgentLoop — retries transient errors then gives up', () => {
     }
 
     expect(call).toBe(2); // retried exactly once
-    expect(out).toContain('Retrying (1/2)');
+    expect(out).toContain('retrying (1/2)');
     expect(out).toContain('Recovered and answered.');
   });
 

@@ -8,6 +8,9 @@ export type CommandResult =
   | { type: 'menu'; title: string; options: any[]; onSelect?: (val: any) => void | Promise<void> }
   | { type: 'prompt'; title: string; onResolve: (val: string) => void }
   | { type: 'redirect'; command: string }
+  // A rich front-end panel (HelpDashboard / StatsDashboard / DataTableDashboard) forwarded to the
+  // TUI as a message carrying a uiComponent + payload.
+  | { type: 'dashboard'; uiComponent: string; payload: any }
   | { type: 'none' }; // Handled externally
 
 export interface CommandContext {

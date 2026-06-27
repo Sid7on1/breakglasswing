@@ -2,6 +2,7 @@ import { ToolRegistry } from '../tools/tool.registry';
 import { buildTool } from '../tools/tool.factory';
 import { IGovernor } from '../core/interfaces';
 import { Logger } from '../utils/logger';
+import { withTimeout } from '../utils/withTimeout'; // shared, leak-safe — a hung server never blocks boot/add
 import { McpServerSpec } from './config';
 
 // The MCP SDK ships package "exports" maps that our classic TS moduleResolution can't follow
@@ -12,20 +13,12 @@ const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { SSEClientTransport } = require('@modelcontextprotocol/sdk/client/sse.js');
 
-/** Reject if a promise doesn't settle within `ms` — so a hung server never blocks boot/add. */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms)),
-  ]);
-}
-
 /**
  * Open a transport+client for a spec. Local (stdio) specs launch a command; remote specs
  * connect to a URL — trying Streamable HTTP first, then falling back to SSE (older hosted
  * servers only speak SSE). Returns a connected client or throws.
  */
-async function openClient(spec: McpServerSpec): Promise<any> {
+export async function openClient(spec: McpServerSpec): Promise<any> {
   const client = new Client({ name: 'bimax', version: '1.0.0' }, { capabilities: {} });
 
   if (spec.url) {

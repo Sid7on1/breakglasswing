@@ -65,9 +65,13 @@ function replayBootLogs() {
 
 // 4. Graceful Boot Error Handling (API-006)
 process.on('uncaughtException', (err) => {
+  // A broken pipe means our reader (the Go TUI) closed stdout/stderr — i.e. it exited. That's a normal
+  // shutdown, not a crash: leave quietly with no scary fatal-crash.log or CRITICAL CRASH banner.
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') { process.exit(0); }
+
   const msg = `[FATAL] Uncaught Exception: ${err.message}\n${err.stack}`;
   fs.appendFileSync('fatal-crash.log', new Date().toISOString() + ' ' + msg + '\n');
-  
+
   if (bootLogs.length > 0) {
     originalConsoleError(msg);
   } else {

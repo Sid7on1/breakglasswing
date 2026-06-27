@@ -98,6 +98,8 @@ type UiSnapshot struct {
 	Graph          GraphSummary `json:"graph"`
 	ContextWindow  int          `json:"contextWindow"`
 	TokensBaseline int          `json:"tokensBaseline"`
+	// Cumulative tokens saved this session by Headroom-style backlog compression.
+	CompressionSaved int `json:"compressionSaved"`
 }
 
 // GraphSummary — the codebase-map overview behind CodebaseMapPanel.
@@ -106,6 +108,9 @@ type GraphSummary struct {
 	FileCount    int           `json:"fileCount"`
 	AIGraphBuilt bool          `json:"aiGraphBuilt"`
 	Modules      []GraphModule `json:"modules"`
+	// Engine backing the graph tools: "codebase-memory" (158-lang engine + local semantic search),
+	// "native" (in-memory AST graph), or "none". Badged in the codebase-map panel.
+	Engine string `json:"engine,omitempty"`
 }
 
 type GraphModule struct {

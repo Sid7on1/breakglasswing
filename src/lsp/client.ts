@@ -4,6 +4,7 @@ import * as url from 'url';
 import { spawn, ChildProcess } from 'child_process';
 import { LspServerSpec } from './registry';
 import { Logger } from '../utils/logger';
+import { withTimeoutOr } from '../utils/withTimeout';
 
 // C1 — a minimal LSP client over stdio (vscode-jsonrpc). Spawns a language server, performs
 // the initialize handshake, opens documents, and exposes the two enrichments the agent
@@ -112,12 +113,13 @@ export class LspClient {
     if (!(await this.start())) return [];
     const uri = this.syncDocument(file);
     try {
-      const locs = await Promise.race([
+      const locs = await withTimeoutOr<any>(
         this.connection.sendRequest('textDocument/references', {
           textDocument: { uri }, position: { line: line0, character: char0 }, context: { includeDeclaration: true },
         }),
-        new Promise<null>(res => setTimeout(() => res(null), timeoutMs)),
-      ]);
+        timeoutMs,
+        null,
+      );
       if (!Array.isArray(locs)) return [];
       return locs.map((l: any) => ({ uri: l.uri, line: l.range.start.line, character: l.range.start.character }));
     } catch {

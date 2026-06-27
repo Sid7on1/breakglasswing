@@ -7,6 +7,28 @@ import { Logger } from '../utils/logger';
 import { McpServerSpec, loadMcpServers, normalizeArgs, missingPathArgs } from './config';
 import { connectAndRegister, ConnectedMcp } from './client';
 import { cliEvents } from '../cli/events';
+import { codebaseMemorySpec } from './builtin/codebaseMemory';
+
+/**
+ * Built-in engines baked into Bimax (auto-provisioned, not user-configured). Seeded into the
+ * connect set before user config so a same-named entry in .bimax/mcp.json still wins. Failures
+ * are swallowed — a missing engine must never block boot.
+ *
+ * codebase-memory is fronted natively by the GraphQueryTool/GraphContextTool backend (approach b),
+ * so by default we do NOT also register its 14 raw `mcp__codebase-memory__*` tools (that would dump
+ * redundant tools on the model and spawn a second engine process). Power users can opt into the raw
+ * tools with BIMAX_CODEMEM_RAW_TOOLS=1.
+ */
+async function builtinServers(): Promise<McpServerSpec[]> {
+  const out: McpServerSpec[] = [];
+  if (process.env.BIMAX_CODEMEM_RAW_TOOLS === '1') {
+    try {
+      const cbm = await codebaseMemorySpec();
+      if (cbm) out.push(cbm);
+    } catch { /* best-effort */ }
+  }
+  return out;
+}
 
 /** Defend every entry point: a model may pass `args` as a JSON string — coerce it to a real array. */
 function cleanSpec(spec: McpServerSpec): McpServerSpec {
@@ -55,6 +77,8 @@ export class McpManager {
    */
   public async connectAll(registry: ToolRegistry, governor: IGovernor, projectRoot?: string): Promise<number> {
     const byName = new Map<string, McpServerSpec>();
+    // Built-in engines first, so user config of the same name can override them.
+    for (const s of await builtinServers()) byName.set(s.name, s);
     for (const s of loadMcpServers(os.homedir())) byName.set(s.name, s);
     if (projectRoot && projectRoot !== os.homedir()) {
       for (const s of loadMcpServers(projectRoot)) byName.set(s.name, s);

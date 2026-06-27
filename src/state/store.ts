@@ -1,40 +1,36 @@
-import { useState, useEffect } from 'react';
+// Minimal, dependency-free observable store.
+//
+// Previously this imported React (useState/useEffect) to expose a `useStore`
+// hook for the retired Ink front-end. The sole front-end is now the Go / Bubble
+// Tea TUI driving the headless engine over stdio, so the hook is gone and this
+// is a plain typed pub/sub container used by the engine's app state.
 
-type Listener<T> = (state: T, prevState: T) => void;
+export type StateUpdater<T> = Partial<T> | ((prev: T) => Partial<T>);
 
-export function createStore<T>(initialState: T) {
-  let state = initialState;
-  const listeners = new Set<Listener<T>>();
-  
+export interface Store<T> {
+  getState(): T;
+  setState(update: StateUpdater<T>): void;
+  subscribe(listener: (state: T) => void): () => void;
+}
+
+export function createStore<T extends object>(initial: T): Store<T> {
+  let state: T = initial;
+  const listeners = new Set<(state: T) => void>();
+
   return {
-    getState: () => state,
-    
-    setState: (partial: Partial<T> | ((prev: T) => Partial<T>)) => {
-      const prev = state;
-      const changes = typeof partial === 'function' ? partial(prev) : partial;
-      state = { ...prev, ...changes };
-      listeners.forEach(l => l(state, prev));
+    getState() {
+      return state;
     },
-    
-    subscribe: (listener: Listener<T>) => {
+    setState(update: StateUpdater<T>) {
+      const patch = typeof update === 'function' ? update(state) : update;
+      state = { ...state, ...patch };
+      for (const listener of listeners) listener(state);
+    },
+    subscribe(listener: (state: T) => void) {
       listeners.add(listener);
       return () => {
         listeners.delete(listener);
       };
-    },
-    
-    useStore: <R>(selector: (state: T) => R): R => {
-      const [localState, setLocalState] = useState(() => selector(state));
-      
-      useEffect(() => {
-        const listener: Listener<T> = (newState) => {
-          setLocalState(selector(newState));
-        };
-        listeners.add(listener);
-        return () => { listeners.delete(listener); };
-      }, [selector]);
-      
-      return localState;
-    },
+    }
   };
 }

@@ -6,4 +6,15 @@ dist/
 src/**/evolve_staging_*
 *.backup_*
 node_modules/
+node_modules
+node_modules.nosync/
 build/
+
+# Runtime logs / crash dumps written to cwd
+fatal-crash.log
+*.log
+
+# Bundled native engines are fetched/built at runtime, never committed
+vendor/*/bin/
+vendor/*/cache/
+vendor/*/venv/

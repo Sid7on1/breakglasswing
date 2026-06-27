@@ -955,6 +955,26 @@ func TestMapPanelRenders(t *testing.T) {
 	}
 }
 
+func TestMapPanelShowsCodebaseMemoryBadge(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"models": map[string]string{"coding": "x/m"},
+		"graph": map[string]any{
+			"nodeCount": 0, "fileCount": 0, "engine": "codebase-memory",
+		},
+	}))
+	// Full panel badges the engine even with an empty native graph.
+	panel := stripANSI(m.mapPanelView())
+	if !strings.Contains(panel, "codebase-memory") {
+		t.Fatalf("map panel missing codebase-memory badge: %q", panel)
+	}
+	// Compact line surfaces it too (native NodeCount is 0).
+	compact := stripANSI(m.compactMapView())
+	if !strings.Contains(compact, "codebase-memory") {
+		t.Fatalf("compact map missing codebase-memory badge: %q", compact)
+	}
+}
+
 func TestDashboardRouting(t *testing.T) {
 	m, _ := newTestModel()
 	m.handleEngine(ev("message", map[string]any{
@@ -968,6 +988,24 @@ func TestDashboardRouting(t *testing.T) {
 	joined := stripANSI(strings.Join(m.lines, "\n"))
 	if !strings.Contains(joined, "/help") || !strings.Contains(joined, "Show help") {
 		t.Fatalf("help dashboard not rendered: %q", joined)
+	}
+}
+
+func TestHeadroomReportDashboardRenders(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("message", map[string]any{
+		"role": "system", "uiComponent": "StatsDashboard",
+		"payload": map[string]any{
+			"type": "stats", "title": "Headroom savings",
+			"items": []map[string]string{
+				{"label": "Tokens saved (session)", "value": "5,852 tok"},
+				{"label": "anthropic/claude-opus-4-8", "value": "4,272 tok saved · 1 pass(es)"},
+			},
+		},
+	}))
+	joined := stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(joined, "5,852 tok") || !strings.Contains(joined, "claude-opus-4-8") {
+		t.Fatalf("headroom report not rendered: %q", joined)
 	}
 }
 

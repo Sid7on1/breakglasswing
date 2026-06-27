@@ -1,4 +1,4 @@
-import { heuristicTier, decideTier, applyBrief } from '../cli/model.router';
+import { heuristicTier, decideTier, applyBrief, clearClassifierCache } from '../cli/model.router';
 
 describe('model.router — heuristicTier', () => {
   it('short-circuits obvious chat/acks to lite (no LLM)', () => {
@@ -47,6 +47,41 @@ describe('model.router — decideTier', () => {
     const llm = { chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
     const d = await decideTier(llm, 'do something ambiguous and long enough to pass the heuristic', null);
     expect(d).toEqual({ tier: 'lite', via: 'fallback' });
+  });
+});
+
+describe('model.router — classifier cache', () => {
+  const fakeLlm = (reply: string) => ({ chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
+  beforeEach(() => clearClassifierCache());
+
+  it('serves a repeated prompt from cache without re-calling the classifier', async () => {
+    const llm = fakeLlm('{"tier":"heavy","brief":"rework streaming"}');
+    const p = 'rework the streaming pipeline end to end';
+    const first = await decideTier(llm, p, null);
+    const second = await decideTier(llm, p, null);
+    expect(first.via).toBe('classifier');
+    expect(second.via).toBe('cache');
+    expect(second.tier).toBe('heavy');
+    expect(second.brief).toBe('rework streaming');
+    expect(llm.chatCompletion).toHaveBeenCalledTimes(1); // second hit skipped the LLM
+  });
+
+  it('normalizes whitespace/case so trivially-different prompts share a cache entry', async () => {
+    const llm = fakeLlm('{"tier":"lite"}');
+    await decideTier(llm, 'Reindex   The Project', null);
+    const again = await decideTier(llm, 'reindex the project', null);
+    expect(again.via).toBe('cache');
+    expect(llm.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a fallback (transient failure must not pin the route)', async () => {
+    const llm = { chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
+    const p = 'an ambiguous request long enough to pass the heuristic gate';
+    const a = await decideTier(llm, p, null);
+    const b = await decideTier(llm, p, null);
+    expect(a.via).toBe('fallback');
+    expect(b.via).toBe('fallback');
+    expect(llm.chatCompletion).toHaveBeenCalledTimes(2); // retried, not served stale from cache
   });
 });
 

@@ -28,6 +28,8 @@ export class MemoryMonitor {
       }
       this.checkMemory();
     }, intervalMs);
+    // Don't let the monitor timer keep the process (or a Jest worker) alive past its real work.
+    this.monitorLoop.unref();
   }
 
   public stop() {

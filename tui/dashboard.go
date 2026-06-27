@@ -54,7 +54,9 @@ func renderDashboard(me MessageEntry) string {
 			fmt.Fprintf(&b, "%s\n", dashTitle.Render(p.Title))
 		}
 		for _, it := range p.Items {
-			fmt.Fprintf(&b, "%s%s\n", dashKey.Render(fmt.Sprintf("  %-20s", it.Label)), dashVal.Render(it.Value))
+			// Trailing space guarantees a gap even when the label is >= the 20-col pad (e.g. "Tokens saved
+			// (session)" or a long model id) — otherwise the value butts straight against the label.
+			fmt.Fprintf(&b, "%s%s\n", dashKey.Render(fmt.Sprintf("  %-20s ", it.Label)), dashVal.Render(it.Value))
 		}
 	case "DataTableDashboard":
 		var p DataTablePayload

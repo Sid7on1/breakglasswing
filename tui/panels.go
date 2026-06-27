@@ -84,6 +84,9 @@ func (m model) mapPanelView() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%s\n", mapHdr.Render("Codebase Map · "), mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)))
+	if m.graph.Engine == "codebase-memory" {
+		fmt.Fprintf(&b, "%s%s\n", mapHdr.Render("engine: "), logOK.Render("⚡ codebase-memory · 158-lang · semantic"))
+	}
 	if len(m.graph.Modules) > 0 {
 		fmt.Fprintf(&b, "%s\n", mapHdr.Render("top modules (by criticality)"))
 		for _, mod := range m.graph.Modules {
@@ -121,7 +124,10 @@ func (m model) mapPanelView() string {
 // count + the top few modules by criticality, colour-dotted. Empty until the graph is indexed. The
 // full multi-line panel is still available via /map.
 func (m model) compactMapView() string {
-	if m.graph.NodeCount == 0 {
+	cbm := m.graph.Engine == "codebase-memory"
+	// The engine keeps its own 158-language index, so it can be live even when the native in-memory
+	// graph (NodeCount) is empty — still show the badge in that case.
+	if m.graph.NodeCount == 0 && !cbm {
 		return ""
 	}
 	// LEFT-aligned, plain (no wide/ambiguous glyphs), and truncated to width-2 — NOT right-aligned and
@@ -129,7 +135,14 @@ func (m model) compactMapView() string {
 	// version) overflows the terminal, wraps, and desyncs Bubble Tea's inline cursor-up clear → the
 	// whole live region multiplies on every tea.Println / zoom. A short left-aligned line can't wrap.
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s%s", mapHdr.Render("Map "), mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)))
+	if cbm {
+		fmt.Fprintf(&b, "%s", logOK.Render("⚡ codebase-memory"))
+		if m.graph.NodeCount > 0 {
+			fmt.Fprintf(&b, "%s", mapHdr.Render(fmt.Sprintf(" · %d nodes", m.graph.NodeCount)))
+		}
+	} else {
+		fmt.Fprintf(&b, "%s%s", mapHdr.Render("Map "), mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)))
+	}
 	shown := 0
 	for _, mod := range m.graph.Modules {
 		if shown >= 3 {

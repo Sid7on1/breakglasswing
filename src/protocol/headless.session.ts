@@ -175,6 +175,7 @@ export class HeadlessSession {
         const r: any = result;
         cliEvents.emit('input_prompt', r.title, (val: string) => r.onResolve?.(val));
       } else if (result.type === 'redirect') void this.dispatch(result.command);
+      else if (result.type === 'dashboard') cliEvents.emit('message', this.uiMsg(result.uiComponent, result.payload));
     } catch (err: any) {
       if (!String(err?.message).includes('Unknown command')) {
         cliEvents.emit('message', this.msg('system', err?.message ?? String(err), 'error'));

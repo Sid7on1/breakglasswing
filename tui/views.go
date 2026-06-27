@@ -517,6 +517,10 @@ func (m model) tokenMeterView() string {
 		fmt.Fprintf(&b, "%s%s%s", meterFill.Render(strings.Repeat("█", filled)), meterEmpty.Render(strings.Repeat("░", w-filled)), meterText.Render(fmt.Sprintf(" %d%%  ", pct)))
 	}
 	fmt.Fprintf(&b, "%s", meterText.Render(fmt.Sprintf("%s · ~%s tok", shortModel(model), humanCount(tokens))))
+	// Headroom compression: show cumulative tokens saved so the user sees it paying off.
+	if m.ctxSaved > 0 {
+		fmt.Fprintf(&b, "%s", logOK.Render(fmt.Sprintf(" · ⚡ -%s", humanCount(m.ctxSaved))))
+	}
 	// m.width-1, not full width — a line that fills the terminal auto-wraps and ghosts on resize.
 	return lipgloss.PlaceHorizontal(m.width-1, lipgloss.Right, b.String())
 }

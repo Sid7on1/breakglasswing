@@ -34,6 +34,7 @@ import { createGrepTool, createGlobTool } from '../tools/implementations/search.
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { createGraphQueryTool, createGraphContextTool } from '../tools/implementations/graph.tool';
+import { globalCodemem } from '../graph/codemem/backend';
 import { globalMcpManager } from '../mcp/manager';
 import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
@@ -113,8 +114,18 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Tools
   const toolRegistry = new ToolRegistry();
   // Index-gated tools (GraphQueryTool/GraphContextTool) stay disabled until the repo is indexed, then
-  // are promoted + preferred. The check is lazy so it reflects a graph built mid-session (after /index).
-  toolRegistry.setGraphReadyCheck(() => graphStore.getGraph().nodes.size > 0);
+  // are promoted + preferred. The check is lazy so it reflects a graph built mid-session (after /index)
+  // OR the baked-in codebase-memory engine coming online (its own 158-language index + semantic search).
+  toolRegistry.setGraphReadyCheck(() => graphStore.getGraph().nodes.size > 0 || globalCodemem.isReady());
+  // Bring the codebase-memory engine up in the background — it fronts the graph tools when ready and
+  // never blocks boot. Skipped for non-codebase dirs (nothing to index).
+  if (isCodebase(projectRoot)) {
+    globalCodemem.init(projectRoot).catch(() => {});
+  }
+  // Bring the real Headroom Kompress proxy up in the background (provision venv + ONNX model on first
+  // run, spawn the localhost sidecar, wire HEADROOM_PROXY_URL). Never blocks boot; the engine only
+  // calls it under token pressure. Opt out with BIMAX_DISABLE_HEADROOM=1.
+  import('../memory/headroomProxy').then(m => m.ensureHeadroomProxy().catch(() => {})).catch(() => {});
   toolRegistry.register(createReadFileTool(governor));
   toolRegistry.register(createWriteFileTool(governor));
   toolRegistry.register(createEditFileTool(governor));

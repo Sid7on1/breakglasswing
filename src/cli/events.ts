@@ -105,7 +105,7 @@ export interface MessageEntry {
   level?: 'info' | 'warn' | 'error' | 'success';
   uiComponent?: string;
   payload?: any;
-  content: string | React.ReactNode;
+  content: string;
   toolCalls?: ToolCallEntry[];
   // Wall-clock the model spent in its reasoning channel this turn. Rendered as a collapsed
   // "Thought for Ns" line (Claude Code style) once thinking finishes.

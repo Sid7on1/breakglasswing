@@ -7,6 +7,7 @@ import { fmtNode, searchNodes, resolveNodeId } from '../../graph/node.search';
 import { readSymbolSource } from '../../graph/symbol.source';
 import { planContext } from '../../graph/context.planner';
 import { getTopNodes } from '../../graph/pagerank';
+import { globalCodemem } from '../../graph/codemem/backend';
 
 // When a lookup misses, ORIENT the model instead of dead-ending: tell it what the graph actually
 // holds — node-type counts + the most central REAL symbols — so it searches actual names rather than
@@ -38,6 +39,8 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
 - \`GET_DEPENDENCIES <node>\` — what this symbol DIRECTLY depends on (the symbols it calls/uses).
 - \`BLAST_RADIUS <node>\` — downstream reach + highest criticality if you modify this node. Run this before signature-changing edits.
 - \`READ_SYMBOL <node>\` — return ONLY that symbol's source (its exact line range), with a header (file, signature, criticality). Prefer this over reading a whole file when you just need one function/class.
+- \`SEMANTIC <natural-language query>\` — VECTOR search that bridges vocabulary (finds "publish" when you search "send"). Use when you don't know the exact symbol name. Powered by the baked-in codebase-memory engine's local code embeddings.
+- \`ARCHITECTURE [path]\` — high-level structural overview: packages, services, and de-facto module clusters (community detection). Use to grasp how an unfamiliar codebase is organized.
 - \`<node>\` (bare) — the node plus its direct edges.
 
 \`<node>\` may be an exact node id or a unique keyword; ambiguous keywords return candidates to disambiguate.`,
@@ -54,16 +57,33 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     const raw = (args.query || '').trim();
     if (!raw) return 'Error: empty query.';
 
-    const graph = graphStore.getGraph();
-    if (graph.nodes.size === 0) {
-      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
-    }
-
-    const verbs = ['SEARCH_NODES', 'GET_DEPENDENTS', 'GET_DEPENDENCIES', 'BLAST_RADIUS', 'READ_SYMBOL'];
+    const verbs = ['SEARCH_NODES', 'GET_DEPENDENTS', 'GET_DEPENDENCIES', 'BLAST_RADIUS', 'READ_SYMBOL', 'SEMANTIC', 'ARCHITECTURE'];
     const firstSpace = raw.indexOf(' ');
     const maybeVerb = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toUpperCase();
     const verb = verbs.includes(maybeVerb) ? maybeVerb : null;
     const target = verb ? raw.slice(firstSpace + 1).trim() : raw;
+
+    // codebase-memory engine: when connected + indexed, it fronts these verbs with a richer,
+    // 158-language graph + local semantic search. Any miss returns null → native graph below.
+    if (globalCodemem.isReady()) {
+      let r: string | null = null;
+      if (verb === 'SEMANTIC') r = await globalCodemem.search(target, true);
+      else if (verb === 'SEARCH_NODES' && target && target !== '*') r = await globalCodemem.search(target, false);
+      else if (verb === 'GET_DEPENDENTS') r = await globalCodemem.traceCalls(target, 'inbound');
+      else if (verb === 'GET_DEPENDENCIES') r = await globalCodemem.traceCalls(target, 'outbound');
+      else if (verb === 'BLAST_RADIUS') r = await globalCodemem.blastRadius(target);
+      else if (verb === 'READ_SYMBOL') r = await globalCodemem.readSymbol(target);
+      else if (verb === 'ARCHITECTURE') r = await globalCodemem.architecture(target || undefined);
+      if (r) return r;
+    }
+    // Engine-only verbs with no native equivalent: guide the model when the engine isn't ready.
+    if (verb === 'SEMANTIC') return 'Semantic search needs the codebase-memory engine, which is still indexing or unavailable. Use SEARCH_NODES <keyword> for now.';
+    if (verb === 'ARCHITECTURE') return 'The architecture overview needs the codebase-memory engine, which is still indexing or unavailable. Explore with SEARCH_NODES * and ls for now.';
+
+    const graph = graphStore.getGraph();
+    if (graph.nodes.size === 0) {
+      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
+    }
 
     if (verb === 'SEARCH_NODES') {
       // Discovery: `SEARCH_NODES *` (or no keyword) lists the most central nodes so the model can see
@@ -176,14 +196,20 @@ Prefer this over ReadFileTool whenever you are about to modify an existing funct
     const raw = (args.query || '').trim();
     if (!raw) return 'Error: empty query.';
 
-    if (graphStore.getGraph().nodes.size === 0) {
-      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
-    }
-
     const firstSpace = raw.indexOf(' ');
     const maybeVerb = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toUpperCase();
     const target = maybeVerb === 'PLAN_CONTEXT' ? raw.slice(firstSpace + 1).trim() : raw;
     if (!target) return 'Error: PLAN_CONTEXT needs a target symbol (e.g. PLAN_CONTEXT handlePayment).';
+
+    // Prefer the codebase-memory engine when ready; fall back to the native context planner.
+    if (globalCodemem.isReady()) {
+      const r = await globalCodemem.planContext(target);
+      if (r) return r;
+    }
+
+    if (graphStore.getGraph().nodes.size === 0) {
+      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
+    }
 
     const cwd = context?.cwd || process.cwd();
     const pack = await planContext(graphStore, target, { cwd });

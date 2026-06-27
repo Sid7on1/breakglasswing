@@ -321,3 +321,57 @@ globalCommandRegistry.register({
     };
   }
 });
+
+globalCommandRegistry.register({
+  name: '/headroom',
+  description: 'Headroom compression savings report (tokens saved, by model)',
+  category: 'Session & Context',
+  execute: async () => {
+    const { getHeadroomReport } = require('../../memory/headroom.compress');
+    let proxyLive = false;
+    try { proxyLive = require('../../memory/headroomProxy').isHeadroomReady(); } catch { /* optional */ }
+    const r = getHeadroomReport();
+    if (r.totalSaved <= 0) {
+      return {
+        type: 'dashboard' as const,
+        uiComponent: 'StatsDashboard',
+        payload: {
+          type: 'stats',
+          title: '⚡ Headroom — context compression',
+          items: [
+            { label: 'Engine', value: proxyLive ? 'Kompress proxy live (chopratejas/kompress-v2-base, ONNX)' : 'starting (provisioning Kompress proxy…)' },
+            { label: 'Tokens saved', value: '0 (nothing compressed yet)' },
+            { label: 'How it works', value: 'the real Kompress ML model compresses tool outputs ~30-40% once the context is under token pressure; errors/signal lines are kept' },
+          ],
+        },
+      };
+    }
+    const fmt = (n: number) => n.toLocaleString();
+    const pct = Math.round((1 - r.ratio) * 100);
+    // Engine line reflects CURRENT proxy readiness, not just the last recorded pass — otherwise a single
+    // cold-start native pass (fired while the proxy was still provisioning) would keep it pinned to
+    // "native" forever even after Kompress comes live.
+    const engineVal = proxyLive
+      ? 'Kompress proxy (chopratejas/kompress-v2-base, ONNX ML) — live'
+      : 'native heuristic (Kompress proxy still provisioning)';
+    const hadColdStart = proxyLive && r.byModel.length > 0 && r.engine === 'native';
+    const items: { label: string; value: string }[] = [
+      { label: 'Engine', value: engineVal },
+      ...(hadColdStart ? [{ label: 'Note', value: 'early pass(es) used the native fallback while the proxy was warming up; new compactions use Kompress' }] : []),
+      { label: 'Tokens saved (session)', value: `${fmt(r.totalSaved)} tok` },
+      { label: 'Compaction passes', value: `${fmt(r.compressions)}` },
+      { label: 'Avg compression', value: `${pct}% smaller (${fmt(r.totalBefore)} → ${fmt(r.totalAfter)} tok)` },
+    ];
+    if (r.byModel.length) {
+      items.push({ label: '— by model —', value: '' });
+      for (const m of r.byModel) {
+        items.push({ label: m.model, value: `${fmt(m.saved)} tok saved · ${fmt(m.count)} pass(es)` });
+      }
+    }
+    return {
+      type: 'dashboard' as const,
+      uiComponent: 'StatsDashboard',
+      payload: { type: 'stats', title: '⚡ Headroom — context compression savings', items },
+    };
+  },
+});
