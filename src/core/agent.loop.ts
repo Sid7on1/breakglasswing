@@ -176,6 +176,12 @@ export class AgentLoop {
       // persisted to history, so the message log stays well-formed.
       if (discardTurn) continue;
 
+      // Reached here ⇒ the stream completed cleanly (no transient error broke us out). Reset the
+      // transient budget so it means "2 CONSECUTIVE failures", not "2 per entire run". Without this a
+      // single early network blip permanently spends the budget, and a later unrelated blip — hours
+      // into a long autonomous run — would kill the loop instead of retrying.
+      transientRetries = 0;
+
       // Enforce the output contract: strip leaked tool-meta filler before it can
       // land in the reply or the history, and learn whether the turn was nothing but.
       const sanitized = responseSanitizer.sanitize(currentContent);

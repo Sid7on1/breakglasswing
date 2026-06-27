@@ -268,4 +268,42 @@ describe('AgentLoop — retries transient errors then gives up', () => {
     expect(call).toBe(3);
     expect(out).toContain('API Error');
   });
+
+  it('resets the transient budget after a clean turn — survives blips across a long run', async () => {
+    // A noop tool keeps the loop iterating (a content-only turn would end execute()).
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'noop', description: 'no-op', schema: {},
+      isDestructive: false, isConcurrencySafe: true, execute: async () => 'ok',
+    } as any);
+
+    // transient → tool → transient → tool → transient → answer. With a LIFETIME budget of 2 the third
+    // blip would exhaust it and surface "API Error". With a CONSECUTIVE budget (reset on each clean
+    // turn) every blip is retry 1/2 and the run completes — the behavior a day-long loop needs.
+    const script: ChatEvent[][] = [
+      [{ type: 'error', message: 'blip 1', recoverable: true, kind: 'transient' }],
+      [{ type: 'tool_call', id: 't1', name: 'noop', args: '{}' }],
+      [{ type: 'error', message: 'blip 2', recoverable: true, kind: 'transient' }],
+      [{ type: 'tool_call', id: 't2', name: 'noop', args: '{}' }],
+      [{ type: 'error', message: 'blip 3', recoverable: true, kind: 'transient' }],
+      [{ type: 'token', text: 'Done after surviving 3 blips.' }, { type: 'done' }],
+    ];
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        const events = script[Math.min(call, script.length - 1)];
+        call++;
+        for (const e of events) yield e;
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, registry, null as any);
+    let out = '';
+    for await (const t of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 20 })) {
+      out += t;
+    }
+
+    expect(out).toContain('Done after surviving 3 blips.');
+    expect(out).not.toContain('API Error');
+  }, 15000); // 3 transient backoffs (~1s each) of real wait
 });
