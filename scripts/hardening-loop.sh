@@ -93,20 +93,24 @@ ledger start "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN"
 
 # Build the agent prompt fresh each iteration so it includes the LATEST commits — the first real cycle
 # wasted a turn re-doing an EPIPE fix that was already committed, because it had no history awareness.
+# The objective is configurable (HARDEN_OBJECTIVE) so the SAME guard-railed loop drives any long task —
+# hardening, coverage-climb, a scoped feature. Default is open-ended hardening. The recent-commits block
+# stops the agent re-doing finished work (the first cycle wasted a turn re-fixing an already-done EPIPE).
+DEFAULT_OBJECTIVE='Improve THIS repository with exactly one minimal, verifiable change. Pick the single
+highest-value item NOT already addressed: a real bug, a resource/handle leak, an over-engineered chunk
+to simplify, or a missing test on critical untested code.'
 build_prompt() {
   local recent; recent="$(git log --oneline -25 | sed 's/^/  /')"
   cat <<PROMPT
-Harden THIS repository by exactly one minimal, verifiable improvement. Pick the single highest-value
-item NOT already addressed: a real bug, a resource/handle leak, an over-engineered chunk to simplify,
-or a missing test on critical untested code.
+${HARDEN_OBJECTIVE:-$DEFAULT_OBJECTIVE}
 
 IMPORTANT — recent commits (this work is ALREADY DONE; do NOT redo, re-fix, or revert any of it; find
 something genuinely NEW):
 $recent
 
-Rules: make the smallest change that fixes one thing. Do NOT touch git branches/remotes, do NOT edit
-CI or this hardening script, do NOT make sweeping refactors. Keep \`npm run build\` and \`npm run test:ci\`
-green. End with one line: what you changed and why.
+Rules: make the smallest change that accomplishes ONE thing. Do NOT touch git branches/remotes, do NOT
+edit CI or this hardening script, do NOT make sweeping refactors. \`npm run build\` and \`npm run test:ci\`
+MUST stay green (run them yourself to confirm before finishing). End with one line: what you changed and why.
 PROMPT
 }
 
