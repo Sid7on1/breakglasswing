@@ -97,9 +97,11 @@ ledger start "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN"
 # so keep a watchdog re-asserting the symlink for the whole run. (Proper long-term fix: run the loop
 # from a checkout OUTSIDE ~/Desktop so iCloud never touches it.)
 heal_node_modules
-( while true; do [ -e node_modules ] || ln -s node_modules.nosync node_modules 2>/dev/null; sleep 1; done ) &
+( while true; do [ -e node_modules ] || ln -s node_modules.nosync node_modules 2>/dev/null; sleep 3; done ) &
 HEALER_PID=$!
-trap 'kill "$HEALER_PID" 2>/dev/null' EXIT INT TERM
+# On exit: stop the healer AND sweep any iCloud "node_modules N" conflict-copies it provoked (these are
+# gitignored so they never reach a commit, but don't leave them littering the tree).
+trap 'kill "$HEALER_PID" 2>/dev/null; find . -maxdepth 1 -name "node_modules [0-9]*" -exec rm -rf {} + 2>/dev/null' EXIT INT TERM
 log "symlink healer running (pid $HEALER_PID)"
 
 # Build the agent prompt fresh each iteration so it includes the LATEST commits — the first real cycle
