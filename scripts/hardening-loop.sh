@@ -91,6 +91,17 @@ fi
 log "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN max_iters=$MAX_ITERS max_minutes=$MAX_MINUTES"
 ledger start "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN"
 
+# Background symlink healer: this repo lives on ~/Desktop (iCloud), which drops the
+# node_modules -> node_modules.nosync symlink at random — even MID agent-turn, which crashes the
+# engine with "Cannot find module 'commander'". A per-command heal can't cover a multi-minute process,
+# so keep a watchdog re-asserting the symlink for the whole run. (Proper long-term fix: run the loop
+# from a checkout OUTSIDE ~/Desktop so iCloud never touches it.)
+heal_node_modules
+( while true; do [ -e node_modules ] || ln -s node_modules.nosync node_modules 2>/dev/null; sleep 1; done ) &
+HEALER_PID=$!
+trap 'kill "$HEALER_PID" 2>/dev/null' EXIT INT TERM
+log "symlink healer running (pid $HEALER_PID)"
+
 # Build the agent prompt fresh each iteration so it includes the LATEST commits — the first real cycle
 # wasted a turn re-doing an EPIPE fix that was already committed, because it had no history awareness.
 # The objective is configurable (HARDEN_OBJECTIVE) so the SAME guard-railed loop drives any long task —
