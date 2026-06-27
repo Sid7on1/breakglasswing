@@ -13,6 +13,7 @@
     "postinstall": "node -e \"try{require('fs').existsSync(require('path').join(process.cwd(),'.breakglass','config.json'))||require('./scripts/postinstall')()}catch(e){}\"",
     "test": "jest --coverage",
     "test:ci": "jest --coverage=false",
+    "doctor": "bash scripts/doctor.sh",
     "test:leaks": "jest --coverage=false --detectOpenHandles",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
