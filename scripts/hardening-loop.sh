@@ -91,11 +91,24 @@ fi
 log "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN max_iters=$MAX_ITERS max_minutes=$MAX_MINUTES"
 ledger start "branch=$(git rev-parse --abbrev-ref HEAD) dry_run=$DRY_RUN"
 
-HARDEN_PROMPT='Harden THIS repository by exactly one minimal, verifiable improvement. Pick the single
-highest-value item: a real bug, a resource/handle leak, an over-engineered chunk to simplify, or a
-missing test on critical untested code. Make the smallest change that fixes it. Do NOT touch git
-branches/remotes, do NOT edit CI, do NOT make sweeping refactors. Keep `npm run build` and
-`npm run test:leaks` green. State in one line what you changed and why.'
+# Build the agent prompt fresh each iteration so it includes the LATEST commits — the first real cycle
+# wasted a turn re-doing an EPIPE fix that was already committed, because it had no history awareness.
+build_prompt() {
+  local recent; recent="$(git log --oneline -25 | sed 's/^/  /')"
+  cat <<PROMPT
+Harden THIS repository by exactly one minimal, verifiable improvement. Pick the single highest-value
+item NOT already addressed: a real bug, a resource/handle leak, an over-engineered chunk to simplify,
+or a missing test on critical untested code.
+
+IMPORTANT — recent commits (this work is ALREADY DONE; do NOT redo, re-fix, or revert any of it; find
+something genuinely NEW):
+$recent
+
+Rules: make the smallest change that fixes one thing. Do NOT touch git branches/remotes, do NOT edit
+CI or this hardening script, do NOT make sweeping refactors. Keep \`npm run build\` and \`npm run test:ci\`
+green. End with one line: what you changed and why.
+PROMPT
+}
 
 consecutive_noops=0
 for (( i=1; i<=MAX_ITERS; i++ )); do
@@ -115,7 +128,7 @@ for (( i=1; i<=MAX_ITERS; i++ )); do
   before="$(git rev-parse HEAD)"
 
   # 2) Drive the agent for ONE hardening fix (autonomous: --yes bypasses interactive prompts).
-  if ! timeout "$TURN_TIMEOUT" node bin/bimax.js -p "$HARDEN_PROMPT" --yes $MODEL_ARG >/tmp/harden_turn.log 2>&1; then
+  if ! timeout "$TURN_TIMEOUT" node bin/bimax.js -p "$(build_prompt)" --yes $MODEL_ARG >/tmp/harden_turn.log 2>&1; then
     err "agent turn failed/timed out — reverting any partial work"
     git reset --hard "$before" >/dev/null 2>&1; git clean -fd src tui >/dev/null 2>&1
     ledger "$i" "agent-turn-failed (reverted)"; continue
