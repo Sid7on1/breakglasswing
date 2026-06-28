@@ -237,6 +237,21 @@ func (m model) completionView() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// modeChip renders the active agent mode as a bold, uppercase, per-mode colored block. general is
+// yellow (the base); explore/sketch/code/beast each get a distinct hue so cycling with Shift+Tab is
+// obvious. Empty → general (a fresh session starts there).
+func modeChip(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "general"
+	}
+	c, ok := modeChipColor[mode]
+	if !ok {
+		c = colWarn
+	}
+	return modeChipBase.Background(c).Render(strings.ToUpper(mode))
+}
+
 // footerLine renders the status line + hints + model/tier bar, mirroring Ink's Footer.tsx: a left
 // status glyph + text, then right-aligned goals · stream meta · hint chord · model/tier.
 func (m model) footerLine() string {
@@ -278,10 +293,15 @@ func (m model) footerLine() string {
 	if modelID == "" {
 		modelID = "default"
 	}
-	mstr := ""
-	if m.fMode != "" {
-		mstr = m.fMode + " · "
+	// Mode is no longer buried in the gray model string — it's a bold, per-mode colored CHIP so the
+	// active mode (and how it changes as you Shift+Tab) is unmissable. The connected-MCP count rides
+	// alongside it in the same loud family.
+	modeRendered := modeChip(m.fMode)
+	if m.fMcp > 0 {
+		modeRendered += " " + mcpChipStyle.Render(fmt.Sprintf("⚙ %d mcp", m.fMcp))
 	}
+
+	mstr := ""
 	if m.fPinned != "" {
 		mstr += "📌 " // pinned → this model handles every turn, no auto-switch
 	} else {
@@ -302,10 +322,11 @@ func (m model) footerLine() string {
 	// The -5 (vs -1) leaves a 5-cell margin so ambiguous-width glyphs (✻/⇧/📌/▸) rendered wider than
 	// measured still can't push the line into the last column.
 	w := m.width - 5
-	withHints := strings.Join(append(append([]string{}, core...), hints, modelRendered), footerSep)
+	// The mode chip + MCP segment always survive (most important state); hints drop first when tight.
+	withHints := strings.Join(append(append([]string{}, core...), hints, modeRendered, modelRendered), footerSep)
 	rightStr := withHints
 	if lipgloss.Width(left)+lipgloss.Width(withHints)+1 > w {
-		rightStr = strings.Join(append(append([]string{}, core...), modelRendered), footerSep)
+		rightStr = strings.Join(append(append([]string{}, core...), modeRendered, modelRendered), footerSep)
 	}
 
 	leftW, rightW := lipgloss.Width(left), lipgloss.Width(rightStr)

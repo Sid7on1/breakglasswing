@@ -7,6 +7,25 @@ import (
 	"time"
 )
 
+// agentModeOrder mirrors MODE_ORDER in src/cli/agentMode.ts — keep in sync. The Shift+Tab cycle:
+// general → explore → sketch → code → beast → general.
+var agentModeOrder = []string{"general", "explore", "sketch", "code", "beast"}
+
+// nextAgentMode returns the mode to switch to from the current footer mode string (which the engine
+// emits empty for "general"). Case-insensitive; unknown values restart the cycle at explore.
+func nextAgentMode(current string) string {
+	cur := strings.ToLower(strings.TrimSpace(current))
+	if cur == "" {
+		cur = "general"
+	}
+	for i, mode := range agentModeOrder {
+		if mode == cur {
+			return agentModeOrder[(i+1)%len(agentModeOrder)]
+		}
+	}
+	return "explore"
+}
+
 func (m *model) handleEvent(o Outbound) {
 	switch o.Name {
 	case "stream_token":
@@ -80,6 +99,8 @@ func (m *model) handleEvent(o Outbound) {
 		m.thinkSnip = ""
 
 	case "mode_change":
+		// The bold per-mode chip in the footer is the single source of truth for the active mode, so
+		// no extra status one-liner is needed here (avoids two indicators for the same thing).
 		m.fMode = argString(o.Args, 0)
 
 	case "model_tier":
@@ -178,7 +199,8 @@ func (m *model) handleEvent(o Outbound) {
 		}
 
 	case "mcp_changed":
-		// The footer dynamically updates its tool count; no need to spam the transcript.
+		// The footer dynamically updates its MCP chip; no need to spam the transcript.
+		m.fMcp = countMcpServers(cwdOrWD(m.cwd))
 
 	case "graph_changed":
 		m.append(dimStyle.Render("  ⌁ code graph updated"))

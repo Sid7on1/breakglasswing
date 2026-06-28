@@ -70,10 +70,10 @@ func TestFooterState(t *testing.T) {
 		t.Fatalf("footer state wrong: %+v", m)
 	}
 
-	// Footer mirrors Ink Footer.tsx: ⇧ marks the heavy tier, the mode is a "{mode} ·" prefix, plus
+	// Footer mirrors Ink Footer.tsx: ⇧ marks the heavy tier, the mode is a bold uppercase CHIP, plus
 	// the model name, token estimate, goal count and 📌 pin.
 	foot := stripANSI(m.footerLine())
-	for _, want := range []string{"⇧", "minimax-m3", "1.0k tok", "2 goals", "explore ·", "📌"} {
+	for _, want := range []string{"⇧", "minimax-m3", "1.0k tok", "2 goals", "EXPLORE", "📌"} {
 		if !strings.Contains(foot, want) {
 			t.Errorf("footer missing %q in:\n%s", want, foot)
 		}

@@ -1,6 +1,6 @@
 import { globalCommandRegistry } from './registry';
-import { cliEvents } from '../events';
-import { getAgentMode, setAgentMode, AgentMode, setExploreEngagedGate, didExploreEngageGate } from '../agentMode';
+import { getAgentMode, AgentMode } from '../agentMode';
+import { applyAgentMode } from '../applyMode';
 
 /**
  * /mode — switch the agent's behavioral specialization (UPGRADE-PLAN 5.2).
@@ -10,42 +10,16 @@ import { getAgentMode, setAgentMode, AgentMode, setExploreEngagedGate, didExplor
  * /mode general   → default behaviour (no specialization)
  * /mode           → show the current mode + a picker
  *
- * This sits above the brand persona (/agents) and shapes the system prompt. Explore additionally
- * flips the governor into plan mode so the read-only guarantee is actually enforced, not just
- * suggested; switching to code/general restores normal write permissions.
+ * This sits above the brand persona (/agents) and shapes the system prompt. Explore/sketch additionally
+ * flip the governor into plan mode so the read-only guarantee is actually enforced, not just
+ * suggested; switching to code/beast/general restores normal write permissions. The switch itself
+ * lives in applyAgentMode() (shared with Shift+Tab and ModeTool).
  */
-// Restore write permissions ONLY if explore mode is what engaged the plan gate. If the user turned
-// on plan mode themselves via `/plan`, leave it alone — `/mode` must not silently cancel it.
-function restoreWritePermissionsIfOurs(context: any): void {
-  const governor = context.options.governor;
-  if (governor && governor.mode === 'plan' && didExploreEngageGate()) {
-    governor.mode = context.options.dangerouslySkipPermissions ? 'bypass' : 'interactive';
-  }
-  setExploreEngagedGate(false);
-}
-
-function applyMode(mode: AgentMode, context: any): { type: 'message'; level: 'success'; content: string } {
-  const governor = context.options.governor;
-  setAgentMode(mode);
-
-  if (mode === 'explore') {
-    // Only flip the gate (and remember we did) if it wasn't already engaged by `/plan`.
-    if (governor && governor.mode !== 'plan') {
-      governor.mode = 'plan'; // reuse the proven write-gate for read-only enforcement
-      setExploreEngagedGate(true);
-    }
-    cliEvents.emit('mode_change', 'EXPLORE');
-    return { type: 'message', level: 'success', content: 'Explore mode ON — read-only reconnaissance. The agent maps the codebase with graph/search/read tools; all writes are blocked. Switch to /mode code or /mode general to make changes again.' };
-  }
-
-  restoreWritePermissionsIfOurs(context);
-  if (mode === 'code') {
-    cliEvents.emit('mode_change', 'CODE');
-    return { type: 'message', level: 'success', content: 'Code mode ON — execution focus. The agent minimizes redundant reads, makes surgical edits, and verifies with build/tests. Writes are allowed.' };
-  }
-
-  cliEvents.emit('mode_change', '');
-  return { type: 'message', level: 'success', content: 'General mode ON — default behaviour, no specialization. Writes are allowed.' };
+// Switch mode. Deliberately emits NO transcript message — the TUI shows the active mode as a bold
+// footer chip (driven by the mode_change event), so cycling modes doesn't clutter the conversation.
+function applyMode(mode: AgentMode, context: any): { type: 'none' } {
+  applyAgentMode(mode, context.options.governor);
+  return { type: 'none' };
 }
 
 globalCommandRegistry.register({
@@ -55,12 +29,12 @@ globalCommandRegistry.register({
   execute: async (args, context) => {
     const sub = (args[0] || '').toLowerCase();
 
-    if (sub === 'explore' || sub === 'code' || sub === 'general') {
+    if (sub === 'explore' || sub === 'code' || sub === 'general' || sub === 'sketch' || sub === 'beast') {
       return applyMode(sub as AgentMode, context);
     }
 
     if (sub) {
-      return { type: 'message', level: 'error', content: `Unknown mode "${sub}". Valid: explore, code, general.` };
+      return { type: 'message', level: 'error', content: `Unknown mode "${sub}". Valid: explore, sketch, code, beast, general.` };
     }
 
     const current = getAgentMode();
@@ -69,12 +43,14 @@ globalCommandRegistry.register({
       title: `Agent mode (current: ${current})`,
       options: [
         { label: 'explore', value: 'explore', desc: 'Read-only reconnaissance — map the codebase, writes blocked', category: 'Modes' },
+        { label: 'sketch', value: 'sketch', desc: 'Interactive architect — discuss an idea → level-by-level Blueprint (writes blocked)', category: 'Modes' },
         { label: 'code', value: 'code', desc: 'Execution focus — minimal reads, surgical edits, verify after', category: 'Modes' },
+        { label: 'beast', value: 'beast', desc: 'Autonomous builder — drive a goal/Blueprint to a verified result', category: 'Modes' },
         { label: 'general', value: 'general', desc: 'Default behaviour — no specialization', category: 'Modes' },
       ],
       onSelect: (opt: any) => {
-        const msg = applyMode(opt.value as AgentMode, context);
-        context.addSystemMessage(msg.level, msg.content);
+        // Switching emits a transient footer one-liner (mode_change) — no transcript message.
+        applyMode(opt.value as AgentMode, context);
       },
     };
   },

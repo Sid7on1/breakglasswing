@@ -238,6 +238,11 @@ type model struct {
 	fCoding string // coding model id
 	fLite   string // lite model id
 	fGoals  int    // active goal count
+	fMcp    int    // connected (non-disabled) MCP server count
+
+	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used
+	// for ephemeral one-liners (e.g. mode switches) that shouldn't linger or clutter the transcript.
+	statusExpiry time.Time
 }
 
 func initialModel(e *Engine) model {
@@ -286,7 +291,20 @@ func initialModel(e *Engine) model {
 		sessionVerb:  spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))],
 		runningTools: map[string]string{},
 		bell:         os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
+		// Seed the default mode so the footer chip shows "GENERAL" from the first frame (a fresh
+		// terminal starts in general mode — it just wasn't displayed before).
+		fMode: "general",
+		fMcp:  countMcpServers(cwdOrWD("")),
 	}
+}
+
+// cwdOrWD returns p if set, else the process working directory (best-effort "").
+func cwdOrWD(p string) string {
+	if p != "" {
+		return p
+	}
+	wd, _ := os.Getwd()
+	return wd
 }
 
 func clearTerm() tea.Cmd {
@@ -446,6 +464,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinkDots = (m.thinkDots + 1) % 4
 		}
 		m.thinkTick++
+		// Expire an ephemeral status one-liner (mode switches etc.) back to idle.
+		if !m.statusExpiry.IsZero() && time.Now().After(m.statusExpiry) {
+			m.status = "Ready"
+			m.statusExpiry = time.Time{}
+		}
 		return m, tick()
 
 	case tea.KeyMsg:
@@ -722,6 +745,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				next = "auto"
 			}
 			m.engine.Send(encodeInput("/tier " + next))
+			return m, nil
+		case "shift+tab":
+			// Cycle the agent behavioral mode: general → explore → sketch → code → beast → general.
+			// Drives /mode (engine emits mode_change → footer updates m.fMode). Mirrors the workflow
+			// arc: orient → architect → execute → autonomous build → neutral default.
+			m.engine.Send(encodeInput("/mode " + nextAgentMode(m.fMode)))
 			return m, nil
 		case "esc":
 			if m.showFullMap {

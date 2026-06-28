@@ -76,6 +76,21 @@ var (
 	footerMode = lipgloss.NewStyle().Foreground(colOK).Bold(true)
 	footerSep  = lipgloss.NewStyle().Foreground(colSubtle).Render(" · ")
 
+	// Per-mode footer CHIP: bold, uppercase, a solid colored block (reads big/loud at terminal scale).
+	// general = yellow (the base); every other mode a distinct hue so the active mode is unmissable.
+	colSketch     = lipgloss.Color("#B084EB") // purple — the architect
+	modeChipColor = map[string]lipgloss.Color{
+		"general": colInfo,   // blue (base)
+		"explore": colWarn,   // yellow / amber
+		"sketch":  colSketch, // purple
+		"code":    colOK,     // green
+		"beast":   colAccent, // terracotta (brand)
+	}
+	// dark text on the colored block for contrast.
+	modeChipBase = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1A1A1A")).Padding(0, 1)
+	// Connected-MCP segment: bold yellow, same family as the chip so the two read as one cluster.
+	mcpChipStyle = lipgloss.NewStyle().Bold(true).Foreground(colWarn)
+
 	// Autocomplete dropdown / menu selection — accent text + arrow, no heavy inverse bar.
 	compSel = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 

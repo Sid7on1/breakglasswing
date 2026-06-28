@@ -27,6 +27,10 @@ import { setCustomRoutingRules } from './cli/agentRouter';
 import { cliEvents } from './cli/events';
 import { setGlobalPatternStore, GenomePatternStore } from './genome/pattern.store';
 import { setGlobalRecipeLoader, RecipeLoader } from './recipes/recipe.loader';
+import { setBlueprintEngine, BlueprintEngine } from './blueprints/blueprint.engine';
+import { setBlueprintCompiler, BlueprintCompiler } from './blueprints/blueprint.compiler';
+import { setTrainMonitor, TrainMonitor } from './training/train.monitor';
+import { setTrainLauncher, TrainLauncher } from './training/train.launcher';
 import { setContextManagerGraphStore } from './memory/context.manager';
 
 const program = new Command();
@@ -126,6 +130,10 @@ async function main() {
   // Wire genome pattern store, recipe loader, and graph store for context injection
   setGlobalPatternStore(new GenomePatternStore(process.cwd()));
   setGlobalRecipeLoader(new RecipeLoader(process.cwd()));
+  setBlueprintEngine(new BlueprintEngine(process.cwd()));
+  setBlueprintCompiler(new BlueprintCompiler(process.cwd()));
+  setTrainMonitor(new TrainMonitor(process.cwd()));
+  setTrainLauncher(new TrainLauncher(process.cwd()));
   if (graphStore) setContextManagerGraphStore(graphStore);
 
   if (prompt && cliFlags.print) {

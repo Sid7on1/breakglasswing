@@ -52,6 +52,10 @@ import { VectorStore } from '../memory';
 import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
 import { createRegisterAgentTool } from '../tools/implementations/register.tool';
 import { createAskUserTool } from '../tools/implementations/ask_user.tool';
+import { createBlueprintTool } from '../tools/implementations/blueprint.tool';
+import { createTrainMonitorTool } from '../tools/implementations/train_monitor.tool';
+import { createTrainLaunchTool } from '../tools/implementations/train_launch.tool';
+import { createModeTool } from '../tools/implementations/mode.tool';
 import { createGitTool } from '../tools/implementations/git.tool';
 import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 import { createFreeContextTool } from '../tools/implementations/free-context.tool';
@@ -154,6 +158,12 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createGoalsTool(governor));
   toolRegistry.register(createPlanTool(governor));
   toolRegistry.register(createScoutTool(governor));
+  // Sketch Mode: the level-by-level Blueprint builder + LLM-training monitoring.
+  toolRegistry.register(createBlueprintTool(governor, toolRegistry));
+  toolRegistry.register(createTrainMonitorTool(governor));
+  toolRegistry.register(createTrainLaunchTool(governor));
+  // Agent switches its OWN mode (the same modes the user cycles with Shift+Tab) → self-driving loop.
+  toolRegistry.register(createModeTool(governor));
   // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
   globalSkillService.load(projectRoot);
   toolRegistry.register(createSkillTool(governor, globalSkillService));

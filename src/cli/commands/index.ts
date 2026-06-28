@@ -10,6 +10,7 @@ import './plan';
 import './timemachine';
 import './swarm';
 import './beast';
+import './blueprint';
 import './graph';
 import './mcp';
 import './replay';

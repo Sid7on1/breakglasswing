@@ -1,6 +1,94 @@
 # Bimax Studio — Sketch Mode + Blueprint Builders
 
-**Status:** Plan (not yet built) · drafted 2026-06-27
+**Status:** Phase 1+2 SHIPPED 2026-06-28 · drafted 2026-06-27
+
+## Decisions locked (2026-06-28)
+- **Sketch is a MODE**, not a command (sticky conversation). **Beast is also a MODE.**
+- **Shift+Tab cycles modes** in the TUI: general → explore → sketch → code → beast → general.
+- **LLM domain wires ACTUAL monitoring** (TrainMonitorTool: JSONL tail + W&B GraphQL, real alerts).
+- First domain = **Website** (full catalog). Blueprint storage = **`.bimax/blueprints/<slug>.yaml`**.
+
+## What shipped
+- `src/cli/agentMode.ts` — added `sketch` + `beast` modes (prompt personas) + `MODE_ORDER`/`nextMode()`.
+- `src/cli/commands/mode.ts` — `/mode sketch` (reuses explore's read-only plan gate; BlueprintTool/PlanTool/
+  AskUser/web are non-destructive so they still run) + `/mode beast` (writes allowed). Picker updated.
+- TUI: `tui/model.go` Shift+Tab → sends `/mode <next>`; `tui/events.go` `nextAgentMode()` mirrors MODE_ORDER;
+  footer lowercases mode + status hint.
+- `src/blueprints/catalogs.ts` — website (full), agent, LLM (14-level table incl. monitoring) + `inferDomain`.
+- `src/blueprints/blueprint.engine.ts` — create/save/load/list/select/override/import/format/buildBrief → YAML.
+- `src/tools/implementations/blueprint.tool.ts` (BlueprintTool) + `src/cli/commands/blueprint.ts` (/blueprint, /bp).
+- `src/training/train.monitor.ts` + `train_monitor.tool.ts` (TrainMonitorTool) — JSONL + W&B, trend + alerts.
+- Wired in `container.ts` (tools) + `index.ts` (engine + monitor singletons). TS builds, Go builds, go test green.
+
+## Phase 3 SHIPPED 2026-06-28 — Blueprint→Build compiler
+- `src/blueprints/blueprint.compiler.ts` (`BlueprintCompiler`) — compiles a Blueprint's selections +
+  per-level overrides into **real artifacts** under `.bimax/builds/<slug>/`:
+  - **llm:** `train_config.yaml` (all 14 levels → concrete config incl. arch-preset dims, overrides
+    preserved under `overrides:`) + `train.py` scaffold whose `log_step` writes the `metrics.jsonl`
+    TrainMonitorTool tails + `README.md`.
+  - **website:** `package.json` with the right dep stack (framework+styling+motion+components+cms) +
+    `BUILD_PLAN.md` (stack, steps, deploy, overrides, Playwright-verify step).
+  - **agent:** `recipe.yaml` + `WIRING.md` (ModelManage/McpManage/SkillAuthor/governor steps).
+- Wired into `BlueprintTool.build` (compiles + writes, returns file list + brief) and `/blueprint build
+  <slug>`. Init in `index.ts`. Verified end-to-end (LLM + website emit correct files).
+
+## Phase 4-5 SHIPPED 2026-06-28 — self-driving loop + web-import + verify
+- **Agent switches its own mode** (`ModeTool`, `src/tools/implementations/mode.tool.ts`): same modes the
+  user cycles with Shift+Tab. Sketch prompt → on conclusion the agent ModeTool(beast) and builds;
+  beast prompt → ModeTool(sketch) to rework or ModeTool(general) when done. Mode-switch logic unified
+  in `src/cli/applyMode.ts` (`applyAgentMode`, shared by /mode + Shift+Tab + ModeTool) with prior-
+  governor-mode memory so leaving explore/sketch restores the exact prior perms (interactive OR bypass).
+- **Web-import parser:** `BlueprintTool action:"import_url"` — fetches a URL, parses og:title/title +
+  meta description, registers it as a selectable option (no hand-typing). Manual `import` still there.
+- **Website visual-verify:** `BlueprintTool action:"verify"` — detects a connected browser MCP
+  (Playwright/Puppeteer) by name; if present, drives render→screenshot→self-critique; if not, tells the
+  agent to McpManageTool discover+add `playwright` first. LLM/agent verify routed to monitor/smoke-run.
+- **LLM auto-monitor:** `BlueprintTool build` auto-registers the run with TrainMonitor (metrics.jsonl in
+  the build dir) — monitoring is live the moment training writes, no manual watch step.
+- All 593 tests green.
+
+## Phase 6 SHIPPED 2026-06-28 — real HF config + actual training launch
+- **`blueprint.compiler.ts` `compileLlm` rewritten** to emit **real HF field names**, not prose:
+  `train_config.yaml` now has a `model:` block of `AutoConfig` fields (`model_type` llama/mixtral,
+  `hidden_size`, `intermediate_size`, `num_hidden_layers`, `num_attention_heads`, `num_key_value_heads`
+  from the attention choice — mha=heads, mqa=1, gqa=heads/4, mla≈heads/8 + note, `hidden_act` from
+  norm, `rope_theta`/`sliding_window`/`num_local_experts`+`num_experts_per_tok` for MoE⇒mixtral) and a
+  `training:` block of real `TrainingArguments` (`lr_scheduler_type`, `optim`, `bf16`,
+  `gradient_checkpointing`, `warmup_ratio`, `report_to` from monitoring choice, …). Non-HF-native picks
+  (MLA, ALiBi, shared-MoE, Lion/Muon, fp8, DPO/GRPO) land in `_bimax_notes:` instead of being faked.
+  `finetune:` emits a real PEFT/LoRA block (r/alpha/dropout/target_modules, +4bit for QLoRA).
+- **`train.py` is now genuinely runnable** — builds `AutoConfig.for_model` → `AutoModelForCausalLM.
+  from_config`, streams the dataset, tokenizes, runs `transformers.Trainer` with a `TrainerCallback`
+  that appends `{step,loss,grad_norm,tokens_per_sec,lr}` to `metrics.jsonl`. `--smoke` is a
+  **dependency-free, offline** path (no torch/datasets/network) that writes the same metrics shape so
+  the whole launch→metrics→monitor loop is verifiable anywhere. Also emits `requirements.txt`.
+- **Actually launches it:** `src/training/train.launcher.ts` (`TrainLauncher`) spawns `python3 train.py
+  [--smoke]` in the build dir **detached**, logs to `train.log`, records pid/cmd/log to
+  `.bimax/launches/<run>.json`, and can `status`/`stop`/`list`. `src/tools/implementations/
+  train_launch.tool.ts` (`TrainLaunchTool`, **isDestructive** — beast mode) exposes launch/status/stop/
+  list and **auto-wires TrainMonitorTool** to the run's metrics on launch. `BIMAX_PYTHON` picks the
+  interpreter. Wired: launcher singleton in `index.ts`, tool in `container.ts`; BlueprintTool
+  build-notes + LLM verify now point at TrainLaunchTool. New test `src/__tests__/train.launch.test.ts`
+  (HF-field assertions + a real smoke launch→metrics→monitor, python3-gated).
+
+## Phase 7 SHIPPED 2026-06-28 — website verify auto-connects Playwright
+- **`BlueprintTool verify` (website) now AUTO-CONNECTS a browser MCP** instead of just instructing.
+  New exported helper `autoConnectBrowser(registry, governor, manager?)` in `blueprint.tool.ts`: if a
+  browser/screenshot tool is already wired it returns it; otherwise it pulls the `playwright` catalog
+  entry, `globalMcpManager.addToConfig` + `connectSpec` (governor-gated — the user still confirms
+  starting the process), and returns the freshly-registered tool. The verify message then tells the
+  agent to drive render→screenshot→self-critique. The `McpConnector` slice is injectable so the
+  connect branch is unit-tested without spawning npx (`src/__tests__/blueprint.verify.test.ts`, 3
+  tests: already-wired / auto-connect / connect-failure). 600 tests green; Go TUI builds.
+
+## Still TODO (later)
+- True nanotron/torchtitan emitters (today: HF transformers/Trainer; honest notes for non-HF choices).
+- Real eval wiring (lm-eval-harness) so the LLM Eval level computes perplexity/MMLU, not just config.
+- Agent-builder `verify` could auto-run the smoke goal (today it instructs, like website used to).
+
+---
+
+**Original plan below (drafted 2026-06-27):**
 **One line:** Turn Bimax from "agent that executes" into an **interactive architect** that *discusses* an
 idea with you, designs it level-by-level with real options, then builds it — for **websites, agents,
 and LLMs (training / fine-tuning / monitoring)**.
