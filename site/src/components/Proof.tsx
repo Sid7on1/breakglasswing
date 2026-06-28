@@ -1,5 +1,12 @@
 import Reveal from './ui/Reveal';
-import { STATS, PARTNERS } from '../lib/content';
+import Counter from './motion/Counter';
+
+const STATS: { value: number; suffix?: string; label: string }[] = [
+  { value: 604, label: 'tests green, every build' },
+  { value: 3, label: 'domains — sites · agents · LLMs' },
+  { value: 14, label: 'decision levels for an LLM' },
+  { value: 100, suffix: '%', label: 'open, hackable, yours' },
+];
 
 export default function Proof() {
   return (
@@ -9,25 +16,14 @@ export default function Proof() {
           {STATS.map((s, i) => (
             <Reveal key={s.label} delay={i * 0.06}>
               <div className="h-full bg-ink-950 p-8 text-center">
-                <div className="font-heading text-5xl italic tracking-tight text-white">{s.value}</div>
+                <div className="font-heading text-5xl italic tracking-tight text-white">
+                  <Counter value={s.value} suffix={s.suffix} />
+                </div>
                 <div className="mt-2 text-sm text-white/50">{s.label}</div>
               </div>
             </Reveal>
           ))}
         </div>
-
-        <Reveal delay={0.1}>
-          <p className="mt-16 text-center font-mono text-xs uppercase tracking-[0.25em] text-white/40">
-            Built on the tools you already trust
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-x-12 gap-y-4">
-            {PARTNERS.map((p) => (
-              <span key={p} className="font-heading text-2xl italic text-white/45 transition-colors hover:text-white/80">
-                {p}
-              </span>
-            ))}
-          </div>
-        </Reveal>
       </div>
     </section>
   );

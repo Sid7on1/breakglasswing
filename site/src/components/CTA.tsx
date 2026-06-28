@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { ArrowUpRight, Copy, Check } from 'lucide-react';
 import Reveal from './ui/Reveal';
+import Backdrop from './motion/Backdrop';
+import Magnetic from './motion/Magnetic';
 import { INSTALL_CMD, NAV } from '../lib/content';
 
 export default function CTA() {
@@ -14,8 +16,8 @@ export default function CTA() {
 
   return (
     <>
-      <section id="install" className="relative overflow-hidden border-t border-white/5 bg-ink-950 py-28">
-        <div className="absolute inset-0 bg-radial-accent" />
+      <section id="install" className="relative overflow-hidden border-t border-white/5 bg-ink-950 py-32">
+        <Backdrop grid={false} />
         <div className="absolute left-1/2 top-1/2 h-[420px] w-[680px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent/10 blur-[120px]" />
         <Reveal className="relative mx-auto max-w-3xl px-5 text-center">
           <h2 className="font-heading text-5xl italic leading-[1] tracking-[-0.02em] text-gradient sm:text-6xl">
@@ -32,13 +34,15 @@ export default function CTA() {
                 {copied ? <Check className="h-4 w-4 text-accent" /> : <Copy className="h-4 w-4" />}
               </button>
             </div>
-            <a
-              href="https://github.com"
-              className="inline-flex items-center gap-2 rounded-lg bg-accent px-5 py-3 text-sm font-semibold text-ink-950 transition-transform hover:scale-[1.03]"
-            >
-              Star on GitHub
-              <ArrowUpRight className="h-4 w-4" strokeWidth={2.4} />
-            </a>
+            <Magnetic>
+              <a
+                href="https://github.com"
+                className="inline-flex items-center gap-2 rounded-lg bg-accent px-5 py-3 text-sm font-semibold text-ink-950 transition-shadow hover:shadow-glow"
+              >
+                Star on GitHub
+                <ArrowUpRight className="h-4 w-4" strokeWidth={2.4} />
+              </a>
+            </Magnetic>
           </div>
         </Reveal>
       </section>

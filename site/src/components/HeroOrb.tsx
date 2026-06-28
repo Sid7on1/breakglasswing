@@ -8,16 +8,23 @@ import * as THREE from 'three';
 // for parallax. Pointer-events are off so it never steals clicks from the hero copy.
 function Orb() {
   const group = useRef<THREE.Group>(null);
+  const shell = useRef<THREE.Mesh>(null);
   const target = useRef({ x: 0, y: 0 });
+  const t = useRef(0); // assemble progress 0→1
 
   useFrame((state, delta) => {
     const g = group.current;
     if (!g) return;
+    // assemble-in: scale + settle over the first ~1.6s
+    t.current = Math.min(1, t.current + delta / 1.6);
+    const e = 1 - Math.pow(1 - t.current, 3);
+    g.scale.setScalar(0.25 + e * 0.75);
     // pointer parallax (state.pointer is -1..1)
     target.current.x = state.pointer.y * 0.25;
     target.current.y = state.pointer.x * 0.4;
     g.rotation.x += (target.current.x - g.rotation.x) * 0.04;
     g.rotation.y += (target.current.y - g.rotation.y) * 0.04 + delta * 0.08;
+    if (shell.current) shell.current.rotation.z -= delta * 0.05; // counter-rotating shell
   });
 
   return (
@@ -34,9 +41,13 @@ function Orb() {
           speed={1.3}
         />
       </Icosahedron>
-      {/* faint faceted wireframe shell */}
-      <Icosahedron args={[1.72, 2]}>
+      {/* faint faceted wireframe shell, counter-rotating */}
+      <Icosahedron ref={shell} args={[1.72, 2]}>
         <meshBasicMaterial color="#34d399" wireframe transparent opacity={0.14} />
+      </Icosahedron>
+      {/* outer sparse cage */}
+      <Icosahedron args={[2.05, 1]}>
+        <meshBasicMaterial color="#3b82f6" wireframe transparent opacity={0.07} />
       </Icosahedron>
     </group>
   );
