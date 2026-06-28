@@ -30,7 +30,7 @@ describe('BlueprintCompiler (LLM, real HF fields)', () => {
     const res = compiler.compile(eng.load(bp.slug)!);
 
     const names = res.files.map(f => f.path).sort();
-    expect(names).toEqual(['README.md', 'requirements.txt', 'train.py', 'train_config.yaml'].sort());
+    expect(names).toEqual(['README.md', 'eval.py', 'requirements.txt', 'train.py', 'train_config.yaml'].sort());
 
     const cfg = res.files.find(f => f.path === 'train_config.yaml')!.content;
     expect(cfg).toMatch(/num_hidden_layers: 16/);
@@ -95,4 +95,30 @@ maybe('TrainLauncher (smoke launch → metrics → monitor)', () => {
     const r = launcher.launch('nope', '.bimax/builds/nope', { smoke: true });
     expect('error' in r && /train\.py/.test(r.error)).toBe(true);
   });
+
+  it('runs eval.py --smoke and writes perplexity to eval_results.json', async () => {
+    const eng = new BlueprintEngine(root);
+    const bp = eng.create('tiny eval model', 'llm');
+    eng.select(bp.slug, 'arch', 'small');
+    new BlueprintCompiler(root).compile(eng.load(bp.slug)!);
+    const dir = path.join('.bimax', 'builds', bp.slug);
+    const launcher = new TrainLauncher(root);
+
+    // Train smoke first so metrics.jsonl exists, then eval derives perplexity from it.
+    launcher.launch(bp.slug, dir, { smoke: true });
+    const metrics = path.join(root, dir, 'metrics.jsonl');
+    await waitFor(() => fs.existsSync(metrics) && fs.readFileSync(metrics, 'utf8').split('\n').filter(Boolean).length >= 5);
+
+    const ev = launcher.launch(`${bp.slug}-eval`, dir, { smoke: true, script: 'eval.py' });
+    expect('error' in ev ? ev.error : ev.script).toBe('eval.py');
+    const resultsPath = path.join(root, dir, 'eval_results.json');
+    const ok = await waitFor(() => fs.existsSync(resultsPath));
+    expect(ok).toBe(true);
+    const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+    expect(typeof results.perplexity).toBe('number');
+    expect(results.perplexity).toBeGreaterThan(1);
+
+    const st = launcher.status(`${bp.slug}-eval`);
+    expect('error' in st ? st.error : st.results?.perplexity).toBeGreaterThan(1);
+  }, 15000);
 });

@@ -8,6 +8,7 @@ interface TrainLaunchArgs {
   run?: string;
   dir?: string;
   smoke?: boolean;
+  script?: string;
 }
 
 /**
@@ -21,13 +22,13 @@ export const createTrainLaunchTool = (governor: IGovernor) => buildTool({
   description: `Launch (and manage) a generated LLM training run from a built Blueprint scaffold. Runs the emitted train.py as a background process and auto-wires monitoring.
 
 # Actions
-- **launch**: Start a run. Pass run (a name, usually the Blueprint slug) and dir (the build dir, e.g. .bimax/builds/<slug>). Set smoke=true for a dependency-free offline dry run that proves the launch → metrics → monitoring pipeline without torch/data/GPU; omit it for real training (needs requirements.txt installed + a dataset). Auto-registers the run with TrainMonitorTool.
-- **status**: Process + progress for a run. Pass run. Shows pid, running/stopped, how many metric steps have been written, and the tail of train.log.
+- **launch**: Start a run. Pass run (a name, usually the Blueprint slug) and dir (the build dir, e.g. .bimax/builds/<slug>). Optional script — "train.py" (default) to train, or "eval.py" to run the eval harness (perplexity / lm-eval-harness benchmarks → eval_results.json). Set smoke=true for a dependency-free offline dry run that proves the pipeline without torch/data/GPU; omit it for the real run. Training launches auto-register with TrainMonitorTool.
+- **status**: Process + progress for a run. Pass run. Shows pid, running/stopped, metric steps written (train) or eval_results.json (eval), and the tail of the run log.
 - **stop**: Terminate a running launch (SIGTERM). Pass run.
 - **list**: List launched runs.
 
 # When to use
-After BlueprintTool build emits an LLM scaffold: launch smoke=true first to confirm the pipeline writes metrics, then launch (no smoke) for the real run. Poll status here and TrainMonitorTool status for loss/grad/throughput. Set BIMAX_PYTHON to pick a specific interpreter.`,
+After BlueprintTool build emits an LLM scaffold: launch smoke=true first to confirm the pipeline writes metrics, then launch (no smoke) for the real run. To verify quality, launch script="eval.py" and read eval_results.json via status. Poll TrainMonitorTool status for loss/grad/throughput. Set BIMAX_PYTHON to pick a specific interpreter.`,
   isDestructive: true,
   isConcurrencySafe: false,
   schema: {
@@ -35,8 +36,9 @@ After BlueprintTool build emits an LLM scaffold: launch smoke=true first to conf
     properties: {
       action: { type: 'string', enum: ['launch', 'status', 'stop', 'list'] },
       run: { type: 'string', description: 'Run name / Blueprint slug (required for launch/status/stop).' },
-      dir: { type: 'string', description: 'Build dir containing train.py, e.g. .bimax/builds/<slug> (required for launch).' },
-      smoke: { type: 'boolean', description: 'Dependency-free offline dry run that still writes metrics.jsonl (optional; default false = real training).' },
+      dir: { type: 'string', description: 'Build dir containing the script, e.g. .bimax/builds/<slug> (required for launch).' },
+      smoke: { type: 'boolean', description: 'Dependency-free offline dry run (optional; default false = real run).' },
+      script: { type: 'string', enum: ['train.py', 'eval.py'], description: 'Which entrypoint to run (optional; default train.py). Use eval.py for the eval harness.' },
     },
     required: ['action'],
   },
@@ -46,13 +48,15 @@ After BlueprintTool build emits an LLM scaffold: launch smoke=true first to conf
     switch (args.action) {
       case 'launch': {
         if (!args.run || !args.dir) return 'Error: run and dir are required for "launch".';
-        const r = launcher.launch(args.run, args.dir, { smoke: args.smoke });
+        const r = launcher.launch(args.run, args.dir, { smoke: args.smoke, script: args.script });
         if ('error' in r) return `Error: ${r.error}`;
-        // Auto-wire monitoring so Verify is live the moment train.py writes its first step.
+        const isEval = /eval/.test(r.script);
+        // Auto-wire monitoring for training runs so Verify is live the moment train.py writes a step.
         const mon = getTrainMonitor();
         let wired = '';
-        if (mon) { mon.watch(r.run, r.metrics); wired = `\nMonitoring auto-wired → TrainMonitorTool status run="${r.run}".`; }
-        return `Launched "${r.run}" (pid ${r.pid})${r.smoke ? ' [smoke / dep-free]' : ''}.\n  ${r.cmd}\n  log: ${r.log}\n  metrics: ${r.metrics}${wired}\nPoll progress: TrainLaunchTool status run="${r.run}".`;
+        if (mon && !isEval) { mon.watch(r.run, r.metrics); wired = `\nMonitoring auto-wired → TrainMonitorTool status run="${r.run}".`; }
+        const out = isEval ? `eval_results.json (read it via status)` : `metrics: ${r.metrics}`;
+        return `Launched "${r.run}" (${r.script}, pid ${r.pid})${r.smoke ? ' [smoke / dep-free]' : ''}.\n  ${r.cmd}\n  log: ${r.log}\n  ${out}${wired}\nPoll progress: TrainLaunchTool status run="${r.run}".`;
       }
       case 'status': {
         if (!args.run) return 'Error: run is required for "status".';

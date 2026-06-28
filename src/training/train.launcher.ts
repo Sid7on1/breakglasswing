@@ -10,9 +10,10 @@ import { spawn } from 'child_process';
 export interface LaunchSpec {
   run: string;
   dir: string;        // build dir (absolute)
+  script: string;     // the python entrypoint (train.py | eval.py)
   cmd: string;        // the command line, for display
   pid: number;
-  log: string;        // absolute path to train.log
+  log: string;        // absolute path to <script>.log
   metrics: string;    // absolute path to metrics.jsonl
   smoke: boolean;
   startedAt: string;
@@ -22,13 +23,15 @@ export interface LaunchStatus {
   run: string;
   pid: number;
   running: boolean;
+  script: string;
   cmd: string;
   smoke: boolean;
   startedAt: string;
   log: string;
   metrics: string;
   metricsLines: number;
-  tail: string[];     // last lines of train.log
+  results?: Record<string, any>;  // eval_results.json, when present
+  tail: string[];     // last lines of the run log
 }
 
 const LAUNCH_DIR = '.bimax/launches';
@@ -43,11 +46,12 @@ export class TrainLauncher {
     return path.isAbsolute(dir) ? dir : path.join(this.projectRoot, dir);
   }
 
-  /** Spawn `python train.py [--smoke]` in the build dir, detached, logging to train.log. */
-  launch(run: string, dir: string, opts: { smoke?: boolean } = {}): LaunchSpec | { error: string } {
+  /** Spawn `python <script> [--smoke]` in the build dir, detached, logging to <script>.log. */
+  launch(run: string, dir: string, opts: { smoke?: boolean; script?: string } = {}): LaunchSpec | { error: string } {
     const buildDir = this.resolveDir(dir);
-    const script = path.join(buildDir, 'train.py');
-    if (!fs.existsSync(script)) return { error: `No train.py in ${dir}. Build the Blueprint first (BlueprintTool build).` };
+    const scriptName = opts.script || 'train.py';
+    const script = path.join(buildDir, scriptName);
+    if (!fs.existsSync(script)) return { error: `No ${scriptName} in ${dir}. Build the Blueprint first (BlueprintTool build).` };
 
     const existing = this.load(run);
     if (existing && this.isAlive(existing.pid)) {
@@ -55,10 +59,11 @@ export class TrainLauncher {
     }
 
     fs.mkdirSync(this.dir, { recursive: true });
-    const log = path.join(buildDir, 'train.log');
+    const base = scriptName.replace(/\.py$/, '');
+    const log = path.join(buildDir, `${base}.log`);
     const metrics = path.join(buildDir, 'metrics.jsonl');
     const out = fs.openSync(log, 'a');
-    const args = ['-u', 'train.py', ...(opts.smoke ? ['--smoke'] : [])];
+    const args = ['-u', scriptName, ...(opts.smoke ? ['--smoke'] : [])];
 
     let child;
     try {
@@ -72,7 +77,7 @@ export class TrainLauncher {
     child.unref();
 
     const spec: LaunchSpec = {
-      run, dir: buildDir,
+      run, dir: buildDir, script: scriptName,
       cmd: `${this.python} ${args.join(' ')}`,
       pid: child.pid, log, metrics, smoke: !!opts.smoke,
       startedAt: new Date().toISOString(),
@@ -86,9 +91,11 @@ export class TrainLauncher {
     if (!spec) return { error: `No launch "${run}". Start one with action "launch".` };
     return {
       run: spec.run, pid: spec.pid, running: this.isAlive(spec.pid),
+      script: spec.script || 'train.py',
       cmd: spec.cmd, smoke: spec.smoke, startedAt: spec.startedAt,
       log: spec.log, metrics: spec.metrics,
       metricsLines: this.countLines(spec.metrics),
+      results: this.readJson(path.join(spec.dir, 'eval_results.json')),
       tail: this.tail(spec.log, 12),
     };
   }
@@ -125,15 +132,23 @@ export class TrainLauncher {
     try { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; }
   }
 
+  private readJson(p: string): Record<string, any> | undefined {
+    try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return undefined; }
+  }
+
   private tail(p: string, n: number): string[] {
     try { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).slice(-n); } catch { return []; }
   }
 
   format(s: LaunchStatus): string {
+    const isEval = /eval/.test(s.script);
+    const progress = isEval
+      ? (s.results ? `  eval_results.json: ${Object.entries(s.results).map(([k, v]) => `${k}=${v}`).join('  ·  ')}` : `  eval_results.json: not written yet`)
+      : `  metrics.jsonl: ${s.metricsLines} step(s) written  →  TrainMonitorTool status run="${s.run}"`;
     return [
-      `🚀 Launch "${s.run}"  ·  pid ${s.pid}  ·  ${s.running ? 'RUNNING' : 'stopped'}${s.smoke ? '  ·  [smoke]' : ''}`,
+      `🚀 Launch "${s.run}" (${s.script})  ·  pid ${s.pid}  ·  ${s.running ? 'RUNNING' : 'stopped'}${s.smoke ? '  ·  [smoke]' : ''}`,
       `  cmd: ${s.cmd}   (started ${s.startedAt})`,
-      `  metrics.jsonl: ${s.metricsLines} step(s) written  →  TrainMonitorTool status run="${s.run}"`,
+      progress,
       ...(s.tail.length ? [`  log tail:`, ...s.tail.map(l => `    ${l}`)] : [`  (no log output yet)`]),
     ].join('\n');
   }

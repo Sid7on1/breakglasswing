@@ -81,9 +81,22 @@
   connect branch is unit-tested without spawning npx (`src/__tests__/blueprint.verify.test.ts`, 3
   tests: already-wired / auto-connect / connect-failure). 600 tests green; Go TUI builds.
 
+## Phase 8 SHIPPED 2026-06-28 — real LLM eval (perplexity / lm-eval-harness)
+- **`compileLlm` now also emits `eval.py`** — a runnable eval harness for the LLM Verify stage.
+  Real path: computes held-out **perplexity** from the trained checkpoint (`./out`), or when the
+  Eval level chose a benchmark suite, shells out to **lm-eval-harness** (`python -m lm_eval`,
+  MMLU/HellaSwag/ARC). `--smoke` is dependency-free: derives perplexity from the last loss in
+  metrics.jsonl (ppl = exp(loss)), so eval is verifiable without a checkpoint. Both write
+  `eval_results.json`. `requirements.txt` gained `lm-eval>=0.4`.
+- **`TrainLauncher` generalized to run any script** — `launch(run, dir, {smoke, script})`; logs to
+  `<script>.log`, records the script, and `status` surfaces `eval_results.json` (not just metrics
+  lines) for eval runs via `format`. `TrainLaunchTool` got a `script` enum (`train.py`|`eval.py`) and
+  skips the train-only monitor auto-wire for eval. Build-notes + LLM verify now include the eval step.
+- New test in `train.launch.test.ts`: real `eval.py --smoke` → asserts a numeric perplexity in
+  `eval_results.json` + via launcher `status`. 601 tests green; Go TUI builds.
+
 ## Still TODO (later)
 - True nanotron/torchtitan emitters (today: HF transformers/Trainer; honest notes for non-HF choices).
-- Real eval wiring (lm-eval-harness) so the LLM Eval level computes perplexity/MMLU, not just config.
 - Agent-builder `verify` could auto-run the smoke goal (today it instructs, like website used to).
 
 ---

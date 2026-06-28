@@ -183,7 +183,7 @@ In sketch mode: after discussing an idea, create a Blueprint, then walk the user
         if (!args.slug) return 'Error: slug is required for action "verify".';
         const bp = eng.load(args.slug);
         if (!bp) return `Error: no Blueprint "${args.slug}". Use action "list".`;
-        if (bp.domain === 'llm') return `Verify (LLM): launch it, then read its metrics. Dry-run first — TrainLaunchTool launch run="${bp.slug}" dir=".bimax/builds/${bp.slug}" smoke=true — then TrainLaunchTool status and TrainMonitorTool status run="${bp.slug}" to check loss/grad/throughput. For the real run, drop smoke. Not a visual check.`;
+        if (bp.domain === 'llm') return `Verify (LLM): launch it, watch metrics, then eval. (1) Dry-run: TrainLaunchTool launch run="${bp.slug}" dir=".bimax/builds/${bp.slug}" smoke=true → TrainMonitorTool status run="${bp.slug}" for loss/grad/throughput. (2) Eval: TrainLaunchTool launch run="${bp.slug}-eval" dir=".bimax/builds/${bp.slug}" script="eval.py" smoke=true → status for eval_results.json (perplexity). Drop smoke for the real run. Not a visual check.`;
         if (bp.domain === 'agent') return `Verify (agent): run the smoke goal end-to-end and confirm the agent uses its tools and stays in guardrails. Not a visual check.`;
         const url = args.url || 'http://localhost:4321 (your dev server)';
         if (!toolRegistry) return `Verify (website): no tool registry in this context — connect a browser MCP with McpManageTool(action:"add", id:"playwright"), then render ${url} and self-critique the visual.`;
