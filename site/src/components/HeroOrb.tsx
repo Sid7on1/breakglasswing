@@ -22,21 +22,21 @@ function Orb() {
 
   return (
     <group ref={group}>
-      {/* dark, softly distorting glass core */}
-      <Icosahedron args={[1.6, 12]}>
+      {/* dark, softly distorting glass core with an emerald cast */}
+      <Icosahedron args={[1.55, 14]}>
         <MeshDistortMaterial
-          color="#0b1220"
-          emissive="#1b2740"
-          emissiveIntensity={0.35}
-          roughness={0.15}
-          metalness={0.6}
-          distort={0.32}
-          speed={1.4}
+          color="#0a1414"
+          emissive="#0e3a2a"
+          emissiveIntensity={0.4}
+          roughness={0.12}
+          metalness={0.7}
+          distort={0.3}
+          speed={1.3}
         />
       </Icosahedron>
       {/* faint faceted wireframe shell */}
-      <Icosahedron args={[1.78, 2]}>
-        <meshBasicMaterial color="#9fb4d8" wireframe transparent opacity={0.12} />
+      <Icosahedron args={[1.72, 2]}>
+        <meshBasicMaterial color="#34d399" wireframe transparent opacity={0.14} />
       </Icosahedron>
     </group>
   );

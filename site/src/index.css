@@ -6,22 +6,63 @@
   color-scheme: dark;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 html,
 body {
   margin: 0;
-  background: #000;
-  color: #fff;
+  background: #05070d;
+  color: #f8fafc;
+  font-family: 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(52, 211, 153, 0.25);
+  color: #fff;
+}
+
+/* Slim dark scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+@layer utilities {
+  /* faint technical grid */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+  .bg-radial-accent {
+    background: radial-gradient(60% 50% at 50% 0%, rgba(52, 211, 153, 0.12), transparent 70%);
+  }
+  .text-gradient {
+    background: linear-gradient(180deg, #ffffff 30%, rgba(255, 255, 255, 0.55));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
 }
 
 /* Liquid-glass design system ------------------------------------------------ */
 .liquid-glass {
-  background: rgba(255, 255, 255, 0.01);
-  background-blend-mode: luminosity;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  background: rgba(255, 255, 255, 0.012);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border: none;
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.08);
   position: relative;
   overflow: hidden;
 }
@@ -31,15 +72,15 @@ body {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  padding: 1.4px;
+  padding: 1.2px;
   background: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.45) 0%,
-    rgba(255, 255, 255, 0.15) 20%,
-    rgba(255, 255, 255, 0) 40%,
-    rgba(255, 255, 255, 0) 60%,
-    rgba(255, 255, 255, 0.15) 80%,
-    rgba(255, 255, 255, 0.45) 100%
+    rgba(255, 255, 255, 0.35) 0%,
+    rgba(255, 255, 255, 0.1) 22%,
+    rgba(255, 255, 255, 0) 45%,
+    rgba(255, 255, 255, 0) 55%,
+    rgba(255, 255, 255, 0.1) 78%,
+    rgba(255, 255, 255, 0.35) 100%
   );
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
@@ -50,14 +91,13 @@ body {
 }
 
 .liquid-glass-strong {
-  background: rgba(255, 255, 255, 0.01);
-  background-blend-mode: luminosity;
-  backdrop-filter: blur(50px);
-  -webkit-backdrop-filter: blur(50px);
+  background: rgba(15, 22, 38, 0.5);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
   border: none;
   box-shadow:
-    4px 4px 4px rgba(0, 0, 0, 0.05),
-    inset 0 1px 1px rgba(255, 255, 255, 0.15);
+    0 8px 30px rgba(0, 0, 0, 0.4),
+    inset 0 1px 1px rgba(255, 255, 255, 0.12);
   position: relative;
   overflow: hidden;
 }
@@ -67,15 +107,15 @@ body {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  padding: 1.4px;
+  padding: 1.2px;
   background: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.5) 0%,
-    rgba(255, 255, 255, 0.2) 20%,
-    rgba(255, 255, 255, 0) 40%,
-    rgba(255, 255, 255, 0) 60%,
-    rgba(255, 255, 255, 0.2) 80%,
-    rgba(255, 255, 255, 0.5) 100%
+    rgba(255, 255, 255, 0.4) 0%,
+    rgba(255, 255, 255, 0.12) 22%,
+    rgba(255, 255, 255, 0) 45%,
+    rgba(255, 255, 255, 0) 55%,
+    rgba(255, 255, 255, 0.12) 78%,
+    rgba(255, 255, 255, 0.4) 100%
   );
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
@@ -85,8 +125,10 @@ body {
   pointer-events: none;
 }
 
-/* Respect reduced motion: drop the videos to their poster + kill big transforms. */
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
   video {
     display: none;
   }

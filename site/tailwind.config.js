@@ -5,19 +5,28 @@ export default {
     extend: {
       fontFamily: {
         heading: ["'Instrument Serif'", 'serif'],
-        body: ["'Barlow'", 'sans-serif'],
+        body: ["'Inter'", 'system-ui', 'sans-serif'],
+        mono: ["'JetBrains Mono'", 'ui-monospace', 'monospace'],
       },
-    },
-    // Bare `rounded` → pill, per the design system.
-    borderRadius: {
-      DEFAULT: '9999px',
-      none: '0',
-      sm: '0.5rem',
-      md: '0.75rem',
-      lg: '1rem',
-      xl: '1.25rem',
-      '2xl': '1.5rem',
-      full: '9999px',
+      colors: {
+        // Dark Mode (OLED) system — deep navy-black base, slate surfaces, emerald "build" accent.
+        ink: {
+          950: '#05070d',
+          900: '#0a0e1a',
+          800: '#0f1626',
+          700: '#161f33',
+          600: '#1e293b',
+        },
+        accent: {
+          DEFAULT: '#34d399', // emerald — the "run / build" energy
+          bright: '#4ade80',
+          dim: '#22c55e',
+        },
+        glowblue: '#3b82f6',
+      },
+      boxShadow: {
+        glow: '0 0 40px -8px rgba(52, 211, 153, 0.35)',
+      },
     },
   },
   plugins: [],
