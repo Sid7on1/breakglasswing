@@ -1,4 +1,8 @@
-import { autoConnectBrowser, McpConnector } from '../tools/implementations/blueprint.tool';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { autoConnectBrowser, agentVerifyChecklist, McpConnector } from '../tools/implementations/blueprint.tool';
+import { BlueprintEngine } from '../blueprints/blueprint.engine';
 import { IGovernor } from '../core/interfaces';
 
 const governor = {} as IGovernor;
@@ -49,5 +53,39 @@ describe('autoConnectBrowser (website Verify)', () => {
     const r = await autoConnectBrowser(registry, governor, manager);
     expect(r.connected).toBe(false);
     expect(r.error).toMatch(/exited before connecting/);
+  });
+});
+
+describe('agentVerifyChecklist (agent Verify)', () => {
+  let root: string;
+  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'bmx-agentv-')); });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it('flags a required browser MCP as ✗ when none is connected', () => {
+    const eng = new BlueprintEngine(root);
+    const bp = eng.create('an agent that drives web pages', 'agent');
+    eng.select(bp.slug, 'tools', 'browser');
+    const out = agentVerifyChecklist(eng.load(bp.slug)!, ['EditFileTool', 'ReadFileTool']);
+    expect(out).toMatch(/\[✗\] Tools\/MCP/);
+    expect(out).toMatch(/NOT connected/);
+    expect(out).toMatch(/Resolve the ✗/);
+  });
+
+  it('marks the browser MCP ✓ when it is connected', () => {
+    const eng = new BlueprintEngine(root);
+    const bp = eng.create('an agent that drives web pages', 'agent');
+    eng.select(bp.slug, 'tools', 'browser');
+    const out = agentVerifyChecklist(eng.load(bp.slug)!, ['mcp__playwright__browser_navigate']);
+    expect(out).toMatch(/\[✓\] Tools\/MCP/);
+    expect(out).not.toMatch(/Resolve the ✗/);
+  });
+
+  it('lists every wiring concern as a checklist item', () => {
+    const eng = new BlueprintEngine(root);
+    const bp = eng.create('a research agent', 'agent');
+    const out = agentVerifyChecklist(eng.load(bp.slug)!, []);
+    for (const k of ['Model:', 'Tools/MCP:', 'Memory:', 'Orchestration:', 'Guardrails:', 'Eval:']) {
+      expect(out).toContain(k);
+    }
   });
 });

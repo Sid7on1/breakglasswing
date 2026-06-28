@@ -95,9 +95,20 @@
 - New test in `train.launch.test.ts`: real `eval.py --smoke` → asserts a numeric perplexity in
   `eval_results.json` + via launcher `status`. 601 tests green; Go TUI builds.
 
+## Phase 9 SHIPPED 2026-06-28 — agent verify readiness smoke-check
+- **`BlueprintTool verify` (agent) now emits a real ✓/✗ readiness checklist** instead of a one-liner.
+  New exported `agentVerifyChecklist(bp, toolNames)` reads the Blueprint's selections (model / tools /
+  memory / orchestration / guardrails / eval) and **statically checks what's checkable**: if the chosen
+  tool layer needs an MCP (browser→playwright/puppeteer, web→websearch/brave, data→postgres/sqlite),
+  it confirms that MCP is actually connected and marks it ✓ or ✗ with the exact fix (McpManageTool
+  discover+add). If anything's ✗ it tells the agent to resolve it before running the smoke goal
+  end-to-end in beast mode. (A full LLM auto-run is deliberately NOT built — the agent self-runs the
+  goal via beast mode; this verifies the wiring is correct first.) 3 tests in `blueprint.verify.test.ts`
+  (✗ when unconnected / ✓ when connected / all concerns listed). 604 tests green; Go TUI builds.
+
 ## Still TODO (later)
 - True nanotron/torchtitan emitters (today: HF transformers/Trainer; honest notes for non-HF choices).
-- Agent-builder `verify` could auto-run the smoke goal (today it instructs, like website used to).
+  Only matters for big multi-node runs; HF Trainer already covers single/multi-GPU. Lowest priority.
 
 ---
 

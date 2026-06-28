@@ -55,6 +55,52 @@ function parsePage(html: string): { title: string; desc: string } {
   return { title: title.slice(0, 80), desc: (desc || title).slice(0, 140) };
 }
 
+interface VerifiableBlueprint {
+  goal: string;
+  levels: { id: string; selected: string; options: { id: string; title: string }[] }[];
+}
+
+/**
+ * Agent-domain Verify: a real readiness smoke-check (not a full LLM run — the agent self-runs the
+ * smoke goal in beast mode). Reads the Blueprint's selections and statically checks what's checkable:
+ * if the chosen tool layer needs an MCP (browser/web/data), confirm it's actually connected. Emits a
+ * ✓/✗ checklist so the agent fixes wiring gaps BEFORE running the goal end-to-end.
+ */
+export function agentVerifyChecklist(bp: VerifiableBlueprint, toolNames: string[]): string {
+  const pick = (id: string) => {
+    const l = bp.levels.find(x => x.id === id);
+    if (!l) return '—';
+    const o = l.options.find(x => x.id === l.selected);
+    return o ? o.title : (l.selected || '—');
+  };
+  const selId = (id: string) => bp.levels.find(x => x.id === id)?.selected || '';
+  const has = (re: RegExp) => toolNames.some(n => re.test(n));
+
+  const toolsSel = selId('tools');
+  const need = toolsSel === 'browser' ? /playwright|puppeteer|browser/i
+    : toolsSel === 'web' ? /websearch|web_search|brave|fetch/i
+    : toolsSel === 'data' ? /postgres|sqlite|mysql|database/i
+    : null;
+  const toolMark = !need ? ' ' : has(need) ? '✓' : '✗';
+  const toolNote = !need ? '' : has(need) ? ' — connected ✓' : ' — NOT connected; McpManageTool discover+add it first ✗';
+  const orch = pick('orchestration');
+  const blocked = !!need && !has(need);
+
+  return [
+    `Verify (agent) — readiness smoke-check for "${bp.goal}":`,
+    `  [ ] Model: ${pick('model')} — confirm it's the active provider/model (ModelManageTool).`,
+    `  [${toolMark}] Tools/MCP: ${pick('tools')}${toolNote}.`,
+    `  [ ] Memory: ${pick('memory')}.`,
+    `  [ ] Orchestration: ${orch}${/beast/i.test(orch) ? ' — run the smoke goal via /beast.' : '.'}`,
+    `  [ ] Guardrails: ${pick('guardrails')} — confirm the governor mode matches.`,
+    `  [ ] Eval: ${pick('eval')} — the smoke goal to run end-to-end.`,
+    ``,
+    blocked
+      ? `⚠️ Resolve the ✗ above (connect the MCP) before running. Then in beast mode, execute the smoke goal end-to-end and confirm the agent uses its tools and stays in guardrails.`
+      : `Then in beast mode, execute the smoke goal end-to-end and confirm the agent uses its tools and stays in guardrails.`,
+  ].join('\n');
+}
+
 interface BlueprintArgs {
   action: 'create' | 'list' | 'show' | 'levels' | 'select' | 'override' | 'import' | 'import_url' | 'verify' | 'build' | 'delete';
   // create
@@ -184,7 +230,7 @@ In sketch mode: after discussing an idea, create a Blueprint, then walk the user
         const bp = eng.load(args.slug);
         if (!bp) return `Error: no Blueprint "${args.slug}". Use action "list".`;
         if (bp.domain === 'llm') return `Verify (LLM): launch it, watch metrics, then eval. (1) Dry-run: TrainLaunchTool launch run="${bp.slug}" dir=".bimax/builds/${bp.slug}" smoke=true → TrainMonitorTool status run="${bp.slug}" for loss/grad/throughput. (2) Eval: TrainLaunchTool launch run="${bp.slug}-eval" dir=".bimax/builds/${bp.slug}" script="eval.py" smoke=true → status for eval_results.json (perplexity). Drop smoke for the real run. Not a visual check.`;
-        if (bp.domain === 'agent') return `Verify (agent): run the smoke goal end-to-end and confirm the agent uses its tools and stays in guardrails. Not a visual check.`;
+        if (bp.domain === 'agent') return agentVerifyChecklist(bp, toolRegistry ? toolRegistry.getToolNames() : []);
         const url = args.url || 'http://localhost:4321 (your dev server)';
         if (!toolRegistry) return `Verify (website): no tool registry in this context — connect a browser MCP with McpManageTool(action:"add", id:"playwright"), then render ${url} and self-critique the visual.`;
         const browser = await autoConnectBrowser(toolRegistry, governor);
