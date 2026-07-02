@@ -5,6 +5,7 @@ export type LoopType =
   | 'no_progress_poll'     // same (tool, args, result) — calling but nothing changes
   | 'ping_pong'            // A→B→A→B alternation between two tools
   | 'unknown_tool_repeat'  // model keeps calling a non-existent tool name
+  | 'error_thrashing'      // same tool keeps ERRORING across the window, even with DIFFERENT args
   | 'circuit_breaker';     // total tool calls for this session exceeded the budget
 
 export interface LoopSignal {
@@ -19,11 +20,18 @@ interface CallRecord {
   tool: string;
   argsHash: string;
   resultHash: string;
+  isError: boolean;
 }
 
 const SOFT_THRESHOLD = 3;  // warn, inject hint
 const HARD_THRESHOLD = 5;  // intervene, push the model to stop
 const MAX_TOTAL_CALLS = 200; // circuit breaker
+// Error-thrashing: how many times a single tool may FAIL within the rolling window before we step in.
+// This is deliberately independent of argsHash — the whole point is to catch the "keep tweaking the
+// arguments and it keeps erroring" spiral (a mis-anchored EditFileTool, a Bash command that never
+// succeeds) that the args-identical generic_repeat check cannot see.
+const ERROR_SOFT_THRESHOLD = 3;
+const ERROR_HARD_THRESHOLD = 4;
 
 function sha256Short(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
@@ -46,13 +54,25 @@ export class LoopDetector {
   // calls have elapsed since the last ping-pong signal.
   private lastPingPongAt = -Infinity;
   private static readonly PING_PONG_COOLDOWN = 4;
+  // Cooldown for error-thrashing: once a spiral is flagged, an every-call re-fire would spam history,
+  // so wait this many further calls before flagging the same tool again.
+  private lastErrorThrashAt = -Infinity;
+  private lastErrorThrashSeverity: 'soft' | 'hard' | null = null;
+  private static readonly ERROR_THRASH_COOLDOWN = 3;
 
-  record(toolName: string, argsJson: string, resultText: string): LoopSignal | null {
+  /**
+   * Record a completed tool call.
+   * @param isError whether the call failed (from the tool executor). When the caller can't determine
+   *   it, a light heuristic on the result text is used as a fallback so the error-thrashing detector
+   *   still has a signal. Defaults to that heuristic when omitted, keeping older call sites working.
+   */
+  record(toolName: string, argsJson: string, resultText: string, isError?: boolean): LoopSignal | null {
     this.totalCalls++;
     const argsHash = sha256Short(toolName + ':' + argsJson);
     const resultHash = sha256Short(resultText);
+    const failed = isError ?? /^(tool error|error:|failed to|tool .* not found)/i.test((resultText || '').trimStart());
 
-    this.history.push({ tool: toolName, argsHash, resultHash });
+    this.history.push({ tool: toolName, argsHash, resultHash, isError: failed });
     // Keep a rolling window — only the last 20 calls matter for pattern matching
     if (this.history.length > 20) this.history.shift();
 
@@ -78,6 +98,28 @@ export class LoopDetector {
     }
     if (repeats >= SOFT_THRESHOLD) {
       return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'soft' };
+    }
+
+    // Error thrashing — the same tool keeps FAILING across the window even as the model varies its
+    // arguments (the args-identical generic_repeat check above can't see this). Only considered on a
+    // failing call, and cooled down so a genuine retry-with-fix isn't punished. This catches the common
+    // "edit fails to match → tweak → fails again → tweak …" spiral that used to eat 5–10 turns.
+    if (failed) {
+      const errorsForTool = this.history.filter(c => c.tool === toolName && c.isError).length;
+      const severity: 'soft' | 'hard' | null =
+        errorsForTool >= ERROR_HARD_THRESHOLD ? 'hard' :
+        errorsForTool >= ERROR_SOFT_THRESHOLD ? 'soft' : null;
+      if (severity) {
+        // Escalating soft→hard bypasses the cooldown (the spiral just got worse and the model needs the
+        // stronger nudge now); otherwise the cooldown throttles repeat signals of the same severity so a
+        // long tail of failures doesn't spam an identical warning into history every single call.
+        const escalated = severity === 'hard' && this.lastErrorThrashSeverity !== 'hard';
+        if (escalated || this.totalCalls - this.lastErrorThrashAt >= LoopDetector.ERROR_THRASH_COOLDOWN) {
+          this.lastErrorThrashAt = this.totalCalls;
+          this.lastErrorThrashSeverity = severity;
+          return { type: 'error_thrashing', tool: toolName, argsHash, count: errorsForTool, severity };
+        }
+      }
     }
 
     // No-progress poll — same (tool, argsHash, resultHash) SOFT_THRESHOLD times in a row
@@ -139,5 +181,7 @@ export class LoopDetector {
     this.totalCalls = 0;
     this.breakerFired = false;
     this.lastPingPongAt = -Infinity;
+    this.lastErrorThrashAt = -Infinity;
+    this.lastErrorThrashSeverity = null;
   }
 }

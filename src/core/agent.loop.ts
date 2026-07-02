@@ -503,7 +503,7 @@ export class AgentLoop {
             } as ToolCallEntry);
             if (typed?.errorClass) toolSpan.setAttribute('bimax.tool.error_class', typed.errorClass);
             toolSpan.end(isError ? 'error' : 'ok', isError ? result.slice(0, 200) : undefined);
-            return { id: tc.id, result };
+            return { id: tc.id, result, isError };
           };
 
           let argsObj: any;
@@ -538,8 +538,8 @@ export class AgentLoop {
         };
 
         const parallelResults = await Promise.all(parallel.map(tc => executeTool(tc)));
-        const resultById = new Map<string, string>();
-        for (const res of parallelResults) resultById.set(res.id, res.result);
+        const resultById = new Map<string, { result: string; isError: boolean }>();
+        for (const res of parallelResults) resultById.set(res.id, { result: res.result, isError: res.isError });
 
         let interrupted = false;
         for (const tc of sequential) {
@@ -547,7 +547,7 @@ export class AgentLoop {
           // run of tool calls promptly, instead of waiting out the whole batch + another model call.
           if (signal?.aborted) { interrupted = true; break; }
           const res = await executeTool(tc);
-          resultById.set(res.id, res.result);
+          resultById.set(res.id, { result: res.result, isError: res.isError });
         }
 
         // Push tool results in the SAME order the model emitted the calls, and answer EVERY
@@ -559,11 +559,11 @@ export class AgentLoop {
         // models misread which result belongs to which call.
         const loopSignals: LoopSignal[] = [];
         for (const tc of toolCalls) {
-          const ran = resultById.has(tc.id);
-          const result = ran ? resultById.get(tc.id)! : 'Tool call interrupted before it ran.';
+          const ran = resultById.get(tc.id);
+          const result = ran ? ran.result : 'Tool call interrupted before it ran.';
           this.messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
           if (ran) {
-            const sig = loopDetector.record(tc.name, tc.args, result);
+            const sig = loopDetector.record(tc.name, tc.args, result, ran.isError);
             if (sig) loopSignals.push(sig);
           }
         }
@@ -587,19 +587,27 @@ export class AgentLoop {
             cliEvents.emit('loop_detected' as any, worst);
             this.messages.push({
               role: 'user',
-              content:
-                `[LOOP DETECTED — HARD STOP] You called "${worst.tool}" ${worst.count} times with the same ` +
-                `arguments and got the same result. This is a loop. STOP immediately. ` +
-                `Take a completely different approach — try a different tool, a different strategy, or a different argument. ` +
-                `If you are genuinely blocked, explain exactly what is blocking you instead of repeating the same call.`,
+              content: worst.type === 'error_thrashing'
+                ? `[LOOP DETECTED — HARD STOP] "${worst.tool}" has FAILED ${worst.count} times in a row, even as you ` +
+                  `changed its arguments. Retrying with another small tweak is not working. STOP and change strategy: ` +
+                  `re-read the current state before acting again (e.g. read the exact file/region you're editing, or run a ` +
+                  `command to inspect reality), fix the root cause of the error, or use a different tool entirely. ` +
+                  `If you are genuinely blocked, explain exactly what is blocking you instead of trying again.`
+                : `[LOOP DETECTED — HARD STOP] You called "${worst.tool}" ${worst.count} times with the same ` +
+                  `arguments and got the same result. This is a loop. STOP immediately. ` +
+                  `Take a completely different approach — try a different tool, a different strategy, or a different argument. ` +
+                  `If you are genuinely blocked, explain exactly what is blocking you instead of repeating the same call.`,
             });
           } else {
             Logger.warn(`[LoopGuard] Soft loop: ${worst.type} on "${worst.tool}" (${worst.count}×)`);
             this.messages.push({
               role: 'user',
-              content:
-                `[Loop Warning] "${worst.tool}" has been called with similar arguments ${worst.count} times. ` +
-                `Consider whether this approach is making progress, or try a different strategy.`,
+              content: worst.type === 'error_thrashing'
+                ? `[Loop Warning] "${worst.tool}" has failed ${worst.count} times. Before trying again, verify your ` +
+                  `assumptions — re-read the exact target or inspect the current state so the next attempt fixes the ` +
+                  `real cause instead of guessing.`
+                : `[Loop Warning] "${worst.tool}" has been called with similar arguments ${worst.count} times. ` +
+                  `Consider whether this approach is making progress, or try a different strategy.`,
             });
           }
         }

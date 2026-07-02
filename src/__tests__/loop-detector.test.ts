@@ -25,3 +25,42 @@ describe('LoopDetector — interleaved repeats', () => {
     expect(d.record('Read', '{"path":"x.ts"}', 'v2')).toBeNull();
   });
 });
+
+describe('LoopDetector — error thrashing (varying args, repeated failure)', () => {
+  it('fires when the same tool keeps ERRORING with DIFFERENT args', () => {
+    const d = new LoopDetector();
+    // A classic edit-match spiral: the model tweaks the old_string each time, and each attempt fails.
+    // generic_repeat can't see this because the args differ every time.
+    let sig = null as ReturnType<LoopDetector['record']>;
+    for (let i = 0; i < 4; i++) {
+      sig = d.record('EditFileTool', JSON.stringify({ old: `attempt-${i}` }), 'Tool Error: no match found', true);
+    }
+    expect(sig?.type).toBe('error_thrashing');
+    expect(sig?.severity).toBe('hard');
+    expect(sig?.tool).toBe('EditFileTool');
+  });
+
+  it('escalates soft → hard as failures accumulate', () => {
+    const d = new LoopDetector();
+    expect(d.record('BashTool', '{"cmd":"a"}', 'err', true)).toBeNull();          // 1 fail
+    expect(d.record('BashTool', '{"cmd":"b"}', 'err', true)).toBeNull();          // 2 fails
+    expect(d.record('BashTool', '{"cmd":"c"}', 'err', true)?.severity).toBe('soft'); // 3 → soft
+  });
+
+  it('does not fire when the calls SUCCEED (isError=false), even with repeated tool', () => {
+    const d = new LoopDetector();
+    for (let i = 0; i < 6; i++) {
+      const sig = d.record('BashTool', JSON.stringify({ cmd: `step-${i}` }), 'ok', false);
+      expect(sig).toBeNull();
+    }
+  });
+
+  it('infers failure from result text when isError is omitted', () => {
+    const d = new LoopDetector();
+    let sig = null as ReturnType<LoopDetector['record']>;
+    for (let i = 0; i < 4; i++) {
+      sig = d.record('EditFileTool', JSON.stringify({ old: `v${i}` }), 'Tool Error: could not apply edit');
+    }
+    expect(sig?.type).toBe('error_thrashing');
+  });
+});

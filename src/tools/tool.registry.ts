@@ -1,3 +1,4 @@
+import fuzzysort from 'fuzzysort';
 import { BuiltTool } from './tool.factory';
 import { Logger } from '../utils/logger';
 
@@ -144,28 +145,56 @@ export class ToolRegistry {
   }
 
   /**
+   * Rank a pool of tools against a free-text query, best match first. Uses fuzzysort's typo-tolerant
+   * scorer over each tool's name AND description, then re-weights so a hit in the NAME dominates an
+   * incidental mention in the description — a query like "graph" should surface GraphQueryTool ahead of
+   * some unrelated tool whose prose happens to say "dependency graph". Falls back to substring-token
+   * scoring when fuzzysort returns nothing (very short/odd queries), so this never matches *fewer*
+   * tools than the old naive `includes()` scan it replaced. Empty query → [].
+   */
+  private rank(query: string, pool: BuiltTool[], max: number): BuiltTool[] {
+    const q = (query || '').trim();
+    if (!q || pool.length === 0) return [];
+
+    const results = fuzzysort.go(q, pool, { keys: ['name', 'description'], limit: max * 4 });
+    if (results.length > 0) {
+      return results
+        .map(r => {
+          const nameScore = r[0] ? r[0].score : 0;
+          const descScore = r[1] ? r[1].score : 0;
+          return { tool: r.obj as BuiltTool, score: nameScore * 2 + descScore };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, max)
+        .map(s => s.tool);
+    }
+
+    const terms = q.toLowerCase().split(/[\s,+]+/).filter(Boolean);
+    return pool
+      .map(t => ({ t, s: terms.reduce((n, term) => n + (`${t.name} ${t.description}`.toLowerCase().includes(term) ? 1 : 0), 0) }))
+      .filter(x => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, max)
+      .map(x => x.t);
+  }
+
+  /**
    * Search across tools that are already callable (core set + already-discovered deferred tools).
    * Used by ToolSearchTool to detect when the model is looping — asking for a tool it already has.
    * Returns matching tool names (not schemas — the model already has them).
    */
   public findCallable(query: string, max = 5): string[] {
-    const q = (query || '').trim().toLowerCase();
+    const q = (query || '').trim();
     if (!q) return [];
-    if (q.startsWith('select:')) {
+    if (q.toLowerCase().startsWith('select:')) {
       const wanted = new Set(q.slice('select:'.length).split(',').map(s => s.trim()).filter(Boolean));
       return Array.from(this.tools.keys()).filter(name =>
         wanted.has(name) && (CORE_TOOLS.has(name) || this.discovered.has(name) || name === TOOL_SEARCH_TOOL)
       ).slice(0, max);
     }
-    const terms = q.split(/[\s,+]+/).filter(Boolean);
-    return Array.from(this.tools.values())
-      .filter(t => CORE_TOOLS.has(t.name) || this.discovered.has(t.name))
-      .filter(t => {
-        const hay = `${t.name} ${t.description}`.toLowerCase();
-        return terms.some(term => hay.includes(term));
-      })
-      .slice(0, max)
-      .map(t => t.name);
+    const callable = Array.from(this.tools.values())
+      .filter(t => CORE_TOOLS.has(t.name) || this.discovered.has(t.name));
+    return this.rank(q, callable, max).map(t => t.name);
   }
 
   /**
@@ -180,19 +209,14 @@ export class ToolRegistry {
     let matched: BuiltTool[];
     if (q.toLowerCase().startsWith('select:')) {
       const wanted = new Set(q.slice('select:'.length).split(',').map(s => s.trim()).filter(Boolean));
-      matched = deferred.filter(t => wanted.has(t.name));
+      matched = deferred.filter(t => wanted.has(t.name)).slice(0, max);
+    } else if (q === '') {
+      // No query at all → advertise the deferred set (bounded), matching the prior behavior.
+      matched = deferred.slice(0, max);
     } else {
-      const terms = q.toLowerCase().split(/[\s,+]+/).filter(Boolean);
-      const score = (t: BuiltTool) => {
-        const hay = `${t.name} ${t.description}`.toLowerCase();
-        return terms.reduce((n, term) => n + (hay.includes(term) ? 1 : 0), 0);
-      };
-      matched = terms.length
-        ? deferred.map(t => ({ t, s: score(t) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s).map(x => x.t)
-        : deferred;
+      // Typo-tolerant, name-weighted ranking (see rank()).
+      matched = this.rank(q, deferred, max);
     }
-
-    matched = matched.slice(0, max);
     this.markDiscovered(matched.map(t => t.name));
     return matched.map(toSchema);
   }

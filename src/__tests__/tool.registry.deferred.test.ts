@@ -69,6 +69,27 @@ describe('ToolRegistry — smart vs full context modes', () => {
     expect(reg.isDiscovered('mcp__github__create')).toBe(true);
   });
 
+  // Note: these use DEFERRED tool names (not CORE tools like WebFetchTool, which are never deferred).
+  it('searchDeferred fuzzy-ranks by relevance, name over description', () => {
+    const r = new ToolRegistry();
+    r.register(fakeTool('ScoutTool', 'browse the internet'));          // "scout" in the NAME
+    r.register(fakeTool('CrawlerTool', 'scout and index remote pages')); // "scout" only in description
+    r.register(fakeTool('DockerTool', 'run containers'));               // irrelevant
+    const found = r.searchDeferred('scout').map((s: any) => s.name);
+    expect(found[0]).toBe('ScoutTool');    // name hit ranks first
+    expect(found).not.toContain('DockerTool'); // irrelevant tool excluded
+  });
+
+  it('searchDeferred matches abbreviations/dropped chars (proving fuzzy, not substring)', () => {
+    const r = new ToolRegistry();
+    r.register(fakeTool('ScoutTool', 'browse the internet'));
+    r.register(fakeTool('DockerTool', 'run containers'));
+    // "scot" is a subsequence of "scout" — no contiguous substring match, so the old includes() path
+    // would find nothing; fuzzysort still resolves it.
+    const found = r.searchDeferred('scot').map((s: any) => s.name);
+    expect(found).toContain('ScoutTool');
+  });
+
   it('unregister clears discovery state', () => {
     reg.markDiscovered(['ScoutTool']);
     reg.unregister('ScoutTool');

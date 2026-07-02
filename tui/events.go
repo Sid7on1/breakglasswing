@@ -259,7 +259,23 @@ func (m *model) handleEvent(o Outbound) {
 			if detail == "" {
 				detail = sig.Type
 			}
-			m.append(errStyle.Render(fmt.Sprintf("  ↻ loop detected: %s ×%d (%s)", detail, sig.Count, sig.Severity)))
+			// Type-aware label: an error spiral ("kept failing and tweaking args") reads very
+			// differently from a plain repeat, so name it plainly instead of the generic "loop
+			// detected". The tool name and ×count are always included (the front-end contract).
+			icon, label := "↻", "loop detected"
+			switch sig.Type {
+			case "error_thrashing":
+				icon, label = "⚠", "repeated failures"
+			case "no_progress_poll":
+				icon, label = "↻", "no progress"
+			case "ping_pong":
+				icon, label = "⇄", "ping-pong loop"
+			case "circuit_breaker":
+				icon, label = "⛔", "tool-call budget hit"
+			case "unknown_tool_repeat":
+				icon, label = "?", "unknown tool repeated"
+			}
+			m.append(errStyle.Render(fmt.Sprintf("  %s %s: %s ×%d (%s) — changing strategy", icon, label, detail, sig.Count, sig.Severity)))
 		}
 
 	case "rerun_onboarding":

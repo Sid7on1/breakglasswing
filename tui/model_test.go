@@ -467,6 +467,22 @@ func TestCwdAndLoopDetected(t *testing.T) {
 	}
 }
 
+func TestLoopDetectedErrorThrashingLabel(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("loop_detected", map[string]any{
+		"type": "error_thrashing", "tool": "EditFileTool", "count": 4, "severity": "hard",
+	}))
+	joined := strings.Join(m.lines, "\n")
+	// An error spiral must read as failures, not a generic "loop detected", and still carry the
+	// tool name + ×count so the user knows exactly what stalled.
+	if !strings.Contains(joined, "repeated failures") || !strings.Contains(joined, "EditFileTool") || !strings.Contains(joined, "×4") {
+		t.Fatalf("error_thrashing not rendered as expected:\n%s", joined)
+	}
+	if strings.Contains(joined, "loop detected") {
+		t.Fatalf("error_thrashing should not use the generic 'loop detected' label:\n%s", joined)
+	}
+}
+
 func TestStreamThenFinalMessage(t *testing.T) {
 	m, _ := newTestModel()
 	m.handleEngine(ev("stream_token", "Hel"))
