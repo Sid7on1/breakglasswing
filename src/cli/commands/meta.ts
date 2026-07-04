@@ -4,6 +4,7 @@ import { getCurrentProvider } from '../provider';
 import { cliEvents, getSessionTokenEstimate } from '../events';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
+import { getTaintTracker } from '../../mind/taint';
 import { getConfig } from '../config';
 import { modelMenuOptions, liveModelMenuOptions } from '../models';
 import { encode } from 'gpt-tokenizer';
@@ -103,7 +104,7 @@ globalCommandRegistry.register({
 
 globalCommandRegistry.register({
   name: '/model',
-  description: 'Show current model',
+  description: 'Model & routing — id · lite · coding · tier · provider',
   category: 'Configuration',
   execute: async (args, context) => {
     // Two slots: CODING (the main agent loop) and LITE (cheap aux calls — summaries, self-critic).
@@ -155,6 +156,16 @@ globalCommandRegistry.register({
         options: [...(await pickerOptions(cur)), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
         onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustom(apply) : apply(opt.value)),
       };
+    }
+
+    // Consolidated routing sub-verbs (Phase D): /model tier|provider|reasoning|routes|arms dispatch
+    // to the dedicated (now palette-hidden) command, so the whole model/routing surface lives under
+    // one primary verb. This also stops `/model tier` from being misread as "set coding model = tier".
+    const ROUTING_SUBS: Record<string, string> = {
+      tier: '/tier', provider: '/provider', reasoning: '/reasoning', routes: '/routes', arms: '/arms',
+    };
+    if (ROUTING_SUBS[slot]) {
+      return { type: 'redirect', command: [ROUTING_SUBS[slot], ...args.slice(1)].join(' ').trim() };
     }
 
     // /model <id>  → set the coding model directly.
@@ -308,6 +319,8 @@ globalCommandRegistry.register({
     // TUI consumes to wipe its transcript; bare `/clear` asks first.
     if ((args[0] || '').toLowerCase() === 'force') {
       try { context.restoreMessages?.([]); } catch { /* best-effort */ }
+      // The untrusted content leaves the window with the history — taint lifts with it.
+      try { getTaintTracker().clear('conversation cleared'); } catch { /* best-effort */ }
       cliEvents.emit('clear');
       return { type: 'message', level: 'success', content: 'Conversation cleared.' };
     }
