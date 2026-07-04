@@ -261,6 +261,20 @@ func TestToolCallCollapse(t *testing.T) {
 	}
 }
 
+// Regression: task-list bookkeeping must never be reported as a code "edit". A read-only run that
+// updates its todo list once said "1 edits" and looked like it silently changed files.
+func TestTodoWriteIsNotAnEdit(t *testing.T) {
+	if got := toolCategory("TodoWriteTool"); got == "edits" {
+		t.Fatalf("TodoWriteTool must not bucket as an edit, got %q", got)
+	}
+	if got := toolCategory("EditFileTool"); got != "edits" {
+		t.Fatalf("EditFileTool must still bucket as an edit, got %q", got)
+	}
+	if got := toolCategory("WriteFileTool"); got != "edits" {
+		t.Fatalf("WriteFileTool must still bucket as an edit, got %q", got)
+	}
+}
+
 // A tool occupies ONE fixed slot for its whole lifecycle: the same id arriving as running then as
 // a result updates the card in place (never a second entry), and the finished card commits to
 // scrollback only when non-tool content lands.

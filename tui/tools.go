@@ -305,6 +305,11 @@ func (m *model) flushToolRun() {
 // toolCategory buckets a tool name for the collapsed summary.
 func toolCategory(name string) string {
 	switch {
+	// Task/plan bookkeeping is NOT a code edit. This must be checked before the Edit/Write
+	// substring rule below, or TodoWriteTool (task-list updates) lands in "edits" and a
+	// read-only run reports phantom edits — making the agent look like it lied about touching code.
+	case strings.Contains(name, "Todo") || strings.Contains(name, "Task") || strings.Contains(name, "Plan"):
+		return "other"
 	case strings.Contains(name, "Read") || strings.Contains(name, "Cat"):
 		return "reads"
 	case strings.Contains(name, "Edit") || strings.Contains(name, "Write"):

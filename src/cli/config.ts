@@ -87,7 +87,7 @@ const DEFAULTS: CliConfig = {
   skipSemanticMetadata: false,
   autoIndex: true,
   excludeFromIndex: [],
-  maxToolIterations: 15,
+  maxToolIterations: 50, // deep multi-file work (audits, refactors) needs headroom; 15 forced constant "continue" babysitting. Loop-detection + context compaction guard runaway.
   maxSubAgents: 5,
   notificationBell: false,
   customRoutingRules: [],
