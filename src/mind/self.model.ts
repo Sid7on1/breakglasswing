@@ -8,12 +8,40 @@ import { betaTailProb, betaMean } from './stats';
  * loop (whose observers feed the singletons), and persisting that fake experience into
  * the repo's real .bimax/ would poison the agent's actual self-knowledge — so test runs
  * get a throwaway temp root. Explicit `new X(root)` instances (mind.test.ts) are unaffected.
+ *
+ * In production this MUST be stable for the whole process, anchored to the PROJECT root — not
+ * raw process.cwd(). cwd() fragments the mind: launching from a subdirectory (or after a
+ * ChangeDirectoryTool) opened a *different* .bimax/ledger.db, so rewards (tool_outcome),
+ * episode boundaries, and policy decisions scattered across files and never assembled into a
+ * scorable episode — which is exactly why /arms had no data to fold. We resolve the nearest
+ * ancestor holding a .git or existing .bimax once and cache it, so every singleton shares one
+ * coherent store regardless of where the binary was launched.
  */
+let _cachedRoot: string | null = null;
 export function mindSingletonRoot(): string {
   if (process.env.JEST_WORKER_ID) {
     return fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-mind-singleton-'));
   }
-  return process.cwd();
+  if (_cachedRoot) return _cachedRoot;
+  _cachedRoot = findProjectRoot(process.cwd());
+  return _cachedRoot;
+}
+
+/**
+ * Walk up from `start` to the git project root; fall back to `start` if the tree has no `.git`.
+ * We anchor on `.git` (not `.bimax`) deliberately: a stray `.bimax/` left in a subdirectory by the
+ * old cwd-fragmented behavior must NOT win over the real project root, or it would perpetuate the
+ * very fragmentation this fix removes.
+ */
+function findProjectRoot(start: string): string {
+  let dir = start;
+  for (let i = 0; i < 40; i++) {
+    if (fs.existsSync(path.join(dir, '.git'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached filesystem root
+    dir = parent;
+  }
+  return start;
 }
 
 /**
