@@ -20,6 +20,12 @@ Driven by the frozen Six-Stage Launch Audit. Gates close Must-Fix blockers befor
   line numbers. Regression tests added.
 - **Write tool** — no longer silently overwrites an existing file for a new-document request;
   it picks a non-colliding name.
+- **Lint green** — cleared the 65 eslint errors that were failing CI's engine job (main's
+  required check was red). `no-require-imports` is now a warning (the lazy-`require` cycle-break
+  pattern is deliberate); the 26 real findings (dead escapes, useless assignments, ternary
+  statements, inconsistent returns) are fixed. `eslint` exits 0.
+- **`/perf`** — hidden, local-only engine performance readout: cold-start (load → ready),
+  per-turn time-to-first-token (p50/p95), and memory. Pure in-process counters, no egress.
 
 ## History
 
