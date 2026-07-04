@@ -407,9 +407,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Bracketed multi-line paste: collapse to a "[Pasted text #N +L lines]" chip.
-	if msg.Paste && strings.Contains(string(msg.Runes), "\n") {
-		m.addPaste(string(msg.Runes))
+	// Multi-line paste: collapse to a "[Pasted text #N +L lines]" chip. A KeyRunes message that
+	// carries a line break can only be a paste — Enter is KeyEnter and Ctrl+J is KeyCtrlJ, neither
+	// arrives as a rune — so we don't require the msg.Paste flag (terminals that don't bracket
+	// pastes never set it). We accept CR as well as LF: bracketed pastes commonly deliver '\r'.
+	if runes := string(msg.Runes); strings.ContainsAny(runes, "\n\r") {
+		m.addPaste(runes)
 		m.syncInputHeight()
 		m.relayout()
 		return m, nil

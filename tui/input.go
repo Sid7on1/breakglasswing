@@ -150,7 +150,11 @@ func (m *model) handleInputRequest(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // --- paste chips (SimpleInput.tsx) ---------------------------------------------------------
 
 // addPaste collapses a multi-line paste into a chip and inserts its placeholder into the input.
+// Line endings are normalized to '\n' so the line count is correct whether the terminal delivered
+// CRLF, bare CR, or LF, and so the expanded text the engine receives is clean.
 func (m *model) addPaste(text string) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	m.pasteCounter++
 	lines := strings.Count(text, "\n") + 1
 	ph := fmt.Sprintf("[Pasted text #%d +%d lines]", m.pasteCounter, lines)
