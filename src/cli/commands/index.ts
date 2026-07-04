@@ -38,3 +38,4 @@ import './mode';
 import './selection';
 import './mind';
 import './calibration';
+import './perf';

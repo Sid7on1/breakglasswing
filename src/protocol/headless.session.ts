@@ -5,6 +5,7 @@ import { expandAtMentions, expandFileAtMentions } from '../cli/atMention';
 import { globalCommandRegistry } from '../cli/commands/registry';
 import { decideTier, applyBrief, Tier } from '../cli/model.router';
 import { getEpistemicLedger } from '../mind/epistemic.ledger';
+import { recordTurn } from '../telemetry/perf';
 import { IGraphStore } from '../graph/models';
 
 /**
@@ -95,6 +96,8 @@ export class HeadlessSession {
     }
     this.busy = true;
     this.turnAbort = new AbortController();
+    const turnStart = Date.now();
+    let firstTokenMs = 0; // set on the first streamed token (perf: time-to-first-token)
     // Snapshot the epistemic ledger so we can report THIS turn's verification posture at the end:
     // claims open on edits and resolve when a build/test run names the touched files.
     const beforeLedger = (() => { try { return getEpistemicLedger().stats(); } catch { return null; } })();
@@ -137,7 +140,10 @@ export class HeadlessSession {
       let streamed = '';
       await active.execute(
         agentQuery,
-        (token: string) => { totalChars += token.length; streamed += token; cliEvents.emit('stream_token', token); },
+        (token: string) => {
+          if (firstTokenMs === 0) firstTokenMs = Date.now() - turnStart;
+          totalChars += token.length; streamed += token; cliEvents.emit('stream_token', token);
+        },
         {
           maxIterations: this.deps.options.maxToolIterations,
           planMode: this.deps.options.governor?.mode === 'plan',
@@ -163,6 +169,7 @@ export class HeadlessSession {
     } finally {
       this.busy = false;
       this.turnAbort = null;
+      recordTurn({ firstTokenMs, totalMs: Date.now() - turnStart, tokens: totalChars });
       cliEvents.emit('thinking_clear');
       // Confidence-in-margin (turn-end form): report whether this turn's edits were checked. The
       // ledger delta tells us how many claims opened (edits) vs resolved (a build/test run named the
