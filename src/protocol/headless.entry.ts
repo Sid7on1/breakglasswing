@@ -81,6 +81,20 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   // Push footer + map-panel + token-meter state the Go front-end can't read from engine singletons.
   startUiSnapshot(graphStore);
 
+  // Mind layer wake-up: one QUICK drives measurement at boot (cheap signals only — a grep and a
+  // git status, strictly sequential, never builds/tests) so the footer's 🧠 strip and the DRIVES
+  // prompt section reflect reality from the first turn instead of waiting for a manual
+  // /drives check. Fire-and-forget; re-snapshots when done. BIMAX_DRIVES_BOOT=0 disables.
+  if (process.env.BIMAX_DRIVES_BOOT !== '0' && isCodebase(process.cwd())) {
+    void (async () => {
+      try {
+        const { getDrivesEngine } = require('../mind/drives.engine');
+        await getDrivesEngine().check({ quick: true });
+        cliEvents.emit('mind_changed');
+      } catch { /* best-effort */ }
+    })();
+  }
+
   // Self-heal a stale/invalid model pin (e.g. config.json points at a model from a different
   // provider) so the first turn doesn't 400. Non-blocking — runs concurrently with `ready` so it
   // never delays startup; if the user's first turn beats it, the agent loop's model-404 message

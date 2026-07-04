@@ -15,14 +15,21 @@ describe('checkEditSyntax', () => {
     expect(checkEditSyntax('README.md', 'broken } {')).toBeNull();
   });
 
-  it('EditFileTool appends a syntax warning when an edit breaks the file', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bimax-syn-'));
-    const file = path.join(dir, 'a.ts');
-    await fs.writeFile(file, 'export function f() { return 1; }', 'utf8');
-    const res = String(await createEditFileTool(governor).execute(
-      { path: file, oldString: 'return 1; }', newString: 'return 1; } }' }, { cwd: dir },
-    ));
-    expect(res).toMatch(/SYNTAX CHECK FAILED/);
-    await fs.rm(dir, { recursive: true, force: true });
+  it('EditFileTool appends a syntax warning when an edit breaks the file (shield off — warn-only path)', async () => {
+    // With the Edit Shield ON (default) this edit is refused outright — that behavior is
+    // covered in surgical.tools.test.ts. This exercises the legacy warn-and-write path.
+    process.env.BIMAX_EDIT_SHIELD = '0';
+    try {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bimax-syn-'));
+      const file = path.join(dir, 'a.ts');
+      await fs.writeFile(file, 'export function f() { return 1; }', 'utf8');
+      const res = String(await createEditFileTool(governor).execute(
+        { path: file, oldString: 'return 1; }', newString: 'return 1; } }' }, { cwd: dir },
+      ));
+      expect(res).toMatch(/SYNTAX CHECK FAILED/);
+      await fs.rm(dir, { recursive: true, force: true });
+    } finally {
+      delete process.env.BIMAX_EDIT_SHIELD;
+    }
   });
 });

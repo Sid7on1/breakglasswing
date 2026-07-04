@@ -214,7 +214,7 @@ In sketch mode: after discussing an idea, create a Blueprint, then walk the user
         if (!args.slug || !args.level || !args.url) return 'Error: slug, level, and url are required for "import_url".';
         let parsed: { title: string; desc: string };
         try {
-          const res = await fetch(args.url, { headers: { 'User-Agent': 'Bimax/1.0' } });
+          const res = await fetch(args.url, { headers: { 'User-Agent': 'BiMax/1.0' } });
           if (!res.ok) return `Error: fetch ${args.url} → ${res.status}.`;
           parsed = parsePage(await res.text());
         } catch (e: any) {

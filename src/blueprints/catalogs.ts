@@ -92,7 +92,7 @@ const WEBSITE: DomainCatalog = {
 const AGENT: DomainCatalog = {
   domain: 'agent',
   title: 'Agent Builder',
-  description: 'A purpose-built AI agent — leans on Bimax\'s own self-service tools.',
+  description: 'A purpose-built AI agent — leans on BiMax\'s own self-service tools.',
   build: 'Author a persona/skill (SkillAuthorTool) + wire the base model (ModelManageTool) and tools/MCP (McpManageTool), optionally a recipe; smoke-run via /beast.',
   verify: 'Run a smoke goal end-to-end + any registered tests; confirm the agent uses its tools and stays in guardrails.',
   levels: [

@@ -35,12 +35,21 @@ import { globalProjectMemory } from '../memory/project.memory';
 // worker thread would race against the parent's connections and create duplicate sessions.
 import { GraphStore } from '../graph/graph.store';
 import { cliEvents } from './events';
+import { floorRoot } from '../sandbox/exec.sandbox';
+import { SafetyPolicy } from '../governor/policy.engine';
 
 async function runWorker() {
   if (!parentPort) throw new Error('Worker must be run as a thread');
 
   const config = workerData as SubAgentConfig;
-  
+
+  // Sandbox floor (BiMax v2): this worker is an isolated autonomous episode. Bash enforcement
+  // lives in bash.tool.ts (kernel sandbox via the thread-local FLOOR_ENV), but the Node-side
+  // file tools must be confined too — narrow the governor's workspace boundary to the episode
+  // root so Write/Edit/Delete outside the worktree are vetoed in-process.
+  const episodeFloor = floorRoot();
+  if (episodeFloor) SafetyPolicy.allowedWorkspace = episodeFloor;
+
   try {
     const pool = buildKeyPool();
     const apiKeyManager = new ApiKeyManager(pool);
@@ -60,11 +69,11 @@ async function runWorker() {
     governor.mode = config.parentMode as any;
 
     const toolRegistry = new ToolRegistry();
-    // Must match the parent's graph path (container.ts: <projectRoot>/.breakglass/graph/playground.json),
-    // keyed off the sub-agent's project cwd — NOT ~/.breakglass/graph.json, which left workers querying
-    // an empty/stale store relative to the parent project.
-    const graphStorePath = path.join(config.cwd || process.cwd(), '.breakglass', 'graph', 'playground.json');
-    const graphStore = new GraphStore(graphStorePath);
+    // Must match the parent's graph backend (container.ts uses createGraphStore: SQLite when
+    // available, legacy JSON otherwise), keyed off the sub-agent's project cwd — NOT
+    // ~/.breakglass/graph.json, which left workers querying an empty/stale store.
+    const { createGraphStore } = await import('../graph/sqlite.graph.store');
+    const graphStore = createGraphStore(config.cwd || process.cwd());
     const { isCodebase } = await import('../graph/graph.summary');
     if (isCodebase(config.cwd || process.cwd())) {
       await graphStore.loadFromDisk();
@@ -81,18 +90,24 @@ async function runWorker() {
     toolRegistry.register(createGrepTool(governor));
     toolRegistry.register(createGlobTool(governor));
     toolRegistry.register(createTodoWriteTool(governor));
-    toolRegistry.register(createWebFetchTool(governor));
+    // Floored episodes are net: none — WebFetch/WebSearch run fetches from the worker thread
+    // itself, where the kernel sandbox on Bash children can't reach, so simply don't arm them.
+    if (!episodeFloor) toolRegistry.register(createWebFetchTool(governor));
     toolRegistry.register(createCdTool(governor));
     toolRegistry.register(createGraphQueryTool(governor, graphStore));
     toolRegistry.register(createGraphContextTool(governor, graphStore));
     toolRegistry.register(createGitTool(governor));
-    toolRegistry.register(createRememberTool(governor, globalProjectMemory));
+    // Shared project memory is a persistence channel out of the episode — floored workers'
+    // lessons re-enter only via the dream grader, never directly.
+    if (!episodeFloor) toolRegistry.register(createRememberTool(governor, globalProjectMemory));
     globalSkillService.load(config.cwd || process.cwd());
     toolRegistry.register(createSkillTool(governor, globalSkillService));
-    toolRegistry.register(createSkillInstallTool(governor, globalSkillService));
+    // Skill installs fetch from the network AND persist outside the episode — both off-limits
+    // under the floor (persistence must go through the objective grader, not side effects).
+    if (!episodeFloor) toolRegistry.register(createSkillInstallTool(governor, globalSkillService));
     loadHooksConfig(config.cwd || process.cwd());
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
-    toolRegistry.register(createWebSearchTool(governor));
+    if (!episodeFloor) toolRegistry.register(createWebSearchTool(governor));
 
     // 2. Instantiate Persona
     let agent: AgentPersona;

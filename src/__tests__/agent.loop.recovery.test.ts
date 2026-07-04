@@ -239,13 +239,23 @@ describe('AgentLoop — retries transient errors then gives up', () => {
     };
 
     const loop = new AgentLoop(mockLlm, new ToolRegistry(), null as any);
+    const statuses: string[] = [];
+    const onStatus = (s: string) => statuses.push(String(s));
+    cliEvents.on('status', onStatus);
     let out = '';
-    for await (const t of loop.execute([{ role: 'user', content: 'hi' }], 'sys', { maxIterations: 5 })) {
-      out += t;
+    try {
+      for await (const t of loop.execute([{ role: 'user', content: 'hi' }], 'sys', { maxIterations: 5 })) {
+        out += t;
+      }
+    } finally {
+      cliEvents.off('status', onStatus);
     }
 
     expect(call).toBe(2); // retried exactly once
-    expect(out).toContain('retrying (1/2)');
+    // Recovery is narrated on the status channel, NEVER into the answer stream — the reply must
+    // read as one uninterrupted voice.
+    expect(out).not.toContain('retrying');
+    expect(statuses.some(s => /retrying in \d+s \(1\/2\)/.test(s))).toBe(true);
     expect(out).toContain('Recovered and answered.');
   });
 
@@ -266,7 +276,7 @@ describe('AgentLoop — retries transient errors then gives up', () => {
 
     // Initial attempt + 2 retries, then the fatal surface — never an infinite spin.
     expect(call).toBe(3);
-    expect(out).toContain('API Error');
+    expect(out).toContain('The provider returned an error');
   });
 
   it('resets the transient budget after a clean turn — survives blips across a long run', async () => {
@@ -304,6 +314,6 @@ describe('AgentLoop — retries transient errors then gives up', () => {
     }
 
     expect(out).toContain('Done after surviving 3 blips.');
-    expect(out).not.toContain('API Error');
+    expect(out).not.toContain('provider returned an error');
   }, 15000); // 3 transient backoffs (~1s each) of real wait
 });

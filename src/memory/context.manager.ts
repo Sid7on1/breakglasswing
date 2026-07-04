@@ -107,14 +107,11 @@ export class ContextManager {
       try { const c = require('../cli/config').getConfig(); model = c.model || c.liteModel || 'unknown'; } catch { /* config optional */ }
 
       let saved = 0, n = 0;
-      // Give the proxy a brief beat to finish coming up before this pressured pass: the startup context
-      // can cross the threshold on turn one, before the ~4s sidecar boot completes — without this wait
-      // that first pass goes native and (since compaction may not recur) stays the only recorded engine.
-      try {
-        const hp = require('./headroomProxy');
-        if (!hp.isHeadroomReady()) await hp.awaitHeadroomReady(8000);
-      } catch { /* headroom optional */ }
-      // Prefer the real Headroom Kompress proxy; fall back to the native heuristic only if the sidecar
+      // NEVER wait for the sidecar in front of a turn. This used to block up to 8s so the first
+      // pressured pass could use the proxy instead of the native fallback — trading user-visible
+      // latency for stats bookkeeping. If the proxy isn't up yet, the lossless native pass covers
+      // this turn and the proxy simply catches the next one.
+      // Prefer the real Headroom Kompress proxy; fall back to the native heuristic if the sidecar
       // isn't up yet (provisioning/first-run model download) so a turn under pressure never goes uncompacted.
       const proxied = await proxyCompress(messages as any, model === 'unknown' ? '' : model, this.MAX_TOKENS);
       if (proxied) {
@@ -163,11 +160,29 @@ export class ContextManager {
     // RepoMap (aider-style): refresh it EVERY turn so it reflects current files and re-ranks toward
     // THIS request (focus terms from the latest user message). Strip any prior map first so history
     // keeps exactly one copy — current, personalized, no accumulation.
+    //
+    // PLACEMENT MATTERS: the map is injected immediately BEFORE the latest user message, never at
+    // messages[0]. A per-turn-changing message at the head of the conversation invalidates the
+    // provider's prompt-prefix cache for the ENTIRE history on every single turn — the silent tax
+    // that made long sessions slow and expensive. Near the tail, only the last few messages are
+    // uncached; everything earlier stays a byte-stable, cacheable prefix. (Within one agent-loop
+    // turn the position is stable too — tool rounds append after it.)
     if (_graphStore) {
       try {
         msgs = msgs.filter(m => !(m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[RepoMap]')));
         const outline = formatRepoMapOutline(_graphStore, 1500, focusTermsFromMessages(msgs));
-        if (outline) msgs = [{ role: 'system' as const, content: outline }, ...msgs];
+        if (outline) {
+          const mapMsg = { role: 'system' as const, content: outline };
+          let lastUser = -1;
+          for (let j = msgs.length - 1; j >= 0; j--) {
+            if (msgs[j].role === 'user') { lastUser = j; break; }
+          }
+          // Insert before the latest user message; if there is none (shouldn't happen mid-turn),
+          // fall back to appending — never to the cache-hostile head.
+          msgs = lastUser >= 0
+            ? [...msgs.slice(0, lastUser), mapMsg, ...msgs.slice(lastUser)]
+            : [...msgs, mapMsg];
+        }
       } catch { /* pagerank optional — never fail the compaction loop */ }
     }
 
@@ -261,13 +276,32 @@ export class ContextManager {
     return messages.slice(start);
   }
 
-  private estimateTokens(messages: Message[]): number {
+  // Per-message token counts, keyed by message identity. The compaction passes preserve object
+  // identity for every message they don't touch, and a message's content never mutates in place —
+  // so across a long session only the handful of NEW/rewritten messages are ever re-tokenized.
+  // (The old implementation re-encoded the ENTIRE conversation with gpt-tokenizer on every single
+  // turn — an O(session) CPU spike per turn that grew with the thing it was supposed to manage.)
+  private tokenCache = new WeakMap<object, { content: unknown; tokens: number }>();
+
+  private countMessageTokens(m: Message): number {
+    const key = m as unknown as object;
+    const hit = this.tokenCache.get(key);
+    if (hit && hit.content === m.content) return hit.tokens;
+    let tokens: number;
     try {
-      const text = messages.map(m => contentToText(m.content)).join('\n');
-      return encode(text).length;
+      tokens = encode(contentToText(m.content)).length;
     } catch {
-      return Math.ceil(JSON.stringify(messages).length / 4);
+      tokens = Math.ceil(String(contentToText(m.content) ?? '').length / 4);
     }
+    this.tokenCache.set(key, { content: m.content, tokens });
+    return tokens;
+  }
+
+  private estimateTokens(messages: Message[]): number {
+    // +1 per message ≈ the joining newline the old whole-conversation encode counted.
+    let total = 0;
+    for (const m of messages) total += this.countMessageTokens(m) + 1;
+    return total;
   }
 
   /** Layer 4 — summarize older messages into a single system note (the one LLM-backed pass). */

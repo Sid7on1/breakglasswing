@@ -6,6 +6,10 @@ import { capabilitiesFor, capabilityGlyphs } from '../../core/capabilities';
 import { globalTelemetry } from '../../telemetry/telemetry';
 import * as headroomProxy from '../../memory/headroomProxy';
 import { getHeadroomReport } from '../../memory/headroom.compress';
+import { globalMcpManager } from '../../mcp/manager';
+import { getSelfModel } from '../../mind/self.model';
+import { getEpistemicLedger } from '../../mind/epistemic.ledger';
+import { getDrivesEngine } from '../../mind/drives.engine';
 
 // One actionable health line. status drives the glyph; detail says what to do when not OK.
 function healthLine(status: 'ok' | 'warn' | 'fail', label: string, detail: string): string {
@@ -46,6 +50,49 @@ function healthChecks(): string[] {
     lines.push(healthLine('warn', 'Compression', `unavailable (${e?.message})`));
   }
 
+  // MCP connectors — no network probe here (keep /diagnostics instant); /mcp doctor performs the
+  // active five-second-bounded probe when a connector needs deeper inspection.
+  try {
+    const statuses = globalMcpManager.health();
+    const active = statuses.filter(s => s.state !== 'disabled');
+    const broken = active.filter(s => s.state === 'error' || s.state === 'disconnected');
+    if (!statuses.length) {
+      lines.push(healthLine('warn', 'Integrations', 'none configured — use /mcp to add one'));
+    } else if (broken.length) {
+      lines.push(healthLine('fail', 'Integrations', `${broken.map(s => s.name).join(', ')} need attention — run /mcp doctor`));
+    } else {
+      lines.push(healthLine('ok', 'Integrations', `${active.length} connected · ${statuses.length - active.length} disabled`));
+    }
+  } catch (e: any) {
+    lines.push(healthLine('warn', 'Integrations', `status unavailable (${e?.message})`));
+  }
+
+  return lines;
+}
+
+// A one-glance strip of the mind layer: weak spots, calibration gaps, drive deviations.
+// Full detail lives in /self; this just says whether the agent's self-knowledge is clean.
+function mindLines(): string[] {
+  const lines: string[] = ['', '**Mind (self-knowledge)**'];
+  try {
+    const weak = getSelfModel().weakSpots();
+    const t = getSelfModel().totals();
+    lines.push(weak.length === 0
+      ? healthLine('ok', 'Self-model', t.calls > 0 ? `${t.calls} outcomes learned · no weak spots` : 'building — no outcomes yet')
+      : healthLine('warn', 'Self-model', `${weak.length} weak spot(s) — routing hints active (see /self)`));
+  } catch { /* best-effort */ }
+  try {
+    const over = getEpistemicLedger().overconfidentDomains();
+    lines.push(over.length === 0
+      ? healthLine('ok', 'Calibration', 'no overconfidence gap detected')
+      : healthLine('warn', 'Calibration', `overconfident in ${over.map(o => o.domain).join(', ')} — verification escalated`));
+  } catch { /* best-effort */ }
+  try {
+    const dev = getDrivesEngine().deviations();
+    lines.push(dev.length === 0
+      ? healthLine('ok', 'Drives', 'no fresh deviations (measure with /drives check)')
+      : healthLine('fail', 'Drives', `${dev.map(d => d.label).join(', ')} — run /dream or fix directly`));
+  } catch { /* best-effort */ }
   return lines;
 }
 
@@ -118,10 +165,11 @@ globalCommandRegistry.register({
       `- Context window: ${caps.contextWindow.toLocaleString()} tokens`,
       `- Capabilities: ${glyphs || '(floor — no special capabilities)'}`,
       ...healthChecks(),
+      ...mindLines(),
       ...toolLines,
       ...cacheLines,
       '',
-      '_Spend → /cost · context usage → /context · plugins → /plugins · safety → /security_',
+      '_Spend → /cost · context usage → /context · plugins → /plugins · safety → /security · self-knowledge → /self_',
     ];
 
     return { type: 'message', level: 'info', content: lines.join('\n') };

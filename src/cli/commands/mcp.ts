@@ -3,11 +3,25 @@ import { globalCommandRegistry } from './registry';
 import { globalMcpManager } from '../../mcp/manager';
 import { missingPathArgs, loadMcpServers } from '../../mcp/config';
 
+function healthReport(statuses: Awaited<ReturnType<typeof globalMcpManager.diagnose>>): string {
+  if (!statuses.length) return 'No MCP servers configured.';
+  return statuses.map(s => {
+    const glyph = s.state === 'connected' ? '✓' : s.state === 'disabled' ? '○' : s.state === 'connecting' ? '…' : '✗';
+    const detail = s.state === 'connected'
+      ? `${s.toolCount} tool(s)`
+      : s.missingPaths?.length
+        ? `missing path(s): ${s.missingPaths.join(', ')}`
+        : s.error || s.state;
+    const usage = s.calls > 0 ? ` · ${s.calls} call(s), avg ${s.avgMs}ms${s.callErrors ? `, ${s.callErrors} error(s)` : ''}` : '';
+    return `${glyph} ${s.name} · ${s.transport} · ${detail}${usage}`;
+  }).join('\n');
+}
+
 // Interactive MCP server management. The agent has its own (Governor-gated) McpManageTool;
 // this is the human-facing equivalent in the settings/command surface.
 globalCommandRegistry.register({
   name: '/mcp',
-  description: 'List / add / remove MCP servers',
+  description: 'Manage, diagnose, and reconnect MCP integrations',
   category: 'Configuration',
   execute: async (args, context) => {
     const registry = context.options?.toolRegistry;
@@ -24,6 +38,7 @@ globalCommandRegistry.register({
         return { label: `${disabled ? '○' : conn ? '●' : '◌'} ${n}`, value: `/mcp server ${n}`, desc };
       });
       options.push({ label: '+ Add a server', value: '/mcp add', desc: 'Register & connect a new MCP server' } as any);
+      options.push({ label: '♡ Integration doctor', value: '/mcp doctor', desc: 'Probe connectors and explain failures' } as any);
       if (configured.length) {
         options.push({ label: '🗑  Remove ALL servers', value: '/mcp remove all', desc: 'Disconnect & delete every server' } as any);
       }
@@ -43,6 +58,7 @@ globalCommandRegistry.register({
       const conn = globalMcpManager.get(name);
       const options: any[] = [];
       if (conn) options.push({ label: 'Show tools', value: `/mcp test ${name}`, desc: `${conn.toolNames.length} tool(s)` });
+      if (!disabled) options.push({ label: '↻  Reconnect', value: `/mcp reconnect ${name}`, desc: 'Refresh tools and connection safely' });
       options.push(
         disabled
           ? { label: '▶  Enable', value: `/mcp enable ${name}`, desc: 'Allow this server to start' }
@@ -61,7 +77,9 @@ globalCommandRegistry.register({
       const name = args[1];
       if (!name) return { type: 'message', level: 'error', content: `Usage: /mcp ${sub} <name>` };
       const enabled = sub === 'enable';
-      const ok = await globalMcpManager.setEnabled(name, enabled, registry, context.cwd);
+      // MCP settings are global by default. Passing the project cwd here made a server visible in
+      // the menu but impossible to enable/disable unless the project happened to own the config.
+      const ok = await globalMcpManager.setEnabled(name, enabled, registry);
       if (!ok) return { type: 'message', level: 'info', content: `No server named '${name}' in config.` };
       if (enabled && registry && governor) {
         // Connect it right now so it's usable without a restart.
@@ -78,6 +96,31 @@ globalCommandRegistry.register({
         }
       }
       return { type: 'message', level: 'success', content: enabled ? `Enabled '${name}'.` : `Disabled '${name}' — it won't start until re-enabled.` };
+    }
+
+    if (sub === 'doctor') {
+      const statuses = await globalMcpManager.diagnose();
+      const broken = statuses.filter(s => s.state === 'error' || s.state === 'disconnected');
+      return {
+        type: 'message',
+        level: broken.length ? 'error' : 'success',
+        content: `MCP integration doctor\n${healthReport(statuses)}` +
+          (broken.length ? '\n\nFix the reported cause, then run /mcp reconnect <name>.' : '\n\nAll active integrations answered their health probe.'),
+      };
+    }
+
+    if (sub === 'reconnect') {
+      const name = args[1];
+      if (!name) return { type: 'message', level: 'error', content: 'Usage: /mcp reconnect <name>' };
+      if (!registry || !governor) return { type: 'message', level: 'error', content: 'Tool registry unavailable in this context.' };
+      const conn = await globalMcpManager.reconnect(name, registry, governor);
+      return {
+        type: 'message',
+        level: conn ? 'success' : 'error',
+        content: conn
+          ? `Reconnected '${name}' — ${conn.toolNames.length} tool(s) are live.`
+          : `Could not reconnect '${name}'. ${globalMcpManager.lastErrorFor(name) || globalMcpManager.lastError || 'Unknown error.'}`,
+      };
     }
 
     if (sub === 'add') {
@@ -180,6 +223,6 @@ globalCommandRegistry.register({
       return { type: 'message', level: 'success', content: `Removed all MCP servers (${all.length}): ${all.join(', ')}.` };
     }
 
-    return { type: 'message', level: 'error', content: 'Usage: /mcp [add|remove|remove all|test] …' };
+    return { type: 'message', level: 'error', content: 'Usage: /mcp [doctor|reconnect|add|remove|remove all|test] …' };
   },
 });

@@ -69,11 +69,13 @@ export class ProtocolHost {
     emitter.on(DIFF_PROMPT_EVENT, diffFn);
     this.listeners.push({ event: DIFF_PROMPT_EVENT, fn: diffFn });
 
-    // input_prompt(title, resolve) — a free-form text prompt (e.g. /keys asking for an API key).
-    const inputFn = (title: string, resolve: (a: string) => void) => {
+    // input_prompt(title, resolve, opts?) — a free-form text prompt (e.g. /keys asking for an API
+    // key). `opts.masked` rides the wire so the front-end masks secrets BY CONTRACT — not by
+    // guessing from the question's wording.
+    const inputFn = (title: string, resolve: (a: string) => void, opts?: { masked?: boolean }) => {
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
-      this.write({ t: 'request', id, kind: 'input', question: title, options: [] });
+      this.write({ t: 'request', id, kind: 'input', question: title, options: [], masked: !!opts?.masked });
     };
     emitter.on(INPUT_PROMPT_EVENT, inputFn);
     this.listeners.push({ event: INPUT_PROMPT_EVENT, fn: inputFn });
@@ -100,6 +102,11 @@ export class ProtocolHost {
       }
       case 'interrupt':
         this.handlers.onInterrupt?.();
+        return;
+      case 'ping':
+        // Answered synchronously from the ingest path — no engine work is awaited, so a pong only
+        // fails to return when the process/event loop is genuinely wedged (which is the signal).
+        this.write({ t: 'pong', id: msg.id });
         return;
       case 'query': {
         const { id, text } = msg;

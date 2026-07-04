@@ -25,12 +25,12 @@ export class GlobalPrompter {
       try {
         cliEvents.emit('veto_prompt', question, options, (answer: string) => {
           this.isPrompting = false;
-          cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
+          cliEvents.emit('spinner_state', 'idle', 'Ready');
           resolve(answer.trim());
         });
       } catch (e) {
         this.isPrompting = false;
-        cliEvents.emit('spinner_state', 'idle', 'Awaiting orders...');
+        cliEvents.emit('spinner_state', 'idle', 'Ready');
         throw e;
       }
     });

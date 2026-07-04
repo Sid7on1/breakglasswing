@@ -7,6 +7,7 @@ import { GlobalPrompter } from '../cli/prompter';
 import { YoloClassifier } from '../security/yolo.classifier';
 import { cliEvents } from '../cli/events';
 import { BashStaticAnalyzer } from './bash.analyzer';
+import { taintRestriction } from '../mind/taint';
 
 export type SessionPermissionMode = 'interactive' | 'plan' | 'auto' | 'strict' | 'bypass';
 
@@ -76,13 +77,23 @@ export class Governor implements IGovernor {
       return;
     }
 
+    // Taint capability narrowing (v2 D3) — computed BEFORE the rule shortcut so a persistent
+    // "Always Allow" created in a clean session can never waive it: once untrusted content
+    // (web/MCP output) is in the conversation, network-capable commands are hard-blocked in
+    // auto mode and always face the human elsewhere.
+    const taintCut: { action: 'block' | 'ask'; reason: string } | null =
+      taskType === 'OS_COMMAND' ? taintRestriction(payload.command || '', this.mode) : null;
+    if (taintCut?.action === 'block') {
+      throw new GovernorVetoError(`Blocked: ${taintCut.reason}`);
+    }
+
     // Layer 1: Persistent Rules Check
     const matchingRule = this.rules.find(r => r.tool === taskType); // Simplistic matching
     if (matchingRule) {
       if (matchingRule.effect === 'deny') {
         throw new GovernorVetoError(`Rule explicitly denied task: ${taskType}`);
       }
-      if (matchingRule.effect === 'allow') {
+      if (matchingRule.effect === 'allow' && !taintCut) {
         cliEvents.emit('status', `Approved (Rule): ${taskType}`);
         return;
       }
@@ -100,16 +111,20 @@ export class Governor implements IGovernor {
       // Layer 2: Static Analysis for Bash Commands
       if (taskType === 'OS_COMMAND') {
         const analysis = this.bashAnalyzer.analyze(payload.command);
-        
-        if (analysis.category === 'read' && analysis.risk === 'none' && this.mode !== 'strict') {
+
+        // Taint-narrowed commands (computed above) keep none of the fast paths below —
+        // they fall through to the human prompt with the taint source named. Read-only
+        // auto-approve is unaffected for untainted-restricted commands (ls can't exfil).
+        if (analysis.category === 'read' && analysis.risk === 'none' && this.mode !== 'strict' && !taintCut) {
           // Auto-approve read-only safe commands
           Logger.info(`[Governor] Auto-approved safe read command: ${payload.command}`);
           cliEvents.emit('status', `Approved (Static Analysis): ${taskType}`);
           return;
         }
 
-        // Fallback: Layer 3 ML Classifier (only if auto mode or interactive)
-        if (this.yolo && this.mode === 'auto') {
+        // Fallback: Layer 3 ML Classifier (only if auto mode or interactive).
+        // Never lets a tainted network command through — that's the human's call.
+        if (this.yolo && this.mode === 'auto' && !taintCut) {
           const isSafe = await this.yolo.evaluateAction(payload.command, payload.context);
           if (isSafe) {
              cliEvents.emit('status', `Approved (ML Classifier): ${taskType}`);
@@ -134,7 +149,8 @@ export class Governor implements IGovernor {
         : taskType === 'OS_COMMAND' ? `Run: ${(payload.command || '').slice(0, 60)}`
         : `${taskType}`;
 
-      const question = `Allow? ${label}`;
+      // A taint-narrowed command asks with the taint source in view — the human decides knowingly.
+      const question = taintCut ? `⚠ TAINTED CONTEXT — ${taintCut.reason}\nAllow anyway? ${label}` : `Allow? ${label}`;
       const answer = await GlobalPrompter.ask(question, ['Yes', 'No', 'Always Allow This Tool']);
 
       if (answer === 'No') {

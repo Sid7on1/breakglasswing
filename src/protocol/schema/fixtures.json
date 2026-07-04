@@ -1,0 +1,113 @@
+{
+  "protocolVersion": 1,
+  "outbound": [
+    {
+      "t": "event",
+      "name": "message",
+      "args": [
+        {
+          "role": "assistant",
+          "content": "hello",
+          "level": "info"
+        }
+      ]
+    },
+    {
+      "t": "request",
+      "id": 7,
+      "kind": "prompt",
+      "question": "Run `npm test`?",
+      "options": [
+        "Yes",
+        "No",
+        "Always Allow"
+      ],
+      "isAsk": false,
+      "isMulti": false
+    },
+    {
+      "t": "request",
+      "id": 8,
+      "kind": "diff",
+      "question": "Apply this edit?",
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "isAsk": false,
+      "isMulti": false,
+      "body": "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new"
+    },
+    {
+      "t": "request",
+      "id": 9,
+      "kind": "input",
+      "question": "Branch name:",
+      "options": [],
+      "isAsk": true,
+      "isMulti": false
+    },
+    {
+      "t": "ready",
+      "protocol": 1
+    },
+    {
+      "t": "queryResult",
+      "id": 3,
+      "items": [
+        {
+          "value": "/git",
+          "label": "/git",
+          "desc": "Git helpers",
+          "kind": "command",
+          "disabled": true,
+          "disabledReason": "repo not initialized"
+        },
+        {
+          "value": "@handlePayment",
+          "label": "handlePayment",
+          "desc": "src/pay.ts",
+          "kind": "symbol"
+        },
+        {
+          "value": "@./src/",
+          "label": "./src/",
+          "desc": "directory",
+          "kind": "path"
+        }
+      ]
+    },
+    {
+      "t": "pong",
+      "id": 42
+    }
+  ],
+  "inbound": [
+    {
+      "t": "reply",
+      "id": 7,
+      "value": "Yes"
+    },
+    {
+      "t": "input",
+      "text": "refactor the auth module"
+    },
+    {
+      "t": "interrupt"
+    },
+    {
+      "t": "query",
+      "id": 3,
+      "text": "/g"
+    },
+    {
+      "t": "menuSelect",
+      "id": "model-menu",
+      "value": "claude-fable-5"
+    },
+    {
+      "t": "ping",
+      "id": 42
+    }
+  ]
+}

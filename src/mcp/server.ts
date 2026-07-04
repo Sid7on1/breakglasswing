@@ -61,7 +61,8 @@ export function createGraphMcpServer(store: GraphStore, cwd: string = process.cw
 export async function runGraphMcpStdioServer(cwd: string = process.cwd()): Promise<void> {
   // stdout is the JSON-RPC channel — redirect stray logging to stderr so it can't corrupt it.
   console.log = console.error.bind(console);
-  const store = new GraphStore(path.join(cwd, '.breakglass/graph', 'playground.json'));
+  const { createGraphStore } = await import('../graph/sqlite.graph.store');
+  const store = createGraphStore(cwd);
   await store.loadFromDisk();
   const server = createGraphMcpServer(store, cwd);
   await server.connect(new StdioServerTransport());

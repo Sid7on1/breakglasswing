@@ -2,6 +2,7 @@ import { IGovernor } from '../core/interfaces';
 import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
 import { runPreHooks, runPostHooks } from './hooks';
+import { isTypedOutcome, outcomeBlocked, TypedOutcome } from './outcome';
 
 export interface ToolDef<TArgs = any> {
   name: string;
@@ -58,7 +59,9 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
       if (pre && pre.block) {
         const reason = pre.reason || 'declined by a PreToolUse hook';
         Logger.warn(`[Tool:${def.name}] ⛔ blocked by hook: ${reason}`);
-        return `${def.name} was blocked before running: ${reason}`;
+        const text = `${def.name} was blocked before running: ${reason}`;
+        context?.reportOutcome?.(outcomeBlocked(text));
+        return text;
       }
 
       try {
@@ -67,7 +70,14 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
         // finally emits 'idle'. Emitting idle per-tool flipped the front-end's busy flag off between
         // tools, which killed the "working" indicator AND the esc-to-interrupt gate mid-turn.
         cliEvents.emit('spinner_state', 'executing', `${def.name}...`);
-        const result = await def.execute(args, context);
+        const raw = await def.execute(args, context);
+        // Typed outcome (v2 Phase 0): a tool that declares what happened reports it on the
+        // context side-channel; every caller keeps receiving the plain text it always did.
+        let result: any = raw;
+        if (isTypedOutcome(raw)) {
+          context?.reportOutcome?.(raw as TypedOutcome);
+          result = raw.text;
+        }
         // PostToolUse hooks (A2): react to the result and optionally append to it (e.g. the
         // B2 verify loop feeds typecheck errors back so the model self-corrects). Non-fatal.
         const appended = await runPostHooks(def.name, args, result, context);

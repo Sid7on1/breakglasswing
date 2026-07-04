@@ -1,29 +1,25 @@
 import SmoothScroll from './components/motion/SmoothScroll';
 import Navbar from './components/Navbar';
-import Hero from './components/Hero';
-import TrustMarquee from './components/TrustMarquee';
-import SeeItBuild from './components/SeeItBuild';
-import Loop from './components/Loop';
-import Capabilities from './components/Capabilities';
-import Domains from './components/Domains';
-import Proof from './components/Proof';
-import CTA from './components/CTA';
+import SpaceJourney from './components/space/SpaceJourney';
+import { MissionSection, AtlasSection, CrewSection, LaunchSection } from './components/space/Sections';
 
+// The observatory: ONE fixed 3D world (SpaceJourney) behind everything; four full-height DOM
+// sections scroll over it, and the page's scroll progress flies the camera between the four
+// scenes (planet → constellation → station → nebula). See space/SpaceJourney.tsx for the rig.
 export default function App() {
   return (
     <div className="bg-ink-950">
       <SmoothScroll />
-      <Navbar />
-      <main>
-        <Hero />
-        <TrustMarquee />
-        <SeeItBuild />
-        <Loop />
-        <Capabilities />
-        <Domains />
-        <Proof />
-        <CTA />
-      </main>
+      <SpaceJourney />
+      <div className="relative z-10">
+        <Navbar />
+        <main>
+          <MissionSection />
+          <AtlasSection />
+          <CrewSection />
+          <LaunchSection />
+        </main>
+      </div>
     </div>
   );
 }

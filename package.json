@@ -1,7 +1,7 @@
 {
   "name": "bimax",
   "version": "1.0.0",
-  "description": "BiMax — Autonomous AI agent for your terminal",
+  "description": "BiMax \u2014 Autonomous AI agent for your terminal",
   "bin": {
     "bimax": "bin/bimax.js"
   },
@@ -17,7 +17,8 @@
     "test:leaks": "jest --coverage=false --detectOpenHandles",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

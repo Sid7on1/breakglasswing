@@ -77,12 +77,12 @@ export default function Navbar() {
             GitHub
           </a>
           <a
-            href="#install"
+            href="#launch"
             onClick={(e) => {
               e.preventDefault();
-              go('install');
+              go('launch');
             }}
-            className="flex items-center gap-1 rounded-full bg-accent px-4 py-1.5 text-sm font-semibold text-ink-950 transition-transform hover:scale-[1.03]"
+            className="flex items-center gap-1 rounded-full bg-accent px-4 py-1.5 text-sm font-semibold text-white transition-transform hover:scale-[1.03]"
           >
             Get started
             <ArrowUpRight className="h-4 w-4" strokeWidth={2.4} />

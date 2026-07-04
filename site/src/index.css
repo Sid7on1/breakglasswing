@@ -13,14 +13,14 @@ html {
 html,
 body {
   margin: 0;
-  background: #05070d;
+  background: #040412;
   color: #f8fafc;
   font-family: 'Inter', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: rgba(52, 211, 153, 0.25);
+  background: rgba(139, 92, 246, 0.3);
   color: #fff;
 }
 
@@ -46,7 +46,7 @@ body {
     background-size: 48px 48px;
   }
   .bg-radial-accent {
-    background: radial-gradient(60% 50% at 50% 0%, rgba(52, 211, 153, 0.12), transparent 70%);
+    background: radial-gradient(60% 50% at 50% 0%, rgba(139, 92, 246, 0.14), transparent 70%);
   }
   .text-gradient {
     background: linear-gradient(180deg, #ffffff 30%, rgba(255, 255, 255, 0.55));

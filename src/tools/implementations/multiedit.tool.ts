@@ -4,11 +4,12 @@ import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
-import { checkEditSyntax } from '../syntax.check';
+import { checkEditSyntax, shieldEdit } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { globalTransactionManager } from '../../core/transaction.manager';
 import { findFuzzyMatch, closestRegion } from './edit.tool';
+import { outcomeOk, outcomeError, outcomeRejected } from '../outcome';
 
 interface SingleEdit {
   path: string;
@@ -66,7 +67,7 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       newString: e.newString ?? e.new_string,
       replaceAll: e.replaceAll ?? e.replace_all,
     }));
-    if (edits.length === 0) return 'Error: edits array is empty.';
+    if (edits.length === 0) return outcomeError('invalid_args', 'Error: edits array is empty.');
 
     // Phase 1 — load each distinct file once and validate every edit in order against
     // an in-memory working copy. Nothing touches disk until all edits are proven valid.
@@ -76,8 +77,8 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
 
     for (let i = 0; i < edits.length; i++) {
       const e = edits[i];
-      if (e.oldString === e.newString) return `Error: edit #${i + 1} (${e.path}): newString must differ from oldString.`;
-      if (!e.oldString) return `Error: edit #${i + 1} (${e.path}): oldString cannot be empty.`;
+      if (e.oldString === e.newString) return outcomeError('invalid_args', `Error: edit #${i + 1} (${e.path}): newString must differ from oldString.`);
+      if (!e.oldString) return outcomeError('invalid_args', `Error: edit #${i + 1} (${e.path}): oldString cannot be empty.`);
 
       const full = resolvePath(e.path, cwd);
       if (!working.has(full)) {
@@ -87,7 +88,7 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
           originals.set(full, disk);
           order.push(full);
         } catch (err: any) {
-          if (err.code === 'ENOENT') return `Error: edit #${i + 1}: file not found: ${e.path}. Use WriteFileTool to create files.`;
+          if (err.code === 'ENOENT') return outcomeError('not_found', `Error: edit #${i + 1}: file not found: ${e.path}. Use WriteFileTool to create files.`);
           throw err;
         }
       }
@@ -101,31 +102,40 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
         const fuzzy = findFuzzyMatch(content, e.oldString);
         if (!fuzzy) {
           const hint = closestRegion(content, e.oldString);
-          return `Error: edit #${i + 1} (${e.path}): oldString not found (after preceding edits).` +
+          return outcomeError('not_found', `Error: edit #${i + 1} (${e.path}): oldString not found (after preceding edits).` +
             (hint
               ? `\n\nThe closest region currently in the file is:\n\n${hint}\n\n` +
                 `Copy oldString VERBATIM from there, or split this into smaller edits anchored on a single unique line.`
-              : ` Re-read the file and match it exactly, including whitespace and indentation.`);
+              : ` Re-read the file and match it exactly, including whitespace and indentation.`));
         }
         resolvedOld = fuzzy.resolvedOld;
         occ = countOccurrences(content, resolvedOld);
       }
-      if (occ > 1 && !e.replaceAll) return `Error: edit #${i + 1} (${e.path}): oldString appears ${occ} times — add context or set replaceAll: true.`;
+      if (occ > 1 && !e.replaceAll) return outcomeError('ambiguous_match', `Error: edit #${i + 1} (${e.path}): oldString appears ${occ} times — add context or set replaceAll: true.`);
       const updated = e.replaceAll ? content.split(resolvedOld).join(e.newString) : content.replace(resolvedOld, e.newString);
       working.set(full, updated);
+    }
+
+    // Edit Shield — refuse the whole batch when any file would end up with NEW syntax errors,
+    // before anything touches disk (keeps the all-or-nothing promise).
+    for (const full of order) {
+      const shield = shieldEdit(full, originals.get(full)!, working.get(full)!);
+      if (shield) {
+        return outcomeError('syntax', `MultiEdit refused by Edit Shield for ${path.relative(cwd, full)}: ${shield}`);
+      }
     }
 
     // Blast-radius gate — check every distinct file; a decline anywhere aborts the whole batch.
     for (const full of order) {
       if (!(await checkBlastRadius(full))) {
-        return `MultiEdit cancelled — declined at the blast-radius gate for ${path.relative(cwd, full)}. No changes were made.`;
+        return outcomeRejected(`MultiEdit cancelled — declined at the blast-radius gate for ${path.relative(cwd, full)}. No changes were made.`);
       }
     }
 
     // Inline diff approval — show the whole batch as one diff; reject is all-or-nothing.
     const combinedDiff = order.map(f => unifiedDiff(originals.get(f)!, working.get(f)!, path.relative(cwd, f))).join('\n');
     const approved = await requestDiffApproval(`MultiEdit: ${edits.length} edit(s) across ${order.length} file(s)`, combinedDiff);
-    if (!approved) return `MultiEdit rejected by user. No changes were made.`;
+    if (!approved) return outcomeRejected(`MultiEdit rejected by user. No changes were made.`);
 
     // Phase 2 — governance approval for every distinct file BEFORE any write, so a
     // veto leaves the workspace untouched (keeps the operation atomic).
@@ -158,14 +168,14 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
           await globalTransactionManager.autoRollback(path.relative(cwd, full), `write failed: ${e.message}`);
         }
         const ok = written.length - restoreErrors.length;
-        return `MultiEdit failed writing ${path.relative(cwd, full)}: ${e.message}. ` +
+        return outcomeError('io', `MultiEdit failed writing ${path.relative(cwd, full)}: ${e.message}. ` +
           `Rolled back ${ok} already-written file(s) to their original contents.` +
-          (restoreErrors.length ? ` WARNING — could not restore: ${restoreErrors.join('; ')}.` : '');
+          (restoreErrors.length ? ` WARNING — could not restore: ${restoreErrors.join('; ')}.` : ''));
       }
     }
 
     const diff = capDiff(order.map(f => compactDiff(originals.get(f)!, working.get(f)!, path.relative(cwd, f))).join('\n'));
     const syntaxWarn = order.map(f => checkEditSyntax(f, working.get(f)!) || '').join('');
-    return `Applied ${edits.length} edit(s) across ${order.length} file(s):\n${diff}${syntaxWarn}`;
+    return outcomeOk(`Applied ${edits.length} edit(s) across ${order.length} file(s):\n${diff}${syntaxWarn}`);
   },
 }, governor);

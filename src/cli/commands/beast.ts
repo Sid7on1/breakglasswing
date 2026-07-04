@@ -9,6 +9,7 @@ import { globalProjectMemory } from '../../memory/project.memory';
 import { getGoalManager } from '../../memory/goal.manager';
 import { buildAgentContextBlock } from '../../evolution/agent.context';
 import { WorktreeManager } from '../../evolution/worktree.manager';
+import { PipelineJournal } from '../../core/pipeline.journal';
 
 function isGitRepo(cwd: string): boolean {
   try {
@@ -56,6 +57,16 @@ globalCommandRegistry.register({
     const sections: string[] = [];
     context.addSystemMessage('info', `🦾 Beast engaged for: "${goal}"`);
 
+    // Durable pipeline (v2 §3.10): every step transition is a ledger event; a crashed or
+    // failed run re-invoked with the SAME goal resumes after its last completed step —
+    // the worktrees/branches it created are still on disk, and the journal knows which
+    // steps banked them.
+    const journal = PipelineJournal.open('beast', goal.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60));
+    if (journal.resumed) {
+      log('info', `♻ Resuming incomplete beast run \`${journal.run}\` — completed steps are served from the journal.`);
+      sections.push(`♻ Resumed run \`${journal.run}\` (crash/failure recovery — completed steps not re-executed).`);
+    }
+
     try {
       // 1. Recall standing context (for the header + to confirm the loop is memory-fed).
       try {
@@ -66,34 +77,42 @@ globalCommandRegistry.register({
       // 2. Optional speculate — propose distinct approaches, adopt the recommended one.
       let workingGoal = goal;
       if (speculateN > 0) {
-        log('info', `🔭 Speculating ${speculateN} approaches…`);
-        const solver = new SpeculativeSolver(context.cwd, llmAdapter, mode, log);
-        const spec = await solver.run(goal, { count: speculateN });
-        const pick = spec.recommended != null ? spec.arms[spec.recommended] : undefined;
-        if (pick) {
-          workingGoal = `${goal}\n\nPreferred approach (from speculation): ${pick.approach}`;
-          sections.push(`🔭 Speculation: ${spec.arms.length} approaches tried; adopted #${pick.index + 1}${pick.testsPassed ? ' (tests passed)' : ''}.`);
-        } else {
-          sections.push(`🔭 Speculation: no clearly-better approach; proceeding with the raw goal.`);
-        }
+        const spec = await journal.step('speculate', async () => {
+          log('info', `🔭 Speculating ${speculateN} approaches…`);
+          const solver = new SpeculativeSolver(context.cwd, llmAdapter, mode, log);
+          const s = await solver.run(goal, { count: speculateN });
+          const pick = s.recommended != null ? s.arms[s.recommended] : undefined;
+          return pick
+            ? { workingGoal: `${goal}\n\nPreferred approach (from speculation): ${pick.approach}`, section: `🔭 Speculation: ${s.arms.length} approaches tried; adopted #${pick.index + 1}${pick.testsPassed ? ' (tests passed)' : ''}.` }
+            : { workingGoal: goal, section: `🔭 Speculation: no clearly-better approach; proceeding with the raw goal.` };
+        });
+        workingGoal = spec.workingGoal;
+        sections.push(spec.section);
       }
 
       // 3. Swarm — decompose + parallel graph-aware sub-agents → integration branch.
-      log('info', '🐝 Swarming…');
-      const swarm = new SwarmOrchestrator(context.cwd, llmAdapter, mode, log);
-      const report = await swarm.run(workingGoal, { autoMerge: false });
-      const ok = report.nodes.filter(n => n.status === 'completed').length;
-      const nodeLines = report.nodes.map(n => {
-        const icon = n.status === 'completed' ? '✔' : n.status === 'conflict' ? '⚠' : n.status === 'skipped' ? '·' : '✖';
-        return `  ${icon} ${n.id} — ${n.status}${n.detail ? ` (${n.detail})` : ''}`;
+      const swarmed = await journal.step('swarm', async () => {
+        log('info', '🐝 Swarming…');
+        const swarm = new SwarmOrchestrator(context.cwd, llmAdapter, mode, log);
+        const report = await swarm.run(workingGoal, { autoMerge: false });
+        const okCount = report.nodes.filter(n => n.status === 'completed').length;
+        const nodeLines = report.nodes.map(n => {
+          const icon = n.status === 'completed' ? '✔' : n.status === 'conflict' ? '⚠' : n.status === 'skipped' ? '·' : '✖';
+          return `  ${icon} ${n.id} — ${n.status}${n.detail ? ` (${n.detail})` : ''}`;
+        });
+        return { branch: report.integrationBranch, ok: okCount, total: report.nodes.length, nodeSummary: nodeLines.join('\n') };
       });
-      sections.push(`🐝 Swarm: ${ok}/${report.nodes.length} task(s) succeeded.\n${nodeLines.join('\n')}`);
-      const branch = report.integrationBranch;
+      sections.push(`🐝 Swarm: ${swarmed.ok}/${swarmed.total} task(s) succeeded.\n${swarmed.nodeSummary}`);
+      const branch = swarmed.branch;
+      const ok = swarmed.ok;
 
       // 4. Heal — run the test suite against the integration branch; auto-fix in a worktree if red.
-      log('info', '🩺 Healing the integration branch…');
-      const healer = new TestHealer(context.cwd, mode, log);
-      const heal = await healer.heal({ baseRef: branch, goal: `make tests pass for: ${goal}` });
+      const heal = await journal.step('heal', async () => {
+        log('info', '🩺 Healing the integration branch…');
+        const healer = new TestHealer(context.cwd, mode, log);
+        const h = await healer.heal({ baseRef: branch, goal: `make tests pass for: ${goal}` });
+        return { initiallyGreen: h.initiallyGreen, healed: h.healed, branch: h.branch };
+      });
       sections.push(
         heal.initiallyGreen ? '🩺 Heal: tests already green.'
         : heal.healed ? `🩺 Heal: tests were red, auto-fixed on \`${heal.branch}\` (merge that into the integration branch).`
@@ -101,25 +120,27 @@ globalCommandRegistry.register({
       );
 
       // 5. Self-critic — one review/fix pass over the integration diff in its own worktree.
-      log('info', '🔎 Self-critic review pass…');
-      try {
-        const wm = new WorktreeManager(context.cwd);
-        const critBranch = `beast/critic/${Date.now().toString(36)}`;
-        const { worktreePath } = await wm.createWorktree(critBranch, branch);
-        const ctx = await buildAgentContextBlock({ goal, subtask: `review the changes for goal: ${goal}` });
-        const prompt = `${ctx}Review the work done toward this goal and FIX any real problems you find — correctness bugs, missed cases, inconsistencies with the codebase. Do NOT add new scope.\n\nGoal: ${goal}\n\nInspect the diff with git/BashTool, then fix in place. Work only inside this worktree; do not commit.`;
-        await globalSubAgentManager.spawnWorker(`beast-critic-${Date.now().toString(36)}`, { agentType: 'OpenClaw', prompt, cwd: worktreePath, parentMode: mode });
-        const changed = await wm.hasChanges(worktreePath);
-        if (changed) {
-          await wm.commitChanges(worktreePath, 'beast: self-critic fixes');
-          sections.push(`🔎 Self-critic: applied fixes on \`${critBranch}\` (merge into the integration branch if you want them).`);
-        } else {
+      const critic = await journal.step('critic', async () => {
+        log('info', '🔎 Self-critic review pass…');
+        try {
+          const wm = new WorktreeManager(context.cwd);
+          const critBranch = `beast/critic/${Date.now().toString(36)}`;
+          const { worktreePath } = await wm.createWorktree(critBranch, branch);
+          const ctx = await buildAgentContextBlock({ goal, subtask: `review the changes for goal: ${goal}` });
+          const prompt = `${ctx}Review the work done toward this goal and FIX any real problems you find — correctness bugs, missed cases, inconsistencies with the codebase. Do NOT add new scope.\n\nGoal: ${goal}\n\nInspect the diff with git/BashTool, then fix in place. Work only inside this worktree; do not commit.`;
+          await globalSubAgentManager.spawnWorker(`beast-critic-${Date.now().toString(36)}`, { agentType: 'OpenClaw', prompt, cwd: worktreePath, parentMode: mode });
+          const changed = await wm.hasChanges(worktreePath);
+          if (changed) {
+            await wm.commitChanges(worktreePath, 'beast: self-critic fixes');
+            return `🔎 Self-critic: applied fixes on \`${critBranch}\` (merge into the integration branch if you want them).`;
+          }
           await wm.removeWorktree(critBranch, true).catch(() => {});
-          sections.push('🔎 Self-critic: no issues found.');
+          return '🔎 Self-critic: no issues found.';
+        } catch (e: any) {
+          return `🔎 Self-critic: skipped (${(e.message || 'error').slice(0, 60)}).`;
         }
-      } catch (e: any) {
-        sections.push(`🔎 Self-critic: skipped (${(e.message || 'error').slice(0, 60)}).`);
-      }
+      });
+      sections.push(critic);
 
       // 6. Checkpoint — lightweight snapshot so the run is anchored in the time machine.
       const cp = globalCheckpointManager.create(`beast: ${goal.slice(0, 60)}`, false);
@@ -128,18 +149,21 @@ globalCommandRegistry.register({
       // 7. Memory-fed close — record the outcome so the next run/session carries it forward.
       try {
         await globalProjectMemory.remember(
-          `Beast run for "${goal}": swarm ${ok}/${report.nodes.length} ok on ${branch}; heal ${heal.initiallyGreen ? 'green' : heal.healed ? 'fixed' : 'needs review'}.`,
+          `Beast run for "${goal}": swarm ${ok}/${swarmed.total} ok on ${branch}; heal ${heal.initiallyGreen ? 'green' : heal.healed ? 'fixed' : 'needs review'}.`,
           'note', ['beast'],
         );
       } catch { /* memory optional */ }
 
+      journal.finish(true);
       const summary =
         `🦾 Beast complete for: "${goal}"\n\n` +
         sections.join('\n\n') +
         `\n\nResult is on branch \`${branch}\`. Review it, then merge with:\n  git merge ${branch}`;
-      return { type: 'message', level: ok === report.nodes.length ? 'success' : 'info', content: summary };
+      return { type: 'message', level: ok === swarmed.total ? 'success' : 'info', content: summary };
     } catch (e: any) {
-      return { type: 'message', level: 'error', content: `Beast failed: ${e.message}` };
+      // Deliberately NOT finished: the journal keeps the run incomplete, so re-running
+      // `/beast <same goal>` resumes after the last banked step instead of starting over.
+      return { type: 'message', level: 'error', content: `Beast failed: ${e.message}\n\n♻ Progress is journaled — run the same /beast command again to resume after the last completed step (\`/pipelines\` shows incomplete runs).` };
     }
   },
 });

@@ -3,12 +3,17 @@ import * as path from 'path';
 import { existsSync } from 'fs';
 import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
+import { FLOOR_ENV } from '../sandbox/exec.sandbox';
 
 export interface SubAgentConfig {
   agentType: string;
   prompt: string;
   cwd: string;
   parentMode: string;
+  // Sandbox floor (BiMax v2): when set, the worker runs as an isolated autonomous episode —
+  // Bash confined by the OS sandbox to this root with network denied, file tools' workspace
+  // narrowed to it, net-facing tools not registered. Carried via the worker's own env copy.
+  sandboxFloorRoot?: string;
 }
 
 export class SubAgentManager {
@@ -42,6 +47,11 @@ export class SubAgentManager {
       const worker = new Worker(this.workerScriptPath, {
         workerData: config,
         execArgv: this.workerExecArgv,
+        // Floored episodes get their own env copy with the floor flag — thread-scoped, so the
+        // parent session and sibling workers are unaffected.
+        ...(config.sandboxFloorRoot
+          ? { env: { ...process.env, [FLOOR_ENV]: config.sandboxFloorRoot } }
+          : {}),
       });
 
       this.activeWorkers.set(taskId, worker);

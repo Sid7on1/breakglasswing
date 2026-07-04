@@ -1,17 +1,44 @@
 import { ToolRegistry } from '../tools/tool.registry';
-import { buildTool } from '../tools/tool.factory';
+import { buildTool, BuiltTool } from '../tools/tool.factory';
 import { IGovernor } from '../core/interfaces';
 import { Logger } from '../utils/logger';
 import { withTimeout } from '../utils/withTimeout'; // shared, leak-safe — a hung server never blocks boot/add
+import { recordMcpCall } from './stats';
 import { McpServerSpec } from './config';
 
 // The MCP SDK ships package "exports" maps that our classic TS moduleResolution can't follow
 // for types; the dual-published CJS build resolves fine at runtime, so we require() it at the
 // boundary and keep the SDK objects loosely typed inside this module only.
+/* eslint-disable @typescript-eslint/no-require-imports */
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
 const { StreamableHTTPClientTransport } = require('@modelcontextprotocol/sdk/client/streamableHttp.js');
 const { SSEClientTransport } = require('@modelcontextprotocol/sdk/client/sse.js');
+/* eslint-enable @typescript-eslint/no-require-imports */
+
+// Baseline env a spawned server needs to function as a process — nothing secret in it.
+// v2 threat model, cut #4: a stdio MCP server used to inherit the FULL parent env, so every
+// API key on the machine leaked to every community server (one compromised npm package away
+// from exfiltration). Now a server sees this baseline + ONLY the env its spec declares.
+const MCP_ENV_BASELINE = [
+  'PATH', 'HOME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'USER', 'LOGNAME',
+  // Node/npm plumbing many stdio servers (npx-launched) legitimately need:
+  'NODE_ENV', 'NODE_PATH', 'NODE_OPTIONS', 'npm_config_cache', 'npm_config_prefix',
+];
+
+/** Scrubbed env for a stdio MCP server: toolchain baseline + the spec's declared env only. */
+export function mcpChildEnv(spec: McpServerSpec): Record<string, string> {
+  // Escape hatch for setups that rely on globally-exported keys instead of declaring them
+  // per-server. Explicit and loud — inheriting everything is the insecure legacy behavior.
+  if (process.env.BIMAX_MCP_ENV_INHERIT === '1') {
+    return { ...process.env as Record<string, string>, ...(spec.env || {}) };
+  }
+  const out: Record<string, string> = {};
+  for (const k of MCP_ENV_BASELINE) {
+    if (process.env[k] !== undefined) out[k] = process.env[k]!;
+  }
+  return { ...out, ...(spec.env || {}) };
+}
 
 /**
  * Open a transport+client for a spec. Local (stdio) specs launch a command; remote specs
@@ -35,6 +62,7 @@ export async function openClient(spec: McpServerSpec): Promise<any> {
       return client;
     } catch (httpErr: any) {
       Logger.warn(`[MCP] '${spec.name}' HTTP transport failed (${httpErr.message}); trying SSE.`);
+      try { await client.close?.(); } catch { /* failed transports are best-effort cleanup */ }
       const sseClient = new Client({ name: 'bimax', version: '1.0.0' }, { capabilities: {} });
       await withTimeout(sseClient.connect(new SSEClientTransport(url, reqInit)), 30000, `MCP '${spec.name}' (SSE)`);
       return sseClient;
@@ -47,7 +75,9 @@ export async function openClient(spec: McpServerSpec): Promise<any> {
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args || [],
-    env: { ...process.env, ...(spec.env || {}) },
+    // Scrubbed: baseline + declared env only — a server missing a key should have it
+    // declared in its spec (or set BIMAX_MCP_ENV_INHERIT=1 to accept the legacy leak).
+    env: mcpChildEnv(spec),
     stderr: 'pipe',
   });
 
@@ -75,7 +105,7 @@ export async function openClient(spec: McpServerSpec): Promise<any> {
     const detail = stderrChunks.join('').trim();
     if (detail) {
       const lastLines = detail.split('\n').filter(Boolean).slice(-3).join(' ');
-      throw new Error(`${e?.message || e} — server said: ${lastLines}`);
+      throw new Error(`${e?.message || e} — server said: ${lastLines}`, { cause: e });
     }
     throw e;
   }
@@ -126,6 +156,9 @@ export interface ConnectedMcp {
   name: string;
   client: any;
   toolNames: string[];
+  /** The exact spec this connection was opened with — lets the watchdog/healer reconnect a server
+   *  that isn't in any config file (built-ins, tests) without a config round-trip. */
+  spec: McpServerSpec;
 }
 
 /** Flatten an MCP tool result's content array into a plain string for the agent. */
@@ -133,13 +166,36 @@ function contentToString(result: any): string {
   if (!result) return '';
   const content = result.content;
   if (Array.isArray(content)) {
-    return content
-      .map((c: any) => (c?.type === 'text' ? c.text : c?.type ? `[${c.type} content]` : ''))
+    const rendered = content
+      .map((c: any) => {
+        if (c?.type === 'text') return c.text;
+        if (c?.type === 'resource') return c.resource?.text || (c.resource ? JSON.stringify(c.resource) : '[resource content]');
+        if (c?.type === 'image') return `[image content: ${c.mimeType || 'unknown type'}, ${c.data?.length || 0} encoded bytes]`;
+        return c?.type ? `[${c.type} content]` : '';
+      })
       .filter(Boolean)
       .join('\n');
+    if (result.structuredContent !== undefined) {
+      const structured = JSON.stringify(result.structuredContent, null, 2);
+      return rendered ? `${rendered}\n${structured}` : structured;
+    }
+    return rendered;
   }
   return typeof result === 'string' ? result : JSON.stringify(result);
 }
+
+/** Does this error mean the transport/process is gone (vs. the tool itself failing)? */
+export function isDeadConnectionError(e: any): boolean {
+  const msg = String(e?.message || e);
+  return /connection closed|not connected|transport (?:closed|error)|EPIPE|ECONNRESET|write after end/i.test(msg);
+}
+
+/**
+ * A healer the manager injects: given a server name, try to bring it back and return the FRESH
+ * client (or null). Lets a tool call survive a crashed/expired server transparently: reconnect
+ * once, retry the call on the new client — no recursion (the retry is a direct client call).
+ */
+export type McpHealer = (serverName: string) => Promise<any | null>;
 
 /**
  * Connect to one MCP server (stdio) and register each of its tools into the registry as a
@@ -152,14 +208,18 @@ export async function connectAndRegister(
   registry: ToolRegistry,
   governor: IGovernor,
   onError?: (message: string) => void,
+  healer?: McpHealer,
 ): Promise<ConnectedMcp | null> {
+  let client: any;
+  const registered = new Map<string, BuiltTool | undefined>();
   try {
-    const client = await openClient(spec);
+    client = await openClient(spec);
 
     const listed = await client.listTools();
     const toolNames: string[] = [];
     for (const t of listed?.tools || []) {
       const toolName = `mcp__${spec.name}__${t.name}`;
+      registered.set(toolName, registry.getTool(toolName));
       registry.register(buildTool({
         name: toolName,
         description: `[MCP:${spec.name}] ${t.description || t.name}`,
@@ -170,17 +230,54 @@ export async function connectAndRegister(
           // validate strictly (zod) and reject those, so coerce each arg to its declared schema
           // type first. Native tools tolerate strings already; MCP is where strict validation bites.
           const coerced = coerceArgsToSchema(args || {}, t.inputSchema);
-          const res = await client.callTool({ name: t.name, arguments: coerced });
-          const text = contentToString(res);
-          return res?.isError ? `MCP tool ${t.name} reported an error: ${text}` : text;
+          const configuredTimeout = Number(process.env.BIMAX_MCP_CALL_TIMEOUT_MS || 120000);
+          const timeoutMs = Number.isFinite(configuredTimeout)
+            ? Math.min(Math.max(configuredTimeout, 1000), 10 * 60 * 1000)
+            : 120000;
+          const started = Date.now();
+          try {
+            let res: any;
+            try {
+              res = await withTimeout<any>(
+                client.callTool({ name: t.name, arguments: coerced }),
+                timeoutMs,
+                `MCP tool '${spec.name}/${t.name}'`,
+              );
+            } catch (e: any) {
+              // Self-heal: a crashed/expired server shows up as a dead transport, not a tool error.
+              // Reconnect once and retry on the fresh client — the retry is a direct client call
+              // (never back through the registry), so a still-dead server can't recurse.
+              if (!healer || !isDeadConnectionError(e)) throw e;
+              Logger.warn(`[MCP] '${spec.name}' connection dead mid-call (${e?.message}); reconnecting to retry.`);
+              const fresh = await healer(spec.name);
+              if (!fresh) throw e;
+              res = await withTimeout<any>(
+                fresh.callTool({ name: t.name, arguments: coerced }),
+                timeoutMs,
+                `MCP tool '${spec.name}/${t.name}' (after reconnect)`,
+              );
+            }
+            const text = contentToString(res);
+            recordMcpCall(spec.name, t.name, Date.now() - started, res?.isError ? text : undefined);
+            return res?.isError ? `MCP tool ${t.name} reported an error: ${text}` : text;
+          } catch (e: any) {
+            recordMcpCall(spec.name, t.name, Date.now() - started, e?.message || String(e));
+            throw e;
+          }
         },
       }, governor));
       toolNames.push(toolName);
     }
 
     Logger.info(`[MCP] Connected '${spec.name}' — registered ${toolNames.length} tool(s).`);
-    return { name: spec.name, client, toolNames };
+    return { name: spec.name, client, toolNames, spec };
   } catch (e: any) {
+    // A failed handshake/list/register must leave neither a child process nor half-registered tools.
+    try { await client?.close?.(); } catch { /* best-effort */ }
+    for (const [name, previous] of registered) {
+      if (previous) registry.register(previous);
+      else registry.unregister(name);
+    }
     const msg = e?.message || String(e);
     Logger.warn(`[MCP] Failed to connect '${spec.name}': ${msg}`);
     onError?.(msg);

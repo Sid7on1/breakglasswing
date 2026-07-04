@@ -22,13 +22,13 @@ globalCommandRegistry.register({
   category: 'Code & Intelligence',
   execute: async (args, _context) => {
     const eng = getBlueprintEngine();
-    if (!eng) return { type: 'message', level: 'error', content: 'Blueprint engine not initialised. Restart Bimax in a project directory.' };
+    if (!eng) return { type: 'message', level: 'error', content: 'Blueprint engine not initialised. Restart BiMax in a project directory.' };
     const sub = (args[0] || '').toLowerCase();
 
     if (sub === 'domains') {
       const lines = Object.values(DOMAIN_CATALOGS).map(c =>
         `**${c.title}** (${c.domain}) — ${c.description}\n  levels: ${c.levels.map(l => l.title).join(' → ')}`);
-      return { type: 'message', level: 'info', content: `Buildable domains:\n\n${lines.join('\n\n')}\n\nStart one in sketch mode (Shift+Tab): describe the idea and Bimax walks you level-by-level.` };
+      return { type: 'message', level: 'info', content: `Buildable domains:\n\n${lines.join('\n\n')}\n\nStart one in sketch mode (Shift+Tab): describe the idea and BiMax walks you level-by-level.` };
     }
 
     if (sub === 'show' || sub === 'inspect') {
@@ -65,7 +65,7 @@ globalCommandRegistry.register({
     // default: list
     const all = eng.list();
     if (!all.length) {
-      return { type: 'message', level: 'info', content: 'No Blueprints yet. Shift+Tab into sketch mode and describe an idea — Bimax will build one with you. /blueprint domains shows what you can build.' };
+      return { type: 'message', level: 'info', content: 'No Blueprints yet. Shift+Tab into sketch mode and describe an idea — BiMax will build one with you. /blueprint domains shows what you can build.' };
     }
     const lines = all.map(b => `• \`${b.slug}\`  [${getCatalog(b.domain)?.title ?? b.domain}]  ${b.goal}`);
     return { type: 'message', level: 'info', content: `Saved Blueprints (${all.length}):\n${lines.join('\n')}\n\n/blueprint show <slug> to view · Shift+Tab to beast mode to build.` };

@@ -4,12 +4,13 @@ import { resolvePath, countOccurrences } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
-import { checkEditSyntax } from '../syntax.check';
+import { checkEditSyntax, shieldEdit } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { detectCorruptWrite } from '../write-guard';
 import { fileStateCache } from '../../memory/file-state-cache';
 import { globalTransactionManager } from '../../core/transaction.manager';
+import { outcomeOk, outcomeError, outcomeRejected } from '../outcome';
 
 interface FallbackMatch {
   resolvedOld: string; // the actual text in the file that will be replaced
@@ -233,10 +234,10 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     const fullPath = resolvePath(args.path, cwd);
 
     if (args.oldString === args.newString) {
-      return 'Error: newString must be different from oldString.';
+      return outcomeError('invalid_args', 'Error: newString must be different from oldString.');
     }
     if (!args.oldString) {
-      return 'Error: oldString cannot be empty. To create a file, use WriteFileTool.';
+      return outcomeError('invalid_args', 'Error: oldString cannot be empty. To create a file, use WriteFileTool.');
     }
 
     let content: string;
@@ -244,7 +245,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
       content = await fs.readFile(fullPath, 'utf8');
     } catch (e: any) {
       if (e.code === 'ENOENT') {
-        return `Error: File not found: ${args.path}. Use WriteFileTool to create new files.`;
+        return outcomeError('not_found', `Error: File not found: ${args.path}. Use WriteFileTool to create new files.`);
       }
       throw e;
     }
@@ -270,7 +271,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
       const fuzzy = findFuzzyMatch(content, args.oldString);
       if (!fuzzy) {
         const hint = closestRegion(content, args.oldString);
-        return fail(
+        return outcomeError('not_found', await fail(
           `Error: oldString not found in ${args.path}. The 9-step fuzzy fallback also failed ` +
           `(TrimmedBoundary → LineTrimmed → WhitespaceNormalized → IndentationFlexible → ` +
           `EscapeNormalized → BlockAnchor → ContextAware → MultiOccurrence).` +
@@ -280,7 +281,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
               `smaller edit anchored on a single unique line. Do NOT re-send the same oldString.`
             : ` Re-read the file and copy oldString exactly, including whitespace and indentation.`),
           'oldString not found',
-        );
+        ));
       }
       resolvedOld = fuzzy.resolvedOld;
       matchMethod = fuzzy.method;
@@ -288,10 +289,10 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
 
     const resolvedCount = countOccurrences(content, resolvedOld);
     if (resolvedCount > 1 && !args.replaceAll) {
-      return fail(
+      return outcomeError('ambiguous_match', await fail(
         `Error: oldString appears ${resolvedCount} times in ${args.path}${matchMethod ? ` (matched via ${matchMethod})` : ''}. Add more surrounding context to make it unique, or pass replaceAll: true.`,
         'ambiguous oldString',
-      );
+      ));
     }
 
     const updated = args.replaceAll
@@ -302,16 +303,23 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     // newline-stripped newString). Refuse before touching disk.
     const flat = detectCorruptWrite(content, updated, fullPath);
     if (flat) {
-      return fail(
+      return outcomeError('syntax', await fail(
         `Edit to ${args.path} refused: ${flat}. No changes were made. ` +
         `Make a smaller, surgical edit and keep newline characters intact in newString.`,
         'corrupt-write refused',
-      );
+      ));
+    }
+
+    // Edit Shield: refuse an edit that would introduce NEW syntax errors — the broken file never
+    // reaches disk, and the error names the exact lines so the very next attempt can fix it.
+    const shield = shieldEdit(fullPath, content, updated);
+    if (shield) {
+      return outcomeError('syntax', await fail(`Edit to ${args.path} refused by Edit Shield: ${shield}`, 'edit-shield refused'));
     }
 
     // Blast-radius gate (no-op unless enabled + interactive + the file owns a HIGH/CRITICAL symbol).
     if (!(await checkBlastRadius(fullPath))) {
-      return fail(`Edit to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`, 'blast-radius declined');
+      return outcomeRejected(await fail(`Edit to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`, 'blast-radius declined'));
     }
 
     // Inline diff approval. When a fuzzy match was used, surface the match method in the summary
@@ -320,7 +328,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
       ? `Edit ${args.path} [APPROXIMATE MATCH via ${matchMethod}]`
       : `Edit ${args.path}`;
     const approved = await requestDiffApproval(approvalSummary, unifiedDiff(content, updated, args.path));
-    if (!approved) return fail(`Edit to ${args.path} rejected by user. No changes were made.`, 'rejected by user');
+    if (!approved) return outcomeRejected(await fail(`Edit to ${args.path} rejected by user. No changes were made.`, 'rejected by user'));
 
     // Track original content for atomic rollback before touching disk.
     await globalTransactionManager.trackEdit(fullPath);
@@ -329,7 +337,7 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     try {
       await fs.writeFile(fullPath, updated, 'utf8');
     } catch (e: any) {
-      return fail(`Edit to ${args.path} failed while writing: ${e.message}. No changes were applied.`, `write failed: ${e.message}`);
+      return outcomeError('io', await fail(`Edit to ${args.path} failed while writing: ${e.message}. No changes were applied.`, `write failed: ${e.message}`));
     }
     // Invalidate the read cache so post-compact restoration doesn't re-inject stale content.
     fileStateCache.invalidate(fullPath);
@@ -337,6 +345,6 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     const n = args.replaceAll ? resolvedCount : 1;
     const matchNote = matchMethod ? ` [matched via ${matchMethod}]` : '';
     const syntaxWarn = checkEditSyntax(fullPath, updated) || '';
-    return `Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}${matchNote}):\n${capDiff(compactDiff(content, updated, args.path))}${syntaxWarn}`;
+    return outcomeOk(`Edited ${args.path} (${n} replacement${n === 1 ? '' : 's'}${matchNote}):\n${capDiff(compactDiff(content, updated, args.path))}${syntaxWarn}`);
   },
 }, governor);

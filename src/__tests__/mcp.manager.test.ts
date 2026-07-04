@@ -5,6 +5,7 @@ import { McpManager } from '../mcp/manager';
 import { loadMcpServers, normalizeArgs, missingPathArgs } from '../mcp/config';
 import { ToolRegistry } from '../tools/tool.registry';
 import { IGovernor } from '../core/interfaces';
+import { cliEvents } from '../cli/events';
 
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
 const FIXTURE = path.join(__dirname, 'fixtures', 'mcp-echo-server.js');
@@ -42,7 +43,6 @@ describe('McpManager config persistence', () => {
   });
 
   it('setEnabled emits mcp_changed so the UI/token-meter refreshes', async () => {
-    const { cliEvents } = require('../cli/events');
     const mgr = new McpManager();
     mgr.addToConfig({ name: 'seq', command: 'node', args: [FIXTURE] }, dir);
 
@@ -74,8 +74,12 @@ describe('McpManager config persistence', () => {
 
   it('persists and loads a remote URL server (no command)', () => {
     const mgr = new McpManager();
-    mgr.addToConfig({ name: 'magic', url: 'https://link.mcpmarket.com/x/mcp' }, dir);
-    expect(loadMcpServers(dir)).toEqual([{ name: 'magic', url: 'https://link.mcpmarket.com/x/mcp' }]);
+    mgr.addToConfig({ name: 'magic', url: 'https://link.mcpmarket.com/x/mcp', headers: { Authorization: 'Bearer test' } }, dir);
+    expect(loadMcpServers(dir)).toEqual([{
+      name: 'magic',
+      url: 'https://link.mcpmarket.com/x/mcp',
+      headers: { Authorization: 'Bearer test' },
+    }]);
     expect(mgr.configuredNames(dir)).toContain('magic');
   });
 
@@ -144,5 +148,116 @@ describe('McpManager runtime connection', () => {
     await mgr.disconnect('echo', registry);
     expect(mgr.get('echo')).toBeUndefined();
     expect(registry.getTool('mcp__echo__echo')).toBeUndefined();
+  }, 20000);
+
+  it('actively diagnoses a live connector and reports its transport and tools', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-mcp-health-'));
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    mgr.addToConfig({ name: 'echo', command: 'node', args: [FIXTURE] }, dir);
+    try {
+      await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+      const [health] = await mgr.diagnose(dir);
+      expect(health).toMatchObject({ name: 'echo', state: 'connected', transport: 'stdio', toolCount: 1 });
+    } finally {
+      await mgr.disconnect('echo', registry);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('keeps a working connection and its tools when a replacement fails', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-mcp-reconnect-'));
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    mgr.addToConfig({ name: 'echo', command: 'node', args: [FIXTURE] }, dir);
+    try {
+      const original = await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+      expect(original).not.toBeNull();
+
+      mgr.addToConfig({ name: 'echo', command: 'node', args: ['/no/such/file.js'] }, dir);
+      expect(await mgr.reconnect('echo', registry, governor, dir)).toBeNull();
+      expect(mgr.get('echo')).toBe(original);
+      expect(registry.getTool('mcp__echo__echo')).toBeDefined();
+      expect(mgr.lastErrorFor('echo')).toContain('Connection closed');
+      expect(mgr.health(dir)[0].state).toBe('error');
+    } finally {
+      await mgr.disconnect('echo', registry);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('self-heals a dead connection mid-call: reconnects and retries transparently', async () => {
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    const conn = await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+    expect(conn).not.toBeNull();
+    // Simulate a crashed server: kill the transport underneath the live tools.
+    await conn!.client.close();
+
+    const tool = registry.getTool('mcp__echo__echo');
+    const out = await tool!.execute({ text: 'revive' }, {});
+    expect(out).toContain('echo: revive');
+    expect(mgr.get('echo')).not.toBe(conn); // a fresh connection replaced the dead one
+    await mgr.disconnect('echo', registry);
+  }, 20000);
+
+  it('watchdog probes in the background and auto-heals a dead connector', async () => {
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    const conn = await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+    await conn!.client.close();
+    mgr.startWatchdog(registry, governor, 100);
+    try {
+      // Give the sweep a moment to notice the dead probe and reconnect.
+      const deadline = Date.now() + 8000;
+      while (mgr.get('echo') === conn && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const fresh = mgr.get('echo');
+      expect(fresh).toBeDefined();
+      expect(fresh).not.toBe(conn);
+      const tool = registry.getTool('mcp__echo__echo');
+      await expect(tool!.execute({ text: 'alive' }, {})).resolves.toContain('echo: alive');
+    } finally {
+      mgr.stopWatchdog();
+      await mgr.disconnect('echo', registry);
+    }
+  }, 20000);
+
+  it('surfaces per-tool call telemetry (count + latency) in health()', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-mcp-stats-'));
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    mgr.addToConfig({ name: 'echo', command: 'node', args: [FIXTURE] }, dir);
+    try {
+      await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+      await registry.getTool('mcp__echo__echo')!.execute({ text: 'measured' }, {});
+      const echo = mgr.health(dir).find(s => s.name === 'echo')!;
+      expect(echo.calls).toBeGreaterThanOrEqual(1);
+      expect(echo.avgMs).toBeGreaterThanOrEqual(0);
+      expect(echo.callErrors).toBe(0);
+    } finally {
+      await mgr.disconnect('echo', registry);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  it('closes the old client after a successful live reconnect', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-mcp-replace-'));
+    const mgr = new McpManager();
+    const registry = new ToolRegistry();
+    mgr.addToConfig({ name: 'echo', command: 'node', args: [FIXTURE] }, dir);
+    try {
+      const original = await mgr.connectSpec({ name: 'echo', command: 'node', args: [FIXTURE] }, registry, governor);
+      const close = jest.spyOn(original!.client, 'close');
+      const replacement = await mgr.reconnect('echo', registry, governor, dir);
+      expect(replacement).not.toBeNull();
+      expect(replacement).not.toBe(original);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(registry.getTool('mcp__echo__echo')).toBeDefined();
+    } finally {
+      await mgr.disconnect('echo', registry);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }, 20000);
 });

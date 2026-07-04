@@ -36,3 +36,4 @@ import './scout';
 import './recipe';
 import './mode';
 import './selection';
+import './mind';

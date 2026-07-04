@@ -5,6 +5,7 @@ import { StaticAnalyzer } from './static.analyzer';
 import { TreeSitterAnalyzer } from './treesitter.analyzer';
 import { SemanticAugmenter } from './semantic.augmenter';
 import { GraphStore } from './graph.store';
+import { SqliteGraphStore } from './sqlite.graph.store';
 import { Logger } from '../utils';
 
 export class CodebaseIndexer {
@@ -50,22 +51,20 @@ export class CodebaseIndexer {
       Logger.info(`[CodebaseIndexer] Skipped — disabled by config.`);
       return;
     }
-    const graphPath = path.join(this.projectRoot, '.breakglass/graph', 'playground.json');
-    
-    // Check if the graph already exists and actually has nodes. Byte size is a bad proxy — an
-    // empty-but-structured `{"nodes":[],"edges":[]}` can clear a size threshold yet have 0 nodes,
-    // so we count the nodes instead.
-    let needsIndexing = true;
-    if (fs.existsSync(graphPath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
-        const nodeCount = Array.isArray(parsed.nodes) ? parsed.nodes.length : Object.keys(parsed.nodes || {}).length;
-        if (nodeCount > 0) needsIndexing = false;
-      } catch { /* unreadable / corrupt — treat as needing indexing */ }
+    // Store-agnostic "already indexed" check: count nodes in the LOADED store (works for
+    // both the SQLite and the legacy JSON backends). If the store looks empty, give it one
+    // load attempt — boot paths that skipped loadFromDisk (or a fresh SQLite DB sitting
+    // next to a legacy playground.json awaiting migration) are covered by this.
+    if (this.graphStore.getGraph().nodes.size === 0) {
+      try { await this.graphStore.loadFromDisk(); } catch { /* treat as unindexed */ }
     }
+    const needsIndexing = this.graphStore.getGraph().nodes.size === 0;
 
     if (!force && !needsIndexing) {
-      return; // Already indexed
+      // Already indexed — keep it FRESH instead of frozen (v2 §3.9): re-parse changed
+      // files in the background, bounded, never blocking boot.
+      this.refreshStale().catch(() => { /* freshness is best-effort */ });
+      return;
     }
 
     if (force) {
@@ -83,6 +82,7 @@ export class CodebaseIndexer {
     }
     await this.runTreeSitterPass();
     await this.graphStore.saveToDisk();
+    if (this.graphStore instanceof SqliteGraphStore) this.graphStore.recordFileHashes(this.projectRoot);
 
     const nodeCount = this.graphStore.getGraph().nodes.size;
     if (nodeCount === 0) {
@@ -124,6 +124,49 @@ export class CodebaseIndexer {
     });
   }
 
+  /**
+   * Incremental refresh (v2 §3.9): re-parse ONLY the files whose content hash moved
+   * since the last (re)index, prune nodes of deleted files. Needs the SQLite store
+   * (which carries the hash baseline); on the JSON store it reports 'unsupported'.
+   * Bounded: past `fullThreshold` stale files a full reindex is cheaper and cleaner.
+   */
+  public async refreshStale(opts?: { fullThreshold?: number }): Promise<{ supported: boolean; changed: number; deleted: number; full: boolean }> {
+    if (!(this.graphStore instanceof SqliteGraphStore) || !this.graphStore.isAvailable()) {
+      return { supported: false, changed: 0, deleted: 0, full: false };
+    }
+    const store = this.graphStore;
+    const { changed, deleted } = store.staleFiles(this.projectRoot);
+    if (changed.length === 0 && deleted.length === 0) return { supported: true, changed: 0, deleted: 0, full: false };
+
+    const threshold = opts?.fullThreshold ?? 200;
+    if (changed.length + deleted.length > threshold) {
+      Logger.info(`[CodebaseIndexer] ${changed.length + deleted.length} stale files — beyond the incremental budget, full reindex.`);
+      await this.buildAstIndex();
+      return { supported: true, changed: changed.length, deleted: deleted.length, full: true };
+    }
+
+    for (const rel of deleted) store.removeFileNodes(rel);
+    const tsLike = /\.(ts|tsx|js|jsx|mjs|cjs)$/i;
+    for (const rel of changed) {
+      const abs = path.isAbsolute(rel) ? rel : path.join(this.projectRoot, rel);
+      try {
+        if (tsLike.test(rel)) {
+          this.analyzer.analyzeSingleFile(abs);
+        } else {
+          store.removeFileNodes(rel);
+          const tsa = new TreeSitterAnalyzer(this.projectRoot, this.graphStore, this.excludePatterns);
+          await tsa.analyzeSingleFile(abs);
+        }
+      } catch (e: any) {
+        Logger.warn(`[CodebaseIndexer] incremental re-parse of ${rel} failed: ${e.message}`);
+      }
+    }
+    await this.graphStore.saveToDisk();
+    store.recordFileHashes(this.projectRoot, changed);
+    Logger.info(`[CodebaseIndexer] Incremental refresh: ${changed.length} file(s) re-parsed, ${deleted.length} pruned.`);
+    return { supported: true, changed: changed.length, deleted: deleted.length, full: false };
+  }
+
   public async buildAstIndex(): Promise<number> {
     Logger.info(`[CodebaseIndexer] Manually triggering AST indexing for ${this.projectRoot}`);
     this.graphStore.clear();
@@ -134,6 +177,7 @@ export class CodebaseIndexer {
     }
     await this.runTreeSitterPass();
     await this.graphStore.saveToDisk();
+    if (this.graphStore instanceof SqliteGraphStore) this.graphStore.recordFileHashes(this.projectRoot);
     return this.graphStore.getGraph().nodes.size;
   }
 

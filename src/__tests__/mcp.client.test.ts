@@ -60,4 +60,25 @@ describe('registerMcpTools (A3, integration)', () => {
     );
     expect(connected).toHaveLength(0);
   }, 20000);
+
+  it('bounds a hung MCP tool call instead of hanging the agent forever', async () => {
+    const previous = process.env.BIMAX_MCP_CALL_TIMEOUT_MS;
+    process.env.BIMAX_MCP_CALL_TIMEOUT_MS = '1000';
+    const registry = new ToolRegistry();
+    const connected = await registerMcpTools(
+      [{ name: 'echo-timeout', command: 'node', args: [FIXTURE] }],
+      registry,
+      governor,
+    );
+    try {
+      const tool = registry.getTool('mcp__echo-timeout__echo');
+      await expect(tool!.execute({ text: '__hang__' }, {})).rejects.toThrow(
+        "MCP tool 'echo-timeout/echo' timed out after 1000ms",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.BIMAX_MCP_CALL_TIMEOUT_MS;
+      else process.env.BIMAX_MCP_CALL_TIMEOUT_MS = previous;
+      await connected[0]?.client.close();
+    }
+  }, 20000);
 });

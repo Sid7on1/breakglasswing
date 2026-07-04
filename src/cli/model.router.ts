@@ -26,6 +26,13 @@ export interface RouteDecision {
 // message so "ok" matches but "ok now refactor the parser" does not.
 const CHATTY = /^(hi|hey+|hello|yo|sup|howdy|thanks|thank you|thx|ty|ok|okay|k|cool|nice|great|awesome|got it|gotcha|sure|yep|yeah|yes|no|nope|hmm|lol|wow|same|right)[!.…\s]*$/i;
 
+// Obvious coding-work signals: an imperative "change/build code" verb, or unambiguous code context
+// (a fenced block, a stack trace). These route straight to HEAVY with no classifier round-trip —
+// the pre-flight LLM call was the single biggest source of first-token latency, and for these
+// prompts its answer is a foregone conclusion.
+const HEAVY_VERB = /\b(implement|refactor|debug|rewrite|redesign|optimi[sz]e|migrate|integrate|diagnose|troubleshoot|build (?:a|the|out|me)\b|write (?:a|the|some|me)? ?(?:code|tests?|script|function|class|module|component)\b|fix (?:the|this|that|a|my)? ?(?:bug|tests?|error|crash|issue|build|types?)\b|add (?:a|the)? ?(?:support|tests?|feature|endpoint|command|flag)\b|create (?:a|the)? ?(?:file|class|function|module|component|script|tests?)\b)/i;
+const CODE_CONTEXT = /```|\bTraceback \(most recent call last\)|\n\s+at [\w$.<[\]]+ \([^)]*:\d+:\d+\)/;
+
 /**
  * Local, LLM-free pre-filter. Returns a definite tier for obvious cases, or null to mean
  * "not obvious — ask the classifier".
@@ -35,6 +42,10 @@ export function heuristicTier(prompt: string): Tier | null {
   if (!p) return 'lite';
   // Short greetings / acknowledgements / filler → lite, no model call.
   if (p.length <= 40 && CHATTY.test(p)) return 'lite';
+  // Unmistakable coding work → heavy, no model call. Long prompts with code fences or stack
+  // traces are equally unambiguous.
+  if (HEAVY_VERB.test(p) || CODE_CONTEXT.test(p)) return 'heavy';
+  if (p.length > 600) return 'heavy'; // a request this detailed is never small talk
   return null;
 }
 
@@ -52,8 +63,11 @@ Reply with ONLY a JSON object, no prose: {"tier":"lite"} or {"tier":"heavy","bri
  */
 // The classifier is a pre-flight call that runs BEFORE the user sees anything, so it must never be
 // the thing that hangs a turn. If the lite model cold-starts, we'd rather just answer with lite than
-// make the user wait for the router. Cap it tightly and fall back to lite on timeout.
-const CLASSIFIER_TIMEOUT_MS = 6000;
+// make the user wait for the router. Cap it tightly and fall back to lite on timeout: with the
+// heavy-verb heuristic above catching unmistakable coding work locally, everything reaching the
+// classifier is borderline — and a borderline turn answered by lite is a fine outcome, so 3s is
+// the most a user should ever wait on routing.
+const CLASSIFIER_TIMEOUT_MS = 3000;
 
 // Bounded cache of classifier decisions so identical/repeated prompts (re-asks after an error,
 // "yes"/"continue", retried turns) skip the pre-flight LLM round-trip — saving latency and a lite-model

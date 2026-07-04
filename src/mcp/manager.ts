@@ -8,6 +8,23 @@ import { McpServerSpec, loadMcpServers, normalizeArgs, missingPathArgs } from '.
 import { connectAndRegister, ConnectedMcp } from './client';
 import { cliEvents } from '../cli/events';
 import { codebaseMemorySpec } from './builtin/codebaseMemory';
+import { withTimeout } from '../utils/withTimeout';
+import { serverCallSummary } from './stats';
+
+export type McpHealthState = 'connected' | 'disabled' | 'connecting' | 'disconnected' | 'error';
+
+export interface McpHealth {
+  name: string;
+  state: McpHealthState;
+  transport: 'stdio' | 'http' | 'sse';
+  toolCount: number;
+  error?: string;
+  missingPaths?: string[];
+  /** Lifetime call telemetry for this server's tools (0s when unused this session). */
+  calls: number;
+  callErrors: number;
+  avgMs: number;
+}
 
 /**
  * Built-in engines baked into Bimax (auto-provisioned, not user-configured). Seeded into the
@@ -46,6 +63,8 @@ export class McpManager {
   private pending: Set<string> = new Set();
   /** The reason the most recent connect attempt failed (for surfacing to the user/agent). */
   public lastError: string | null = null;
+  /** Failure state is tracked per server so one bad connector cannot hide another one's cause. */
+  private errors: Map<string, string> = new Map();
 
   // MCP servers are stored GLOBALLY by default (~/.bimax/mcp.json) so a server added in any
   // directory persists everywhere — just like API keys. Passing an explicit `cwd` targets that
@@ -65,9 +84,42 @@ export class McpManager {
     governor: IGovernor,
   ): Promise<ConnectedMcp | null> {
     this.lastError = null;
-    const conn = await connectAndRegister(cleanSpec(spec), registry, governor, (msg) => { this.lastError = msg; });
-    if (conn) this.connections.set(conn.name, conn);
-    return conn;
+    this.pending.add(spec.name);
+    let failure: string | null = null;
+    try {
+      const conn = await connectAndRegister(cleanSpec(spec), registry, governor, (msg) => {
+        failure = msg;
+        this.lastError = msg;
+      }, async () => {
+        // Self-heal hook for a dead transport mid-call: reconnect with the SAME spec (not a config
+        // lookup — built-ins/tests aren't in any file) and hand back the fresh client so the
+        // in-flight call can retry once on it.
+        const fresh = await this.connectSpec(spec, registry, governor);
+        return fresh?.client ?? null;
+      });
+      if (!conn) {
+        this.errors.set(spec.name, failure || 'Connection failed without an error message.');
+        return null;
+      }
+
+      // A live reconfigure must not leak the old process or leave tools that the replacement no
+      // longer exposes. Common tool names have already been replaced in the registry by the new
+      // connection, so unregister only stale names before closing the previous client.
+      const previous = this.connections.get(conn.name);
+      if (previous && previous !== conn) {
+        const currentNames = new Set(conn.toolNames);
+        for (const oldName of previous.toolNames) {
+          if (!currentNames.has(oldName)) registry.unregister(oldName);
+        }
+        try { await previous.client?.close?.(); } catch { /* best-effort */ }
+      }
+
+      this.connections.set(conn.name, conn);
+      this.errors.delete(spec.name);
+      return conn;
+    } finally {
+      this.pending.delete(spec.name);
+    }
   }
 
   /**
@@ -83,30 +135,32 @@ export class McpManager {
     if (projectRoot && projectRoot !== os.homedir()) {
       for (const s of loadMcpServers(projectRoot)) byName.set(s.name, s);
     }
-    let n = 0;
-    for (const spec of byName.values()) {
+    // Connect all servers IN PARALLEL — boot used to pay the sum of every server's handshake
+    // (npx cold-starts routinely take seconds each); now it pays only the slowest one. Each
+    // connectSpec tracks its own pending/error state, so concurrency is safe here.
+    const results = await Promise.allSettled(Array.from(byName.values()).map(async (spec) => {
       // Skip servers the user turned off — they stay in config until re-enabled.
       if (spec.disabled) {
         Logger.info(`[MCP] Skipping disabled server '${spec.name}'.`);
-        continue;
+        return false;
       }
       // Skip servers whose path args don't exist — they would just fail and slow the others.
       const missing = missingPathArgs(normalizeArgs(spec.args));
       if (missing.length) {
         Logger.warn(`[MCP] Skipping '${spec.name}': path(s) do not exist: ${missing.join(', ')}`);
         cliEvents.emit('status', `MCP '${spec.name}' skipped — missing path(s): ${missing.join(', ')}`);
-        continue;
+        return false;
       }
-      this.pending.add(spec.name);
       const c = await this.connectSpec(spec, registry, governor);
-      this.pending.delete(spec.name);
       if (c) {
-        n++;
         cliEvents.emit('status', `MCP '${spec.name}' connected — ${c.toolNames.length} tool(s)`);
-      } else if (this.lastError) {
-        cliEvents.emit('status', `MCP '${spec.name}' failed: ${this.lastError}`);
+        return true;
       }
-    }
+      const why = this.lastErrorFor(spec.name);
+      if (why) cliEvents.emit('status', `MCP '${spec.name}' failed: ${why}`);
+      return false;
+    }));
+    const n = results.filter(r => r.status === 'fulfilled' && r.value).length;
     if (n > 0) cliEvents.emit('mcp_changed');
     return n;
   }
@@ -144,9 +198,143 @@ export class McpManager {
     return this.connections.get(name);
   }
 
+  /** Last failure for one server (unlike lastError, this survives other servers connecting). */
+  public lastErrorFor(name: string): string | null {
+    return this.errors.get(name) ?? null;
+  }
+
+  /** Snapshot connector health without making network requests. */
+  public health(cwd?: string): McpHealth[] {
+    const specs = loadMcpServers(this.configRoot(cwd));
+    const byName = new Map(specs.map(spec => [spec.name, spec]));
+    // Include a live connector even if its config was removed or changed out-of-band.
+    for (const conn of this.connections.values()) {
+      if (!byName.has(conn.name)) byName.set(conn.name, { name: conn.name, command: 'live' });
+    }
+
+    return Array.from(byName.values()).map(spec => {
+      const conn = this.connections.get(spec.name);
+      const missing = missingPathArgs(normalizeArgs(spec.args));
+      const error = this.errors.get(spec.name);
+      let state: McpHealthState = 'disconnected';
+      if (spec.disabled) state = 'disabled';
+      else if (this.pending.has(spec.name)) state = 'connecting';
+      else if (conn) state = error ? 'error' : 'connected';
+      else if (error || missing.length) state = 'error';
+
+      const usage = serverCallSummary(spec.name);
+      return {
+        name: spec.name,
+        state,
+        transport: spec.url ? (spec.type === 'sse' ? 'sse' : 'http') : 'stdio',
+        toolCount: conn?.toolNames.length ?? 0,
+        calls: usage.calls,
+        callErrors: usage.errors,
+        avgMs: usage.avgMs,
+        ...(error ? { error } : {}),
+        ...(missing.length ? { missingPaths: missing } : {}),
+      } as McpHealth;
+    });
+  }
+
+  /** Actively probe connected servers. This is intentionally read-only and bounded. */
+  public async diagnose(cwd?: string): Promise<McpHealth[]> {
+    for (const conn of this.connections.values()) {
+      try {
+        const probe = typeof conn.client?.ping === 'function'
+          ? conn.client.ping()
+          : conn.client.listTools();
+        await withTimeout(Promise.resolve(probe), 5000, `MCP '${conn.name}' health check`);
+        this.errors.delete(conn.name);
+      } catch (e: any) {
+        this.errors.set(conn.name, e?.message || String(e));
+      }
+    }
+    return this.health(cwd);
+  }
+
+  /** Reconnect one configured server while preserving a working old connection on failure. */
+  public async reconnect(
+    name: string,
+    registry: ToolRegistry,
+    governor: IGovernor,
+    cwd?: string,
+  ): Promise<ConnectedMcp | null> {
+    this.healFailures.delete(name); // a manual reconnect resets the watchdog's give-up counter
+    const spec = loadMcpServers(this.configRoot(cwd)).find(s => s.name === name);
+    if (!spec) {
+      const msg = `No MCP server named '${name}' is configured.`;
+      this.lastError = msg;
+      this.errors.set(name, msg);
+      return null;
+    }
+    if (spec.disabled) {
+      const msg = `MCP server '${name}' is disabled.`;
+      this.lastError = msg;
+      this.errors.set(name, msg);
+      return null;
+    }
+    return this.connectSpec(spec, registry, governor);
+  }
+
   /** Live tool names contributed by all connected servers. */
   public toolNames(): string[] {
     return this.list().flatMap(c => c.toolNames);
+  }
+
+  // --- Watchdog: background self-healing -----------------------------------------------------
+
+  private watchdog: ReturnType<typeof setInterval> | null = null;
+  /** Consecutive failed heal attempts per server — after 3 the watchdog stops trying (manual /mcp reconnect resets it). */
+  private healFailures: Map<string, number> = new Map();
+  private static readonly MAX_HEAL_ATTEMPTS = 3;
+
+  /**
+   * Start the background auto-doctor: every `intervalMs` (default 60s) probe each live connector
+   * and auto-reconnect dead ones. Backs off after MAX_HEAL_ATTEMPTS consecutive failures so a
+   * permanently-broken server isn't relaunched forever. Never prompts — connect/reconnect paths
+   * don't gate through the Governor. The interval is unref'd so it can't keep the process alive.
+   */
+  public startWatchdog(registry: ToolRegistry, governor: IGovernor, intervalMs = 60000): void {
+    if (this.watchdog || process.env.BIMAX_MCP_WATCHDOG === '0') return;
+    let sweeping = false; // a slow sweep must not overlap the next tick
+    this.watchdog = setInterval(async () => {
+      if (sweeping) return;
+      sweeping = true;
+      try {
+        for (const conn of this.list()) {
+          try {
+            const probe = typeof conn.client?.ping === 'function' ? conn.client.ping() : conn.client.listTools();
+            await withTimeout(Promise.resolve(probe), 5000, `MCP '${conn.name}' watchdog probe`);
+            this.healFailures.delete(conn.name);
+          } catch (probeErr: any) {
+            const attempts = this.healFailures.get(conn.name) ?? 0;
+            if (attempts >= McpManager.MAX_HEAL_ATTEMPTS) continue; // gave up — manual reconnect resets
+            this.errors.set(conn.name, probeErr?.message || String(probeErr));
+            Logger.warn(`[MCP] Watchdog: '${conn.name}' failed its probe (${probeErr?.message}); auto-reconnecting (attempt ${attempts + 1}/${McpManager.MAX_HEAL_ATTEMPTS}).`);
+            // Reconnect with the connection's own spec — config-file lookup would miss built-ins.
+            const fresh = await this.connectSpec(conn.spec, registry, governor);
+            if (fresh) {
+              this.healFailures.delete(conn.name);
+              cliEvents.emit('status', `MCP '${conn.name}' auto-healed — ${fresh.toolNames.length} tool(s) back.`);
+              cliEvents.emit('mcp_changed');
+            } else {
+              this.healFailures.set(conn.name, attempts + 1);
+              if (attempts + 1 >= McpManager.MAX_HEAL_ATTEMPTS) {
+                cliEvents.emit('status', `MCP '${conn.name}' is down (${McpManager.MAX_HEAL_ATTEMPTS} heal attempts failed) — run /mcp doctor.`);
+              }
+            }
+          }
+        }
+      } finally {
+        sweeping = false;
+      }
+    }, intervalMs);
+    this.watchdog.unref?.();
+  }
+
+  public stopWatchdog(): void {
+    if (this.watchdog) { clearInterval(this.watchdog); this.watchdog = null; }
   }
 
   /** Disconnect a server, drop its tools from the registry, and forget the connection. */
@@ -156,6 +344,7 @@ export class McpManager {
     try { await conn.client?.close?.(); } catch { /* best-effort */ }
     if (registry) for (const t of conn.toolNames) registry.unregister(t);
     this.connections.delete(name);
+    this.pending.delete(name);
     return true;
   }
 
@@ -177,6 +366,7 @@ export class McpManager {
     if (next.length === specs.length) return false;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ servers: next }, null, 2), 'utf8');
+    this.errors.delete(name);
     return true;
   }
 

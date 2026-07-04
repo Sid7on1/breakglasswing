@@ -17,6 +17,14 @@ import { loadProjectGuide } from '../projectGuide';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getGoalManager } from '../../memory/goal.manager';
 import { agentModePromptSection } from '../agentMode';
+import { getSelfModel } from '../../mind/self.model';
+import { getHabitMiner } from '../../mind/habit.compiler';
+import { getUserModel } from '../../mind/user.model';
+import { getDrivesEngine } from '../../mind/drives.engine';
+import { getEpistemicLedger } from '../../mind/epistemic.ledger';
+import { getEventLedger } from '../../mind/event.ledger';
+import { getExemplarStore } from '../../mind/exemplar.store';
+import { getPolicyArms } from '../../mind/policy.arms';
 
 export interface PersonaConfig {
   name: string;
@@ -55,17 +63,17 @@ export abstract class AgentPersona {
    * environment, live MCP tools, recalled memory, plan mode, the discovery-dependent tool list) is
    * pushed into the suffix. Mirrors Claude Code's SYSTEM_PROMPT_DYNAMIC_BOUNDARY split.
    */
-  public getSystemPrompt(opts?: { planMode?: boolean; memory?: string; contextMode?: 'smart' | 'full' }): string {
+  public getSystemPrompt(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): string {
     const { staticPrefix, dynamicSuffix } = this.getSystemPromptParts(opts);
     return [staticPrefix, dynamicSuffix].filter(Boolean).join('\n\n');
   }
 
   /** Same content as getSystemPrompt(), but exposed as its two cache segments (for the /context view). */
-  public getSystemPromptParts(opts?: { planMode?: boolean; memory?: string; contextMode?: 'smart' | 'full' }): { staticPrefix: string; dynamicSuffix: string } {
+  public getSystemPromptParts(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): { staticPrefix: string; dynamicSuffix: string } {
     return this.splitPrompt(this.buildSections(opts));
   }
 
-  protected buildSections(opts?: { planMode?: boolean; memory?: string; contextMode?: 'smart' | 'full' }): Record<string, string> {
+  protected buildSections(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): Record<string, string> {
     const cwd = this.cwd;
     const homedir = os.homedir();
 
@@ -166,6 +174,10 @@ export abstract class AgentPersona {
       }
     } catch { /* project guide is best-effort */ }
 
+    if (opts?.exemplars) {
+      sections.exemplars = opts.exemplars;
+    }
+
     if (opts?.memory) {
       sections.memory = opts.memory;
     }
@@ -184,6 +196,24 @@ export abstract class AgentPersona {
       const modeSection = agentModePromptSection();
       if (modeSection) sections.agentMode = modeSection;
     } catch { /* mode guidance is best-effort */ }
+
+    // Mind layer (all best-effort — the prompt must build even if a mind engine is broken):
+    //   self-knowledge — the agent's own measured failure rates, as routing rules;
+    //   compiled habits — recurring tool sequences to batch instead of re-derive;
+    //   user model — learned preferences from accepted/rejected diffs and corrections;
+    //   drives — homeostatic deviations (failing tests, type errors) the agent should offer to fix.
+    // Every non-empty block passes its policy ARM (v2 §4.4): the decision + propensity land
+    // in the ledger, so each intervention's effect is measurable offline (IPS in /arms) and
+    // a shadowed arm keeps logging what it WOULD have said without spending prompt tokens.
+    const arm = (id: Parameters<ReturnType<typeof getPolicyArms>['decide']>[0], block: string): string => {
+      if (!block) return '';
+      try { return getPolicyArms().decide(id).show ? block : ''; } catch { return block; }
+    };
+    try { const b = arm('self-knowledge', getSelfModel().getPromptBlock()); if (b) sections.selfKnowledge = b; } catch { /* best-effort */ }
+    try { const b = arm('habits', getHabitMiner().getPromptBlock()); if (b) sections.habits = b; } catch { /* best-effort */ }
+    try { const b = arm('user-model', getUserModel().getPromptBlock()); if (b) sections.userModel = b; } catch { /* best-effort */ }
+    try { const b = arm('drives', getDrivesEngine().getPromptBlock()); if (b) sections.drives = b; } catch { /* best-effort */ }
+    try { const b = arm('calibration', getEpistemicLedger().getPromptBlock()); if (b) sections.calibration = b; } catch { /* best-effort */ }
 
     if (opts?.planMode) {
       sections.plan = `### PLAN MODE (ACTIVE — CRITICAL)\nYou are in read-only PLAN MODE. The Governor will reject every mutating action: writing or deleting files, and any non-read shell command. Do NOT attempt them — they will fail.\n- Use only read/search tools (read files, grep/glob, query the graph, fetch URLs, ask the user) to investigate.\n- When you understand the task, STOP and present a concrete, step-by-step implementation plan: the files you would change, what each change does, and any risks or open questions. Use a numbered list.\n- SAVE the plan: call PlanTool(action:"write", ...) — it is allowed in plan mode and persists to .bimax/plans/<slug>.md (git-tracked), so the plan survives the session and you can check off steps with PlanTool(action:"update_step") while executing. Tell the user the slug it saved under.\n- Do not claim you made any code changes. No source is written in plan mode (only the plan file itself).\n- End by telling the user they can approve and run \`/plan off\` to let you execute the plan.`;
@@ -219,6 +249,12 @@ export abstract class AgentPersona {
       sections.memory,
       sections.goals,   // cross-session persistent goals (injected after memory, before plan mode)
       sections.agentMode, // behavioral mode (explore/code) specialization
+      sections.selfKnowledge, // mind: learned failure rates → routing rules
+      sections.habits,        // mind: compiled procedural memory
+      sections.userModel,     // mind: learned user preferences (theory of mind)
+      sections.drives,        // mind: homeostatic deviations to surface
+      sections.calibration,   // mind: measured overconfidence → escalated verification
+      sections.exemplars,     // mind: verified past episodes similar to THIS task (v2 §9.3)
       sections.plan,
     ].filter(Boolean).join('\n\n');
 
@@ -229,6 +265,15 @@ export abstract class AgentPersona {
     // Fresh user turn: drop any leftover todos so the loop's persistence check only reacts to items
     // this task actually opens (no spurious "keep going" on an unrelated next message).
     clearActiveTodos();
+
+    // Theory of mind: corrections ("don't …", "always …") become standing preferences that are
+    // re-injected into every future prompt, so the user never has to repeat themselves.
+    try { getUserModel().observeUserMessage(prompt); } catch { /* best-effort */ }
+    // Procedural memory: a new user turn is an episode boundary — habit mining never
+    // stitches tool sequences across unrelated tasks. The boundary also lands in the
+    // event ledger so habit views can be rebuilt with the same episode structure.
+    try { getHabitMiner().markBoundary(); } catch { /* best-effort */ }
+    try { getEventLedger().append('boundary', {}); } catch { /* best-effort */ }
 
     // Resolve the active model's capabilities once for this turn — drives both vision attachment
     // and the context-window fallback below. Best-effort: FLOOR (no caps) on any failure.
@@ -252,6 +297,17 @@ export abstract class AgentPersona {
     let memory = '';
     try { memory = await globalProjectMemory.recallBlock(prompt); } catch { /* memory is best-effort */ }
 
+    // Experience retrieval (v2 §9.3): the few most similar past episodes that VERIFIED —
+    // dream self-play fixes, regenerations, replayed wins — injected as evidence for this
+    // task. Every injection is a ledger event so the feature's effect stays measurable
+    // (which turns showed exemplars is exactly what off-policy evaluation needs).
+    let exemplars = '';
+    try {
+      exemplars = getExemplarStore().getPromptBlock(prompt);
+      if (exemplars && !getPolicyArms().decide('exemplars').show) exemplars = ''; // §4.4 holdout/shadow
+      if (exemplars) getEventLedger().append('exemplar_injected', { task: prompt.slice(0, 200), block: exemplars.slice(0, 600) });
+    } catch { /* best-effort */ }
+
     // AgentLoop expects an IGovernor, but our tools already have it injected during buildTool
     const cfg = getConfig();
     // Context window precedence: an explicit user setting always wins; otherwise fall back to the
@@ -268,7 +324,7 @@ export abstract class AgentPersona {
     const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow);
     const maxIterations = options?.maxIterations ?? 130;
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
-    const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, contextMode });
+    const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, exemplars, contextMode });
 
     const passOpts = { maxIterations, contextMode, useLite: options?.useLite, signal: options?.signal };
     executionLog += await this.runPass(loop, systemPrompt, passOpts, onToken);
@@ -278,7 +334,17 @@ export abstract class AgentPersona {
     // interrupted (don't spend a model call reviewing work the user just cancelled).
     if (!options?.signal?.aborted && isSelfCriticEnabled() && !options?.planMode && executionLog.trim().length > 40) {
       try {
-        const review = await this.critique(prompt, executionLog);
+        let review = await this.critique(prompt, executionLog);
+        // Assertion extraction rides the critic pass (v2 §3.5.2 — the lite model is
+        // already reading this turn; one PREF line costs zero extra API calls). The
+        // regex opener path catches "don't …"; this catches every other phrasing.
+        try {
+          const pref = review?.match(/^\s*PREF\[(do|dont)\]:\s*(.+?)\s*$/m);
+          if (pref) {
+            getUserModel().learnAssertion(pref[2], pref[1] as 'do' | 'dont', 'critic');
+            review = review.replace(/^\s*PREF\[(do|dont)\]:.*$/gm, '').trim();
+          }
+        } catch { /* best-effort */ }
         if (review && !/^\s*done\b/i.test(review.trim())) {
           if (onToken) onToken(`\n\n_Self-review flagged issues; revising…_\n`);
           this.messages.push({
@@ -335,7 +401,8 @@ export abstract class AgentPersona {
   private async critique(originalPrompt: string, work: string): Promise<string> {
     const system = `You are a meticulous senior reviewer checking another agent's work before it is shown to the user. Judge ONLY against the user's request and basic correctness.
 - If the work fully and correctly satisfies the request, reply with exactly: DONE
-- Otherwise, list the concrete defects or missing pieces as a short bulleted list (no preamble). Be specific and actionable. Do not invent requirements the user did not ask for.`;
+- Otherwise, list the concrete defects or missing pieces as a short bulleted list (no preamble). Be specific and actionable. Do not invent requirements the user did not ask for.
+- Separately: if the user's request STATED a standing preference about how the agent should work in future turns (a workflow/style rule like "always run the build after edits" or "stop adding comments" — NOT the task content itself), append one final line: PREF[do]: <the rule, imperative, ≤120 chars> or PREF[dont]: <the rule>. At most one PREF line; omit it when the message contains no such rule. The PREF line is metadata and does not affect the DONE verdict.`;
     return this.llmAdapter.chatCompletion(
       [{ role: 'user', content: `User's request:\n${originalPrompt}\n\nThe agent's work/response:\n${work}` }],
       system,

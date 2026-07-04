@@ -9,23 +9,24 @@ export default {
         mono: ["'JetBrains Mono'", 'ui-monospace', 'monospace'],
       },
       colors: {
-        // Dark Mode (OLED) system — deep navy-black base, slate surfaces, emerald "build" accent.
+        // Deep-space observatory system — indigo-black void, violet aurora accent, starlight cyan.
+        // Keyed as `ink` so every surviving ink-* utility (nav, glass, borders) re-themes in place.
         ink: {
-          950: '#05070d',
-          900: '#0a0e1a',
-          800: '#0f1626',
-          700: '#161f33',
-          600: '#1e293b',
+          950: '#040412',
+          900: '#08081d',
+          800: '#0e0e2a',
+          700: '#161638',
+          600: '#1e1e4b',
         },
         accent: {
-          DEFAULT: '#34d399', // emerald — the "run / build" energy
-          bright: '#4ade80',
-          dim: '#22c55e',
+          DEFAULT: '#8b5cf6', // violet — the observatory beam
+          bright: '#a78bfa',
+          dim: '#7c3aed',
         },
-        glowblue: '#3b82f6',
+        glowblue: '#67e8f9', // starlight cyan
       },
       boxShadow: {
-        glow: '0 0 40px -8px rgba(52, 211, 153, 0.35)',
+        glow: '0 0 40px -8px rgba(139, 92, 246, 0.4)',
       },
     },
   },

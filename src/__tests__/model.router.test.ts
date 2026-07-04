@@ -7,9 +7,26 @@ describe('model.router — heuristicTier', () => {
     }
   });
 
-  it('does not short-circuit a real task that merely starts chatty', () => {
-    expect(heuristicTier('ok now refactor the parser to support async')).toBeNull();
-    expect(heuristicTier('fix the failing tests in src/engine')).toBeNull();
+  it('never routes a real task to lite just because it starts chatty', () => {
+    expect(heuristicTier('ok now refactor the parser to support async')).not.toBe('lite');
+    expect(heuristicTier('fix the failing tests in src/engine')).not.toBe('lite');
+  });
+
+  it('routes unmistakable coding work straight to heavy (no LLM)', () => {
+    expect(heuristicTier('refactor the parser to support async')).toBe('heavy');
+    expect(heuristicTier('implement retry logic in the fetch layer')).toBe('heavy');
+    expect(heuristicTier('fix the bug in session loading')).toBe('heavy');
+    expect(heuristicTier('debug why startup hangs')).toBe('heavy');
+  });
+
+  it('routes code fences and stack traces straight to heavy', () => {
+    expect(heuristicTier('why does this fail?\n```js\nconst x = await y;\n```')).toBe('heavy');
+    expect(heuristicTier('crash:\nTypeError: boom\n    at run (/app/src/main.ts:10:3)')).toBe('heavy');
+  });
+
+  it('leaves ambiguous prompts to the classifier', () => {
+    expect(heuristicTier('please rework the tokenizer to stream')).toBeNull();
+    expect(heuristicTier('what does the governor do here')).toBeNull();
   });
 
   it('empty input is lite', () => {

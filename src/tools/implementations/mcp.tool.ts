@@ -2,9 +2,23 @@ import { buildTool, BuiltTool } from '../tool.factory';
 import { IGovernor } from '../../core/interfaces';
 import { ToolRegistry } from '../tool.registry';
 import * as os from 'os';
-import { McpManager } from '../../mcp/manager';
+import { McpHealth, McpManager } from '../../mcp/manager';
 import { normalizeArgs, missingPathArgs, loadMcpServers } from '../../mcp/config';
 import { discoverServers, catalogEntry } from '../../mcp/catalog';
+
+function formatHealth(statuses: McpHealth[]): string {
+  if (statuses.length === 0) return 'No MCP servers configured.';
+  return statuses.map(s => {
+    const glyph = s.state === 'connected' ? '✓' : s.state === 'disabled' ? '○' : s.state === 'connecting' ? '…' : '✗';
+    const detail = s.state === 'connected'
+      ? `${s.toolCount} tool(s)`
+      : s.missingPaths?.length
+        ? `missing path(s): ${s.missingPaths.join(', ')}`
+        : s.error || s.state;
+    const usage = s.calls > 0 ? ` — ${s.calls} call(s), avg ${s.avgMs}ms${s.callErrors ? `, ${s.callErrors} error(s)` : ''}` : '';
+    return `- ${glyph} ${s.name} (${s.transport}) — ${detail}${usage}`;
+  }).join('\n');
+}
 
 /**
  * Lets the agent set up MCP servers for itself. `isDestructive` is true, so the Governor prompts
@@ -30,6 +44,8 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
 - remove-all: disconnect and delete EVERY configured MCP server. Use this when the user says "delete/remove all MCP servers". Do NOT try to delete files by path — use this action.
 - disable: keep a server in config but stop it and prevent it starting at boot. Needs { name }.
 - enable: re-enable a disabled server and connect it now. Needs { name }.
+- doctor: actively probe every connected server and explain broken/disconnected integrations.
+- reconnect: safely reconnect one configured server. The old live connection is kept if replacement fails. Needs { name }.
 
 # When to use
 - The user asks to install/add/set up an MCP server, or a task needs a capability an MCP server provides.
@@ -44,7 +60,7 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'discover', 'add', 'remove', 'remove-all', 'enable', 'disable'], description: 'What to do.' },
+        action: { type: 'string', enum: ['list', 'discover', 'add', 'remove', 'remove-all', 'enable', 'disable', 'doctor', 'reconnect'], description: 'What to do.' },
         query: { type: 'string', description: 'For discover: a plain-language capability you need (e.g. "search the web", "query postgres").' },
         id: { type: 'string', description: 'For add: a catalog id from a discover result (e.g. "github", "postgres"). Resolves command/args automatically.' },
         name: { type: 'string', description: 'Server name (for add/remove/enable/disable). Defaults to the catalog id when adding by id.' },
@@ -75,17 +91,22 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
       }
 
       if (args.action === 'list') {
-        const connected = manager.list();
-        const configured = manager.configuredNames();
-        if (configured.length === 0 && connected.length === 0) {
-          return 'No MCP servers configured. Use action="add" to set one up.';
-        }
-        const lines = configured.map(n => {
-          const conn = manager.get(n);
-          if (manager.isDisabled(n)) return `- ${n} (disabled — won't start until enabled)`;
-          return conn ? `- ${n} (connected, ${conn.toolNames.length} tools)` : `- ${n} (configured, not connected)`;
-        });
-        return `MCP servers:\n${lines.join('\n')}`;
+        return `MCP servers:\n${formatHealth(manager.health())}`;
+      }
+
+      if (args.action === 'doctor') {
+        const statuses = await manager.diagnose();
+        const broken = statuses.filter(s => s.state === 'error' || s.state === 'disconnected');
+        return `MCP doctor: ${statuses.length - broken.length}/${statuses.length} integration(s) healthy or intentionally disabled.\n${formatHealth(statuses)}` +
+          (broken.length ? '\nUse action="reconnect" with a server name after fixing the reported cause.' : '');
+      }
+
+      if (args.action === 'reconnect') {
+        if (!args.name) return 'reconnect requires "name". Use action="doctor" to see server health.';
+        const conn = await manager.reconnect(args.name, registry, governor);
+        return conn
+          ? `Reconnected '${args.name}' — ${conn.toolNames.length} tool(s) are live.`
+          : `Could not reconnect '${args.name}'. ${manager.lastErrorFor(args.name) || manager.lastError || 'Unknown error.'}`;
       }
 
       if (args.action === 'add') {
@@ -98,7 +119,6 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
           args.name = args.name || entry.id;
           args.command = entry.command;
           args.url = entry.url;
-          args.headers = args.headers;
           args.args = [...(entry.args || []), ...(normalizeArgs(args.args) || [])];
           const missingEnv = (entry.needsEnv || []).filter(k => !process.env[k] && !(args.env && args.env[k]));
           if (missingEnv.length) {
@@ -134,7 +154,7 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
           if (args.url) {
             return `Saved '${args.name}' to .bimax/mcp.json, but the remote URL '${args.url}' failed to connect.${reason} It may be unreachable, need auth headers, or speak a different transport.`;
           }
-          return `Saved '${args.name}' to .bimax/mcp.json, but the command 'npx'/'${args.command} ${cleanArgs.join(' ')}' exited before connecting.${reason} ` +
+          return `Saved '${args.name}' to .bimax/mcp.json, but the command '${args.command} ${cleanArgs.join(' ')}' exited before connecting.${reason} ` +
             `Common causes: the package name is wrong, or a required PATH argument points at a folder that does not exist. ` +
             `For the filesystem server, pass REAL absolute paths you want to expose (e.g. args ["-y","@modelcontextprotocol/server-filesystem","${process.cwd()}"]) — not placeholders like /path/to/folder.`;
         }
@@ -177,7 +197,7 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
         return `Disabled '${args.name}' — it stays in config but won't start until re-enabled.`;
       }
 
-      return `Unknown action "${args.action}". Use "list", "add", "remove", or "remove-all".`;
+      return `Unknown action "${args.action}". Use "list", "doctor", "reconnect", "add", "remove", or "remove-all".`;
     },
   }, governor);
 }

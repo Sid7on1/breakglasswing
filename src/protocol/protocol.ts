@@ -31,6 +31,7 @@ export interface RequestMsg {
   isAsk?: boolean;  // true for the AskUser tool (free-form) vs a governor yes/no/always veto
   isMulti?: boolean; // true for multi-select checklists
   body?: string;    // for kind:'diff', the unified diff to render before the choices
+  masked?: boolean; // for kind:'input': the answer is a secret — render it as bullets, never echo
 }
 
 /** Handshake — sent once when the host attaches, so the front-end can version-check. */
@@ -49,7 +50,10 @@ export interface CompletionItem {
 /** Completions for a {@link QueryMsg}, correlated by `id` so stale results can be dropped. */
 export interface QueryResultMsg { t: 'queryResult'; id: number; items: CompletionItem[]; }
 
-export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg;
+/** Liveness answer to a {@link PingMsg} — echoes `id` so the front-end can match it. */
+export interface PongMsg { t: 'pong'; id: number; }
+
+export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg;
 
 // --- Inbound: front-end → engine -----------------------------------------------------------
 
@@ -72,7 +76,14 @@ export interface QueryMsg { t: 'query'; id: number; text: string; }
  */
 export interface MenuSelectMsg { t: 'menuSelect'; id: string; value: string; }
 
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg;
+/**
+ * Liveness probe from the front-end. Answered immediately with a {@link PongMsg} — if the answer
+ * doesn't come back, the engine's event loop is wedged (or the process is a zombie) and the
+ * front-end can tell the user instead of showing a spinner forever.
+ */
+export interface PingMsg { t: 'ping'; id: number; }
+
+export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg;
 
 // --- Event vocabulary ----------------------------------------------------------------------
 

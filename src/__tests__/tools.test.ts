@@ -183,7 +183,7 @@ describe('BashTool — timeout coercion', () => {
     ['undefined', undefined],
   ])('runs the command when timeout is a %s value', async (_label, timeout) => {
     const res: any = await tool.execute({ command: 'echo coerced_ok', timeout }, { cwd: dir });
-    expect(res.stdout).toContain('coerced_ok');
+    expect(String(res)).toContain('coerced_ok');
   });
 });
 

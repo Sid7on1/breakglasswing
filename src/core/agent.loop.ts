@@ -10,6 +10,16 @@ import { getActiveTodos } from '../tools/implementations/todo.tool';
 import { LoopDetector, LoopSignal } from './loop-detector';
 import { getGlobalPatternStore } from '../genome/pattern.store';
 import { globalTelemetry } from '../telemetry/telemetry';
+import { getSelfModel, domainOf, pathOf, classifyOutcome, currentModelKey } from '../mind/self.model';
+import { TypedOutcome, typedFromError } from '../tools/outcome';
+import { getEventLedger } from '../mind/event.ledger';
+import { markToolTaint } from '../mind/taint';
+import { getHabitMiner } from '../mind/habit.compiler';
+import { getEpistemicLedger, isEvidenceCommand } from '../mind/epistemic.ledger';
+import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder';
+
+/** Mutating tools whose success is an implicit "this change is correct" claim. */
+const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
 
 /**
  * Coerce a model-emitted tool-call arguments string to VALID JSON before it enters the message
@@ -82,6 +92,10 @@ export class AgentLoop {
     // finish (or keeps re-opening items) can't spin the loop forever.
     let persistenceNudges = 0;
     const MAX_PERSISTENCE_NUDGES = 4;
+    // Black-box recorder: every execute() is an episode — each LLM call in this run is
+    // recorded (request hash + response stream) to a bundle under .bimax/episodes/,
+    // self-flushing per call. /episodes replays it; BIMAX_RECORDER=0 disables.
+    const recordedLlm = startEpisodeRecording(this.llm).llm;
 
     for (let i = 0; i < maxIter; i++) {
       // Interrupted between turns: stop cleanly before spending another model call.
@@ -92,7 +106,7 @@ export class AgentLoop {
       // In smart mode the registry returns only the core working set + ToolSearch + any tools the
       // model has already surfaced via ToolSearchTool; in full mode it returns every schema. This
       // is recomputed each turn so a tool discovered mid-task becomes available immediately.
-      const generator = this.llm.chat(this.messages, {
+      const generator = recordedLlm.chat(this.messages, {
         system: systemPrompt,
         tools: this.tools.getSchemas({ mode: contextMode }) as any,
         // Tier routing: when the turn was routed to the lite model, every step of this loop
@@ -140,7 +154,10 @@ export class AgentLoop {
           this.contextManager.updateTokens(event.prompt);
         } else if (event.type === 'error') {
           if (event.recoverable && event.kind === 'context') {
-            yield `\n[AgentLoop] Recoverable API Error: ${event.message}. Attempting reactive compaction...\n`;
+            // Internal recovery — never narrated into the answer stream (the reply must read as one
+            // uninterrupted voice). The footer status + log view carry what's happening instead.
+            cliEvents.emit('status', 'Context overflow — compacting and retrying…');
+            cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Context overflow (${event.message}); compacting and re-asking.`, timestamp: new Date() });
             this.messages = await this.contextManager.reactiveCompact(this.messages, new Error(event.message));
             discardTurn = true;
             break;
@@ -153,18 +170,20 @@ export class AgentLoop {
             const backoffMs = event.retryAfterSecs != null
               ? Math.min(event.retryAfterSecs * 1000, 30_000)
               : Math.min(1000 * 2 ** (transientRetries - 1), 8000);
-            yield `\n[AgentLoop] Transient API error (${event.message}). Backing off ${Math.round(backoffMs / 1000)}s, retrying (${transientRetries}/${MAX_TRANSIENT_RETRIES})...\n`;
+            cliEvents.emit('status', `Provider hiccup — retrying in ${Math.round(backoffMs / 1000)}s (${transientRetries}/${MAX_TRANSIENT_RETRIES})`);
+            cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Transient API error (${event.message}); backing off ${Math.round(backoffMs / 1000)}s.`, timestamp: new Date() });
             await new Promise(r => setTimeout(r, backoffMs));
             discardTurn = true;
             break;
           } else {
-            // A bad/unknown model ID 400s every turn until changed. Don't dump the raw provider
-            // error — tell the user the one thing that fixes it.
+            // Unrecoverable: this IS the turn's outcome, so it belongs in the reply — but in a human
+            // voice, not a "[AgentLoop]" log line. A bad/unknown model ID 400s every turn until
+            // changed, so lead with the one thing that fixes it rather than the raw provider dump.
             const m = String(event.message || '');
             if (/model/i.test(m) && /(not a valid|not found|does not exist|unknown model|invalid)/i.test(m)) {
-              yield `\n[AgentLoop] The provider rejected the current model id. Run /model to pick one it actually serves.\n  (provider said: ${m})\n`;
+              yield `\n⚠ The provider rejected the current model id — run /model to pick one it serves.\n  (provider said: ${m})\n`;
             } else {
-              yield `\n[AgentLoop] API Error: ${event.message}\n`;
+              yield `\n⚠ The provider returned an error: ${event.message}\n`;
             }
             return;
           }
@@ -266,15 +285,79 @@ export class AgentLoop {
           };
           cliEvents.emit('tool_call', entry);
 
-          const finish = (result: string, isError: boolean) => {
+          const finish = (result: string, isError: boolean, typed?: TypedOutcome) => {
             const endTime = new Date();
             const durationMs = endTime.getTime() - entry.startTime.getTime();
             globalTelemetry.recordToolCall(tc.name, durationMs);
+            // Mind layer: feed the self-model (learned failure rates → routing hints) and the
+            // habit miner (recurring tool sequences → compiled habits). Both are best-effort
+            // observers — they must never be able to break tool execution. During a replay
+            // these stand down entirely: re-observing recorded experience as fresh evidence
+            // would double-count every outcome the system already learned from.
+            if (!isReplayActive()) try {
+              // Typed outcome (v2 Phase 0): prefer the tool's own declaration — ground truth.
+              // The regex classifier is the explicit low-confidence fallback for unswept/MCP tools.
+              // 'blocked' (policy said no) joins 'rejected' as preference/policy data, never a
+              // failure-rate sample.
+              const outcome: 'ok' | 'err' | 'rejected' = typed
+                ? (typed.status === 'ok' ? 'ok' : typed.status === 'error' ? 'err' : 'rejected')
+                : classifyOutcome(result, isError);
+              const domain = domainOf(tc.name, tc.args || '{}');
+              // Taint (v2 D3): web/MCP output entering the conversation marks the session
+              // untrusted — the governor then denies network capability until a human clears it.
+              markToolTaint(tc.name, tc.args || '{}', result);
+              let bashCmd: string | undefined;
+              if (tc.name === 'BashTool') {
+                try { bashCmd = String(JSON.parse(tc.args || '{}').command || '') || undefined; } catch { /* unparseable */ }
+              }
+              // Prefix the declared error class so weak-spot samples carry the label.
+              const errSample = outcome === 'err'
+                ? (typed?.errorClass ? `[${typed.errorClass}] ${result}` : result).slice(0, 200)
+                : undefined;
+              // Event ledger (v2 D1): every tool outcome lands in the append-only log with
+              // its typed label AND everything a view rebuild needs (model key, bash cmd,
+              // touched file, error sample) — the raw material learned state is refolded from.
+              getEventLedger().append('tool_outcome', {
+                tool: tc.name, domain,
+                status: typed?.status ?? outcome,
+                errorClass: typed?.errorClass,
+                exitCode: typed?.exitCode,
+                confidence: typed ? 'high' : 'low',
+                model: currentModelKey(),
+                cmd: bashCmd,
+                file: pathOf(tc.args || '{}'),
+                errSample,
+                durationMs, isError,
+              });
+              if (outcome !== 'rejected') {
+                getSelfModel().record(tc.name, domain, outcome === 'ok', errSample);
+              }
+              getHabitMiner().observe(tc.name, domain, outcome === 'ok', bashCmd);
+              // Epistemic ledger: a successful mutation opens a correctness claim (confidence
+              // grounded in the self-model, scoped to the mutated FILE); a build/test/typecheck
+              // run is evidence that resolves only the claims it covers — red output must name
+              // the claim's file, green repo-wide runs cover everything in the window.
+              if (outcome === 'ok' && CLAIMING_TOOLS.has(tc.name)) {
+                const claimFile = pathOf(tc.args || '{}');
+                const conf = getSelfModel().confidenceFor(tc.name, domain);
+                getEpistemicLedger().openClaim(domain, conf, claimFile);
+                getEventLedger().append('claim', { tool: tc.name, domain, file: claimFile, confidence: conf });
+              } else if (tc.name === 'BashTool' && bashCmd && isEvidenceCommand(bashCmd)) {
+                // Exit code (when Bash declared it) beats the regex guess: a red tsc/test run
+                // returns its output with exit≠0 and used to classify 'ok', silently settling
+                // claims as GREEN. Ground truth ends that.
+                const evidenceOk = typed?.exitCode !== undefined ? typed.exitCode === 0 : outcome === 'ok';
+                const settled = getEpistemicLedger().resolve(evidenceOk, { command: bashCmd, output: result });
+                getEventLedger().append('evidence', { command: bashCmd.slice(0, 200), ok: evidenceOk, settled });
+              }
+            } catch { /* observers are best-effort */ }
             cliEvents.emit('tool_call_result', {
               ...entry,
               output: result,
               status: isError ? 'error' : 'success',
               endTime,
+              // Additive typed-outcome fields — the TUI ignores unknown JSON keys.
+              ...(typed ? { outcome: typed.status, errorClass: typed.errorClass } : {}),
             } as ToolCallEntry);
             return { id: tc.id, result };
           };
@@ -294,12 +377,19 @@ export class AgentLoop {
           try {
             // Thread the interrupt signal into the tool so a long-running one (e.g. a 30s Bash)
             // is killed the instant esc is hit, rather than running to completion first.
-            const toolContext = { ...(context || { cwd: process.cwd() }), signal };
+            // reportOutcome is the typed-outcome side-channel: the factory fires it when the
+            // tool declared its own status (v2 Phase 0), so learning gets labels, not guesses.
+            let typed: TypedOutcome | undefined;
+            const toolContext = {
+              ...(context || { cwd: process.cwd() }), signal,
+              reportOutcome: (o: TypedOutcome) => { typed = o; },
+            };
             const result = await tool.execute(argsObj, toolContext);
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-            return finish(resultStr, false);
+            return finish(resultStr, false, typed);
           } catch (e: any) {
-            return finish(`Tool Error: ${e.message}`, true);
+            const text = `Tool Error: ${e.message}`;
+            return finish(text, true, typedFromError(e, text));
           }
         };
 
@@ -327,13 +417,19 @@ export class AgentLoop {
           if (sig) loopSignals.push(sig);
         }
 
+        // One mind-strip refresh per tool batch (not per call): the footer's 🧠 counters
+        // (weak spots / drive deviations / habits) re-snapshot after the batch lands.
+        try { cliEvents.emit('mind_changed' as any); } catch { /* best-effort */ }
+
         // Handle any loop signals collected this turn
         if (loopSignals.length > 0) {
           const worst = loopSignals.sort((a, b) => b.count - a.count)[0];
           // Log to genome pattern store (best-effort, non-blocking)
           try { getGlobalPatternStore()?.appendLoopSignal(worst.type, worst.tool, worst.argsHash, worst.severity); } catch { /* ignore */ }
           if (worst.severity === 'hard') {
-            yield `\n[LoopGuard] Hard loop detected: ${worst.type} on "${worst.tool}" (${worst.count}×). Injecting intervention.\n`;
+            // The loop_detected event renders its own visible line in the TUI — no reply-stream
+            // narration on top of it (the answer must stay the model's voice alone).
+            cliEvents.emit('status', `Loop broken — "${worst.tool}" repeated ${worst.count}×, steering the model away`);
             cliEvents.emit('loop_detected' as any, worst);
             this.messages.push({
               role: 'user',
@@ -405,12 +501,12 @@ export class AgentLoop {
         // No tool calls and nothing left open — task complete. If the entire call produced
         // no visible text at all, say so rather than returning dead silence.
         if (!anyTextYielded) {
-          yield `\n[No response was produced. Try rephrasing, or press Ctrl+T to pin the model tier.]\n`;
+          yield `\nNo response was produced. Try rephrasing, or press Ctrl+T to pin the model tier.\n`;
         }
         return;
       }
     }
-    
-    yield `\n[AgentLoop] Reached maximum iterations (${maxIter}).\n`;
+
+    yield `\n⚠ Stopped after ${maxIter} rounds without finishing — say "continue" to pick up where this left off.\n`;
   }
 }

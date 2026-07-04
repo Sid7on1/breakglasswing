@@ -62,7 +62,7 @@ export const appStore = createStore<AppState>({
   },
   messages: [],
   logs: [],
-  spinner: { status: 'idle', message: 'Awaiting orders...' },
+  spinner: { status: 'idle', message: 'Ready' },
   statusText: '',
   vetoResolver: null,
   streamingText: '',

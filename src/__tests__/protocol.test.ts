@@ -100,15 +100,26 @@ describe('ProtocolHost', () => {
     let got: string | undefined;
     emitter.emit('input_prompt', 'Enter API key:', (a: string) => { got = a; });
     const req = sent.find(m => m.t === 'request') as any;
-    expect(req).toMatchObject({ t: 'request', kind: 'input', question: 'Enter API key:', options: [] });
+    expect(req).toMatchObject({ t: 'request', kind: 'input', question: 'Enter API key:', options: [], masked: false });
     host.ingest({ t: 'reply', id: req.id, value: 'sk-123' } as Inbound);
     expect(got).toBe('sk-123');
+  });
+
+  it('carries the masked flag so secret prompts are masked by contract, not by wording', () => {
+    emitter.emit('input_prompt', 'Paste the value:', () => {}, { masked: true });
+    const req = sent.find(m => m.t === 'request') as any;
+    expect(req).toMatchObject({ t: 'request', kind: 'input', question: 'Paste the value:', masked: true });
   });
 
   it('routes inbound input to the handler and ignores stale replies', () => {
     host.ingest({ t: 'input', text: 'refactor the parser' });
     expect(inputs).toEqual(['refactor the parser']);
     expect(() => host.ingest({ t: 'reply', id: 999, value: 'x' } as Inbound)).not.toThrow();
+  });
+
+  it('answers a ping with a pong echoing the id (the TUI heartbeat)', () => {
+    host.ingest({ t: 'ping', id: 7 } as Inbound);
+    expect(sent).toContainEqual({ t: 'pong', id: 7 });
   });
 
   it('does not leak listeners after detach', () => {

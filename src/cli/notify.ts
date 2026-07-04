@@ -1,5 +1,5 @@
 // Terminal notifications — ported from Claude Code's src/ink/useTerminalNotification.ts
-// and src/ink/termio/osc.ts, adapted to Bimax's plain-function style (no React context).
+// and src/ink/termio/osc.ts, adapted to BiMax's plain-function style (no React context).
 //
 // These are TERMINAL features (OSC escape sequences), entirely model-agnostic: they work
 // the same regardless of which LLM the agent is driving. We auto-detect the terminal and
@@ -74,13 +74,13 @@ export function notify(opts: { title?: string; message: string }): void {
     }
     case 'kitty': {
       const id = kittyNotifId++;
-      write(wrapForMultiplexer(osc([OSC_KITTY, `i=${id}:d=0:p=title`, title ?? 'Bimax'], true)));
+      write(wrapForMultiplexer(osc([OSC_KITTY, `i=${id}:d=0:p=title`, title ?? 'BiMax'], true)));
       write(wrapForMultiplexer(osc([OSC_KITTY, `i=${id}:p=body`, message], true)));
       write(wrapForMultiplexer(osc([OSC_KITTY, `i=${id}:d=1:a=focus`, ''], true)));
       break;
     }
     case 'ghostty': {
-      write(wrapForMultiplexer(osc([OSC_GHOSTTY, 'notify', title ?? 'Bimax', message])));
+      write(wrapForMultiplexer(osc([OSC_GHOSTTY, 'notify', title ?? 'BiMax', message])));
       break;
     }
     default:

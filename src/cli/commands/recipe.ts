@@ -22,7 +22,7 @@ globalCommandRegistry.register({
   execute: async (args, context) => {
     const loader = getGlobalRecipeLoader();
     if (!loader) {
-      return { type: 'message', level: 'error', content: 'Recipe loader not initialised. Restart Bimax in a project directory.' };
+      return { type: 'message', level: 'error', content: 'Recipe loader not initialised. Restart BiMax in a project directory.' };
     }
 
     const sub = (args[0] || '').toLowerCase();

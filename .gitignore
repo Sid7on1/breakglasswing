@@ -18,3 +18,23 @@ fatal-crash.log
 vendor/*/bin/
 vendor/*/cache/
 vendor/*/venv/
+
+# Bun --compile scratch blobs (60MB each) that bun leaves at cwd on a crash/interrupt
+*.bun-build
+.*.bun-build
+
+# Mind layer — learned, machine-local state (plans/goals in .bimax stay tracked)
+.bimax/self-model.json
+.bimax/habits.json
+.bimax/habits/
+.bimax/user-model.json
+.bimax/epistemic.json
+.bimax/drives.json
+.bimax/dreams.json
+.bimax/dogfood/
+.bimax/ledger.db*
+.bimax/episodes/
+.bimax/exemplars.json
+.bimax/tdm.json
+.bimax/claims.json
+.bimax/policy-arms.json

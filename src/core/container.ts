@@ -30,6 +30,8 @@ import { createCdTool } from '../tools/implementations/cd.tool';
 import { createReadFileTool, createWriteFileTool, createDeleteTool, createMakeDirTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
+import { createSymbolEditTool } from '../tools/implementations/symboledit.tool';
+import { createRelatedTestsTool } from '../tools/implementations/relatedtests.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -111,7 +113,10 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
 
   // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();
-  const graphStore = new GraphStore(path.join(projectRoot, '.breakglass/graph', 'playground.json'));
+  // SQLite-backed when node:sqlite exists (atomic saves, per-file staleness → incremental
+  // reindex); legacy JSON store otherwise. Same IGraphStore either way (v2 §3.9).
+  const { createGraphStore } = await import('../graph/sqlite.graph.store');
+  const graphStore = createGraphStore(projectRoot);
   const { isCodebase } = await import('../graph/graph.summary');
   if (isCodebase(projectRoot)) {
     await graphStore.loadFromDisk();
@@ -136,6 +141,9 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createWriteFileTool(governor));
   toolRegistry.register(createEditFileTool(governor));
   toolRegistry.register(createMultiEditTool(governor));
+  // Surgical precision pair: AST-addressed edits + minimal-scope test verification.
+  toolRegistry.register(createSymbolEditTool(governor));
+  toolRegistry.register(createRelatedTestsTool(governor));
   toolRegistry.register(createDeleteTool(governor));
   toolRegistry.register(createMakeDirTool(governor));
   toolRegistry.register(createBashTool(governor));
@@ -179,9 +187,12 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createToolSearchTool(governor, toolRegistry));
   toolRegistry.register(createWebSearchTool(governor));
 
-  // External MCP servers — best-effort, never blocks boot.
+  // External MCP servers — best-effort, never blocks boot. Once the initial (parallel) connect
+  // settles, the watchdog takes over: a 60s background sweep that probes each live connector and
+  // auto-reconnects dead ones (bounded attempts; BIMAX_MCP_WATCHDOG=0 disables).
   globalMcpManager
     .connectAll(toolRegistry, governor, projectRoot)
+    .then(() => globalMcpManager.startWatchdog(toolRegistry, governor))
     .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
 
   // Genome & Evolution — used by /evolve (gated by allowSelfEvolution config, off by default).

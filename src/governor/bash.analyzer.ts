@@ -36,6 +36,7 @@ const SENSITIVE_PREFIXES = [
 const SENSITIVE_DOTFILES = ['.ssh/', '.bashrc', '.zshrc', '.bash_profile', '.profile', '.aws/', '.kube/'];
 
 export class BashStaticAnalyzer {
+  private static languagePromise: Promise<Parser.Language> | null = null;
   private readonly READ_ONLY_COMMANDS = new Set([
     'ls', 'cat', 'echo', 'pwd', 'whoami', 'date', 'ps', 'top',
     'head', 'tail', 'less', 'more', 'find', 'grep', 'awk', 'sed', 'wc',
@@ -73,15 +74,24 @@ export class BashStaticAnalyzer {
     if (this.warmStarted) return;
     this.warmStarted = true;
     try {
-      await Parser.init();
-      const wasmPath = require.resolve('tree-sitter-wasms/out/tree-sitter-bash.wasm');
-      const lang = await Parser.Language.load(wasmPath);
+      // Parser.init + WASM loading are process-wide work. Governors can be created repeatedly in
+      // tests and sub-systems; sharing the promise prevents parallel WASM loads and descriptor
+      // spikes while still giving each analyzer its own lightweight Parser instance.
+      if (!BashStaticAnalyzer.languagePromise) {
+        BashStaticAnalyzer.languagePromise = (async () => {
+          await Parser.init();
+          const wasmPath = require.resolve('tree-sitter-wasms/out/tree-sitter-bash.wasm');
+          return Parser.Language.load(wasmPath);
+        })();
+      }
+      const lang = await BashStaticAnalyzer.languagePromise;
       const parser = new Parser();
       parser.setLanguage(lang);
       this.parser = parser;
       Logger.info('[BashAnalyzer] tree-sitter-bash loaded — AST command analysis active.');
     } catch (e: any) {
       this.parser = null;
+      BashStaticAnalyzer.languagePromise = null;
       Logger.warn(`[BashAnalyzer] AST grammar unavailable, using regex fallback: ${e?.message ?? e}`);
     }
   }

@@ -12,8 +12,8 @@ describe('BashTool — non-zero exit returns output, not a bare failure', () => 
       { command: 'echo "TYPE_ERROR_HERE"; exit 1' },
       { cwd: process.cwd() },
     );
-    expect(String(res.stdout)).toContain('TYPE_ERROR_HERE');
-    expect(String(res.stderr)).toMatch(/exited with code 1/);
+    expect(String(res)).toContain('TYPE_ERROR_HERE');
+    expect(String(res)).toMatch(/exited with code 1/);
   });
 
   it('captures stderr from a failing command (grep no match style)', async () => {
@@ -21,7 +21,7 @@ describe('BashTool — non-zero exit returns output, not a bare failure', () => 
       { command: 'echo "to stderr" 1>&2; exit 2' },
       { cwd: process.cwd() },
     );
-    expect(String(res.stderr)).toContain('to stderr');
-    expect(String(res.stderr)).toMatch(/exited with code 2/);
+    expect(String(res)).toContain('to stderr');
+    expect(String(res)).toMatch(/exited with code 2/);
   });
 });

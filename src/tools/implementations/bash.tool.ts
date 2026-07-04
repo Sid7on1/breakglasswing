@@ -3,7 +3,8 @@ import { promisify } from 'util';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { sandboxArgv } from '../../sandbox/exec.sandbox';
+import { sandboxArgv, floorRoot, floorArgv, floorChildEnv, floorBlockedReason } from '../../sandbox/exec.sandbox';
+import { outcomeOk, classifiedError } from '../outcome';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -47,29 +48,43 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
     try {
       const currentCwd = context?.cwd || process.cwd();
       const cmd = args.command.replace(/^~(?=\/|$)/, os.homedir());
+      // Sandbox FLOOR (autonomous episodes): mandatory — no toggle lowers it. If the floor
+      // can't be enforced on this platform, Bash is blocked rather than run with ambient
+      // authority (BIMAX_SANDBOX_FLOOR_SOFT=1 is the explicit opt-out).
+      const blocked = floorBlockedReason();
+      if (blocked) throw classifiedError(`Command blocked: ${blocked}`, 'permission', 'blocked');
+      const flArgv = floorArgv(cmd);
       // When sandboxing is on (B3), run the command under sandbox-exec via execFile so the
       // profile + the command pass as discrete argv (no shell re-quoting). Otherwise run it
       // through the shell exactly as before.
-      const sbArgv = sandboxArgv(cmd, currentCwd);
+      const sbArgv = flArgv ?? sandboxArgv(cmd, currentCwd);
       // signal: when the user hits esc mid-turn, the agent loop aborts it and Node kills this child
       // process immediately instead of waiting out the command / its timeout.
-      const execOpts = { cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, signal: context?.signal as AbortSignal | undefined };
+      const execOpts = {
+        cwd: currentCwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024,
+        signal: context?.signal as AbortSignal | undefined,
+        // Floored episodes (even soft-bypassed ones) never expose the parent env to children.
+        ...(floorRoot() ? { env: floorChildEnv() } : {}),
+      };
       const { stdout, stderr } = sbArgv
         ? await execFileAsync('sandbox-exec', sbArgv, execOpts)
         : await execAsync(cmd, execOpts);
       const out = stdout.trim();
       const err = stderr.trim();
-      return {
+      const payload = {
         stdout: out.length > MAX_OUTPUT_CHARS ? out.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : out,
         stderr: err.length > MAX_OUTPUT_CHARS ? err.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : err,
       };
+      // Typed outcome: text matches the old JSON.stringify wire format exactly; exitCode 0 is
+      // ground truth for the epistemic ledger's green evidence flag.
+      return outcomeOk(JSON.stringify(payload, null, 2), { exitCode: 0 });
     } catch (e: any) {
       // Interrupted by esc (signal abort) — also sets e.killed, so check it BEFORE the timeout case.
       if (e?.name === 'AbortError' || e?.code === 'ABORT_ERR' || context?.signal?.aborted) {
-        throw new Error(`Command interrupted: ${args.command}`, { cause: e });
+        throw classifiedError(`Command interrupted: ${args.command}`, 'interrupted');
       }
       if (e.killed) {
-        throw new Error(`Command timed out after ${timeoutMs}ms: ${args.command}`, { cause: e });
+        throw classifiedError(`Command timed out after ${timeoutMs}ms: ${args.command}`, 'timeout');
       }
       // A NON-ZERO exit is normal and useful for many commands — `tsc` with type errors, a failing
       // `npm test`, `grep` with no match. Node's exec rejects in that case but attaches the captured
@@ -80,12 +95,17 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       const err = String(e.stderr || '').trim();
       if (out || err) {
         const tag = e.code != null ? `\n[command exited with code ${e.code}]` : '';
-        return {
+        const payload = {
           stdout: out.length > MAX_OUTPUT_CHARS ? out.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : out,
           stderr: ((err + tag).length > MAX_OUTPUT_CHARS ? (err + tag).slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : (err + tag)),
         };
+        // Still status 'ok' — a failing tsc/test run is a useful result, not a tool failure —
+        // but the non-zero exitCode makes the ledger's red evidence flag exact.
+        return outcomeOk(JSON.stringify(payload, null, 2), { exitCode: typeof e.code === 'number' ? e.code : 1 });
       }
-      throw new Error(`Bash execution failed: ${e.message}`, { cause: e });
+      const wrapped: any = classifiedError(`Bash execution failed: ${e.message}`, 'external');
+      wrapped.cause = e;
+      throw wrapped;
     }
   }
 }, governor);

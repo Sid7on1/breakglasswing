@@ -6,6 +6,7 @@ import { SubTask } from '../task/types';
 import { SubAgentManager } from '../core/subagent.manager';
 import { LlmAdapter } from '../core/llm.adapter';
 import { buildAgentContextBlock } from './agent.context';
+import { FileClaims } from '../core/file.claims';
 
 export interface SwarmNodeResult {
   id: string;
@@ -37,6 +38,7 @@ export class SwarmOrchestrator {
   private readonly subagents = new SubAgentManager();
   private readonly stamp = Date.now().toString(36);
   private readonly maxParallel = 4;
+  private readonly claims: FileClaims;
 
   constructor(
     private projectRoot: string,
@@ -45,6 +47,7 @@ export class SwarmOrchestrator {
     private log: SwarmLogger = () => {}
   ) {
     this.worktrees = new WorktreeManager(projectRoot);
+    this.claims = new FileClaims(projectRoot);
   }
 
   private git(args: string[], cwd = this.projectRoot): string {
@@ -179,6 +182,20 @@ export class SwarmOrchestrator {
           // commitChanges interpolates the message into a shell command; strip shell-significant chars.
           const safeMsg = `swarm(${node.id}): ${node.description}`.replace(/["`$\\\n\r]/g, ' ').slice(0, 80);
           await this.worktrees.commitChanges(worktreePath, safeMsg);
+
+          // Merge queue (v2 §3.10): lease this branch's changed paths before touching the
+          // integration branch, so a CONCURRENT orchestrator (another swarm, a heal, a
+          // second session) mutating the same files queues instead of interleaving. The
+          // lease is cross-process (.bimax/claims.json, TTL + dead-PID pruned).
+          const agentId = `swarm-${this.stamp}-${node.id}`;
+          let changedPaths: string[] = [];
+          try { changedPaths = this.git(['diff', '--name-only', `${integrationBranch}...${branch}`]).split('\n').filter(Boolean).slice(0, 200); } catch { /* claims are best-effort */ }
+          const lease = changedPaths.length > 0
+            ? await this.claims.awaitAcquire(agentId, changedPaths, { timeoutMs: 120_000 })
+            : { granted: true as const, conflicts: [] };
+          if (!lease.granted) {
+            this.log('warn', `⏳ ${node.id}: paths still leased by ${lease.conflicts[0]?.holder || 'another agent'} after 120s — merging anyway (git is the last-line arbiter).`);
+          }
           try {
             this.git(['merge', '--no-ff', '-m', `merge ${node.id}`, branch], integrationPath);
             report.nodes.push({ id: node.id, description: node.description, status: 'completed', detail: 'merged' });
@@ -188,9 +205,11 @@ export class SwarmOrchestrator {
             try { this.git(['merge', '--abort'], integrationPath); } catch { /* nothing to abort */ }
             report.nodes.push({ id: node.id, description: node.description, status: 'conflict', detail: 'merge conflict — left on its branch ' + branch });
             this.log('error', `✖ ${node.id} conflicted on merge; branch ${branch} kept for manual review.`);
+            this.claims.release(agentId);
             await this.cleanupWorktreeOnly(worktreePath);
             continue;
           }
+          this.claims.release(agentId);
           await this.cleanupBranch(branch, worktreePath);
         }
       }

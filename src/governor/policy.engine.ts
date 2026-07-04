@@ -33,6 +33,14 @@ export function initPolicyEngine() {
           setTimeout(loadPolicy, 100); // small debounce — editors write in bursts
         }
       });
+      // Some restricted/container filesystems create the watcher successfully and then report an
+      // asynchronous EMFILE/EPERM error. A surrounding try/catch cannot catch EventEmitter errors;
+      // without this listener the error becomes an uncaught exception and can crash startup.
+      policyWatcher.on('error', (e: NodeJS.ErrnoException) => {
+        Logger.warn(`[PolicyEngine] Hot reload disabled: ${e.message}`);
+        policyWatcher?.close();
+        policyWatcher = null;
+      });
       // Don't let the watcher keep the process alive
       policyWatcher.unref();
     }

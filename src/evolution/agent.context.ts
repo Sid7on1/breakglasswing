@@ -13,6 +13,7 @@ import { getGoalManager } from '../memory/goal.manager';
 import { globalProjectMemory } from '../memory/project.memory';
 import { getContextManagerGraphStore } from '../memory/context.manager';
 import { formatRepoMapOutline } from '../graph/pagerank';
+import { getExemplarStore } from '../mind/exemplar.store';
 
 /** Code-ish identifiers in a task line (camelCase, snake_case, paths, dotted) — for focusing the map
  * and picking symbols to blast-radius. Mirrors focusTermsFromMessages in context.manager. */
@@ -69,6 +70,14 @@ export async function buildAgentContextBlock(opts: { goal: string; subtask: stri
     const mem = await globalProjectMemory.recallBlock(`${goal} ${subtask}`, 3);
     if (mem?.trim()) parts.push(mem.trim());
   } catch { /* memory optional */ }
+
+  // 2b. Verified experience (v2 §9.3) — past episodes similar to this slice that passed an
+  // objective check. Sub-agents benefit most: they start cold, and a "you fixed this exact
+  // defect class before, verified by <test>" line beats generic instructions.
+  try {
+    const ex = getExemplarStore().getPromptBlock(`${goal}\n${subtask}`);
+    if (ex?.trim()) parts.push(ex.trim());
+  } catch { /* exemplars optional */ }
 
   // 3 & 4. Architecture + blast radius — only when the codebase-memory engine is indexed.
   if (globalCodemem.isReady()) {
