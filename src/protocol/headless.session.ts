@@ -4,7 +4,31 @@ import { routeQuery } from '../cli/agentRouter';
 import { expandAtMentions, expandFileAtMentions } from '../cli/atMention';
 import { globalCommandRegistry } from '../cli/commands/registry';
 import { decideTier, applyBrief, Tier } from '../cli/model.router';
+import { getEpistemicLedger } from '../mind/epistemic.ledger';
 import { IGraphStore } from '../graph/models';
+
+/**
+ * Confidence-in-margin (turn-end form): from the epistemic-ledger delta across a turn, decide what
+ * to say about its verification posture. `verified` = claims resolved by a build/test run that named
+ * the touched files; `opened` = new claims (edits) still unchecked. Returns null when the turn
+ * changed nothing that the ledger tracks — it speaks only to confirm verified work or nudge an
+ * unverified change. Pure, so it's unit-testable without driving a whole turn.
+ */
+export function ledgerTurnSummary(
+  before: { resolved: number; open: number } | null,
+  after: { resolved: number; open: number },
+): { text: string; level: 'success' | 'info' } | null {
+  if (!before) return null;
+  const verified = after.resolved - before.resolved;
+  const opened = after.open - before.open;
+  if (verified > 0) {
+    return { text: `◇ ledger · verified ${verified} change${verified > 1 ? 's' : ''} this turn`, level: 'success' };
+  }
+  if (opened > 0) {
+    return { text: `◇ ledger · ${opened} change${opened > 1 ? 's' : ''} unverified — run a build/test to confirm`, level: 'info' };
+  }
+  return null;
+}
 
 export interface HeadlessDeps {
   personas: Record<string, AgentPersona>;
@@ -71,6 +95,9 @@ export class HeadlessSession {
     }
     this.busy = true;
     this.turnAbort = new AbortController();
+    // Snapshot the epistemic ledger so we can report THIS turn's verification posture at the end:
+    // claims open on edits and resolve when a build/test run names the touched files.
+    const beforeLedger = (() => { try { return getEpistemicLedger().stats(); } catch { return null; } })();
     cliEvents.emit('message', this.msg('user', query));
     // Show activity IMMEDIATELY — @-mention expansion + decideTier (an LLM classifier call) below can
     // take 10-15s, during which the front-end would otherwise sit silent after the user's message.
@@ -81,17 +108,22 @@ export class HeadlessSession {
     let totalChars = 0;
 
     try {
+      // Model-tier routing (parity with FullScreen): lite is the default responder; escalate to the
+      // heavy coding model only when the turn needs it. A manual pin wins. Kicked off FIRST — it only
+      // needs the raw query — so the classifier (when the local heuristic can't decide) overlaps with
+      // the @-mention expansion below instead of stacking another serial round-trip on turn start.
+      const tierPromise = decideTier(this.deps.options.llmAdapter, query, this.pinnedTier)
+        .catch(() => ({ tier: 'lite' as const, via: 'fallback' as const, brief: undefined }));
+
       // @-mention / @file expansion is best-effort, same as the Ink path.
       let agentQuery = query;
       try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
       try { agentQuery = (await expandAtMentions(agentQuery, this.deps.graphStore, process.cwd())).text; } catch { /* best-effort */ }
 
-      // Model-tier routing (parity with FullScreen): lite is the default responder; escalate to the
-      // heavy coding model only when the turn needs it. A manual pin wins. The footer pointer flips
-      // to whichever model will actually receive this request.
+      // The footer pointer flips to whichever model will actually receive this request.
       let useLite = true;
       try {
-        const decision = await decideTier(this.deps.options.llmAdapter, query, this.pinnedTier);
+        const decision = await tierPromise;
         useLite = decision.tier === 'lite';
         cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
         if (!useLite) agentQuery = applyBrief(agentQuery, decision.brief);
@@ -132,7 +164,17 @@ export class HeadlessSession {
       this.busy = false;
       this.turnAbort = null;
       cliEvents.emit('thinking_clear');
-      cliEvents.emit('spinner_state', 'idle', 'Awaiting orders…');
+      // Confidence-in-margin (turn-end form): report whether this turn's edits were checked. The
+      // ledger delta tells us how many claims opened (edits) vs resolved (a build/test run named the
+      // touched files) during the turn. Silent when the turn changed nothing — it only speaks to
+      // confirm verified work or nudge that a change went unchecked.
+      if (beforeLedger) {
+        try {
+          const sum = ledgerTurnSummary(beforeLedger, getEpistemicLedger().stats());
+          if (sum) cliEvents.emit('message', this.msg('system', sum.text, sum.level));
+        } catch { /* ledger best-effort */ }
+      }
+      cliEvents.emit('spinner_state', 'idle', 'Ready');
     }
   }
 
@@ -148,7 +190,14 @@ export class HeadlessSession {
       // Menus / prompts are forwarded as messages carrying a uiComponent + payload; the front-end
       // renders them and replies via the protocol's menuSelect / reply channel.
       setActiveMenu: (menu: any) => this.emitMenu(menu),
-      setActivePrompt: (prompt: any) => cliEvents.emit('message', this.uiMsg('prompt', prompt)),
+      // Free-form prompts go through the request/reply channel (the old uiComponent-'prompt'
+      // message was unrenderable out-of-process: its onResolve callback can't cross the wire, so
+      // flows like /keys dead-ended with no visible prompt). isMasked rides along so secrets are
+      // masked by contract. setActivePrompt(null) is the Ink "dismiss" — a no-op over the wire.
+      setActivePrompt: (prompt: any) => {
+        if (!prompt || !prompt.title) return;
+        cliEvents.emit('input_prompt', prompt.title, (val: string) => prompt.onResolve?.(val), { masked: !!prompt.isMasked });
+      },
       executeCommand: (cmd: string) => { void this.dispatch(cmd); },
       restoreMessages: (msgs: any[]) => {
         // Refuse to swap the history array while a turn is running — the agent loop is mutating it,
@@ -173,7 +222,7 @@ export class HeadlessSession {
       else if (result.type === 'prompt') {
         // Free-form text prompt: bridge its onResolve callback through the request/reply channel.
         const r: any = result;
-        cliEvents.emit('input_prompt', r.title, (val: string) => r.onResolve?.(val));
+        cliEvents.emit('input_prompt', r.title, (val: string) => r.onResolve?.(val), { masked: !!r.isMasked });
       } else if (result.type === 'redirect') void this.dispatch(result.command);
       else if (result.type === 'dashboard') cliEvents.emit('message', this.uiMsg(result.uiComponent, result.payload));
     } catch (err: any) {
