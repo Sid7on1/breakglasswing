@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref so the required check reflects the latest push.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Engine (typecheck · lint · test)
+    runs-on: ubuntu-latest
+    env:
+      # Tests mock the browser; never pull ~150MB of Chromium in CI.
+      PUPPETEER_SKIP_DOWNLOAD: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Typecheck + build
+        run: npm run build
+      - name: Lint (warnings allowed; errors fail)
+        run: npm run lint
+      - name: Protocol contract fixtures are up to date
+        run: |
+          npm run gen:protocol
+          git diff --exit-code -- src/protocol || {
+            echo "::error::protocol fixtures drifted — run 'npm run gen:protocol' and commit"; exit 1; }
+      - name: Test
+        run: npm run test:ci
+
+  tui:
+    name: TUI (build · test)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: tui/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
