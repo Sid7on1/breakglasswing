@@ -347,6 +347,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return nm, tea.Batch(clearCmd, cmd)
 		}
 	}
+	// COMMIT wrap. Must stay in parity with the LIVE wrap in View() (ansi.Hardwrap at width-1):
+	// content that fits and renders clean while streaming must fit and render clean once committed
+	// to scrollback, or coloured backgrounds bleed to column 0 on a phantom continuation row. The
+	// invariant (a line already within budget is never re-wrapped) is enforced for BOTH paths by
+	// TestWrapPathParityNoBleed — preserve it if you touch either wrap.
 	for i, line := range nm.printQueue {
 		if nm.width > 2 {
 			nm.printQueue[i] = indentAwareWrap(line, nm.width-2)
@@ -683,6 +688,8 @@ func (m model) View() string {
 		// the terminal's auto-wrap at the last column (cursor slides to the next row), which desyncs
 		// Bubble Tea's inline cursor-up clear → the footer/meter/input "multiply" or leave a mirror box
 		// on resize/zoom. width-1 keeps logical rows == physical rows so the renderer clears exactly.
+		// Parity with the COMMIT wrap in Update() is enforced by TestWrapPathParityNoBleed — a line
+		// that fits here must also fit once committed, or the diff background bleeds to column 0.
 		out = ansi.Hardwrap(out, m.width-1, true)
 	}
 	// Never emit more rows than the terminal has, or the renderer pushes the top of the live region into

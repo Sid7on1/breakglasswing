@@ -74,6 +74,30 @@ func TestParseDiffRowsDropsNoNewlineMarker(t *testing.T) {
 	}
 }
 
+// Parity guard for the two wrap paths that a diff card passes through: the LIVE region wrap
+// (ansi.Hardwrap at width-1, in View) and the COMMIT wrap (indentAwareWrap at width-2, in
+// Update). A diff row is pre-laid-out and hard-clamped to fill its width; NEITHER path may
+// re-wrap it onto a continuation row, or its coloured background spills to column 0. This
+// asserts both paths leave a rendered, indented diff block's row count unchanged.
+func TestWrapPathParityNoBleed(t *testing.T) {
+	long := "Elena Marquez found the lighthouse on a map she didn’t remember buying—the ink faded, the coordinates clear: a tower standing alone on the far horizon at dusk."
+	diff := "@@ -1,0 +1,2 @@\n+The Cartographer of Lost Things\n+" + long + "\n\\ No newline at end of file"
+	for _, w := range []int{190, 140, 100, 80, 64} {
+		indent := "  "
+		diffW := w - len(indent) - 4 - 6
+		block := indentLines(renderDiff(diff, 40, diffW, "story.txt"), indent+"    ")
+		rows := strings.Count(block, "\n")
+		// LIVE path: ansi.Hardwrap at width-1 over the whole region.
+		if got := strings.Count(ansi.Hardwrap(block, w-1, true), "\n"); got != rows {
+			t.Fatalf("LIVE wrap added rows at width=%d: %d != %d", w, got, rows)
+		}
+		// COMMIT path: indentAwareWrap at width-2 per line.
+		if got := strings.Count(indentAwareWrap(block, w-2), "\n"); got != rows {
+			t.Fatalf("COMMIT wrap added rows at width=%d: %d != %d", w, got, rows)
+		}
+	}
+}
+
 // An overwrite of unrelated content drifts the old/new line counters apart. Removed lines must NOT
 // show a number (they have no position in the new file) — otherwise the single gutter reads
 // backwards (1,2,3,3,5,4,4…). Visible numbers must stay monotonic: the new file's real line numbers.
