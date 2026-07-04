@@ -27,9 +27,16 @@ func main() {
 			fmt.Println("bimax — autonomous AI agent for your terminal")
 			fmt.Println("usage: bimax            launch the TUI in the current project")
 			fmt.Println("       bimax --version  print the version and exit")
+			fmt.Println("       bimax --no-anim  reduce motion (freeze spinner/shimmer)")
+			fmt.Println()
+			fmt.Println("env:   NO_COLOR=1              plain output, no color")
+			fmt.Println("       BIMAX_REDUCED_MOTION=1  same as --no-anim")
 			return
 		}
 	}
+
+	// Accessibility: NO_COLOR + reduced motion, resolved before any style renders.
+	initAccessibility(os.Args[1:])
 
 	eng, err := StartEngine(ResolveRoot())
 	if err != nil {

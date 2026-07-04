@@ -14,7 +14,8 @@ var (
 	colText     = lipgloss.Color("#EDEFF2") // Mist — primary text
 	colInactive = lipgloss.Color("#9AA1AC") // secondary text / summaries (cool graphite)
 	colSubtle   = lipgloss.Color("#626974") // tertiary — dim chrome (gutters, hints)
-	colDim      = lipgloss.Color("#444A54") // faint graphite (empty meter cells, hairline text)
+	colDim      = lipgloss.Color("#444A54") // faint graphite — DECORATIVE ONLY (panel hairline borders,
+	//                                         empty meter track); 2.2:1, WCAG-exempt. Never use for text.
 	colUser     = lipgloss.Color("#EDEFF2") // user lines: bright, marked by the phosphor caret
 	colAsst     = lipgloss.Color("#EDEFF2")
 	colTool     = lipgloss.Color("#5FD08A") // ok green (Braun dot)
@@ -128,7 +129,8 @@ var (
 	logWarn  = lipgloss.NewStyle().Foreground(colWarn)
 	logOK    = lipgloss.NewStyle().Foreground(colOK)
 	logInfo  = lipgloss.NewStyle().Foreground(colText)
-	logDim   = lipgloss.NewStyle().Foreground(colDim) // debug level — dimmer than info
+	logDim   = lipgloss.NewStyle().Foreground(colSubtle) // debug level — dimmer than info, but text so it
+	//                                                       stays readable (colSubtle 3.5:1, not colDim 2.2:1)
 	logPanel = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)
 
 	// Task-list panel — a bordered box pinned above the prompt (Claude-Code TaskListV2 style).

@@ -381,9 +381,15 @@ func (m model) thinkingView() string {
 		verb = spinnerVerbs[verbIdx]
 	}
 
+	// Reduced motion: one static row. No braille spinner, no per-frame shimmer sweep, no dot
+	// rotation — only the whole-second elapsed clock changes. Same information, zero animation.
+	if reducedMotion {
+		return workLabel.Render("● "+verb+" · "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
+	}
+
 	shimmerText := renderShimmerVerb(verb, m.thinkTick, stalledIntensity, isToolPulse)
 	dots := strings.Repeat(".", m.thinkDots)
-	
+
 	s := m.spin.View() + " " + workLabel.Render("● ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 	if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
@@ -445,6 +451,9 @@ func renderShimmerVerb(verb string, tickIdx int, stalledIntensity float64, isToo
 
 // workingView: braille spinner + a bold "⏺ Generating… Ns" clock + cancel hint while the answer streams.
 func (m model) workingView() string {
+	if reducedMotion {
+		return workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
+	}
 	return m.spin.View() + " " + workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 }
 

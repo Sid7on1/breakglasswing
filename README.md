@@ -70,5 +70,6 @@ macOS and Linux for every PR to `main`.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — every subsystem, tool, and command.
 - [docs/FEATURES.md](docs/FEATURES.md) — the highlight reel.
 - [docs/INSTALL.md](docs/INSTALL.md) — install, build, and release.
+- [docs/ACCESSIBILITY.md](docs/ACCESSIBILITY.md) — `NO_COLOR`, reduced motion, contrast, screen readers.
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — notable changes.
 - [PRIVACY.md](PRIVACY.md) — what data BiMax collects (short answer: it stays on your machine).

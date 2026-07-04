@@ -34,6 +34,11 @@ func tickCmd(d time.Duration) tea.Cmd {
 // the old unconditional 50ms tick woke the process 20×/s around the clock to redraw nothing (the
 // heartbeat and status-expiry checks only need coarse ticks).
 func (m model) nextTick() tea.Cmd {
+	// Reduced motion: never run the 50ms animation cadence. The working line is static; the only
+	// thing that changes is the whole-second elapsed clock, which 500ms ticks update precisely.
+	if reducedMotion {
+		return tickCmd(500 * time.Millisecond)
+	}
 	if m.working() || !m.resizeAt.IsZero() {
 		return tickCmd(50 * time.Millisecond)
 	}
