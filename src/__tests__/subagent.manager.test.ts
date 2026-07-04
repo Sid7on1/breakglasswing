@@ -25,6 +25,15 @@ describe('SubAgentManager — worker watchdog timeout', () => {
 
   const cfg = { agentType: 'test', prompt: 'x', cwd: os.tmpdir(), parentMode: 'safe' };
 
+  // Regression: sub-agents crashed at module load ("Cannot find package 'minimatch'") because the
+  // worker ran the TypeScript source with a tsx loader that doesn't propagate into worker threads.
+  // The default entry must resolve to a COMPILED .js worker with no TS-loader execArgv.
+  it('defaults to a compiled .js worker entry with no tsx loader', () => {
+    const mgr = new SubAgentManager() as any;
+    expect(mgr.workerScriptPath.endsWith('.js')).toBe(true);
+    expect(mgr.workerExecArgv).toEqual([]);
+  });
+
   it('terminates and rejects a worker that exceeds the timeout', async () => {
     const mgr = new SubAgentManager({ workerScriptPath: hangScript, timeoutMs: 300 });
     const start = Date.now();

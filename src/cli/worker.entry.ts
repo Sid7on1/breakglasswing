@@ -122,7 +122,8 @@ async function runWorker() {
       if (skillConfig) {
         agent = new DynamicPersona(skillConfig, toolRegistry, llmAdapter);
       } else {
-        throw new Error(`Unknown agent type: ${config.agentType}`);
+        // Unknown/blank type → spawn BiMax itself rather than failing the whole sub-agent.
+        agent = new BiMaxPersona(toolRegistry, llmAdapter);
       }
     }
 

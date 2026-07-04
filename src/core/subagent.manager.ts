@@ -29,14 +29,30 @@ export class SubAgentManager {
 
   // opts is a test seam: production callers use the default worker entrypoint and timeout.
   constructor(opts?: { workerScriptPath?: string; timeoutMs?: number }) {
-    // Resolve the worker entry next to this file. When running compiled (`node dist/...`) __dirname is
-    // dist/core and the sibling .js exists. When running from source (`tsx src/index.ts`) __dirname is
-    // src/core and only the .ts exists — use it, and tell the worker to load tsx so it can run TS.
-    const jsPath = path.resolve(__dirname, '../cli/worker.entry.js');
+    // ALWAYS prefer a COMPILED worker entry. A worker thread does not reliably inherit a TypeScript
+    // loader (tsx/ts-node) via execArgv across Node versions — passing `--import tsx` to the worker
+    // fails to register the ESM hooks, which surfaced as "Cannot find package 'minimatch'" /
+    // "Unknown file extension '.ts'" and killed EVERY sub-agent whenever the engine ran from source.
+    // A plain .js worker under plain node needs no loader and just works.
+    // Candidates: the sibling .js when we're already compiled (dist/core → dist/cli), and the dist
+    // copy when running from source (src/core → ../../dist/cli). Fall back to the .ts entry + tsx
+    // only if no compiled worker exists at all (pure-source checkout with no build).
+    const compiledCandidates = [
+      path.resolve(__dirname, '../cli/worker.entry.js'),
+      path.resolve(__dirname, '../../dist/cli/worker.entry.js'),
+    ];
+    const compiledJs = compiledCandidates.find(existsSync);
     const tsPath = path.resolve(__dirname, '../cli/worker.entry.ts');
-    const useTs = !existsSync(jsPath) && existsSync(tsPath);
-    this.workerScriptPath = opts?.workerScriptPath ?? (useTs ? tsPath : jsPath);
-    this.workerExecArgv = useTs ? ['--import', 'tsx'] : [];
+    if (opts?.workerScriptPath) {
+      this.workerScriptPath = opts.workerScriptPath;
+      this.workerExecArgv = opts.workerScriptPath.endsWith('.ts') ? ['--import', 'tsx'] : [];
+    } else if (compiledJs) {
+      this.workerScriptPath = compiledJs;
+      this.workerExecArgv = [];
+    } else {
+      this.workerScriptPath = tsPath;
+      this.workerExecArgv = ['--import', 'tsx'];
+    }
     this.workerTimeoutMs = opts?.timeoutMs ?? parseInt(process.env.BGW_WORKER_TIMEOUT_MS || '600000', 10);
   }
 

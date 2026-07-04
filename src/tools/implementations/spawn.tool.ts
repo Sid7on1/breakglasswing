@@ -26,17 +26,19 @@ Use this tool when a user request is too massive or complex to be completed in a
       properties: {
         agentType: {
           type: 'string',
-          enum: ['Hermes', 'OpenCode', 'OpenClaw', 'BiMax', ...Object.keys(SkillLoader.getAllSkills())],
-          description: 'The type of sub-agent to spawn.'
+          enum: ['BiMax', 'Hermes', 'OpenCode', 'OpenClaw', ...Object.keys(SkillLoader.getAllSkills())],
+          description: 'The sub-agent persona. Default and standard is "BiMax" — a full copy of yourself with the same tools and reasoning; omit this to spawn BiMax. The others are legacy specialized personas — only use one if the task specifically calls for it.'
         },
         prompt: {
           type: 'string',
           description: 'The highly detailed prompt/task for the sub-agent.'
         },
       },
-      required: ['agentType', 'prompt']
+      required: ['prompt']
     },
-    execute: async (args: { agentType: string, prompt: string }, context?: any) => {
+    execute: async (args: { agentType?: string, prompt: string }, context?: any) => {
+      // Default to a BiMax sub-agent (a copy of ourselves) — never a stray legacy persona.
+      const agentType = args.agentType || 'BiMax';
       // Hard cap — NOT model-controllable. Keeping this as a constant (not an arg) prevents
       // the model from passing maxSubAgents:100 and spawning 100 worker threads.
       const MAX_CONCURRENT = 5;
@@ -51,7 +53,7 @@ Use this tool when a user request is too massive or complex to be completed in a
 
       // We don't await the worker here. We fire and forget.
       globalSubAgentManager.spawnWorker(taskId, {
-        agentType: args.agentType,
+        agentType,
         prompt: args.prompt,
         cwd: currentCwd,
         parentMode: parentMode
@@ -64,7 +66,7 @@ Use this tool when a user request is too massive or complex to be completed in a
           id: `subagent-result-${taskId}`,
           role: 'system',
           level: 'success',
-          content: `✓ Sub-agent ${args.agentType} (${taskId}) finished:\n\n${text.slice(0, 4000)}`,
+          content: `✓ Sub-agent ${agentType} (${taskId}) finished:\n\n${text.slice(0, 4000)}`,
           timestamp: new Date(),
         });
       }).catch(err => {
@@ -73,12 +75,12 @@ Use this tool when a user request is too massive or complex to be completed in a
           id: `subagent-result-${taskId}`,
           role: 'system',
           level: 'error',
-          content: `✗ Sub-agent ${args.agentType} (${taskId}) failed: ${err.message}`,
+          content: `✗ Sub-agent ${agentType} (${taskId}) failed: ${err.message}`,
           timestamp: new Date(),
         });
       });
 
-      return `TASK_QUEUED: Sub-agent ${args.agentType} spawned successfully as WorkerThread ${taskId}.`;
+      return `TASK_QUEUED: Sub-agent ${agentType} spawned successfully as WorkerThread ${taskId}.`;
     }
   }, governor);
 }
