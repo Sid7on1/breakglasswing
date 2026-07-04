@@ -38,23 +38,23 @@ export interface SanitizedResponse {
  */
 const FILLER_PATTERNS: readonly RegExp[] = [
   // "No function/tool call is needed | required | necessary for this response."
-  /^[ \t>*\-]*no (?:function|tool)[ -]?call[s]?(?: (?:is|are|will be|would be|was|were))? (?:needed|required|necessary)\b[^\n]*$/gim,
+  /^[ \t>*-]*no (?:function|tool)[ -]?call[s]?(?: (?:is|are|will be|would be|was|were))? (?:needed|required|necessary)\b[^\n]*$/gim,
   // "I will now call | use | invoke | run the X tool/function."
-  /^[ \t>*\-]*(?:i(?:'ll| will| am going to)|let me|i'm going to) (?:now )?(?:call|use|invoke|run)\b[^\n]*\b(?:tool|function)[s]?\b[^\n]*$/gim,
+  /^[ \t>*-]*(?:i(?:'ll| will| am going to)|let me|i'm going to) (?:now )?(?:call|use|invoke|run)\b[^\n]*\b(?:tool|function)[s]?\b[^\n]*$/gim,
   // "There is no need to call a tool", "I don't need to use any tools here."
-  /^[ \t>*\-]*(?:there(?:'s| is) no need to|i (?:do not|don't) need to) (?:call|use|invoke|run)\b[^\n]*\b(?:tool|function)[s]?\b[^\n]*$/gim,
+  /^[ \t>*-]*(?:there(?:'s| is) no need to|i (?:do not|don't) need to) (?:call|use|invoke|run)\b[^\n]*\b(?:tool|function)[s]?\b[^\n]*$/gim,
   // Post-hoc tool-execution narration, e.g. "The ChangeDirectoryTool was successfully executed…"
   // — the model naming its internal tool and reporting that it ran. (Internal tool names like
   // XTool never belong in a user-facing reply, so this is safe.)
-  /^[ \t>*\-]*the \w+tool (?:was|is|has been)\b[^\n]*$/gim,
+  /^[ \t>*-]*the \w+tool (?:was|is|has been)\b[^\n]*$/gim,
   // "…listed in the output of the ls -la command executed by the BashTool." — narration of which
   // tool produced the result; the result itself is already shown, so the sentence is pure filler.
-  /^[ \t>*\-]*[^\n]*\bexecuted by the \w*tool\b[^\n]*$/gim,
+  /^[ \t>*-]*[^\n]*\bexecuted by the \w*tool\b[^\n]*$/gim,
   // Leaked message-TRIAGE narration: the model announcing its CHAT/QUESTION/TASK classification,
   // e.g. 'This message is a "CHAT" message, so I will respond with a one-sentence greeting.'
   // Tightly anchored — requires the classification token in QUOTES or followed by the word
   // "message" — so ordinary prose like "This is a TASK queue that…" is never stripped.
-  /^[ \t>*\-]*this (?:message |input )?is an? (?:"(?:CHAT|QUESTION|TASK)"|(?:CHAT|QUESTION|TASK) message)[^\n]*$/gim,
+  /^[ \t>*-]*this (?:message |input )?is an? (?:"(?:CHAT|QUESTION|TASK)"|(?:CHAT|QUESTION|TASK) message)[^\n]*$/gim,
 ];
 
 export class ResponseSanitizer {

@@ -32,7 +32,7 @@ export function isServerAvailable(spec: LspServerSpec): boolean {
     execSync(`command -v ${spec.command}`, { stdio: 'ignore' });
     ok = true;
   } catch {
-    ok = false;
+    // command not on PATH — stays false
   }
   availability.set(spec.command, ok);
   return ok;

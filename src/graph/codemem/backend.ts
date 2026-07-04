@@ -89,7 +89,7 @@ export class CodememBackend {
     // Not indexed yet — build it. 'full' enables the embedding/similarity edges that power
     // semantic vector search; the index is cached to disk so it's a one-time cost per repo.
     Logger.info(`[codebase-memory] indexing '${guess}' (full, one-time)...`);
-    let indexed: any = null;
+    let indexed: any;
     try {
       indexed = await this.call('index_repository', { repo_path: want, mode: 'full' });
     } catch (e: any) {

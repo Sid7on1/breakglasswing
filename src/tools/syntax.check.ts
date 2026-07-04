@@ -35,7 +35,7 @@ function hasChecker(ext: string): boolean {
   try {
     execFileSync(process.platform === 'win32' ? 'where' : 'which', [def.bin], { stdio: 'pipe', timeout: 3000 });
     ok = true;
-  } catch { ok = false; }
+  } catch { /* checker not installed — stays false */ }
   checkerAvailable.set(ext, ok);
   return ok;
 }

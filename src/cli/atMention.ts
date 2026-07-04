@@ -209,7 +209,7 @@ export async function expandFileAtMentions(text: string, cwd: string): Promise<F
         }
       } else {
         // File or folder path
-        let absPath = token.startsWith('~')
+        const absPath = token.startsWith('~')
           ? path.join(os.homedir(), token.slice(1))
           : path.resolve(cwd, token);
 

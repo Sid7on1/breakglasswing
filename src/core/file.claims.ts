@@ -37,6 +37,7 @@ function globToRegex(glob: string): RegExp {
     .replace(/\*\*/g, '\u0000')       // placeholder so `**` survives the `*` pass
     .replace(/\*/g, '[^/]*')
     .replace(/\?/g, '.')
+    // eslint-disable-next-line no-control-regex -- NUL is our internal `**` placeholder sentinel
     .replace(/\u0000/g, '.*');
   return new RegExp(`^${esc}$`);
 }

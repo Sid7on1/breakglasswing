@@ -109,8 +109,8 @@ export class WatcherManager {
       return;
     }
     // Circuit breaker: skip (and disable) if the budget governor is tapped out.
-    let allowed = true;
-    try { allowed = await this.breaker(); } catch { allowed = false; }
+    let allowed = false; // deny on error
+    try { allowed = await this.breaker(); } catch { /* stays denied */ }
     if (!allowed) {
       w.enabled = false;
       this.notify(`👁️ Watcher ${w.id} disabled by budget circuit breaker.`);

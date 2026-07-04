@@ -125,7 +125,7 @@ export function classifyOutcome(result: string, isError: boolean): 'ok' | 'err' 
  * path-taking tools, the shell program for BashTool, '-' otherwise.
  */
 export function domainOf(toolName: string, rawArgs: string): string {
-  let args: any = {};
+  let args: any;
   try { args = JSON.parse(rawArgs || '{}'); } catch { return '-'; }
   if (toolName === 'BashTool') {
     const cmd = String(args.command || '').trim();

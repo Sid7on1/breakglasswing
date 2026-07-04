@@ -106,7 +106,7 @@ export class ContextManager {
       let model = 'unknown';
       try { const c = require('../cli/config').getConfig(); model = c.model || c.liteModel || 'unknown'; } catch { /* config optional */ }
 
-      let saved = 0, n = 0;
+      let saved = 0, n: number;
       // NEVER wait for the sidecar in front of a turn. This used to block up to 8s so the first
       // pressured pass could use the proxy instead of the native fallback — trading user-visible
       // latency for stats bookkeeping. If the proxy isn't up yet, the lossless native pass covers

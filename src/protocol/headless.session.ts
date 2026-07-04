@@ -75,8 +75,8 @@ export class HeadlessSession {
   async dispatch(text: string): Promise<void> {
     const query = (text || '').trim();
     if (!query) return;
-    if (query.startsWith('/')) return this.runCommand(query);
-    return this.runTurn(query);
+    if (query.startsWith('/')) { await this.runCommand(query); return; }
+    await this.runTurn(query);
   }
 
   /**
@@ -295,7 +295,7 @@ export class HeadlessSession {
       // A still-open <tool_call> is a streaming cutoff — strip it to the end, but ONLY when a JSON
       // payload actually follows. Otherwise a literal "<tool_call>" mentioned in prose would nuke
       // the rest of a real answer (the audit's display-eating bug).
-      .replace(/<tool_call>\s*[\[{][\s\S]*$/, '')
+      .replace(/<tool_call>\s*[[{][\s\S]*$/, '')
       .trim();
   }
 

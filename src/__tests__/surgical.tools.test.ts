@@ -70,7 +70,7 @@ describe('SymbolEditTool', () => {
     }, { cwd: dir });
     const updated = fs.readFileSync(file, 'utf8');
     expect(updated).toContain('this.total += n * 2;');
-    expect(updated).toMatch(/^  push\(n: number\): void \{/m); // re-indented to class-body depth
+    expect(updated).toMatch(/^ {2}push\(n: number\): void \{/m); // re-indented to class-body depth
   });
 
   it('deletes a symbol cleanly', async () => {

@@ -273,7 +273,7 @@ export class MutationEngine {
         const p = e.payload || {};
         if ((p.generator !== 'mutation' && p.generator !== 'regeneration') || typeof p.op !== 'string' || p.killed !== true) continue;
         const c = counts[p.op] || (counts[p.op] = { s: 0, f: 0 });
-        p.fixed ? c.s++ : c.f++;
+        if (p.fixed) c.s++; else c.f++;
       }
       for (const [op, c] of Object.entries(counts)) {
         out[op] = { n: c.s + c.f, pSuccess: betaMean(1 + c.s, 1 + c.f) };

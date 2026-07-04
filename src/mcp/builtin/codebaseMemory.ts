@@ -78,15 +78,16 @@ function download(url: string, dest: string): Promise<void> {
   assertHttps(url);
   return new Promise((resolve, reject) => {
     const follow = (u: string, depth: number) => {
-      if (depth > 5) return reject(new Error('Too many redirects'));
+      if (depth > 5) { reject(new Error('Too many redirects')); return; }
       assertHttps(u);
       https.get(u, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           const loc = res.headers.location;
-          if (!loc) return reject(new Error('Redirect with no location'));
-          return follow(loc.startsWith('/') ? new URL(loc, u).href : loc, depth + 1);
+          if (!loc) { reject(new Error('Redirect with no location')); return; }
+          follow(loc.startsWith('/') ? new URL(loc, u).href : loc, depth + 1);
+          return;
         }
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode} for ${u}`));
+        if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode} for ${u}`)); return; }
         const file = fs.createWriteStream(dest);
         res.pipe(file);
         file.on('finish', () => file.close(() => resolve()));

@@ -69,6 +69,7 @@ export async function runPreHooks(toolName: string, args: any, context: any): Pr
       Logger.warn(`[Hooks] PreToolUse hook for ${toolName} errored (ignored): ${e.message}`);
     }
   }
+  return undefined; // no hook blocked
 }
 
 /**

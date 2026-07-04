@@ -48,6 +48,7 @@ export function loadHooksConfig(dir: string = process.cwd()): number {
         const reason = (e.stderr || e.message || 'hook command failed').toString().trim();
         return { block: true, reason };
       }
+      return undefined; // command succeeded — don't block
     });
     n++;
   }

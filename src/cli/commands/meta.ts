@@ -148,7 +148,7 @@ globalCommandRegistry.register({
     if (slot === 'lite' || slot === 'coding') {
       const apply = slot === 'lite' ? applyLite : applyCoding;
       const rest = args.slice(1).join(' ').trim();
-      if (rest) { rest === '__custom__' ? promptCustom(apply) : apply(rest); return { type: 'none' }; }
+      if (rest) { if (rest === '__custom__') promptCustom(apply); else apply(rest); return { type: 'none' }; }
       const cur = slot === 'lite' ? (liteOf() || '(uses coding model)') : (context.options.model || 'default');
       return {
         type: 'menu',

@@ -70,19 +70,19 @@ async function runCheck(full: string, cwd: string, ext: string): Promise<{ passe
 
 /** PostToolUse handler implementing the verify loop. */
 export async function verifyHook(_toolName: string, args: any, result: any, context: any): Promise<PostHookResult | void> {
-  if (!enabled) return;
-  if (typeof result === 'string' && /\b(rejected|cancelled|blocked|not found|Error)\b/i.test(result)) return;
+  if (!enabled) return undefined;
+  if (typeof result === 'string' && /\b(rejected|cancelled|blocked|not found|Error)\b/i.test(result)) return undefined;
 
   const rel = editedPath(args);
-  if (!rel) return;
+  if (!rel) return undefined;
   const cwd = context?.cwd || process.cwd();
   const full = path.resolve(cwd, rel);
   const ext = path.extname(full).toLowerCase();
-  if (!CHECKABLE.has(ext)) return;
-  if (!fileIsRelevant(full)) return;
+  if (!CHECKABLE.has(ext)) return undefined;
+  if (!fileIsRelevant(full)) return undefined;
 
   const { passed, logs } = await runCheck(full, cwd, ext);
-  if (passed) { attempts.delete(full); return; }
+  if (passed) { attempts.delete(full); return undefined; }
 
   const n = (attempts.get(full) || 0) + 1;
   attempts.set(full, n);
