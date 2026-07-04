@@ -5,6 +5,20 @@ import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
 import { FLOOR_ENV } from '../sandbox/exec.sandbox';
 
+// Line-delimited sentinels the sub-agent SUBPROCESS (bun-compiled binary re-execing itself) writes to
+// stdout, and the parent parses back into the same {type} messages a worker_thread posts. Shared with
+// worker.entry.ts's runAsSubprocess so the two ends can never drift.
+export const SUB_RESULT = '\x00BIMAX_SUB_RESULT\x00';
+export const SUB_ERROR = '\x00BIMAX_SUB_ERROR\x00';
+export const SUB_EVENT = '\x00BIMAX_SUB_EVENT\x00';
+
+// The uniform surface both a Worker (Node dev/dist) and a child-process handle (bun binary) expose,
+// so the spawn/timeout/settle logic below is identical for both transports.
+interface WorkerHandle {
+  on(event: 'message' | 'error' | 'exit', listener: (arg: any) => void): void;
+  terminate(): void | Promise<number>;
+}
+
 export interface SubAgentConfig {
   agentType: string;
   prompt: string;
@@ -17,12 +31,18 @@ export interface SubAgentConfig {
 }
 
 export class SubAgentManager {
-  private activeWorkers = new Map<string, Worker>();
+  private activeWorkers = new Map<string, WorkerHandle>();
   private workerScriptPath: string;
   // Extra Node args for the worker thread. In dev the engine runs from TypeScript source via `tsx`,
   // so the worker must load the tsx hooks to parse the .ts entry — otherwise `new Worker(...ts)`
   // throws "Cannot find module" / can't parse TS. Empty in prod (compiled .js needs no loader).
   private readonly workerExecArgv: string[];
+  // True inside a `bun --compile` single binary (the shipped global install). There is no dist/ or
+  // node_modules on disk there, so the worker can't be spawned from a filesystem path — it must be
+  // the bun-EMBEDDED worker (see worker.target.bun.ts). Node dev/dist keep the compiled-.js path.
+  private readonly isBun: boolean = !!(process as any).versions?.bun;
+  // Set when a test passes an explicit worker script — that path always wins over bun-embedding.
+  private readonly hasScriptOverride: boolean;
   // A sub-agent that hangs (stalled stream, infinite loop) must not block the parent
   // forever. Configurable; defaults to 10 minutes — generous for slow reasoning models.
   private readonly workerTimeoutMs: number;
@@ -43,6 +63,7 @@ export class SubAgentManager {
     ];
     const compiledJs = compiledCandidates.find(existsSync);
     const tsPath = path.resolve(__dirname, '../cli/worker.entry.ts');
+    this.hasScriptOverride = !!opts?.workerScriptPath;
     if (opts?.workerScriptPath) {
       this.workerScriptPath = opts.workerScriptPath;
       this.workerExecArgv = opts.workerScriptPath.endsWith('.ts') ? ['--import', 'tsx'] : [];
@@ -56,19 +77,63 @@ export class SubAgentManager {
     this.workerTimeoutMs = opts?.timeoutMs ?? parseInt(process.env.BGW_WORKER_TIMEOUT_MS || '600000', 10);
   }
 
+  // Choose the transport. Node dev/dist → a worker_thread (fast, shared address space). The
+  // bun-compiled single binary → a CHILD PROCESS that re-execs the binary itself: worker_threads
+  // in a bun --compile executable cannot resolve their dependencies (minimatch et al. aren't
+  // bundled into the embedded worker), but a re-exec of the whole binary carries every dependency.
+  private createHandle(taskId: string, config: SubAgentConfig, workerOpts: any): WorkerHandle {
+    if (this.isBun && !this.hasScriptOverride) {
+      return this.spawnSubprocessHandle(config, workerOpts);
+    }
+    return new Worker(this.workerScriptPath, { ...workerOpts, execArgv: this.workerExecArgv });
+  }
+
+  // Re-exec THIS binary with BIMAX_SUBAGENT_CONFIG set; index.ts detects it and runs the sub-agent
+  // instead of the engine, streaming results back over stdout sentinels which we translate into the
+  // same {type: 'success'|'error'|'tool_event'} messages a worker_thread would post.
+  private spawnSubprocessHandle(config: SubAgentConfig, workerOpts: any): WorkerHandle {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process') as typeof import('child_process');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { EventEmitter } = require('events') as typeof import('events');
+    const env = { ...(workerOpts.env || process.env), BIMAX_SUBAGENT_CONFIG: JSON.stringify(config) };
+    const child = spawn(process.execPath, [], { env, stdio: ['ignore', 'pipe', 'inherit'] });
+    const emitter = new EventEmitter();
+    let buf = '';
+    child.stdout?.on('data', (d: Buffer) => {
+      buf += d.toString();
+      let nl: number;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        try {
+          if (line.startsWith(SUB_RESULT)) emitter.emit('message', { type: 'success', result: JSON.parse(line.slice(SUB_RESULT.length)).result });
+          else if (line.startsWith(SUB_ERROR)) emitter.emit('message', { type: 'error', error: JSON.parse(line.slice(SUB_ERROR.length)).error });
+          else if (line.startsWith(SUB_EVENT)) { const e = JSON.parse(line.slice(SUB_EVENT.length)); emitter.emit('message', { type: 'tool_event', subtype: e.subtype, call: e.call }); }
+          // any other line is stray child stdout — ignore it
+        } catch { /* malformed sentinel line — ignore */ }
+      }
+    });
+    child.on('error', (e: Error) => emitter.emit('error', e));
+    child.on('exit', (code: number | null) => emitter.emit('exit', code ?? 0));
+    return {
+      on: (ev, fn) => { emitter.on(ev, fn); },
+      terminate: () => { try { child.kill('SIGKILL'); } catch { /* best-effort */ } },
+    };
+  }
+
   public spawnWorker(taskId: string, config: SubAgentConfig): Promise<string> {
     return new Promise((resolve, reject) => {
       Logger.info(`[SubAgentManager] Spawning worker for task ${taskId} (Agent: ${config.agentType})`);
 
-      const worker = new Worker(this.workerScriptPath, {
+      const workerOpts = {
         workerData: config,
-        execArgv: this.workerExecArgv,
         // Floored episodes get their own env copy with the floor flag — thread-scoped, so the
         // parent session and sibling workers are unaffected.
         ...(config.sandboxFloorRoot
           ? { env: { ...process.env, [FLOOR_ENV]: config.sandboxFloorRoot } }
           : {}),
-      });
+      };
+      const worker: WorkerHandle = this.createHandle(taskId, config, workerOpts);
 
       this.activeWorkers.set(taskId, worker);
 
@@ -80,7 +145,7 @@ export class SubAgentManager {
         settled = true;
         Logger.error(`[SubAgentManager] Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms. Terminating.`);
         this.activeWorkers.delete(taskId);
-        worker.terminate().catch(() => { /* best-effort */ });
+        Promise.resolve(worker.terminate()).catch(() => { /* best-effort */ });
         reject(new Error(`Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms`));
       }, this.workerTimeoutMs);
 

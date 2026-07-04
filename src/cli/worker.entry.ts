@@ -2,7 +2,7 @@ import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
-import { SubAgentConfig } from '../core/subagent.manager';
+import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT } from '../core/subagent.manager';
 import { loadConfig } from './config';
 import { SkillLoader, DynamicPersona } from './skills.loader';
 import { ToolRegistry } from '../tools/tool.registry';
@@ -38,11 +38,14 @@ import { cliEvents } from './events';
 import { floorRoot } from '../sandbox/exec.sandbox';
 import { SafetyPolicy } from '../governor/policy.engine';
 
-async function runWorker() {
-  if (!parentPort) throw new Error('Worker must be run as a thread');
-
-  const config = workerData as SubAgentConfig;
-
+// Core sub-agent run, transport-agnostic: build the isolated agent + tools and execute the task,
+// relaying each tool event through `emitEvent`. Shared by BOTH the worker_thread path (runWorker,
+// Node dev/dist) and the subprocess path (runAsSubprocess, the bun-compiled binary). Throws on
+// failure so each caller reports it its own way.
+async function runSubAgentCore(
+  config: SubAgentConfig,
+  emitEvent: (subtype: 'tool_call' | 'tool_call_result', call: any) => void,
+): Promise<string> {
   // Sandbox floor (BiMax v2): this worker is an isolated autonomous episode. Bash enforcement
   // lives in bash.tool.ts (kernel sandbox via the thread-local FLOOR_ENV), but the Node-side
   // file tools must be confined too — narrow the governor's workspace boundary to the episode
@@ -50,7 +53,7 @@ async function runWorker() {
   const episodeFloor = floorRoot();
   if (episodeFloor) SafetyPolicy.allowedWorkspace = episodeFloor;
 
-  try {
+  {
     const pool = buildKeyPool();
     const apiKeyManager = new ApiKeyManager(pool);
     const llmAdapter = new LlmAdapter(apiKeyManager);
@@ -131,28 +134,52 @@ async function runWorker() {
     agent.cwd = config.cwd;
 
     // Forward this sub-agent's tool activity to the parent so the UI can nest it under the spawn
-    // (T3). cliEvents here is the worker-thread-local singleton the agent loop emits on; we relay
-    // each call over parentPort. The parent (SubAgentManager) tags it with parentId/agentLabel.
-    const relay = (subtype: 'tool_call' | 'tool_call_result') => (call: any) => {
-      try { parentPort!.postMessage({ type: 'tool_event', subtype, call }); } catch { /* best-effort */ }
-    };
-    const onCall = relay('tool_call');
-    const onResult = relay('tool_call_result');
+    // (T3). cliEvents here is the process/thread-local singleton the agent loop emits on; the
+    // transport-specific emitEvent relays it (postMessage for a thread, a stdout sentinel for a
+    // subprocess). The parent (SubAgentManager) tags it with parentId/agentLabel.
+    const onCall = (call: any) => emitEvent('tool_call', call);
+    const onResult = (call: any) => emitEvent('tool_call_result', call);
     cliEvents.on('tool_call', onCall);
     cliEvents.on('tool_call_result', onResult);
 
     // 3. Execute
-    const result = await agent.execute(config.prompt, (token) => {
-      // Optional streaming
-    });
-
-    cliEvents.off('tool_call', onCall);
-    cliEvents.off('tool_call_result', onResult);
-
-    parentPort.postMessage({ type: 'success', result });
-  } catch (err: any) {
-    parentPort.postMessage({ type: 'error', error: err.message });
+    try {
+      return await agent.execute(config.prompt, () => { /* streaming ignored in sub-agents */ });
+    } finally {
+      cliEvents.off('tool_call', onCall);
+      cliEvents.off('tool_call_result', onResult);
+    }
   }
 }
 
-runWorker();
+// Worker-thread transport (Node dev/dist): config in workerData, results/events via postMessage.
+async function runWorker(): Promise<void> {
+  if (!parentPort) return;
+  const config = workerData as SubAgentConfig;
+  try {
+    const result = await runSubAgentCore(config, (subtype, call) => parentPort!.postMessage({ type: 'tool_event', subtype, call }));
+    parentPort.postMessage({ type: 'success', result });
+  } catch (err: any) {
+    parentPort.postMessage({ type: 'error', error: err?.message || String(err) });
+  }
+}
+
+// Subprocess transport (the bun-compiled single binary re-execing itself): config arrives via env,
+// results/events go out as stdout sentinel lines the parent parses back into worker-style messages.
+// index.ts calls this when it detects BIMAX_SUBAGENT_CONFIG, instead of booting the engine.
+export async function runAsSubprocess(): Promise<void> {
+  const write = (s: string) => { try { process.stdout.write(s + '\n'); } catch { /* best-effort */ } };
+  let config: SubAgentConfig;
+  try { config = JSON.parse(process.env.BIMAX_SUBAGENT_CONFIG || '{}') as SubAgentConfig; }
+  catch { write(SUB_ERROR + JSON.stringify({ error: 'invalid BIMAX_SUBAGENT_CONFIG' })); process.exit(1); return; }
+  try {
+    const result = await runSubAgentCore(config, (subtype, call) => write(SUB_EVENT + JSON.stringify({ subtype, call })));
+    write(SUB_RESULT + JSON.stringify({ result }));
+    process.exit(0);
+  } catch (err: any) {
+    write(SUB_ERROR + JSON.stringify({ error: err?.message || String(err) }));
+    process.exit(1);
+  }
+}
+
+if (parentPort) runWorker();

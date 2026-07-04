@@ -95,6 +95,15 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function main() {
+  // Sub-agent SUBPROCESS mode: the bun-compiled binary re-execs itself with BIMAX_SUBAGENT_CONFIG to
+  // run a sub-agent (worker_threads can't carry their deps inside a bun --compile binary; a full
+  // re-exec can). Intercept before ANY engine boot — this process is a one-shot worker, not the CLI.
+  if (process.env.BIMAX_SUBAGENT_CONFIG) {
+    const { runAsSubprocess } = await import('./cli/worker.entry');
+    await runAsSubprocess();
+    return;
+  }
+
   // `bimax mcp` — serve the project's code graph over MCP stdio (A4). Must intercept before
   // any other boot so "mcp" isn't treated as a prompt, and before normal logging starts.
   if (program.args[0] === 'mcp') {
