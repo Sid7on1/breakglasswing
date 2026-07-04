@@ -1,20 +1,33 @@
 // Import the full command set the app loads at startup, so this test reflects what the `/`
 // autocomplete + Ctrl+G palette actually offer.
 import '../cli/commands';
-import { globalCommandRegistry } from '../cli/commands/registry';
+import { globalCommandRegistry, isHiddenCommand } from '../cli/commands/registry';
 
 // The Ctrl+K command palette derives its options from the live registry — the single source of
 // truth — so it can never drift from the commands that actually exist (the bug the old hardcoded
 // FullScreen list had). These tests lock that contract.
-describe('CommandRegistry.getPaletteOptions — palette single source of truth', () => {
+describe('CommandRegistry.getPaletteOptions — curated palette', () => {
   const opts = globalCommandRegistry.getPaletteOptions();
 
-  it('returns one row per registered command (deduped by identity, not by alias)', () => {
+  it('returns the CURATED (non-hidden) command set, deduped by identity', () => {
     const all = globalCommandRegistry.getAllCommands();
-    expect(opts.length).toBe(all.length);
+    const visible = all.filter(c => !isHiddenCommand(c));
+    // Palette is the curated surface: exactly the non-hidden commands, and strictly fewer than all.
+    expect(opts.length).toBe(visible.length);
+    expect(opts.length).toBeLessThan(all.length);
     // No duplicate command values.
     const values = opts.map(o => o.value);
     expect(new Set(values).size).toBe(values.length);
+  });
+
+  it('demotes hidden commands from the palette but keeps them registered/runnable', () => {
+    const values = opts.map(o => o.value);
+    // Representative hidden commands (mind layer / model internals) are off the browsable surface…
+    expect(values).not.toContain('/self');
+    expect(values).not.toContain('/tier');
+    // …but still exist in the registry, so typing them in full still works.
+    const allNames = globalCommandRegistry.getAllCommands().map(c => c.name);
+    expect(allNames).toEqual(expect.arrayContaining(['/self', '/tier']));
   });
 
   it('every row is a runnable slash command with a description and category', () => {

@@ -6,7 +6,7 @@ export type CommandCategory = 'Configuration' | 'Code & Intelligence' | 'Source 
 export type CommandResult = 
   | { type: 'message'; content: string; level: 'info' | 'success' | 'error' }
   | { type: 'menu'; title: string; options: any[]; onSelect?: (val: any) => void | Promise<void> }
-  | { type: 'prompt'; title: string; onResolve: (val: string) => void }
+  | { type: 'prompt'; title: string; onResolve: (val: string) => void; isMasked?: boolean }
   | { type: 'redirect'; command: string }
   // A rich front-end panel (HelpDashboard / StatsDashboard / DataTableDashboard) forwarded to the
   // TUI as a message carrying a uiComponent + payload.
@@ -34,8 +34,39 @@ export interface Command {
   aliases?: string[];
   description: string;
   category: CommandCategory;
+  /** Demote from the palette + `/` autocomplete (still runnable when typed in full). See PALETTE_HIDDEN. */
+  hidden?: boolean;
   isEnabled?: (context: Partial<CommandContext>) => { enabled: boolean; reason?: string };
   execute(args: string[], context: CommandContext): Promise<CommandResult>;
+}
+
+// Surface triage (identity/runtime plan, Phase D): the engine registers ~70 commands, but showing
+// all of them dilutes discoverability. These are demoted from the palette + `/` autocomplete — they
+// remain fully registered and runnable when typed in full (hidden aliases), and their capability is
+// reachable through a smaller set of primary verbs + the Ctrl+X mind HUD. Tune freely; nothing here
+// deletes a command. Grouped by where the capability now lives:
+export const PALETTE_HIDDEN = new Set<string>([
+  // Mind layer → the Ctrl+X mind HUD (panels, not commands you type).
+  'mind', 'self', 'drives', 'habits', 'dogfood', 'claims', 'ledger', 'taint',
+  'exemplars', 'episodes', 'impact', 'replay', 'dream',
+  // Multi-agent variants → /swarm and /beast.
+  'speculate', 'evolve', 'council', 'orchestrate', 'heal', 'scout',
+  // Time-travel → /rewind.
+  'undo', 'checkpoint', 'backups', 'tx',
+  // Model / routing internals → /model.
+  'provider', 'tier', 'reasoning', 'routes', 'arms',
+  // Variants of a primary verb → the primary (e.g. /context, /diff, /index).
+  'context-mode', 'context-window', 'diff-approval', 'diff-file', 'self-critic',
+  'a11y', 'agent-decisions',
+  // Niche / advanced — reachable when typed, off the browsable surface.
+  'agents', 'ask', 'autocommit', 'branch', 'check', 'keys', 'lint', 'log',
+  'pipelines', 'recipe', 'selection', 'shortcuts', 'headroom',
+]);
+
+/** Is this command demoted from the browsable palette / autocomplete? (names may carry a leading /) */
+export function isHiddenCommand(c: Command): boolean {
+  const bare = c.name.toLowerCase().replace(/^\//, '');
+  return c.hidden === true || PALETTE_HIDDEN.has(bare);
 }
 
 export class CommandRegistry {
@@ -85,6 +116,7 @@ export class CommandRegistry {
   getPaletteOptions(store?: any): { label: string; value: string; desc: string; category: string; disabled?: boolean; disabledReason?: string }[] {
     const ctx: Partial<CommandContext> = { graphStore: store };
     return this.getAllCommands()
+      .filter(c => !isHiddenCommand(c)) // curated surface — hidden commands still run when typed
       .map(c => {
         let disabled = false;
         let disabledReason: string | undefined;
