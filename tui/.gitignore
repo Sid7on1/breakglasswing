@@ -2,3 +2,4 @@ bimax-tui
 bimaxtui
 engine.log
 *.log
+.bimax/

@@ -21,12 +21,23 @@ type engineMsg Outbound
 type engineBatch []Outbound
 type engineClosed struct{}
 
-// tickMsg drives the once-a-second chrome animation: the working-indicator elapsed clock and the
+// tickMsg drives the chrome animation: the working-indicator elapsed clock and the
 // thinking-phrase / dot rotation. Separate from the braille spinner.Tick (sub-second frames).
 type tickMsg time.Time
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Millisecond*50, func(t time.Time) tea.Msg { return tickMsg(t) })
+func tickCmd(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// nextTick picks the animation cadence: 50ms while a turn is live (shimmer/pulse/elapsed clock all
+// animate) or a resize is settling; 500ms when idle. An idle terminal app should be near-silent —
+// the old unconditional 50ms tick woke the process 20×/s around the clock to redraw nothing (the
+// heartbeat and status-expiry checks only need coarse ticks).
+func (m model) nextTick() tea.Cmd {
+	if m.working() || !m.resizeAt.IsZero() {
+		return tickCmd(50 * time.Millisecond)
+	}
+	return tickCmd(500 * time.Millisecond)
 }
 
 // pasteChip is a collapsed multi-line paste: shown as "[Pasted text #N +L lines]" in the input and
@@ -41,46 +52,18 @@ type pasteChip struct {
 // brailleFrames is WorkingIndicator.tsx's spinner — cycled while a turn streams.
 var brailleFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// spinnerVerbs mirrors Claude Code's 188-verb list for quirky loading states.
+// spinnerVerbs — BiMax's own working vocabulary: calm, craftsmanlike, engineering-flavored.
+// Deliberately short and curated (not a borrowed novelty list): every word should read like
+// something a focused engineer is actually doing.
 var spinnerVerbs = []string{
-	"Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking",
-	"Beaming", "Beboppin'", "Befuddling", "Billowing", "Blanching",
-	"Bloviating", "Boogieing", "Boondoggling", "Booping", "Bootstrapping",
-	"Brewing", "Bunning", "Burrowing", "Calculating", "Canoodling",
-	"Caramelizing", "Cascading", "Catapulting", "Cerebrating", "Channeling",
-	"Channelling", "Choreographing", "Churning", "Clauding", "Coalescing",
-	"Cogitating", "Combobulating", "Composing", "Computing", "Concocting",
-	"Considering", "Contemplating", "Cooking", "Crafting", "Creating",
-	"Crunching", "Crystallizing", "Cultivating", "Deciphering", "Deliberating",
-	"Determining", "Dilly-dallying", "Discombobulating", "Doing", "Doodling",
-	"Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing",
-	"Enchanting", "Envisioning", "Evaporating", "Fermenting", "Fiddle-faddling",
-	"Finagling", "Flambéing", "Flibbertigibbeting", "Flowing", "Flummoxing",
-	"Fluttering", "Forging", "Forming", "Frolicking", "Frosting",
-	"Gallivanting", "Galloping", "Garnishing", "Generating", "Gesticulating",
-	"Germinating", "Gitifying", "Grooving", "Gusting", "Harmonizing",
-	"Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
-	"Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating",
-	"Inferring", "Infusing", "Ionizing", "Jitterbugging", "Julienning",
-	"Kneading", "Leavening", "Levitating", "Lollygagging", "Manifesting",
-	"Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking",
-	"Moseying", "Mulling", "Mustering", "Musing", "Nebulizing",
-	"Nesting", "Newspapering", "Noodling", "Nucleating", "Orbiting",
-	"Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing",
-	"Philosophising", "Photosynthesizing", "Pollinating", "Pondering", "Pontificating",
-	"Pouncing", "Precipitating", "Prestidigitating", "Processing", "Proofing",
-	"Propagating", "Puttering", "Puzzling", "Quantumizing", "Razzle-dazzling",
-	"Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating",
-	"Sautéing", "Scampering", "Schlepping", "Scurrying", "Seasoning",
-	"Shenaniganing", "Shimmying", "Simmering", "Skedaddling", "Sketching",
-	"Slithering", "Smooshing", "Sock-hopping", "Spelunking", "Spinning",
-	"Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping",
-	"Symbioting", "Synthesizing", "Tempering", "Thinking", "Thundering",
-	"Tinkering", "Tomfoolering", "Topsy-turvying", "Transfiguring", "Transmuting",
-	"Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing",
-	"Waddling", "Wandering", "Warping", "Whatchamacalliting", "Whirlpooling",
-	"Whirring", "Whisking", "Wibbling", "Working", "Wrangling",
-	"Zesting", "Zigzagging",
+	"Thinking", "Tracing", "Mapping", "Weighing", "Sketching",
+	"Wiring", "Shaping", "Sifting", "Stitching", "Tuning",
+	"Distilling", "Untangling", "Surveying", "Charting", "Drafting",
+	"Refining", "Assembling", "Balancing", "Reading", "Indexing",
+	"Connecting", "Composing", "Measuring", "Polishing", "Aligning",
+	"Focusing", "Resolving", "Verifying", "Reasoning", "Considering",
+	"Piecing", "Planning", "Scanning", "Weaving", "Working",
+	"Grounding", "Sequencing", "Sharpening", "Threading", "Calibrating",
 }
 
 // waitForEngine blocks on the engine channel and delivers the next message as a tea.Msg. Re-issued
@@ -127,21 +110,35 @@ type model struct {
 	printQueue []string // committed lines to flush into the terminal's native scrollback (tea.Println)
 	pendingClear bool   // /clear requested: wipe the physical screen + scrollback before re-banner
 	started  bool     // true once any transcript line has been emitted (for inter-turn spacing)
-	// In-flight tool calls shown in the live region until their result arrives, then committed to
-	// scrollback as one finished entry. Order keeps the render stable (map iteration would flicker).
-	runningTools map[string]string
-	runningOrder []string
-	// Finished tool calls in the current consecutive run, held un-committed so a long burst can be
-	// collapsed into category counts ("⏺ 7 tools · 4 reads · 2 edits"). Flushed into the transcript
-	// when any non-tool content commits. Ctrl+B toggles collapse (collapseTools).
-	toolRun       []ToolCall
+	// Tool calls for the current consecutive run, in START order, each updated IN PLACE by id as its
+	// result arrives (pending → running → done/error). One ordered list — not two groups — so a tool
+	// occupies a single fixed slot for its whole lifecycle and never jumps position when it resolves;
+	// it just fills in (header → header + summary + diff). Running tools stay live in View; the
+	// finished leading prefix commits to scrollback when non-tool content lands (flushToolRun), where
+	// a long boring burst collapses to category counts ("⏺ 7 tools · 4 reads"). Ctrl+B toggles collapse.
+	turnTools     []ToolCall
 	collapseTools bool
 	flushing      bool // guard: flushToolRun appends via m.append, which must not re-enter the flush
-	stream   string   // in-flight assistant tokens (replaced by the final message)
+	stream   string   // in-flight assistant tokens for the current turn (full accumulation)
+	// Progressive streaming: closed markdown blocks are committed to native scrollback as they
+	// complete (formatted once, never to reflow), leaving only the trailing OPEN block live in
+	// View. streamCommitted is the byte offset into stream already committed; turnAnswerStarted
+	// tracks whether the turn's leading ⏺ marker + "Thought" line have been emitted yet.
+	streamCommitted   int
+	turnAnswerStarted bool
 	status        string
 	ready         bool
 	terminalSized bool
+	// engine heartbeat — pingSeq numbers the probes; pingOutstanding is when the unanswered probe
+	// went out (zero = none in flight); engineGone stops probing once the pipe closes; engineStalled
+	// makes the "not responding" alarm fire once instead of every 50ms tick.
+	pingSeq         int
+	lastPingSent    time.Time
+	pingOutstanding time.Time
+	engineGone      bool
+	engineStalled   bool
 	busy          bool   // a turn is executing — Ctrl+C cancels it instead of quitting
+	resizeAt time.Time // last WindowSizeMsg; non-zero = a resize is settling (repaint on the tick after 250ms)
 	quitting bool   // engine asked us to shut down — quit after this message
 	cwd      string // working directory, updated by cwd_changed
 	width    int
@@ -160,6 +157,7 @@ type model struct {
 	reqKind     string // "prompt" | "diff"
 	reqBody     string // diff text for kind:"diff"
 	reqIdx      int
+	reqScroll   int // diff-approval scroll offset (PgUp/PgDn) so large diffs are reviewable
 	reqIsMulti  bool
 	reqSelected map[int]bool
 
@@ -198,6 +196,9 @@ type model struct {
 	// structured log view (Ctrl+O toggles it in place of the transcript).
 	showLogs bool
 	showFullMap bool
+	// mind HUD overlay (Ctrl+X): the 🧠 chip's explainable panel — weak spots with posterior
+	// stats, drives with sparklines, compiled habits (v2 §3.11).
+	showMind bool
 	logs     []LogEntry
 
 	// masked free-form prompt (API keys): render the typed value as bullets in promptView.
@@ -239,6 +240,7 @@ type model struct {
 	fLite   string // lite model id
 	fGoals  int    // active goal count
 	fMcp    int    // connected (non-disabled) MCP server count
+	fMind   MindStrip // mind layer: weak spots / drive deviations / compiled habits
 
 	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used
 	// for ephemeral one-liners (e.g. mode switches) that shouldn't linger or clutter the transcript.
@@ -287,9 +289,8 @@ func initialModel(e *Engine) model {
 		histIdx:  len(hist),
 		vp:            vp,
 		collapseTools: true,
-		status:       "starting engine…",
+		status:       "Starting engine…",
 		sessionVerb:  spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))],
-		runningTools: map[string]string{},
 		bell:         os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
 		// Seed the default mode so the footer chip shows "GENERAL" from the first frame (a fresh
 		// terminal starts in general mode — it just wasn't displayed before).
@@ -307,20 +308,15 @@ func cwdOrWD(p string) string {
 	return wd
 }
 
-func clearTerm() tea.Cmd {
-	return func() tea.Msg {
-		fmt.Print("\033[2J\033[3J\033[H")
-		return nil
-	}
-}
-
 func (m model) Init() tea.Cmd {
+	// Deliberately NO screen/scrollback clear at launch: the terminal's existing content (the
+	// user's shell history) is theirs, not ours. The welcome banner simply prints inline below
+	// whatever was already there — the same quiet entrance Claude Code makes.
 	return tea.Batch(
-		clearTerm(),
 		waitForEngine(m.engine),
 		textarea.Blink,
 		m.spin.Tick,
-		tick(),
+		m.nextTick(),
 	)
 }
 
@@ -334,8 +330,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return res, cmd
 	}
 	// /clear: wipe the visible screen BEFORE the new banner is flushed, else the banner would be erased.
-	// tea.Sequence guarantees the order. (tea.ClearScreen is the renderer-safe clear; the launch-time
-	// scrollback lock lives in main.go, run before the program starts.)
+	// tea.Sequence guarantees the order. (tea.ClearScreen clears only the visible screen — scrollback
+	// is never wiped; the terminal's history belongs to the user.)
 	var clearCmd tea.Cmd
 	if nm.pendingClear {
 		nm.pendingClear = false
@@ -423,26 +419,22 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// In inline mode, resizing the terminal narrower causes previously printed lines to wrap, breaking
-		// the cursor math and leaving ghost overlay frames.
-		// To fix this without causing infinite duplicates in the scrollback:
-		// 1. We trigger tea.ClearScreen via m.pendingClear to wipe the viewport.
-		// 2. We inject \033[3J (wipe scrollback) and \033[H (move to top) directly into the first line
-		//    of the history reprint.
-		// This guarantees the deep-clear and the reprint happen synchronously in one unbroken stream,
-		// preventing the async race condition that caused "black space" above the history.
-		m.pendingClear = true
-		if len(m.lines) > 0 {
-			lines := make([]string, len(m.lines))
-			copy(lines, m.lines)
-			// Attach the deep-clear modifiers to the very first line so no extra newlines are printed
-			lines[0] = "\033[3J\033[H" + lines[0]
-			m.printQueue = append(m.printQueue, lines...)
-		}
+		// In inline mode, resizing narrower makes previously painted live-region rows wrap, breaking
+		// the renderer's cursor math and leaving ghost overlay frames. The old fix wiped the ENTIRE
+		// scrollback (\033[3J) and reprinted the whole transcript — destroying the user's pre-BiMax
+		// terminal history on every resize. Instead: debounce until the drag settles (see tickMsg),
+		// then clear only the visible screen and reprint just the last screenful. The user's
+		// scrollback — theirs and ours — is never touched.
+		m.resizeAt = time.Now()
 		return m, nil
 
 	case spinner.TickMsg:
-		// Keep the frame animating; it's only painted while busy (see View).
+		// Animate (and re-arm) only while something is actually moving — when the turn ends the
+		// chain dies here and is restarted by the engineMsg/engineBatch handlers the moment work
+		// resumes. Idle means idle: no 12fps wakeups to paint a spinner nobody can see.
+		if !m.working() {
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
@@ -456,6 +448,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// Resize settled (no WindowSizeMsg for 250ms): clear the visible screen once to remove any
+		// ghost frames from the drag, and reprint only the last screenful of transcript so the view
+		// isn't left blank. Never wipes scrollback — bounded duplication (≤1 screenful per gesture)
+		// beats destroying the user's terminal history.
+		if !m.resizeAt.IsZero() && time.Since(m.resizeAt) > 250*time.Millisecond {
+			m.resizeAt = time.Time{}
+			m.pendingClear = true
+			if n := len(m.lines); n > 0 && m.height > 1 {
+				keep := m.height - 1
+				if keep > n {
+					keep = n
+				}
+				m.printQueue = append(m.printQueue, m.lines[n-keep:]...)
+			}
+		}
 		// 50ms animation chrome: elapsed clock + smooth shimmer/pulse animation.
 		if m.busy && !m.busyStart.IsZero() {
 			m.elapsed = int(time.Since(m.busyStart).Seconds())
@@ -469,408 +476,44 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Ready"
 			m.statusExpiry = time.Time{}
 		}
-		return m, tick()
+		// Heartbeat: probe the engine every 10s once ready. ANY inbound traffic proves liveness
+		// (handleEngine clears the outstanding probe), so this only trips when the engine's event
+		// loop is genuinely wedged or the process is a zombie whose pipe never closed — turning an
+		// endless spinner into an actionable footer alarm.
+		if m.ready && !m.engineGone && !m.quitting {
+			now := time.Now()
+			switch {
+			case m.pingOutstanding.IsZero() && now.Sub(m.lastPingSent) > 10*time.Second:
+				m.pingSeq++
+				m.engine.Send(encodePing(m.pingSeq))
+				m.lastPingSent = now
+				m.pingOutstanding = now
+			case !m.pingOutstanding.IsZero() && now.Sub(m.pingOutstanding) > 15*time.Second && !m.engineStalled:
+				m.engineStalled = true
+				m.status = "Engine not responding — Ctrl+C to quit if stuck"
+			}
+		}
+		return m, m.nextTick()
 
 	case tea.KeyMsg:
-		// Request overlay captures input until answered (highest priority).
-		if m.reqOpen {
-			if m.reqKind == "input" {
-				return m.handleInputRequest(msg)
-			}
-			// Interactive ask modal
-			switch {
-			case msg.String() == "ctrl+c":
-				m.engine.Close()
-				return m, tea.Quit
-			case msg.String() == "esc":
-				// Find a safe "cancel" option, otherwise just say Dismissed so we don't accidentally approve
-				val := "Dismissed"
-				for _, op := range m.reqOpts {
-					lower := strings.ToLower(op)
-					if lower == "cancel" || lower == "reject" || lower == "no" {
-						val = op
-						break
-					}
-				}
-				m.answer(val)
-				return m, nil
-			case msg.String() == "up":
-				if m.reqIdx > 0 {
-					m.reqIdx--
-				}
-				return m, nil
-			case msg.String() == "down":
-				if m.reqIdx < len(m.reqOpts) {
-					m.reqIdx++
-				}
-				return m, nil
-			case msg.String() == " ":
-				if m.reqIsMulti && m.reqIdx < len(m.reqOpts) {
-					if m.reqSelected == nil {
-						m.reqSelected = make(map[int]bool)
-					}
-					m.reqSelected[m.reqIdx] = !m.reqSelected[m.reqIdx]
-				}
-				return m, nil
-			case msg.String() == "enter":
-				if m.reqIdx == len(m.reqOpts) {
-					val := strings.TrimSpace(m.input.Value())
-					if val != "" {
-						m.input.Reset()
-						m.answer(val)
-					}
-				} else {
-					if m.reqIsMulti {
-						var selected []string
-						for i, op := range m.reqOpts {
-							if m.reqSelected[i] {
-								selected = append(selected, op)
-							}
-						}
-						if len(selected) > 0 {
-							m.answer(strings.Join(selected, ", "))
-						} else {
-							m.answer(m.reqOpts[m.reqIdx])
-						}
-					} else {
-						m.answer(m.reqOpts[m.reqIdx])
-					}
-				}
-				return m, nil
-			default:
-				// Smart typing: if it's a visible character or backspace, jump to the type-in option and type
-				if len(msg.String()) == 1 || msg.String() == "backspace" {
-					m.reqIdx = len(m.reqOpts)
-					var cmd tea.Cmd
-					m.input, cmd = m.input.Update(msg)
-					return m, cmd
-				}
-				return m, nil
-			}
-		}
-
-		// Search mode (Ctrl+F) is modal: type to query, ↑/↓ + Enter navigate matches, Esc exits.
-		if m.searchMode {
-			matches := m.searchMatches()
-			switch msg.String() {
-			case "ctrl+c":
-				m.engine.Close()
-				return m, tea.Quit
-			case "esc", "ctrl+f":
-				m.searchMode = false
-				m.input.SetValue(m.searchSaved)
-				m.input.CursorEnd()
-				m.status = "Ready"
-				m.relayout()
-				return m, nil
-			case "enter", "down":
-				if len(matches) > 0 {
-					m.searchIdx = (m.searchIdx + 1) % len(matches)
-				}
-				m.relayout()
-				return m, nil
-			case "up":
-				if len(matches) > 0 {
-					m.searchIdx = (m.searchIdx - 1 + len(matches)) % len(matches)
-				}
-				m.relayout()
-				return m, nil
-			case "backspace", "ctrl+h":
-				if r := []rune(m.searchQuery); len(r) > 0 {
-					m.searchQuery = string(r[:len(r)-1])
-				}
-				m.searchIdx = 0
-				m.relayout()
-				return m, nil
-			default:
-				if len(msg.Runes) > 0 {
-					m.searchQuery += string(msg.Runes)
-					m.searchIdx = 0
-				}
-				m.relayout()
-				return m, nil
-			}
-		}
-
-		// Interactive menu (command palette / picker): fuzzy-filter as you type, navigate + select.
-		if m.menuOpen {
-			filtered := m.filteredMenu()
-			switch msg.String() {
-			case "ctrl+c":
-				m.engine.Close()
-				return m, tea.Quit
-			case "esc":
-				m.menuOpen = false
-				m.menuFilter = ""
-				m.relayout()
-				return m, nil
-			case "up", "ctrl+p":
-				if len(filtered) > 0 {
-					m.menuIdx = (m.menuIdx - 1 + len(filtered)) % len(filtered)
-				}
-				return m, nil
-			case "down", "ctrl+n":
-				if len(filtered) > 0 {
-					m.menuIdx = (m.menuIdx + 1) % len(filtered)
-				}
-				return m, nil
-			case "enter":
-				m.menuOpen = false
-				m.menuFilter = ""
-				m.relayout()
-				if len(filtered) > 0 {
-					if m.menuID != "" {
-						m.engine.Send(encodeMenuSelect(m.menuID, filtered[m.menuIdx].Value))
-					} else {
-						val := filtered[m.menuIdx].Value
-						switch val {
-						case "/map":
-							m.showFullMap = !m.showFullMap
-						case "/shortcuts":
-							m.append(renderShortcuts())
-						default:
-							m.engine.Send(encodeInput(val))
-						}
-					}
-				}
-				return m, nil
-			case "backspace", "ctrl+h":
-				if r := []rune(m.menuFilter); len(r) > 0 {
-					m.menuFilter = string(r[:len(r)-1])
-				}
-				m.menuIdx = 0
-				m.relayout()
-				return m, nil
-			default:
-				if len(msg.Runes) > 0 {
-					m.menuFilter += string(msg.Runes)
-					m.menuIdx = 0
-				}
-				m.relayout()
-				return m, nil
-			}
-		}
-
-		// Completion-dropdown navigation takes priority while it's open.
-		if m.compOpen {
-			switch msg.String() {
-			case "esc":
-				m.compOpen = false
-				m.relayout()
-				return m, nil
-			case "up", "ctrl+p":
-				m.compIdx = (m.compIdx - 1 + len(m.comps)) % len(m.comps)
-				return m, nil
-			case "down", "ctrl+n":
-				m.compIdx = (m.compIdx + 1) % len(m.comps)
-				return m, nil
-			}
-		}
-
-		// Input history: up/down at the first/last line recalls past submissions. Mid-text they move
-		// the cursor between lines (textarea), so only intercept at the boundaries.
-		switch msg.String() {
-		case "up":
-			if m.input.Line() == 0 && len(m.history) > 0 {
-				m.histPrev()
-				m.syncInputHeight()
-				m.relayout()
-				return m, nil
-			}
-		case "down":
-			if m.input.Line() == m.input.LineCount()-1 && m.histIdx < len(m.history) {
-				m.histNext()
-				m.syncInputHeight()
-				m.relayout()
-				return m, nil
-			}
-		}
-
-		switch msg.String() {
-		case "ctrl+c":
-			// While a turn runs, Ctrl+C cancels it (cooperatively, engine-side) and keeps the
-			// session alive. When idle, it quits. So mid-turn it takes two presses to exit:
-			// first cancels, second (now idle) quits.
-			if m.working() {
-				m.engine.Send(encodeInterrupt())
-				return m, nil
-			}
-			m.engine.Close()
-			return m, tea.Quit
-		// Scrolling is the TERMINAL's job in inline mode — PgUp/PgDn, wheel, trackpad all act on the
-		// real native scrollback (opencode / Claude style). The app does not intercept them.
-		case "ctrl+l":
-			// Clear the physical terminal for a clean repaint (parity with the Ink UI). The transcript
-			// itself is untouched — use /clear to reset the conversation.
-			return m, tea.ClearScreen
-		case "ctrl+f":
-			// Enter transcript/log search; stash the in-progress input until we exit.
-			m.searchMode = true
-			m.searchSaved = m.input.Value()
-			m.searchQuery = ""
-			m.searchIdx = 0
-			m.compOpen = false
-			m.status = "Search transcript & logs — ↑/↓ navigate, Esc exit"
-			m.relayout()
-			return m, nil
-		case "ctrl+o":
-			// Toggle the structured log view in place of the transcript.
-			m.showLogs = !m.showLogs
-			m.relayout()
-			return m, nil
-		case "ctrl+b":
-			// Toggle tool-call collapse: long runs of tool calls fold into category counts ("7 tools ·
-			// 4 reads · 2 edits") or expand back to one line each. Affects the live/current run.
-			m.collapseTools = !m.collapseTools
-			if m.collapseTools {
-				m.status = "Tool calls collapse when long (Ctrl+B to expand)"
-			} else {
-				m.status = "Tool calls expanded (Ctrl+B to collapse)"
-			}
-			m.relayout()
-			return m, nil
-		case "ctrl+t":
-			// Cycle the routing through three states, keyed on the current PIN (not the last-routed
-			// tier), so each press is predictable:
-			//   auto (default; lite answers, auto-escalates to the coding model when a turn needs it)
-			//   → pin lite  (always the lite model; never switches)
-			//   → pin heavy (always the coding/minimax model; never switches)
-			//   → auto …
-			// Drives /tier (engine emits set_tier → model_tier, updating the footer state).
-			next := "lite"
-			switch m.fPinned {
-			case "lite":
-				next = "heavy"
-			case "heavy":
-				next = "auto"
-			}
-			m.engine.Send(encodeInput("/tier " + next))
-			return m, nil
-		case "shift+tab":
-			// Cycle the agent behavioral mode: general → explore → sketch → code → beast → general.
-			// Drives /mode (engine emits mode_change → footer updates m.fMode). Mirrors the workflow
-			// arc: orient → architect → execute → autonomous build → neutral default.
-			m.engine.Send(encodeInput("/mode " + nextAgentMode(m.fMode)))
-			return m, nil
-		case "esc":
-			if m.showFullMap {
-				m.showFullMap = false
-				m.relayout()
-				return m, nil
-			}
-			// While a turn is running (incl. the tool-call phase), esc cancels it.
-			if m.working() {
-				m.engine.Send(encodeInterrupt())
-				m.status = "Interrupting…"
-				return m, nil
-			}
-			// Idle: stash the current line (Ctrl+R resumes). No-op when empty.
-			if strings.TrimSpace(m.input.Value()) != "" {
-				m.stash = m.input.Value()
-				m.input.SetValue("")
-				m.input.SetHeight(1)
-				m.status = "Prompt stashed — Ctrl+R to resume"
-				m.relayout()
-			}
-			return m, nil
-		case "ctrl+r":
-			if m.stash != "" {
-				m.input.SetValue(m.stash)
-				m.input.CursorEnd()
-				m.stash = ""
-				m.status = "Stashed prompt resumed"
-				m.syncInputHeight()
-				m.relayout()
-			}
-			return m, nil
-		case "ctrl+p":
-			// Preview the full text behind the paste chips currently in the input.
-			m.pastePreview()
-			return m, nil
-		case "ctrl+g":
-			// Command palette: prefill "/" and surface the slash-command dropdown (type to filter).
-			m.input.SetValue("/")
-			m.input.CursorEnd()
-			return m, m.requestCompletions()
-		case "tab":
-			if m.compOpen {
-				m.acceptCompletion()
-			}
-			return m, m.requestCompletions() // open, or refine after accept (e.g. descend a dir)
-		case "enter":
-			if m.compOpen {
-				isCmd := m.acceptCompletion()
-				if !isCmd {
-					return m, nil
-				}
-			}
-			raw := m.input.Value()
-			text := strings.TrimSpace(m.expandPastes(raw))
-			if text == "/shortcuts" {
-				// Handled Go-side — the headless engine has no keybindings registry.
-				m.append(renderShortcuts())
-				m.pushHistory(text)
-				m.input.SetValue("")
-				m.input.SetHeight(1)
-				m.clearPastes()
-				m.compOpen = false
-				m.relayout()
-				return m, nil
-			}
-			if text == "/map" {
-				m.showFullMap = !m.showFullMap
-				m.input.SetValue("")
-				m.input.SetHeight(1)
-				m.relayout()
-				return m, nil
-			}
-			if text != "" {
-				if m.working() {
-					m.queued = append(m.queued, text)
-					m.status = fmt.Sprintf("Queued (%d) — runs after the current turn", len(m.queued))
-				} else {
-					m.engine.Send(encodeInput(text)) // engine echoes the user message back
-				}
-				m.pushHistory(strings.TrimSpace(raw))
-				m.input.SetValue("")
-				m.input.SetHeight(1)
-				m.clearPastes()
-				m.status = "DEBUG: text=" + text
-			}
-			m.compOpen = false
-			m.relayout()
-			return m, nil
-		}
-
-		// Bracketed multi-line paste: collapse to a "[Pasted text #N +L lines]" chip.
-		if msg.Paste && strings.Contains(string(msg.Runes), "\n") {
-			m.addPaste(string(msg.Runes))
-			m.syncInputHeight()
-			m.relayout()
-			return m, nil
-		}
-
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		m.syncInputHeight() // grow/shrink the box as lines are added (Ctrl+J) or removed
-		// If every paste chip was deleted from the line, drop the stored blobs.
-		if len(m.pastes) > 0 && !m.inputHasChips() {
-			m.clearPastes()
-		}
-		ccmd := m.requestCompletions() // refresh candidates (debounced) for the new input
-		m.relayout()
-		return m, tea.Batch(cmd, ccmd)
+		return m.handleKey(msg)
 
 	case engineMsg:
+		wasWorking := m.working()
 		m.handleEngine(Outbound(msg))
 		if m.quitting { // engine emitted `shutdown` — exit cleanly
 			m.engine.Close()
 			return m, tea.Quit
 		}
+		// Work just started: restart the spinner chain (it dies while idle — see spinner.TickMsg).
+		if !wasWorking && m.working() {
+			return m, tea.Batch(waitForEngine(m.engine), m.spin.Tick)
+		}
 		return m, waitForEngine(m.engine) // keep listening
 
 	case engineBatch:
 		// Apply a coalesced burst, then render once (see waitForEngine).
+		wasWorking := m.working()
 		for _, o := range msg {
 			m.handleEngine(o)
 			if m.quitting {
@@ -878,20 +521,29 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
+		if !wasWorking && m.working() {
+			return m, tea.Batch(waitForEngine(m.engine), m.spin.Tick)
+		}
 		return m, waitForEngine(m.engine)
 
 	case engineClosed:
-		m.status = "engine exited"
+		m.engineGone = true // stop the heartbeat — there is nothing left to probe
+		m.status = "Engine exited"
 		if !m.ready {
 			// Died during boot — surface the REAL cause (from the engine log), not just the symptom.
-			// This is the difference between a baffling "engine process exited" and an actionable error.
-			m.append(errStyle.Render("— engine failed to start —"))
+			// This is the difference between a baffling "engine exited" and an actionable error.
+			m.append(errStyle.Render("— Engine failed to start —"))
 			if tail := engineLogTail(12); tail != "" {
 				m.append(errStyle.Render(tail))
 			}
-			m.append(errStyle.Render("Hint: try `npm run build`; if node_modules looks corrupt (iCloud can do this on ~/Desktop) reinstall it. Full log: " + engineLogPath()))
+			if hasEmbeddedEngine() {
+				m.append(errStyle.Render("Full log: " + engineLogPath()))
+			} else {
+				// Dev build only — source-tree remediation would be nonsense for an installed binary.
+				m.append(errStyle.Render("Hint: try `npm run build`; if node_modules looks corrupt (iCloud can do this on ~/Desktop) reinstall it. Full log: " + engineLogPath()))
+			}
 		} else {
-			m.append(errStyle.Render("— engine process exited —"))
+			m.append(errStyle.Render("— Engine exited —"))
 		}
 		return m, nil
 	}
@@ -900,10 +552,29 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleEngine(o Outbound) {
+	// Any inbound traffic proves the engine is alive — not just a pong. A busy engine streaming
+	// tokens must never trip the heartbeat alarm, and a recovered one clears it here.
+	m.pingOutstanding = time.Time{}
+	if m.engineStalled {
+		m.engineStalled = false
+		if !m.busy {
+			m.status = "Ready"
+		}
+	}
 	switch o.T {
+	case "pong":
+		// Liveness bookkeeping above is the whole job.
+
 	case "ready":
 		m.ready = true
 		m.status = "Ready"
+		// Version-check the handshake: a stale engine build (or TUI binary) would otherwise fail as
+		// baffling garbled/dropped messages. Protocol==0 means a pre-versioning engine — let it pass.
+		if o.Protocol != 0 && o.Protocol != supportedProtocol {
+			m.append(errStyle.Render(fmt.Sprintf(
+				"⚠ Protocol mismatch: engine speaks v%d, this TUI speaks v%d — rebuild both (npm run build + go build ./tui) so they realign.",
+				o.Protocol, supportedProtocol)))
+		}
 		m.showWelcome()
 
 	case "request":
@@ -914,11 +585,12 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqKind = o.Kind
 		m.reqBody = o.Body
 		m.reqIdx = 0
+		m.reqScroll = 0
 		m.reqIsMulti = o.IsMulti
 		m.reqSelected = make(map[int]bool)
-		// The headless input_prompt carries no isMasked flag, so infer a secret field from the
-		// question text (API keys / tokens / passwords) and render the answer as bullets.
-		m.reqMasked = o.Kind == "input" && secretRE.MatchString(o.Question)
+		// Masking is a wire contract (request.masked); the question-text regex stays only as a
+		// safety net for engines older than the flag — a secret should never hinge on wording.
+		m.reqMasked = o.Kind == "input" && (o.Masked || secretRE.MatchString(o.Question))
 
 	case "queryResult":
 		if o.ID == m.queryID { // ignore stale results from earlier keystrokes
@@ -968,14 +640,10 @@ func (m *model) refresh()  {}
 // dropdown, working/thinking indicator, task list, compact map, token meter, prompt box, footer).
 func (m model) chromeLines() []string {
 	var c []string
-	// Pending finished tool calls (collapsed or expanded) accumulate live before they flush to scrollback.
+	// The whole current tool run — running and finished — in one start-ordered list, so each tool
+	// holds its slot and fills in place. The finished leading prefix leaves for scrollback on flush.
 	if tr := m.toolRunLive(); tr != "" {
 		c = append(c, strings.Split(tr, "\n")...)
-	}
-	for _, id := range m.runningOrder {
-		if line, ok := m.runningTools[id]; ok {
-			c = append(c, line)
-		}
 	}
 	return append(c, m.belowSections()...)
 }
@@ -985,10 +653,18 @@ func (m model) chromeLines() []string {
 // owns the visible transcript, its NATIVE scrollbar, and scrolling. Redrawn in place each frame.
 func (m model) View() string {
 	var rows []string
-	if m.stream != "" {
-		// Indent the in-flight stream to the same +2 gutter the finalized reply uses, so the text
-		// doesn't jump leftward the instant streaming ends and the committed message replaces it.
-		rows = append(rows, indentLines(streamStyle.Render(m.stream), "  "))
+	// Only the trailing OPEN block is live — every closed block above it is already committed to
+	// scrollback (formatted). Render the open block through the SAME markdown renderer the commit
+	// uses, so when it closes and commits there is no raw→formatted snap. The turn's leading ⏺
+	// marker rides on the open block until the first block commits and takes it over.
+	if m.streamCommitted <= len(m.stream) {
+		if open := m.stream[m.streamCommitted:]; strings.TrimSpace(open) != "" {
+			md := indentLines(renderMarkdown(open), "  ")
+			if !m.turnAnswerStarted {
+				md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
+			}
+			rows = append(rows, md)
+		}
 	}
 	rows = append(rows, m.chromeLines()...)
 	out := strings.Join(rows, "\n")
@@ -1044,8 +720,13 @@ func (m model) belowSections() []string {
 			s = append(s, dimStyle.Render("  no codebase map yet — run /index-ai to build it"))
 		}
 	}
-	
-	overlay := m.menuOpen || m.compOpen || m.searchMode || m.showLogs || m.reqOpen || m.showFullMap
+	if m.showMind {
+		if mh := m.mindHudView(); mh != "" {
+			s = append(s, mh)
+		}
+	}
+
+	overlay := m.menuOpen || m.compOpen || m.searchMode || m.showLogs || m.reqOpen || m.showFullMap || m.showMind
 	if !overlay {
 		td := m.activeTodoPanel()
 		cm := m.compactMapView()
@@ -1078,4 +759,4 @@ func (m model) belowSections() []string {
 // working reports whether the model is still mid-turn — either the engine flagged busy, or tools
 // are running. Used to gate esc/Ctrl+C interrupt and to keep the "still working" indicator up
 // continuously (incl. the tool-call phase), not just during text streaming.
-func (m model) working() bool { return m.busy || len(m.runningTools) > 0 }
+func (m model) working() bool { return m.busy || m.hasRunningTool() }

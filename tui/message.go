@@ -7,6 +7,84 @@ import (
 	"time"
 )
 
+// isFenceLine reports whether a line opens or closes a fenced code block (``` or ~~~).
+func isFenceLine(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")
+}
+
+// splitStreamBlocks partitions the open (not-yet-committed) portion of the assistant stream into
+// COMPLETE leading markdown blocks plus the remaining open tail. A block is complete only when a
+// blank line terminates it at fence depth 0 — text inside an unterminated ``` fence is never split,
+// so a half-streamed code block stays live until its closing fence arrives. Returns the closed
+// blocks (in order) and the still-open remainder.
+func splitStreamBlocks(s string) (closed []string, rest string) {
+	lines := strings.Split(s, "\n")
+	inFence := false
+	lastCut := 0 // index of the first line not yet closed into a block
+	for i, line := range lines {
+		if isFenceLine(line) {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && strings.TrimSpace(line) == "" {
+			block := strings.Join(lines[lastCut:i], "\n")
+			if strings.TrimSpace(block) != "" {
+				closed = append(closed, block)
+			}
+			lastCut = i + 1
+		}
+	}
+	rest = strings.Join(lines[lastCut:], "\n")
+	return closed, rest
+}
+
+// appendAssistantBlock commits one finished markdown block to native scrollback, formatted once via
+// glamour. The turn's first block carries the accent ⏺ marker and the "Thought for Ns" line (the
+// thought clock is frozen at the first stream token); later blocks get a blank-line paragraph gap.
+func (m *model) appendAssistantBlock(blk string) {
+	md := indentLines(renderMarkdown(blk), "  ")
+	if md == "" {
+		return
+	}
+	if !m.turnAnswerStarted {
+		m.turnAnswerStarted = true
+		if m.turnThoughtMs >= 500 {
+			m.append(thoughtSty.Render(fmt.Sprintf("  ✻ Thought for %ds", m.turnThoughtMs/1000)))
+		}
+		md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
+	} else {
+		m.append("") // paragraph spacing between committed blocks
+	}
+	m.append(md)
+}
+
+// commitAssistantStream commits any complete markdown blocks at the head of the open stream to
+// scrollback, advancing streamCommitted past them so View only ever renders the trailing open block.
+// When final is set (turn ending), the remaining open tail is force-committed as the last block.
+func (m *model) commitAssistantStream(final bool) {
+	if m.streamCommitted > len(m.stream) {
+		m.streamCommitted = len(m.stream) // defensive clamp (should never trip)
+	}
+	open := m.stream[m.streamCommitted:]
+	if open == "" {
+		return
+	}
+	closed, rest := splitStreamBlocks(open)
+	if final && strings.TrimSpace(rest) != "" {
+		closed = append(closed, rest)
+		rest = ""
+	}
+	for _, blk := range closed {
+		m.appendAssistantBlock(blk)
+	}
+	if final {
+		m.streamCommitted = len(m.stream)
+	} else {
+		m.streamCommitted += len(open) - len(rest) // consumed = everything before the open remainder
+	}
+}
+
 func (m *model) renderMessage(me MessageEntry) {
 	switch me.UIComponent {
 	case "menu":
@@ -32,25 +110,45 @@ func (m *model) renderMessage(me MessageEntry) {
 	}
 	switch me.Role {
 	case "user":
-		// A new turn begins — scope tool-call dedupe to this turn so a later turn's tool ids can't
-		// collide with an earlier turn's line indices (and the map doesn't grow without bound).
-		m.runningTools = map[string]string{}
-		m.runningOrder = nil
+		// A new turn begins — clear any tool stragglers so this turn's tools start from a clean slate.
+		m.turnTools = nil
 		// Reset the per-turn reasoning clock so "Thought for Ns" measures THIS turn, and drop any
 		// leftover streamed partial so a prior turn's text can't bleed into this one.
 		m.turnThinkStart = time.Time{}
 		m.turnThoughtMs = 0
 		m.thinkSnip = ""
 		m.stream = ""
+		m.streamCommitted = 0
+		m.turnAnswerStarted = false
 		m.histTokens += len([]rune(me.Content)) / 4
 		if m.started {
 			m.append("") // a blank line between turns so the transcript reads as distinct exchanges
 		}
 		m.append(caretStyle.Render("❯ ") + userStyle.Render(me.Content))
 	case "assistant":
-		m.stream = "" // the final message supersedes the streamed partial
 		m.histTokens += len([]rune(me.Content)) / 4
-		// "✻ Thought for Ns" — prefer the engine's thoughtMs, else the Go-side clock. ≥500ms only.
+		if m.stream != "" {
+			// Streamed turn: the closed blocks are already in scrollback (committed progressively as
+			// they closed). Force-commit the trailing open block so finalization is a visual no-op —
+			// no snap from raw to formatted, because the user has been watching formatted blocks land.
+			// The final message is authoritative and may EXTEND past what streamed, so adopt me.Content
+			// as long as it agrees with the prefix already committed to scrollback (which can't be
+			// un-printed); otherwise commit exactly what the user watched stream.
+			committedPrefix := m.stream[:m.streamCommitted]
+			finalText := me.Content
+			if finalText == "" || !strings.HasPrefix(finalText, committedPrefix) {
+				finalText = m.stream
+			}
+			m.stream = finalText
+			m.commitAssistantStream(true)
+			m.stream = ""
+			m.streamCommitted = 0
+			m.turnAnswerStarted = false
+			return
+		}
+		// Non-streamed message (some paths deliver a complete assistant message with no token stream):
+		// render it fresh. First line gets the accent ⏺ marker so the reply is anchored; the
+		// "✻ Thought for Ns" line prefers the engine's thoughtMs, else the Go-side clock, ≥500ms only.
 		thought := me.ThoughtMs
 		if thought == 0 {
 			thought = m.turnThoughtMs
@@ -59,10 +157,6 @@ func (m *model) renderMessage(me MessageEntry) {
 		if thought >= 500 {
 			fmt.Fprintf(&b, "%s\n", thoughtSty.Render(fmt.Sprintf("  ✻ Thought for %ds", thought/1000)))
 		}
-		// Render at width-2 and indent by a 2-space gutter so the reply lines up under the rest of the
-		// transcript (tool lines, todos, the welcome block all sit at +2) instead of starting flush at
-		// column 0 with no structure. The first line gets an accent ⏺ marker, Claude-Code style, so a
-		// turn's answer is visually anchored.
 		md := indentLines(renderMarkdown(me.Content), "  ")
 		if md != "" {
 			md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")

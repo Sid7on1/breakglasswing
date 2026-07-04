@@ -36,7 +36,10 @@ func (m *model) handleEvent(o Outbound) {
 		}
 		m.stream += argString(o.Args, 0)
 		m.lastTokenAt = time.Now()
-		m.refresh()
+		// Commit any markdown blocks that just closed to native scrollback (formatted, never to
+		// reflow); only the trailing open block stays live in View. This is what removes the
+		// raw-then-snap-to-formatted jump and stops the growing answer from shoving the chrome.
+		m.commitAssistantStream(false)
 
 	case "message":
 		var me MessageEntry
@@ -59,10 +62,18 @@ func (m *model) handleEvent(o Outbound) {
 			m.elapsed = 0
 		}
 		if wasBusy && !m.busy {
-			// Turn ended (or was interrupted): drop any live tool lines that never got a result,
-			// so working() doesn't stay stuck true and the indicator clears cleanly.
-			m.runningTools = map[string]string{}
-			m.runningOrder = nil
+			// Turn ended (or was interrupted): commit tools that returned a result, and drop any that
+			// never did — so working() clears and the indicator goes idle. Filter to finished (in
+			// order), then flush the lot to scrollback.
+			kept := m.turnTools[:0]
+			for _, tc := range m.turnTools {
+				if toolFinished(tc) {
+					kept = append(kept, tc)
+				}
+			}
+			m.turnTools = kept
+			m.flushToolRun()
+			m.turnTools = nil
 			if m.bell {
 				fmt.Print("\a") // notification bell when a turn completes
 			}
@@ -122,6 +133,7 @@ func (m *model) handleEvent(o Outbound) {
 		var s UiSnapshot
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &s) == nil {
 			m.fCoding, m.fLite, m.fGoals = s.Models.Coding, s.Models.Lite, s.GoalCount
+			m.fMind = s.Mind
 			m.graph = s.Graph
 			m.ctxWindow = s.ContextWindow
 			m.ctxBaseline = s.TokensBaseline
@@ -131,23 +143,14 @@ func (m *model) handleEvent(o Outbound) {
 	case "tool_call", "tool_call_result":
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
-			line := renderToolCall(tc, m.width)
-			running := tc.Status == "running" || tc.Status == ""
-			if tc.ID != "" && running {
-				// Show it live (in View) until the result arrives — can't update scrollback in place.
-				if _, seen := m.runningTools[tc.ID]; !seen {
-					m.runningOrder = append(m.runningOrder, tc.ID)
-				}
-				m.runningTools[tc.ID] = line
+			// Update the tool in its existing slot if we've seen this id (pending → running → done),
+			// else append at the end in start order. The card fills in place — it never moves. The
+			// finished leading prefix leaves for scrollback on the next non-tool content (flushToolRun),
+			// where a long boring burst collapses to category counts instead of pages of lines.
+			if idx := m.toolIdx(tc.ID); tc.ID != "" && idx >= 0 {
+				m.turnTools[idx] = tc
 			} else {
-				// Finished: drop the live copy and add it to the current consecutive tool RUN. The run
-				// is rendered live (collapsed into category counts once it's long, expanded otherwise)
-				// and flushed into the transcript as soon as any non-tool content commits (flushToolRun
-				// runs from append) — so a burst of reads/greps collapses to one line instead of pages.
-				if tc.ID != "" {
-					delete(m.runningTools, tc.ID)
-				}
-				m.toolRun = append(m.toolRun, tc)
+				m.turnTools = append(m.turnTools, tc)
 			}
 		}
 
@@ -175,16 +178,16 @@ func (m *model) handleEvent(o Outbound) {
 
 	case "clear":
 		// /clear: wipe the transcript + per-turn state, then re-show the welcome banner so the screen
-		// looks freshly launched (the engine has already reset the conversation history). Committed lines
-		// live in the terminal's scrollback, so resetting m.lines isn't enough — pendingClear makes the
-		// Update wrapper wipe screen + scrollback (ESC[3J) BEFORE the new banner flushes.
+		// looks freshly launched (the engine has already reset the conversation history). pendingClear
+		// makes the Update wrapper clear the visible screen BEFORE the new banner flushes; scrollback
+		// is deliberately left alone (older transcript stays reachable by scrolling up).
 		m.lines = nil
 		m.printQueue = nil // drop anything queued this cycle; it would land below the cleared screen
 		m.started = false
 		m.stream = ""
-		m.runningTools = map[string]string{}
-		m.runningOrder = nil
-		m.toolRun = nil
+		m.streamCommitted = 0
+		m.turnAnswerStarted = false
+		m.turnTools = nil
 		m.todos = nil
 		m.lastTodoRender = ""
 		m.histTokens = 0

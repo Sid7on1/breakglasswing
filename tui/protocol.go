@@ -5,6 +5,11 @@ import "encoding/json"
 // Go mirror of src/protocol/protocol.ts. The engine speaks NDJSON; we decode the outbound
 // envelope generically and branch on `t` (and, for events, on `name`).
 
+// supportedProtocol is the wire version this TUI speaks — must match PROTOCOL_VERSION in
+// src/protocol/protocol.ts. The engine reports its version in the `ready` handshake; a mismatch
+// is surfaced to the user instead of silently dropping/garbling messages.
+const supportedProtocol = 1
+
 // Outbound — engine → TUI. One struct covers all three message kinds (event/request/ready);
 // only the relevant fields are populated per `t`.
 type Outbound struct {
@@ -17,6 +22,7 @@ type Outbound struct {
 	Options  []string          `json:"options,omitempty"`  // request choices
 	IsAsk    bool              `json:"isAsk,omitempty"`
 	IsMulti  bool              `json:"isMulti,omitempty"`
+	Masked   bool              `json:"masked,omitempty"` // kind:"input" — the answer is a secret; render as bullets
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
 	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
@@ -95,11 +101,45 @@ type UiSnapshot struct {
 		Lite   string `json:"lite"`
 	} `json:"models"`
 	GoalCount      int          `json:"goalCount"`
+	Mind           MindStrip    `json:"mind"`
 	Graph          GraphSummary `json:"graph"`
 	ContextWindow  int          `json:"contextWindow"`
 	TokensBaseline int          `json:"tokensBaseline"`
 	// Cumulative tokens saved this session by Headroom-style backlog compression.
 	CompressionSaved int `json:"compressionSaved"`
+}
+
+// MindStrip — the mind layer's footer counters: learned weak spots being routed around,
+// drives deviating from setpoint, compiled habits. Mirrors UiSnapshotMind in ui.snapshot.ts.
+// The detail slices feed the Ctrl+X mind HUD (v2 §3.11 "explainable chip"): evidence with
+// posterior stats and sparklines, not an opaque counter.
+type MindStrip struct {
+	WeakSpots       int          `json:"weakSpots"`
+	DriveDeviations int          `json:"driveDeviations"`
+	Habits          int          `json:"habits"`
+	Weak            []MindWeak   `json:"weak,omitempty"`
+	Drives          []MindDrive  `json:"drives,omitempty"`
+	HabitNames      []string     `json:"habitNames,omitempty"`
+}
+
+// MindWeak — one learned weak spot: the tool×domain cell, its posterior failure stats, and the
+// routing advice the self-model injects. Mirrors UiSnapshotMindWeak.
+type MindWeak struct {
+	Tool     string  `json:"tool"`
+	Domain   string  `json:"domain"`
+	FailRate float64 `json:"failRate"`
+	PWeak    float64 `json:"pWeak"`
+	N        int     `json:"n"`
+	Advice   string  `json:"advice"`
+}
+
+// MindDrive — one measured drive: label, last human-readable value, whether it's at setpoint,
+// and its recent ok/deviating history (oldest → newest) for the sparkline.
+type MindDrive struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Ok    bool   `json:"ok"`
+	Spark []int  `json:"spark"`
 }
 
 // GraphSummary — the codebase-map overview behind CodebaseMapPanel.
@@ -201,6 +241,14 @@ func encodeQuery(id int, text string) []byte {
 // (e.g. apply a picked model id) — sending the bare value as input would dispatch it as a chat turn.
 func encodeMenuSelect(id, value string) []byte {
 	b, _ := json.Marshal(map[string]any{"t": "menuSelect", "id": id, "value": value})
+	return append(b, '\n')
+}
+
+// encodePing is the TUI→engine liveness probe; the engine answers `{"t":"pong","id":n}` from its
+// ingest path. No pong within the deadline means the engine's event loop is wedged (or the process
+// is a zombie whose pipe hasn't closed) — the heartbeat in model.go surfaces that in the footer.
+func encodePing(id int) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "ping", "id": id})
 	return append(b, '\n')
 }
 

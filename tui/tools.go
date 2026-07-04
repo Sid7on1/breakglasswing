@@ -247,21 +247,59 @@ func formatRun(run []ToolCall, width int, collapse bool) []string {
 	return out
 }
 
-// flushToolRun commits the pending consecutive tool run into the transcript.
+// toolFinished reports whether a tool call has returned a result (any status other than the
+// pending/running placeholder). A finished tool can commit to scrollback; a running one cannot.
+func toolFinished(tc ToolCall) bool { return tc.Status != "running" && tc.Status != "" }
+
+// toolIdx returns the index of the tool with id in turnTools, or -1.
+func (m *model) toolIdx(id string) int {
+	for i := range m.turnTools {
+		if m.turnTools[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasRunningTool reports whether any tool in the current run is still executing.
+func (m model) hasRunningTool() bool {
+	for _, tc := range m.turnTools {
+		if !toolFinished(tc) {
+			return true
+		}
+	}
+	return false
+}
+
+// runningToolCount counts tools still executing (for the "Running N tools…" indicator).
+func (m model) runningToolCount() int {
+	n := 0
+	for _, tc := range m.turnTools {
+		if !toolFinished(tc) {
+			n++
+		}
+	}
+	return n
+}
+
+// flushToolRun commits the FINISHED leading prefix of the current tool run to scrollback, stopping
+// at the first still-running tool so committed order matches start order and nothing lands before
+// its result is known. The still-running tail stays live in View.
 func (m *model) flushToolRun() {
-	if len(m.toolRun) == 0 {
+	n := 0
+	for n < len(m.turnTools) && toolFinished(m.turnTools[n]) {
+		n++
+	}
+	if n == 0 {
 		return
 	}
-	run := m.toolRun
-	m.toolRun = nil
+	run := m.turnTools[:n]
 	m.flushing = true
-	
-	lines := formatRun(run, m.width, m.collapseTools)
-	for _, line := range lines {
+	for _, line := range formatRun(run, m.width, m.collapseTools) {
 		m.append(line)
 	}
-	
 	m.flushing = false
+	m.turnTools = append(m.turnTools[:0:0], m.turnTools[n:]...) // keep the running tail in a fresh array
 }
 
 // toolCategory buckets a tool name for the collapsed summary.
@@ -299,11 +337,12 @@ func toolRunSummary(run []ToolCall) string {
 	return head + body + hint
 }
 
-// toolRunLive renders the pending (un-flushed) tool run for the live region.
+// toolRunLive renders the whole current tool run (running + finished, in start order) for the live
+// region — each tool in its fixed slot, filling in place as results arrive.
 func (m model) toolRunLive() string {
-	if len(m.toolRun) == 0 {
+	if len(m.turnTools) == 0 {
 		return ""
 	}
-	lines := formatRun(m.toolRun, m.width, m.collapseTools)
+	lines := formatRun(m.turnTools, m.width, m.collapseTools)
 	return strings.Join(lines, "\n")
 }

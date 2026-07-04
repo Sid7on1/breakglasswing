@@ -15,17 +15,19 @@ import (
 
 var hunkRe = regexp.MustCompile(`@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
-// renderDiff renders a unified diff Claude-Code style: a dim line-number gutter, and the WHOLE
-// changed line on a coloured background (dark green = added, dark red = removed) with bright text;
-// context lines stay dim. `@@` hunk headers are consumed to drive line numbers, not shown. Capped to
-// maxLines.
-func renderDiff(diff string, maxLines int, fillWidth int, filename string) string {
-	type row struct {
-		num  int
-		sign byte
-		text string
-	}
-	var rows []row
+// diffApprovalRows is the diff window height in the approval overlay; PgUp/PgDn scroll by half.
+const diffApprovalRows = 16
+
+type diffRow struct {
+	num  int
+	sign byte
+	text string
+}
+
+// parseDiffRows turns a unified diff into displayable rows; `@@` hunk headers are consumed to
+// drive line numbers, not shown. Shared by the renderer and the approval overlay's scroll clamp.
+func parseDiffRows(diff string) []diffRow {
+	var rows []diffRow
 	oldLn, newLn := 0, 0
 	for _, ln := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
 		if m := hunkRe.FindStringSubmatch(ln); m != nil {
@@ -34,26 +36,47 @@ func renderDiff(diff string, maxLines int, fillWidth int, filename string) strin
 			continue
 		}
 		if ln == "" {
-			rows = append(rows, row{newLn, ' ', ""})
+			rows = append(rows, diffRow{newLn, ' ', ""})
 			oldLn++
 			newLn++
 			continue
 		}
 		switch ln[0] {
 		case '+':
-			rows = append(rows, row{newLn, '+', ln[1:]})
+			rows = append(rows, diffRow{newLn, '+', ln[1:]})
 			newLn++
 		case '-':
-			rows = append(rows, row{oldLn, '-', ln[1:]})
+			rows = append(rows, diffRow{oldLn, '-', ln[1:]})
 			oldLn++
 		default:
-			rows = append(rows, row{newLn, ' ', strings.TrimPrefix(ln, " ")})
+			rows = append(rows, diffRow{newLn, ' ', strings.TrimPrefix(ln, " ")})
 			oldLn++
 			newLn++
 		}
 	}
+	return rows
+}
+
+// renderDiff renders a unified diff Claude-Code style: a dim line-number gutter, and the WHOLE
+// changed line on a coloured background (dark green = added, dark red = removed) with bright text;
+// context lines stay dim. Capped to maxLines from the top.
+func renderDiff(diff string, maxLines int, fillWidth int, filename string) string {
+	return renderDiffAt(diff, 0, maxLines, fillWidth, filename)
+}
+
+// renderDiffAt is renderDiff with a scroll offset: it shows maxLines rows starting at `offset`
+// (clamped), with ↑/↓ markers when rows exist beyond the window. This is what lets the approval
+// overlay actually REVIEW a 200-line diff (PgUp/PgDn) instead of approving the first 16 rows blind.
+func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string) string {
+	rows := parseDiffRows(diff)
 	if len(rows) == 0 {
 		return ""
+	}
+	if maxOff := len(rows) - maxLines; offset > maxOff {
+		offset = maxOff
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	// Gutter width grows with the largest line number (was a fixed %4d that misaligned past 9999).
 	digits := 3
@@ -82,10 +105,13 @@ func renderDiff(diff string, maxLines int, fillWidth int, filename string) strin
 	lexer := lexers.Match(filename) // resolved once for the whole diff
 
 	var b strings.Builder
+	if offset > 0 {
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("  ↑ %d more (PgUp)", offset)))
+	}
 	shown := 0
-	for _, r := range rows {
+	for _, r := range rows[offset:] {
 		if shown >= maxLines {
-			fmt.Fprintf(&b, "%s\n", dimStyle.Render("  …(diff truncated)"))
+			fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("  ↓ %d more (PgDn)", len(rows)-offset-shown)))
 			break
 		}
 		num := fmt.Sprintf("%*d ", digits, r.num)

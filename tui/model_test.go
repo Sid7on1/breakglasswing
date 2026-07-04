@@ -98,7 +98,7 @@ func TestInterruptWhileBusy(t *testing.T) {
 	}
 
 	// Turn ends → idle. A second Ctrl+C now quits.
-	m.handleEngine(ev("spinner_state", "idle", "Awaiting orders…"))
+	m.handleEngine(ev("spinner_state", "idle", "Ready"))
 	if m.busy {
 		t.Fatal("busy not cleared on spinner_state idle")
 	}
@@ -140,7 +140,7 @@ func TestQueueWhileBusy(t *testing.T) {
 	}
 
 	// Turn ends → idle drains the queue and dispatches the prompt.
-	m.handleEngine(ev("spinner_state", "idle", "Awaiting orders…"))
+	m.handleEngine(ev("spinner_state", "idle", "Ready"))
 	if len(m.queued) != 0 {
 		t.Fatalf("queue not drained on idle: %v", m.queued)
 	}
@@ -261,6 +261,42 @@ func TestToolCallCollapse(t *testing.T) {
 	}
 }
 
+// A tool occupies ONE fixed slot for its whole lifecycle: the same id arriving as running then as
+// a result updates the card in place (never a second entry), and the finished card commits to
+// scrollback only when non-tool content lands.
+func TestToolFixedSlotLifecycle(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 40
+
+	// Tool starts running.
+	m.handleEngine(ev("tool_call", map[string]any{"id": "t1", "toolName": "BashTool", "status": "running", "input": `{"command":"go test"}`}))
+	if len(m.turnTools) != 1 || !m.hasRunningTool() {
+		t.Fatalf("running tool not tracked: %+v", m.turnTools)
+	}
+	if strings.Contains(stripANSI(strings.Join(m.lines, "\n")), "Bash") {
+		t.Fatal("a running tool must stay live, not commit to scrollback")
+	}
+
+	// Same id returns a result — update IN PLACE, still exactly one entry, now finished.
+	m.handleEngine(ev("tool_call_result", map[string]any{"id": "t1", "toolName": "BashTool", "status": "success", "input": `{"command":"go test"}`, "output": "ok"}))
+	if len(m.turnTools) != 1 {
+		t.Fatalf("result created a second entry instead of updating in place: %+v", m.turnTools)
+	}
+	if m.hasRunningTool() {
+		t.Fatal("tool should be finished after its result")
+	}
+
+	// Non-tool content (an assistant block) triggers the flush → the finished card lands in scrollback.
+	m.handleEngine(ev("message", map[string]any{"role": "assistant", "content": "Tests pass."}))
+	committed := stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(committed, "Bash") {
+		t.Fatalf("finished tool not committed on flush:\n%s", committed)
+	}
+	if len(m.turnTools) != 0 {
+		t.Fatalf("turnTools should be empty after flush, got %+v", m.turnTools)
+	}
+}
+
 func TestCompletionDebounce(t *testing.T) {
 	m, buf := newTestModel()
 	m.input.SetValue("/he")
@@ -358,6 +394,50 @@ func TestStreamThenFinalMessage(t *testing.T) {
 	joined := stripANSI(strings.Join(m.lines, "\n"))
 	if !strings.Contains(joined, "Hello world") {
 		t.Fatalf("final message not committed: %q", joined)
+	}
+}
+
+func TestProgressiveBlockCommit(t *testing.T) {
+	m, _ := newTestModel()
+	// A closed paragraph (terminated by a blank line) commits to scrollback mid-stream; the trailing
+	// open paragraph stays live in m.stream, not yet in the transcript.
+	m.handleEngine(ev("stream_token", "First para.\n\nSecond "))
+	committed := stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(committed, "First para.") {
+		t.Fatalf("closed block not committed mid-stream:\n%s", committed)
+	}
+	if strings.Contains(committed, "Second") {
+		t.Fatalf("open block leaked into transcript early:\n%s", committed)
+	}
+	// The open remainder is still what View renders live.
+	if open := m.stream[m.streamCommitted:]; !strings.Contains(open, "Second") {
+		t.Fatalf("open tail lost: %q", open)
+	}
+	// Finalize: the trailing block commits, nothing duplicates.
+	m.handleEngine(ev("message", map[string]any{"role": "assistant", "content": "First para.\n\nSecond para."}))
+	final := stripANSI(strings.Join(m.lines, "\n"))
+	if strings.Count(final, "First para.") != 1 {
+		t.Fatalf("first block duplicated on finalize:\n%s", final)
+	}
+	if !strings.Contains(final, "Second para.") {
+		t.Fatalf("trailing block not committed on finalize:\n%s", final)
+	}
+}
+
+func TestUnclosedFenceStaysLive(t *testing.T) {
+	m, _ := newTestModel()
+	// An open code fence must NOT commit until its closing ``` arrives, even across blank lines
+	// inside the block — otherwise a half-streamed code block would render broken then snap.
+	m.handleEngine(ev("stream_token", "```go\nfunc main() {\n\n\tx := 1\n"))
+	committed := stripANSI(strings.Join(m.lines, "\n"))
+	if strings.Contains(committed, "func main") {
+		t.Fatalf("unclosed fence committed early:\n%s", committed)
+	}
+	// Close the fence + a terminating blank line → the whole code block commits as one unit.
+	m.handleEngine(ev("stream_token", "}\n```\n\n"))
+	committed = stripANSI(strings.Join(m.lines, "\n"))
+	if !strings.Contains(committed, "func main") || !strings.Contains(committed, "x := 1") {
+		t.Fatalf("closed fence not committed whole:\n%s", committed)
 	}
 }
 

@@ -19,7 +19,7 @@ func (m model) midView() string {
 		return m.menuView()
 	case m.compOpen && len(m.comps) > 0:
 		return m.completionView()
-	case len(m.runningTools) > 0:
+	case m.hasRunningTool():
 		return m.toolingView()
 	case m.busy && strings.TrimSpace(m.stream) == "":
 		return m.thinkingView()
@@ -36,7 +36,7 @@ func (m model) promptView() string {
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s\n", userStyle.Render("⚠ "+m.reqQ))
 		if m.reqKind == "diff" && m.reqBody != "" {
-			fmt.Fprintf(&b, "%s\n", renderDiff(m.reqBody, 16, m.width-8, ""))
+			fmt.Fprintf(&b, "%s\n", renderDiffAt(m.reqBody, m.reqScroll, diffApprovalRows, m.width-8, ""))
 		}
 		for i, op := range m.reqOpts {
 			cursor := "  "
@@ -79,11 +79,14 @@ func (m model) promptView() string {
 			fmt.Fprintf(&b, "    %s\n", dimStyle.Render(val))
 		}
 		
+		hints := "↑/↓ navigate · enter to submit · esc to dismiss"
 		if m.reqIsMulti {
-			b.WriteString(dimStyle.Render("↑/↓ navigate · space select · enter to submit · esc to dismiss"))
-		} else {
-			b.WriteString(dimStyle.Render("↑/↓ navigate · enter to submit · esc to dismiss"))
+			hints = "↑/↓ navigate · space select · enter to submit · esc to dismiss"
 		}
+		if m.reqKind == "diff" && len(parseDiffRows(m.reqBody)) > diffApprovalRows {
+			hints += " · PgUp/PgDn scroll diff"
+		}
+		b.WriteString(dimStyle.Render(hints))
 		return requestBox.Width(m.width - 6).Render(b.String())
 	}
 
@@ -274,11 +277,27 @@ func (m model) footerLine() string {
 		}
 		core = append(core, footerHint.Render(fmt.Sprintf("◉ %d %s", m.fGoals, unit)))
 	}
+	// Mind strip: what the agent knows about itself right now. Warn-tinted when it's actively
+	// routing around weak spots or the codebase is off its setpoints; quiet otherwise (/self).
+	// Ctrl+X opens the HUD that explains these counters with the evidence behind them.
+	if m.fMind.WeakSpots > 0 || m.fMind.DriveDeviations > 0 {
+		var parts []string
+		if m.fMind.WeakSpots > 0 {
+			parts = append(parts, fmt.Sprintf("%d weak", m.fMind.WeakSpots))
+		}
+		if m.fMind.DriveDeviations > 0 {
+			parts = append(parts, fmt.Sprintf("%d drive", m.fMind.DriveDeviations))
+		}
+		core = append(core, warnStyle.Render("🧠 "+strings.Join(parts, " · ")+" ⌃X"))
+	} else if m.fMind.Habits > 0 {
+		core = append(core, footerHint.Render(fmt.Sprintf("🧠 %d habits ⌃X", m.fMind.Habits)))
+	}
 	if m.busy {
-		chars := len([]rune(m.stream))
-		meta := fmt.Sprintf("%d chars", chars)
+		// Only numbers that are TRUE go on screen: streamed characters (counted) and elapsed time
+		// (measured). The old "tok/s" was chars/4/elapsed — an estimate dressed up as telemetry.
+		meta := fmt.Sprintf("%s chars", humanCount(len([]rune(m.stream))))
 		if m.elapsed > 0 {
-			meta += fmt.Sprintf(" · %d tok/s · %ds", chars/4/m.elapsed, m.elapsed)
+			meta += fmt.Sprintf(" · %ds", m.elapsed)
 		}
 		core = append(core, footerHint.Render(meta))
 	}
@@ -354,7 +373,7 @@ func (m model) thinkingView() string {
 		}
 	}
 
-	isToolPulse := len(m.runningTools) > 0
+	isToolPulse := m.hasRunningTool()
 	verb := "Executing tool"
 	if !isToolPulse {
 		// Cycle verbs every 4.0 seconds (80 ticks at 50ms/tick) so the shimmer animation has time to finish
@@ -440,7 +459,7 @@ func (m model) workingView() string {
 // toolingView: the same persistent indicator while the model is running tools, so "still working,
 // Ns elapsed, esc to stop" stays visible through the tool-call phase (not just text generation).
 func (m model) toolingView() string {
-	n := len(m.runningTools)
+	n := m.runningToolCount()
 	label := "⚙ Running tool… "
 	if n > 1 {
 		label = fmt.Sprintf("⚙ Running %d tools… ", n)
