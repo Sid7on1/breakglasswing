@@ -369,7 +369,17 @@ func indentAwareWrap(text string, width int) string {
 	lines := strings.Split(text, "\n")
 	for _, line := range lines {
 		clean := ansi.Strip(line)
-		
+
+		// A line that already fits within `width` is left EXACTLY as-is. This matters for content that
+		// is pre-laid-out and hard-clamped to its own budget (diff rows: line-number gutter + green/red
+		// background padded to a fixed width). Word-wrapping such a line at `width - indentStr` would
+		// re-break it 1–2 cells early and spill its coloured background onto a bogus continuation row at
+		// column 0 (the "green bleeds to the far left" bug). Only genuinely over-wide lines get wrapped.
+		if lipgloss.Width(line) <= width {
+			out = append(out, line)
+			continue
+		}
+
 		indentStr := ""
 		if strings.HasPrefix(clean, "● ") || strings.HasPrefix(clean, "❯ ") {
 			indentStr = "  "

@@ -35,6 +35,9 @@ func parseDiffRows(diff string) []diffRow {
 			fmt.Sscanf(m[2], "%d", &newLn)
 			continue
 		}
+		if strings.HasPrefix(ln, "\\") { // git's "\ No newline at end of file" marker — not content
+			continue
+		}
 		if ln == "" {
 			rows = append(rows, diffRow{newLn, ' ', ""})
 			oldLn++
@@ -79,8 +82,13 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 		offset = 0
 	}
 	// Gutter width grows with the largest line number (was a fixed %4d that misaligned past 9999).
+	// Only NEW-side numbers are ever shown (removed lines get a blank gutter, see below), so removed
+	// rows don't widen the column.
 	digits := 3
 	for _, r := range rows {
+		if r.sign == '-' {
+			continue
+		}
 		if d := len(fmt.Sprint(r.num)); d > digits {
 			digits = d
 		}
@@ -115,11 +123,23 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 			break
 		}
 		num := fmt.Sprintf("%*d ", digits, r.num)
-		txt := r.text
-		if rs := []rune(txt); len(rs) > codeW {
-			txt = string(rs[:codeW-1]) + "…"
+		// A removed line has no position in the NEW file, so numbering it (with the old-side number)
+		// makes the single gutter jump around and read backwards when the two sides drift apart
+		// (e.g. a full-file overwrite of unrelated content: 1,2,3,3,5,4,4…). Blank its gutter so the
+		// visible numbers stay monotonic — the new file's real line numbers — and the "- " sign alone
+		// marks the removal.
+		if r.sign == '-' {
+			num = fmt.Sprintf("%*s ", digits, "")
 		}
-		pad := codeW - len([]rune(txt))
+		txt := r.text
+		// Truncate + pad by DISPLAY WIDTH, not rune count: prose is full of ambiguous-width glyphs
+		// (curly quotes, em dashes) that count as one rune but can render wider — counting runes let a
+		// line overflow its budget and wrap, dragging the coloured background to column 0 (the ragged
+		// green bleed). ansi.Truncate / lipgloss.Width measure real cells, so the fill can't overrun.
+		if lipgloss.Width(txt) > codeW {
+			txt = ansi.Truncate(txt, codeW, "…")
+		}
+		pad := codeW - lipgloss.Width(txt)
 		if pad < 0 {
 			pad = 0
 		}

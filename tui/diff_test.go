@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,6 +49,55 @@ func TestRenderDiffAtScrollWindow(t *testing.T) {
 	small := ansi.Strip(renderDiffAt(buildDiff(5), 3, 16, 80, ""))
 	if strings.Contains(small, "more (") {
 		t.Fatalf("short diff should have no markers:\n%s", small)
+	}
+}
+
+// A brand-new file with no trailing newline makes the `diff` library emit a
+// "\ No newline at end of file" marker for the empty OLD side — right after the
+// @@ header, before any content. That marker is not a line of the file and must
+// never be rendered (it once showed up as row "1" above the real first line).
+func TestParseDiffRowsDropsNoNewlineMarker(t *testing.T) {
+	diff := "@@ -1,0 +1,2 @@\n" +
+		"\\ No newline at end of file\n" +
+		"+The House at the End of Stillwater Lane\n" +
+		"+It was not a welcoming house.\n" +
+		"\\ No newline at end of file"
+	rows := parseDiffRows(diff)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 content rows, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].num != 1 || rows[0].text != "The House at the End of Stillwater Lane" {
+		t.Fatalf("first row should be the real first line at num 1, got %+v", rows[0])
+	}
+	if out := ansi.Strip(renderDiff(diff, 20, 80, "")); strings.Contains(out, "No newline") {
+		t.Fatalf("rendered diff must not contain the marker:\n%s", out)
+	}
+}
+
+// An overwrite of unrelated content drifts the old/new line counters apart. Removed lines must NOT
+// show a number (they have no position in the new file) — otherwise the single gutter reads
+// backwards (1,2,3,3,5,4,4…). Visible numbers must stay monotonic: the new file's real line numbers.
+func TestOverwriteGutterStaysMonotonic(t *testing.T) {
+	diff := "@@ -1,5 +1,5 @@\n Title\n \n-old paragraph one\n+new paragraph one\n \n-old paragraph two\n+new paragraph two"
+	out := ansi.Strip(renderDiff(diff, 40, 100, "story.txt"))
+	re := regexp.MustCompile(`^\s*(\d+)\s`)
+	last := 0
+	for _, ln := range strings.Split(out, "\n") {
+		m := re.FindStringSubmatch(ln)
+		if m == nil {
+			if strings.Contains(ln, "-") { // removed rows carry no gutter number
+				continue
+			}
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		if n < last {
+			t.Fatalf("gutter went backwards: %d after %d in %q", n, last, ln)
+		}
+		last = n
+	}
+	if last == 0 {
+		t.Fatal("expected some numbered rows")
 	}
 }
 

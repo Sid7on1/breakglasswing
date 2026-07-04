@@ -6,13 +6,14 @@ import * as crypto from 'crypto';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
-import { checkEditSyntax } from '../syntax.check';
+import { checkEditSyntax, shieldEdit } from '../syntax.check';
 import { requestDiffApproval } from '../../cli/diffApproval';
 import { checkBlastRadius } from '../../cli/blastGate';
 import { sliceLineRange } from '../file-range';
 import { detectCorruptWrite } from '../write-guard';
 import { fileStateCache } from '../../memory/file-state-cache';
 import { globalTransactionManager } from '../../core/transaction.manager';
+import { outcomeOk, outcomeError, outcomeRejected } from '../outcome';
 
 // Files larger than this get truncated with a note. The full file content is written to
 // a temp path for reference when the file is very large (>1MB).
@@ -58,7 +59,7 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
 
       // Get mtime for cache lookup and stale detection
       const mtime = await fileStateCache.getMtime(fullPath);
-      if (mtime === null) return `Error: File not found at ${args.path}`;
+      if (mtime === null) return outcomeError('not_found', `Error: File not found at ${args.path}`);
 
       // When a line range is requested, check the cache first
       if (args.startLine !== undefined || args.endLine !== undefined) {
@@ -67,7 +68,7 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
 
         const rawContent = await fs.readFile(fullPath, 'utf8');
         const { text, error } = sliceLineRange(rawContent, args.startLine, args.endLine);
-        if (error) return `Error: ${error}`;
+        if (error) return outcomeError('invalid_args', `Error: ${error}`);
         const slicedText = text ?? '';
         fileStateCache.set(fullPath, mtime, slicedText, args.startLine, args.endLine);
         return slicedText;
@@ -116,7 +117,7 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
       return content;
     } catch (e: any) {
       if (e.code === 'ENOENT') {
-        return `Error: File not found at ${args.path}`;
+        return outcomeError('not_found', `Error: File not found at ${args.path}`);
       }
       throw e;
     }
@@ -134,6 +135,7 @@ Use this tool to write new code, update configuration files, or generate artifac
 - **Directory Creation:** If the parent directories do not exist, the tool will automatically create them for you.
 - **Do NOT create empty directories:** Do NOT use this tool if you only want to create a new folder/directory. This tool creates FILES. If you need to create an empty directory, use \`BashTool\` with \`mkdir\`.
 - **Overwriting:** Writing to an existing file replaces it (a backup is kept for \`/undo\`). You do NOT need to pass anything special to overwrite.
+- **Do NOT silently clobber:** When the user asks you to CREATE or ADD a *new* document (a story, note, draft, script, etc.) and a file already exists at the path you'd choose, pick a non-colliding name instead (e.g. \`story.txt\` → \`story-2.txt\`) rather than overwriting — an overwrite destroys their existing file. Overwrite an existing file only when the user clearly means to update/replace *that specific* file (e.g. "fix the bug in X", "rewrite X"). When unsure whether a destination exists, list the directory first.
 - **Modifying existing code:** Do NOT rewrite a whole file to change part of it. Use \`EditFileTool\` for a surgical oldString→newString replacement — it is safer and avoids accidentally dropping newlines. A full-file overwrite that collapses a multi-line file to one line will be REFUSED.
 - **Multi-line content:** Always emit real newline characters between lines. Never flatten code onto a single line.
 - **Validation:** After writing a complex script or TypeScript file, immediately use the \`BashTool\` to run a syntax check (e.g., \`npx tsc --noEmit\`) to verify your write didn't introduce syntax errors.`,
@@ -158,7 +160,7 @@ Use this tool to write new code, update configuration files, or generate artifac
     // pre-write backup below — so the old hard `overwrite: true` requirement was redundant friction.
     // Blast-radius gate — only meaningful when overwriting an existing, indexed file.
     if (exists && !(await checkBlastRadius(fullPath))) {
-      return `Write to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`;
+      return outcomeRejected(`Write to ${args.path} cancelled — declined at the blast-radius gate. No changes were made.`);
     }
     // Inline diff approval (no-op unless enabled and an interactive approver is registered).
     const prior = exists ? await fs.readFile(fullPath, 'utf-8').catch(() => '') : '';
@@ -166,15 +168,21 @@ Use this tool to write new code, update configuration files, or generate artifac
       exists ? `Overwrite ${args.path}` : `Create ${args.path}`,
       unifiedDiff(prior, args.content, args.path)
     );
-    if (!approved) return `Write to ${args.path} rejected by user. No changes were made.`;
+    if (!approved) return outcomeRejected(`Write to ${args.path} rejected by user. No changes were made.`);
     // Guard against the "flattened file" corruption (model strips newlines on a full-file
     // overwrite). Refuse before touching disk and steer the model to a surgical edit.
     if (exists) {
       const flat = detectCorruptWrite(prior, args.content, fullPath);
       if (flat) {
-        return `Write to ${args.path} refused: ${flat}. No changes were made. ` +
-          `To modify an existing file use EditFileTool (surgical oldString→newString) and keep real newline characters in multi-line content.`;
+        return outcomeError('syntax', `Write to ${args.path} refused: ${flat}. No changes were made. ` +
+          `To modify an existing file use EditFileTool (surgical oldString→newString) and keep real newline characters in multi-line content.`);
       }
+    }
+    // Edit Shield: a write that would introduce NEW syntax errors (vs. what's on disk; a new file
+    // must simply parse) never reaches disk — the error names the lines so the retry can fix it.
+    const shield = shieldEdit(fullPath, prior, args.content);
+    if (shield) {
+      return outcomeError('syntax', `Write to ${args.path} refused by Edit Shield: ${shield}`);
     }
     // Track original content for atomic rollback when a /tx transaction is open (records '' for a
     // new file so rollback deletes it). Must run before the write so the snapshot is the pre-write state.
@@ -187,7 +195,7 @@ Use this tool to write new code, update configuration files, or generate artifac
     } catch (e: any) {
       if (globalTransactionManager.isOpen()) {
         const rb = await globalTransactionManager.autoRollback(args.path, `write failed: ${e.message}`);
-        return `Write to ${args.path} failed: ${e.message}.${rb ? `\n\n${rb}` : ''}`;
+        return outcomeError('io', `Write to ${args.path} failed: ${e.message}.${rb ? `\n\n${rb}` : ''}`);
       }
       throw e;
     }
@@ -195,7 +203,7 @@ Use this tool to write new code, update configuration files, or generate artifac
     fileStateCache.invalidate(fullPath);
     const diff = capDiff(compactDiff(prior, args.content, args.path));
     const syntaxWarn = checkEditSyntax(fullPath, args.content) || '';
-    return `${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}${syntaxWarn}`;
+    return outcomeOk(`${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}${syntaxWarn}`);
   }
 }, governor);
 
@@ -225,7 +233,7 @@ Use this tool whenever the user explicitly asks you to delete, remove, or trash 
     // resolved against the wrong cwd). Fail loudly instead so the caller can retry.
     const exists = await fs.access(fullPath).then(() => true).catch(() => false);
     if (!exists) {
-      return `Error: Nothing to delete — no file or directory found at ${fullPath} (resolved from "${args.path}" relative to ${currentCwd}). Nothing was changed. If the target lives elsewhere, pass its absolute path.`;
+      return outcomeError('not_found', `Error: Nothing to delete — no file or directory found at ${fullPath} (resolved from "${args.path}" relative to ${currentCwd}). Nothing was changed. If the target lives elsewhere, pass its absolute path.`);
     }
     // Back up a file before deleting so /undo and /rewind can bring it back (parity with edit/write,
     // which always back up first). Best-effort: a directory can't be content-backed-up, and a failed
@@ -236,9 +244,9 @@ Use this tool whenever the user explicitly asks you to delete, remove, or trash 
     } catch { /* best-effort */ }
     try {
       await fs.rm(fullPath, { recursive: true, force: true });
-      return `Successfully deleted ${fullPath}`;
+      return outcomeOk(`Successfully deleted ${fullPath}`);
     } catch (e: any) {
-      return `Failed to delete ${args.path}: ${e.message}`;
+      return outcomeError('io', `Failed to delete ${args.path}: ${e.message}`);
     }
   }
 }, governor);
@@ -266,9 +274,9 @@ Use this tool whenever the user asks you to create, make, or add a new *folder* 
     const fullPath = resolvePath(args.path, currentCwd);
     const stat = await fs.stat(fullPath).catch(() => null);
     if (stat && stat.isFile()) {
-      return `Error: A file already exists at ${fullPath}, so a directory with that name cannot be created. Delete the file first if you meant to replace it with a folder.`;
+      return outcomeError('invalid_args', `Error: A file already exists at ${fullPath}, so a directory with that name cannot be created. Delete the file first if you meant to replace it with a folder.`);
     }
     await fs.mkdir(fullPath, { recursive: true });
-    return `Successfully created directory ${fullPath}`;
+    return outcomeOk(`Successfully created directory ${fullPath}`);
   }
 }, governor);

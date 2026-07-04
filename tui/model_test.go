@@ -1252,3 +1252,33 @@ func TestTranscriptBounded(t *testing.T) {
 		t.Fatalf("in-memory search copy exceeded cap: %d > %d", len(m.lines), transcriptCap)
 	}
 }
+
+// A committed diff row is pre-laid-out and hard-clamped (line-number gutter + green/red background
+// padded to a fixed width). indentAwareWrap must NOT re-wrap a line that already fits within its
+// width budget — doing so spilled the coloured background onto a bogus continuation row at column 0
+// (the "green bleeds to the far left after the response commits" bug). It must still wrap genuinely
+// over-wide prose.
+func TestIndentAwareWrapNoDiffBleed(t *testing.T) {
+	long := "Maya found the lighthouse on a map she didn’t remember buying. The coordinates were clear: a tower standing alone on the horizon.—warm and cold at once"
+	diff := "@@ -1,0 +1,2 @@\n+The Last Light\n+" + long + "\n\\ No newline at end of file"
+	for _, termWidth := range []int{190, 120, 80} {
+		for _, indent := range []string{"  ", "    "} {
+			diffW := termWidth - len(indent) - 4 - 6
+			rendered := indentLines(renderDiff(diff, 20, diffW, "story.txt"), indent+"    ")
+			committed := indentAwareWrap(rendered, termWidth-2)
+			if got, want := strings.Count(committed, "\n"), strings.Count(rendered, "\n"); got != want {
+				t.Fatalf("diff re-wrapped on commit (bleed) at width=%d indent=%d: rows %d != %d",
+					termWidth, len(indent), got+1, want+1)
+			}
+			for _, ln := range strings.Split(committed, "\n") {
+				if w := lipgloss.Width(ln); w > termWidth-2 {
+					t.Fatalf("committed line %d wide exceeds budget %d at width=%d", w, termWidth-2, termWidth)
+				}
+			}
+		}
+	}
+	// Genuinely over-wide prose must still wrap.
+	if !strings.Contains(indentAwareWrap("  ● "+strings.Repeat("word ", 80), 80), "\n") {
+		t.Fatal("long prose line should still wrap")
+	}
+}
