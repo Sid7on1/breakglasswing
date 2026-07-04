@@ -326,6 +326,22 @@ func TestAmbientHealthLine(t *testing.T) {
 	}
 }
 
+// The working indicator names which mind is handling the turn — "fast" (lite) or "deep" (heavy) —
+// so BiMax's two-tier routing is visible live, not just in the footer pointer.
+func TestTierTagVisibleWhileWorking(t *testing.T) {
+	m, _ := newTestModel()
+	m.busy = true
+
+	m.fTier = "lite"
+	if !strings.Contains(stripANSI(m.thinkingView()), "· fast") {
+		t.Fatalf("lite tier should show '· fast':\n%s", stripANSI(m.thinkingView()))
+	}
+	m.fTier = "heavy"
+	if !strings.Contains(stripANSI(m.workingView()), "· deep") {
+		t.Fatalf("heavy tier should show '· deep':\n%s", stripANSI(m.workingView()))
+	}
+}
+
 func TestCompletionDebounce(t *testing.T) {
 	m, buf := newTestModel()
 	m.input.SetValue("/he")

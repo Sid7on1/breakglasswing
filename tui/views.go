@@ -384,11 +384,21 @@ func (m model) thinkingView() string {
 	shimmerText := renderShimmerVerb(verb, m.thinkTick, stalledIntensity, isToolPulse)
 	dots := strings.Repeat(".", m.thinkDots)
 	
-	s := m.spin.View() + " " + workLabel.Render("● ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	s := m.spin.View() + " " + workLabel.Render("● ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 	if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
 	}
 	return s
+}
+
+// tierTag names which of the two minds is handling this turn — the fast intuition (the lite model)
+// or the deep reasoner (the heavy coding model). Rides the live working indicator so BiMax's
+// "two minds, one machine" routing is visible in the moment it decides how hard to think.
+func (m model) tierTag() string {
+	if m.fTier == "heavy" {
+		return footerTier.Render(" · deep")
+	}
+	return subtleStyle.Render(" · fast")
 }
 
 // --- shimmer / pulse animation math --------------------------------------------------------
@@ -435,7 +445,7 @@ func renderShimmerVerb(verb string, tickIdx int, stalledIntensity float64, isToo
 
 // workingView: braille spinner + a bold "⏺ Generating… Ns" clock + cancel hint while the answer streams.
 func (m model) workingView() string {
-	return m.spin.View() + " " + workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	return m.spin.View() + " " + workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 }
 
 // toolingView: the same persistent indicator while the model is running tools, so "still working,
@@ -446,7 +456,7 @@ func (m model) toolingView() string {
 	if n > 1 {
 		label = fmt.Sprintf("▚ Running %d tools… ", n)
 	}
-	return m.spin.View() + " " + workLabel.Render(label+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	return m.spin.View() + " " + workLabel.Render(label+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 }
 
 // --- structured log view (Ctrl+O) ----------------------------------------------------------
