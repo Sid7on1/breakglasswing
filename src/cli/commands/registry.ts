@@ -57,9 +57,13 @@ export const PALETTE_HIDDEN = new Set<string>([
   'provider', 'tier', 'reasoning', 'routes', 'arms',
   // Variants of a primary verb → the primary (e.g. /context, /diff, /index).
   'context-mode', 'context-window', 'diff-approval', 'diff-file', 'self-critic',
-  'a11y', 'agent-decisions',
+  'a11y', 'agent-decisions', 'index-ai', // 'index-ai' → /index (semantic variant)
+  // File-op tools the agent invokes directly — rarely typed as a slash command.
+  'edit', 'write',
+  // Session resume folds into /sessions (which lists + resumes); output format into /config.
+  'resume', 'output',
   // Niche / advanced — reachable when typed, off the browsable surface.
-  'agents', 'ask', 'autocommit', 'branch', 'check', 'keys', 'lint', 'log',
+  'agents', 'ask', 'autocommit', 'branch', 'check', 'keys', 'lint', 'log', 'changelog', 'watch',
   'pipelines', 'recipe', 'selection', 'shortcuts', 'headroom',
 ]);
 

@@ -45,7 +45,20 @@ describe('CommandRegistry.getPaletteOptions — curated palette', () => {
   it('includes the new TUI-upgrade commands so they are discoverable', () => {
     const values = opts.map(o => o.value);
     // Regression: these existed but were missing from the old hardcoded `/` autocomplete list.
-    expect(values).toEqual(expect.arrayContaining(['/plugins', '/security', '/diagnostics', '/output']));
+    expect(values).toEqual(expect.arrayContaining(['/plugins', '/security', '/diagnostics']));
+  });
+
+  it('stays curated to ~25 primary verbs (Gate 5) — discoverability, not sprawl', () => {
+    // The whole point of PALETTE_HIDDEN: the browsable surface is a small set of primary verbs,
+    // with the rest reachable when typed / via the Ctrl+X HUD. Guard against re-sprawl.
+    expect(opts.length).toBeLessThanOrEqual(26);
+    const values = opts.map(o => o.value);
+    // Demoted clusters must NOT be on the browsable surface (they live in the HUD / a primary verb).
+    for (const hidden of ['/self', '/tier', '/undo', '/checkpoint', '/edit', '/write', '/resume', '/output', '/index-ai']) {
+      expect(values).not.toContain(hidden);
+    }
+    // …but the unified verbs that absorbed them ARE visible.
+    expect(values).toEqual(expect.arrayContaining(['/rewind', '/model', '/index', '/sessions']));
   });
 
   it('includes representative commands and is sorted by category then name', () => {
