@@ -297,6 +297,35 @@ func TestToolFixedSlotLifecycle(t *testing.T) {
 	}
 }
 
+// The ambient repo-health line surfaces ONLY drives that are off setpoint — with their measurement
+// and a sparkline — and stays silent when everything is at setpoint (calm by default).
+func TestAmbientHealthLine(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 40
+
+	// All drives healthy → nothing rendered.
+	m.fMind.Drives = []MindDrive{{Label: "Build is green", Value: "build passing", Ok: true, Spark: []int{1, 1, 1}}}
+	if hl := m.healthLineView(); hl != "" {
+		t.Fatalf("health line should be silent when all drives are at setpoint, got: %q", stripANSI(hl))
+	}
+
+	// A deviating drive → its measurement surfaces in the line and in the composed View.
+	m.fMind.Drives = []MindDrive{
+		{Label: "TypeScript clean", Value: "3 type errors", Ok: false, Spark: []int{1, 1, 0, 0}},
+		{Label: "Build is green", Value: "build passing", Ok: true, Spark: []int{1, 1, 1}},
+	}
+	hl := stripANSI(m.healthLineView())
+	if !strings.Contains(hl, "3 type errors") {
+		t.Fatalf("deviating drive not surfaced: %q", hl)
+	}
+	if strings.Contains(hl, "build passing") {
+		t.Fatalf("healthy drive should not appear in the health line: %q", hl)
+	}
+	if !strings.Contains(stripANSI(m.View()), "3 type errors") {
+		t.Fatalf("health line not pinned into the view")
+	}
+}
+
 func TestCompletionDebounce(t *testing.T) {
 	m, buf := newTestModel()
 	m.input.SetValue("/he")

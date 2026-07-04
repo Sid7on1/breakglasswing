@@ -730,17 +730,23 @@ func (m model) belowSections() []string {
 	if !overlay {
 		td := m.activeTodoPanel()
 		cm := m.compactMapView()
-		
+		hl := m.healthLineView() // ambient repo-health: only non-empty when a drive is off setpoint
+
 		// Add a blank spacer above the pinned panels so they don't stick directly to the transcript
 		// or working indicators.
-		if td != "" || cm != "" {
+		if td != "" || cm != "" || hl != "" {
 			s = append(s, "")
 		}
-		
+
 		// Pin the task list above the prompt while any task is unfinished (Claude-Code-style live
 		// panel) so it doesn't scroll off into the transcript.
 		if td != "" {
 			s = append(s, td)
+		}
+		// Ambient repo-health line — the instrument watching the workshop. Silent when all drives are
+		// at setpoint; speaks (build red / type errors / TODO debt, with sparklines) when one slips.
+		if hl != "" {
+			s = append(s, hl)
 		}
 		// Pin a COMPACT, left-aligned codebase-map line above the prompt (P2). It is deliberately short
 		// and NOT padded to full width — a full-width line is what multiplied on zoom. The token meter

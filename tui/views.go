@@ -488,6 +488,60 @@ func logTimeStr(iso string) string {
 	return ""
 }
 
+// --- ambient repo-health line ---------------------------------------------------------------
+
+// miniSpark renders a drive's ok/deviating history (1 = at setpoint, 0 = off) as a tiny two-level
+// sparkline — ▇ healthy, ▁ deviating — capped to the most recent points. Both glyphs are one cell.
+func miniSpark(spark []int) string {
+	if len(spark) == 0 {
+		return ""
+	}
+	s := spark
+	if len(s) > 10 {
+		s = s[len(s)-10:]
+	}
+	var b strings.Builder
+	for _, v := range s {
+		if v == 1 {
+			b.WriteString("▇")
+		} else {
+			b.WriteString("▁")
+		}
+	}
+	return b.String()
+}
+
+// healthLineView is the ambient "instrument watching the workshop": a single compact line pinned
+// above the prompt that surfaces ONLY the drives currently off their setpoint (build red, type
+// errors, TODO debt, tree hygiene…), each with its measurement and a mini sparkline. When every
+// drive is at setpoint it renders nothing — calm by default, it speaks only when something slips.
+// Data is already on the wire (ui_snapshot.mind.drives); this just reads it. Ctrl+X for the full HUD.
+func (m model) healthLineView() string {
+	var dev []MindDrive
+	for _, d := range m.fMind.Drives {
+		if !d.Ok {
+			dev = append(dev, d)
+		}
+	}
+	if len(dev) == 0 {
+		return ""
+	}
+	if len(dev) > 3 { // one line, top offenders only (deviating drives sort first upstream)
+		dev = dev[:3]
+	}
+	parts := make([]string, 0, len(dev))
+	for _, d := range dev {
+		seg := warnStyle.Render(clip(d.Value, 34))
+		if sp := miniSpark(d.Spark); sp != "" {
+			seg += " " + subtleStyle.Render(sp)
+		}
+		parts = append(parts, seg)
+	}
+	line := warnStyle.Render("◇ ") + strings.Join(parts, footerSep) + subtleStyle.Render("  ⌃X")
+	// Never reach the last column — a full-width line ghosts on resize (same rule as the map/meter).
+	return lipgloss.NewStyle().MaxWidth(m.width - 2).Render(line)
+}
+
 // --- token meter ---------------------------------------------------------------------------
 
 // filledCells is ProgressBar.tsx's geometry: how many of width cells are filled for a [0,1] fraction.
