@@ -76,6 +76,30 @@ func (m model) mindHudView() string {
 		}
 	}
 
+	// --- Ledger: the verification posture — did the agent's edits get checked? ---
+	b.WriteString(dashColor("blue").Render("Ledger"))
+	if L := m.fMind.Ledger; L == nil || (L.Resolved == 0 && L.Open == 0 && L.Expired == 0) {
+		fmt.Fprintf(&b, "\n  %s\n", subtleStyle.Render("no claims yet — edits open a claim; a build/test that names the file resolves it"))
+	} else {
+		covDot := okStyle.Render("●")
+		if L.CoveragePct < 40 { // verify-coverage setpoint
+			covDot = warnStyle.Render("●")
+		}
+		fmt.Fprintf(&b, "\n  %s %s %s\n",
+			covDot,
+			dashVal.Render(fmt.Sprintf("%-22s", fmt.Sprintf("%d%% verified", L.CoveragePct))),
+			dimStyle.Render(fmt.Sprintf("resolved %d · open %d · expired %d", L.Resolved, L.Open, L.Expired)))
+		if L.Overconfident > 0 {
+			plural := ""
+			if L.Overconfident > 1 {
+				plural = "s"
+			}
+			fmt.Fprintf(&b, "  %s %s\n", warnStyle.Render("▲"), warnStyle.Render(fmt.Sprintf("%d domain%s overconfident — escalate verification", L.Overconfident, plural)))
+		} else {
+			fmt.Fprintf(&b, "  %s\n", subtleStyle.Render("↳ calibration healthy — no domain shows an overconfidence gap"))
+		}
+	}
+
 	// --- Habits: procedures compiled from repetition into deterministic macros. ---
 	b.WriteString(dashColor("green").Render("Habits"))
 	if len(m.fMind.HabitNames) == 0 {

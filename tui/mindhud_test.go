@@ -43,6 +43,35 @@ func TestMindHudRendersSnapshotDetail(t *testing.T) {
 	}
 }
 
+// The HUD's Ledger section reports the epistemic ledger's verification posture: coverage %, the
+// resolved/open/expired counts, and a calibration line (overconfidence warning or "healthy").
+func TestMindHudLedgerSection(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"mind": map[string]any{
+			"weakSpots": 0, "driveDeviations": 0, "habits": 0,
+			"ledger": map[string]any{
+				"resolved": 6, "open": 2, "expired": 2, "coveragePct": 75, "overconfident": 1,
+			},
+		},
+	}))
+	out := stripANSI(m.mindHudView())
+	for _, want := range []string{"Ledger", "75% verified", "resolved 6", "open 2", "expired 2", "1 domain overconfident"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("ledger section missing %q in:\n%s", want, out)
+		}
+	}
+
+	// Healthy calibration path: no overconfident domains → the reassurance line, not the warning.
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"mind": map[string]any{"ledger": map[string]any{"resolved": 10, "open": 0, "expired": 0, "coveragePct": 100, "overconfident": 0}},
+	}))
+	out = stripANSI(m.mindHudView())
+	if !strings.Contains(out, "calibration healthy") || strings.Contains(out, "overconfident") {
+		t.Fatalf("expected healthy calibration line, got:\n%s", out)
+	}
+}
+
 func TestMindHudToggleAndEsc(t *testing.T) {
 	m, _ := newTestModel()
 	nm, _ := m.update(tea.KeyMsg{Type: tea.KeyCtrlX})

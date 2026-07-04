@@ -22,7 +22,7 @@ type Outbound struct {
 	Options  []string          `json:"options,omitempty"`  // request choices
 	IsAsk    bool              `json:"isAsk,omitempty"`
 	IsMulti  bool              `json:"isMulti,omitempty"`
-	Masked   bool              `json:"masked,omitempty"` // kind:"input" — the answer is a secret; render as bullets
+	Masked   bool              `json:"masked,omitempty"`   // kind:"input" — the answer is a secret; render as bullets
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
 	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
@@ -114,12 +114,23 @@ type UiSnapshot struct {
 // The detail slices feed the Ctrl+X mind HUD (v2 §3.11 "explainable chip"): evidence with
 // posterior stats and sparklines, not an opaque counter.
 type MindStrip struct {
-	WeakSpots       int          `json:"weakSpots"`
-	DriveDeviations int          `json:"driveDeviations"`
-	Habits          int          `json:"habits"`
-	Weak            []MindWeak   `json:"weak,omitempty"`
-	Drives          []MindDrive  `json:"drives,omitempty"`
-	HabitNames      []string     `json:"habitNames,omitempty"`
+	WeakSpots       int         `json:"weakSpots"`
+	DriveDeviations int         `json:"driveDeviations"`
+	Habits          int         `json:"habits"`
+	Weak            []MindWeak  `json:"weak,omitempty"`
+	Drives          []MindDrive `json:"drives,omitempty"`
+	HabitNames      []string    `json:"habitNames,omitempty"`
+	Ledger          *MindLedger `json:"ledger,omitempty"`
+}
+
+// MindLedger — the epistemic ledger's verification posture (the correctness half of the HUD's
+// receipts). Mirrors UiSnapshotMindLedger.
+type MindLedger struct {
+	Resolved      int `json:"resolved"`
+	Open          int `json:"open"`
+	Expired       int `json:"expired"`
+	CoveragePct   int `json:"coveragePct"`
+	Overconfident int `json:"overconfident"`
 }
 
 // MindWeak — one learned weak spot: the tool×domain cell, its posterior failure stats, and the
