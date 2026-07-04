@@ -24,6 +24,9 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      # bubblewrap enables the Linux Bash-sandbox parity test (writes outside cwd must be denied).
+      - name: Install bubblewrap (Linux sandbox backend)
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm ci
       - name: Typecheck + build
         run: npm run build

@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import * as os from 'os';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
-import { sandboxArgv, floorRoot, floorArgv, floorChildEnv, floorBlockedReason } from '../../sandbox/exec.sandbox';
+import { sandboxArgv, sandboxBin, floorRoot, floorArgv, floorChildEnv, floorBlockedReason } from '../../sandbox/exec.sandbox';
 import { outcomeOk, classifiedError } from '../outcome';
 
 const execAsync = promisify(exec);
@@ -54,10 +54,11 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       const blocked = floorBlockedReason();
       if (blocked) throw classifiedError(`Command blocked: ${blocked}`, 'permission', 'blocked');
       const flArgv = floorArgv(cmd);
-      // When sandboxing is on (B3), run the command under sandbox-exec via execFile so the
-      // profile + the command pass as discrete argv (no shell re-quoting). Otherwise run it
-      // through the shell exactly as before.
+      // When sandboxing is on (B3), run the command under the OS sandbox binary (sandbox-exec on
+      // macOS, bwrap on Linux) via execFile so the profile + the command pass as discrete argv (no
+      // shell re-quoting). Otherwise run it through the shell exactly as before.
       const sbArgv = flArgv ?? sandboxArgv(cmd, currentCwd);
+      const sbBin = sbArgv ? sandboxBin() : null;
       // signal: when the user hits esc mid-turn, the agent loop aborts it and Node kills this child
       // process immediately instead of waiting out the command / its timeout.
       const execOpts = {
@@ -66,8 +67,8 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
         // Floored episodes (even soft-bypassed ones) never expose the parent env to children.
         ...(floorRoot() ? { env: floorChildEnv() } : {}),
       };
-      const { stdout, stderr } = sbArgv
-        ? await execFileAsync('sandbox-exec', sbArgv, execOpts)
+      const { stdout, stderr } = sbArgv && sbBin
+        ? await execFileAsync(sbBin, sbArgv, execOpts)
         : await execAsync(cmd, execOpts);
       const out = stdout.trim();
       const err = stderr.trim();

@@ -1,27 +1,66 @@
 import { execSync } from 'child_process';
 
-// B3 — optional OS isolation for BashTool. On macOS we wrap commands in `sandbox-exec`
-// (seatbelt) with a profile that allows reads/exec/network but restricts file WRITES to the
-// workspace + temp dirs — so an agent command can't clobber files outside the project. Off
-// by default (/governor sandbox on). Degrades gracefully: on non-macOS or when sandbox-exec
-// is missing, commands run unsandboxed (with a one-time warning surfaced by the caller).
+// B3 — optional OS isolation for BashTool. We wrap commands in the platform's OS sandbox with a
+// profile that allows reads/exec/network but restricts file WRITES to the workspace + temp dirs —
+// so an agent command can't clobber files outside the project:
+//   • macOS  → `sandbox-exec` (seatbelt) with a deny-file-write* profile.
+//   • Linux  → `bwrap` (bubblewrap): the whole FS is bind-mounted read-only, then cwd + temp are
+//              re-bound read-write. The autonomous FLOOR additionally `--unshare-net`s (no network).
+// Off by default (/governor sandbox on). Degrades gracefully: where no backend exists (or none is
+// installed) commands run unsandboxed, with a one-time warning surfaced by the caller.
 
 let enabled = false;
 export function setSandboxEnabled(v: boolean): void { enabled = v; }
 export function isSandboxEnabled(): boolean { return enabled; }
 
 let availableCache: boolean | null = null;
-/** True only on macOS with `sandbox-exec` present. Cached after first probe. */
-export function sandboxAvailable(): boolean {
-  if (process.platform !== 'darwin') return false;
-  if (availableCache !== null) return availableCache;
+/** The OS sandbox backend for this platform, or null if none is installed. Cached after first probe. */
+export function sandboxBackend(): 'seatbelt' | 'bwrap' | null {
+  if (availableCache === false) return null;
+  const bin = process.platform === 'darwin' ? 'sandbox-exec'
+    : process.platform === 'linux' ? 'bwrap'
+    : null;
+  if (!bin) { availableCache = false; return null; }
+  if (availableCache === true) return bin === 'sandbox-exec' ? 'seatbelt' : 'bwrap';
   try {
-    execSync('command -v sandbox-exec', { stdio: 'ignore' });
+    execSync(`command -v ${bin}`, { stdio: 'ignore' });
     availableCache = true;
+    return bin === 'sandbox-exec' ? 'seatbelt' : 'bwrap';
   } catch {
     availableCache = false;
+    return null;
   }
-  return availableCache;
+}
+
+/** The executable that runs a sandboxed command on this platform, or null when none is available. */
+export function sandboxBin(): string | null {
+  const b = sandboxBackend();
+  return b === 'seatbelt' ? 'sandbox-exec' : b === 'bwrap' ? 'bwrap' : null;
+}
+
+/** True when an OS sandbox backend (seatbelt on macOS, bwrap on Linux) is available. */
+export function sandboxAvailable(): boolean {
+  return sandboxBackend() !== null;
+}
+
+// The writable temp roots re-allowed inside every profile (both platforms).
+const TEMP_WRITE_PATHS = ['/private/tmp', '/private/var/folders', '/tmp'];
+
+/**
+ * bwrap argv (Linux): read-only bind the whole filesystem, then re-bind the writable roots
+ * (cwd/floor-root + temp) read-write. When `denyNetwork` (the autonomous floor), also unshare the
+ * network namespace so the command has no connectivity — the parity of seatbelt's `(deny network*)`.
+ * Pure and platform-independent so it can be unit-tested anywhere.
+ */
+export function buildBwrapArgv(writableRoot: string, denyNetwork: boolean): string[] {
+  const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--die-with-parent'];
+  for (const p of [writableRoot, ...TEMP_WRITE_PATHS]) {
+    // --bind-try: don't fail the whole run if an optional temp path (e.g. /private/tmp on Linux)
+    // doesn't exist; the workspace root always does.
+    args.push('--bind-try', p, p);
+  }
+  if (denyNetwork) args.push('--unshare-net');
+  return [...args, '/bin/sh', '-c'];
 }
 
 /** Seatbelt profile: allow everything, then deny writes, then re-allow writes to cwd + temp. */
@@ -40,13 +79,16 @@ export function buildProfile(cwd: string): string {
 }
 
 /**
- * If sandboxing is enabled and available, return the argv to run `command` under
- * `sandbox-exec` (for execFile, so no shell-quoting hazard). Returns null when sandboxing
+ * If sandboxing is enabled and available, return the argv (excluding the binary — use sandboxBin())
+ * to run `command` sandboxed via execFile, so no shell-quoting hazard. Returns null when sandboxing
  * does not apply, signalling the caller to run the command normally.
  */
 export function sandboxArgv(command: string, cwd: string): string[] | null {
-  if (!enabled || !sandboxAvailable()) return null;
-  return ['-p', buildProfile(cwd), '/bin/sh', '-c', command];
+  if (!enabled) return null;
+  const backend = sandboxBackend();
+  if (backend === 'seatbelt') return ['-p', buildProfile(cwd), '/bin/sh', '-c', command];
+  if (backend === 'bwrap') return [...buildBwrapArgv(cwd, false), command];
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,20 +147,24 @@ export function floorBlockedReason(): string | null {
   if (!floorRoot()) return null;
   if (sandboxAvailable()) return null;
   if (process.env.BIMAX_SANDBOX_FLOOR_SOFT === '1') return null;
-  return 'this is a sandboxed autonomous episode, but no OS sandbox is available on this platform ' +
-    '(sandbox-exec not found). Bash is disabled for the episode; set BIMAX_SANDBOX_FLOOR_SOFT=1 to ' +
-    'explicitly allow unsandboxed autonomous commands.';
+  return 'this is a sandboxed autonomous episode, but no OS sandbox backend is available on this ' +
+    'platform (need sandbox-exec on macOS or bwrap on Linux). Bash is disabled for the episode; ' +
+    'set BIMAX_SANDBOX_FLOOR_SOFT=1 to explicitly allow unsandboxed autonomous commands.';
 }
 
 /**
- * Argv to run `command` under the floor profile, or null when no floor applies (or it is
- * soft-bypassed / unenforceable — callers must consult floorBlockedReason() first).
- * The floor ignores the user-level `enabled` toggle: episodes cannot lower it.
+ * Argv (excluding the binary — use sandboxBin()) to run `command` under the floor profile, or null
+ * when no floor applies (or it is soft-bypassed / unenforceable — callers must consult
+ * floorBlockedReason() first). The floor ignores the user-level `enabled` toggle: episodes cannot
+ * lower it, and it denies network (seatbelt `deny network*` / bwrap `--unshare-net`).
  */
 export function floorArgv(command: string): string[] | null {
   const root = floorRoot();
-  if (!root || !sandboxAvailable()) return null;
-  return ['-p', buildFloorProfile(root), '/bin/sh', '-c', command];
+  if (!root) return null;
+  const backend = sandboxBackend();
+  if (backend === 'seatbelt') return ['-p', buildFloorProfile(root), '/bin/sh', '-c', command];
+  if (backend === 'bwrap') return [...buildBwrapArgv(root, true), command];
+  return null;
 }
 
 /** Test seam: override/reset the cached sandbox-exec availability probe. */

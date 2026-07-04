@@ -26,7 +26,7 @@ globalCommandRegistry.register({
       [governorArmed, 'Governor (permissions)', '/governor', 'Gate tool actions behind approval (off = auto-approve everything)'],
       [isBlastGateEnabled(), 'Blast-radius gate', '/governor blast-gate', 'Confirm edits that touch HIGH/CRITICAL graph symbols'],
       [isVerifyEnabled(), 'Auto-verify edits', '/governor verify', 'Typecheck after edits and feed failures back for self-repair'],
-      [isSandboxEnabled() && sandboxAvailable(), 'Bash sandbox', '/governor sandbox', sandboxAvailable() ? 'Restrict shell writes to the workspace + temp (macOS sandbox-exec)' : 'sandbox-exec unavailable on this OS'],
+      [isSandboxEnabled() && sandboxAvailable(), 'Bash sandbox', '/governor sandbox', sandboxAvailable() ? 'Restrict shell writes to the workspace + temp (sandbox-exec on macOS, bwrap on Linux)' : 'no OS sandbox backend on this OS (need sandbox-exec or bwrap)'],
       [isDiffApprovalEnabled(), 'Diff approval', '/diff-approval', 'Review every agent edit before it applies'],
       [isSelfCriticEnabled(), 'Self-critic', '/self-critic', 'Agent reviews its own work and fixes defects'],
       [isGitAutoCommitEnabled(), 'Auto-commit', '/autocommit', 'Commit after each successful edit (Aider-style)'],

@@ -14,14 +14,15 @@ globalCommandRegistry.register({
   description: 'Toggle Governor Mode',
   category: 'Configuration',
   execute: async (args, context) => {
-    // /governor sandbox [on|off] — run BashTool under macOS sandbox-exec (writes restricted to workspace).
+    // /governor sandbox [on|off] — run BashTool under the OS sandbox (sandbox-exec on macOS, bwrap on
+    // Linux); writes restricted to the workspace + temp.
     if ((args[0] || '').toLowerCase() === 'sandbox') {
       const sub = (args[1] || '').toLowerCase();
       if (sub === 'on' || sub === 'off') {
         const on = sub === 'on';
         setSandboxEnabled(on);
         await context.saveConfig({ sandboxBash: on });
-        const note = on && !sandboxAvailable() ? ' (note: sandbox-exec unavailable here — commands run unsandboxed)' : '';
+        const note = on && !sandboxAvailable() ? ' (note: no OS sandbox backend here — need sandbox-exec on macOS or bwrap on Linux; commands run unsandboxed)' : '';
         return { type: 'message', level: 'success', content: `Bash sandbox is ${on ? 'ON — shell writes restricted to the workspace + temp' : 'OFF'}.${note}` };
       }
       return {
