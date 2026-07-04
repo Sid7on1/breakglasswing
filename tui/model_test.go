@@ -73,7 +73,7 @@ func TestFooterState(t *testing.T) {
 	// Footer mirrors Ink Footer.tsx: ⇧ marks the heavy tier, the mode is a bold uppercase CHIP, plus
 	// the model name, token estimate, goal count and 📌 pin.
 	foot := stripANSI(m.footerLine())
-	for _, want := range []string{"⇧", "minimax-m3", "1.0k tok", "2 goals", "EXPLORE", "📌"} {
+	for _, want := range []string{"⇧", "minimax-m3", "1.0k tok", "2 goals", "EXPLORE", "◈"} {
 		if !strings.Contains(foot, want) {
 			t.Errorf("footer missing %q in:\n%s", want, foot)
 		}
@@ -719,8 +719,8 @@ func TestSpinnerShownWhileBusy(t *testing.T) {
 	if !m.busy {
 		t.Fatal("busy not set")
 	}
-	// Before the first token the live region shows the rotating ThinkingText (✻ phrase).
-	if !strings.Contains(stripANSI(m.View()), "✻") {
+	// Before the first token the live region shows the rotating ThinkingText (● phrase).
+	if !strings.Contains(stripANSI(m.View()), "●") {
 		t.Fatalf("thinking indicator not shown while busy:\n%s", stripANSI(m.View()))
 	}
 	// Once tokens stream, the WorkingIndicator's braille spinner frame appears.

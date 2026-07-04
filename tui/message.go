@@ -50,9 +50,9 @@ func (m *model) appendAssistantBlock(blk string) {
 	if !m.turnAnswerStarted {
 		m.turnAnswerStarted = true
 		if m.turnThoughtMs >= 500 {
-			m.append(thoughtSty.Render(fmt.Sprintf("  ✻ Thought for %ds", m.turnThoughtMs/1000)))
+			m.append(thoughtSty.Render(fmt.Sprintf("  ● Thought for %ds", m.turnThoughtMs/1000)))
 		}
-		md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
+		md = caretStyle.Render("● ") + strings.TrimPrefix(md, "  ")
 	} else {
 		m.append("") // paragraph spacing between committed blocks
 	}
@@ -155,11 +155,11 @@ func (m *model) renderMessage(me MessageEntry) {
 		}
 		var b strings.Builder
 		if thought >= 500 {
-			fmt.Fprintf(&b, "%s\n", thoughtSty.Render(fmt.Sprintf("  ✻ Thought for %ds", thought/1000)))
+			fmt.Fprintf(&b, "%s\n", thoughtSty.Render(fmt.Sprintf("  ● Thought for %ds", thought/1000)))
 		}
 		md := indentLines(renderMarkdown(me.Content), "  ")
 		if md != "" {
-			md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
+			md = caretStyle.Render("● ") + strings.TrimPrefix(md, "  ")
 		}
 		b.WriteString(md)
 		m.append(b.String())

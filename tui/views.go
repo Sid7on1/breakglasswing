@@ -258,11 +258,11 @@ func modeChip(mode string) string {
 // footerLine renders the status line + hints + model/tier bar, mirroring Ink's Footer.tsx: a left
 // status glyph + text, then right-aligned goals · stream meta · hint chord · model/tier.
 func (m model) footerLine() string {
-	icon, txt := footerIdle.Render("✻ "), footerIdle.Render(m.status)
+	icon, txt := footerIdle.Render("● "), footerIdle.Render(m.status)
 	if strings.Contains(m.status, "Requires AST Index") || strings.Contains(m.status, "run /index first") {
-		icon, txt = warnStyle.Render("✻ "), warnStyle.Render(m.status)
+		icon, txt = warnStyle.Render("● "), warnStyle.Render(m.status)
 	} else if m.busy {
-		icon, txt = footerIcon.Render("✶ "), dimStyle.Render(m.status)
+		icon, txt = footerIcon.Render("● "), dimStyle.Render(m.status)
 	}
 	left := icon + txt
 
@@ -288,9 +288,9 @@ func (m model) footerLine() string {
 		if m.fMind.DriveDeviations > 0 {
 			parts = append(parts, fmt.Sprintf("%d drive", m.fMind.DriveDeviations))
 		}
-		core = append(core, warnStyle.Render("🧠 "+strings.Join(parts, " · ")+" ⌃X"))
+		core = append(core, warnStyle.Render("◇ "+strings.Join(parts, " · ")+" ⌃X"))
 	} else if m.fMind.Habits > 0 {
-		core = append(core, footerHint.Render(fmt.Sprintf("🧠 %d habits ⌃X", m.fMind.Habits)))
+		core = append(core, footerHint.Render(fmt.Sprintf("◇ %d habits ⌃X", m.fMind.Habits)))
 	}
 	if m.busy {
 		// Only numbers that are TRUE go on screen: streamed characters (counted) and elapsed time
@@ -317,12 +317,12 @@ func (m model) footerLine() string {
 	// alongside it in the same loud family.
 	modeRendered := modeChip(m.fMode)
 	if m.fMcp > 0 {
-		modeRendered += " " + mcpChipStyle.Render(fmt.Sprintf("⚙ %d mcp", m.fMcp))
+		modeRendered += " " + mcpChipStyle.Render(fmt.Sprintf("▸ %d mcp", m.fMcp))
 	}
 
 	mstr := ""
 	if m.fPinned != "" {
-		mstr += "📌 " // pinned → this model handles every turn, no auto-switch
+		mstr += "◈ " // pinned → this model handles every turn, no auto-switch
 	} else {
 		mstr += "auto " // automatic routing → lite answers, escalates to the coding model when needed
 	}
@@ -384,7 +384,7 @@ func (m model) thinkingView() string {
 	shimmerText := renderShimmerVerb(verb, m.thinkTick, stalledIntensity, isToolPulse)
 	dots := strings.Repeat(".", m.thinkDots)
 	
-	s := m.spin.View() + " " + workLabel.Render("✻ ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	s := m.spin.View() + " " + workLabel.Render("● ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 	if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
 	}
@@ -410,59 +410,41 @@ func lerpRGB(a, b rgb, t float64) rgb {
 }
 
 var (
-	baseRGB    = rgb{215, 119, 87}  // colAccent (#D77757) - terracotta/orange
-	shimmerRGB = rgb{255, 255, 255} // pure bright white for maximum shine
-	errorRGB   = rgb{220, 50, 70}   // colErr (#DC3246) - red
+	baseRGB    = rgb{126, 231, 196} // colAccent (#7EE7C4) — phosphor
+	shimmerRGB = rgb{232, 255, 248} // near-white with a cool phosphor cast for the highlight
+	errorRGB   = rgb{229, 83, 75}   // colErr (#E5534B) — signal red
 )
 
+// renderShimmerVerb renders the working verb as a single CALM whole-word breath — one phosphor pulse
+// on a slow sine, not a per-character glimmer sweep. It reads as "alive and focused" without the
+// frenetic recolor-every-glyph churn (the old sweep was the "busy, not calm" tell). A stall tints the
+// whole word toward red; the tool phase breathes a touch faster than the thinking phase.
 func renderShimmerVerb(verb string, tickIdx int, stalledIntensity float64, isToolPulse bool) string {
 	curBase := lerpRGB(baseRGB, errorRGB, stalledIntensity)
 	curShimmer := lerpRGB(shimmerRGB, errorRGB, stalledIntensity)
 
+	period := 60 // ticks per full breath — ~3s at 50ms/tick (calm); tool phase a little quicker
 	if isToolPulse {
-		// Pulse breathing: sine wave over time (40 ticks = 2 seconds full cycle)
-		phase := float64(tickIdx%40) / 40.0
-		intensity := math.Sin(phase * math.Pi)
-		curColor := lerpRGB(curBase, curShimmer, intensity)
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(curColor.hex())).Render(verb)
+		period = 44
 	}
-
-	// Shimmer sweep: cycle length = verb length + 20 padding
-	runes := []rune(verb)
-	cycleLength := len(runes) + 20
-	glimmerIdx := (tickIdx / 2) % cycleLength
-	glimmerIdx -= 10 // offset so the glimmer sweeps in from outside the word
-
-	var b strings.Builder
-	for i, r := range runes {
-		dist := math.Abs(float64(i - glimmerIdx))
-		var c rgb
-		if dist < 0.5 {
-			c = curShimmer
-		} else if dist < 1.5 {
-			c = lerpRGB(curBase, curShimmer, 0.4) // halo
-		} else if dist < 2.5 {
-			c = lerpRGB(curBase, curShimmer, 0.1) // faint halo
-		} else {
-			c = curBase
-		}
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(c.hex())).Render(string(r)))
-	}
-	return b.String()
+	phase := float64(tickIdx%period) / float64(period)
+	intensity := math.Sin(phase * math.Pi) // 0 → 1 → 0 across the breath
+	c := lerpRGB(curBase, curShimmer, intensity)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(c.hex())).Render(verb)
 }
 
 // workingView: braille spinner + a bold "⏺ Generating… Ns" clock + cancel hint while the answer streams.
 func (m model) workingView() string {
-	return m.spin.View() + " " + workLabel.Render("⏺ Generating… "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
+	return m.spin.View() + " " + workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 }
 
 // toolingView: the same persistent indicator while the model is running tools, so "still working,
 // Ns elapsed, esc to stop" stays visible through the tool-call phase (not just text generation).
 func (m model) toolingView() string {
 	n := m.runningToolCount()
-	label := "⚙ Running tool… "
+	label := "▚ Running tool… "
 	if n > 1 {
-		label = fmt.Sprintf("⚙ Running %d tools… ", n)
+		label = fmt.Sprintf("▚ Running %d tools… ", n)
 	}
 	return m.spin.View() + " " + workLabel.Render(label+fmtElapsed(m.elapsed)) + statusStyle.Render(" · esc to stop")
 }
@@ -559,7 +541,7 @@ func (m model) tokenMeterView() string {
 	fmt.Fprintf(&b, "%s", meterText.Render(fmt.Sprintf("%s · ~%s tok", shortModel(model), humanCount(tokens))))
 	// Headroom compression: show cumulative tokens saved so the user sees it paying off.
 	if m.ctxSaved > 0 {
-		fmt.Fprintf(&b, "%s", logOK.Render(fmt.Sprintf(" · ⚡ -%s", humanCount(m.ctxSaved))))
+		fmt.Fprintf(&b, "%s", logOK.Render(fmt.Sprintf(" · ↯ -%s", humanCount(m.ctxSaved))))
 	}
 	// m.width-1, not full width — a line that fills the terminal auto-wraps and ghosts on resize.
 	return lipgloss.PlaceHorizontal(m.width-1, lipgloss.Right, b.String())

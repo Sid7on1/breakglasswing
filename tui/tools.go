@@ -139,7 +139,7 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 	if tc.AgentLabel != "" {
 		indent = "    " // sub-agent work nests under its spawner
 	}
-	header := dot.Render("⏺ ")
+	header := dot.Render("● ")
 	if tc.AgentLabel != "" {
 		header += agentBadge.Render("[" + tc.AgentLabel + "] ")
 	}
@@ -183,7 +183,7 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 	}
 	out := indent + header
 	if summary != "" {
-		out += "\n" + indent + "  " + toolGut.Render("⎿ ") + sumStyle.Render(summary)
+		out += "\n" + indent + "  " + toolGut.Render("└ ") + sumStyle.Render(summary)
 	}
 	return out + diffBlock
 }
@@ -331,7 +331,7 @@ func toolRunSummary(run []ToolCall) string {
 			parts = append(parts, fmt.Sprintf("%d %s", counts[cat], cat))
 		}
 	}
-	head := toolDot.Render("⏺ ") + toolLabel.Render(fmt.Sprintf("%d tool calls", len(run)))
+	head := toolDot.Render("● ") + toolLabel.Render(fmt.Sprintf("%d tool calls", len(run)))
 	body := toolArgs.Render(" · " + strings.Join(parts, " · "))
 	hint := subtleStyle.Render("  (ctrl+b to expand)")
 	return head + body + hint

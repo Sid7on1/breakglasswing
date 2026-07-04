@@ -13,25 +13,25 @@ import (
 // and NO code-block background fill. The renderer is width-dependent, so we cache it and rebuild
 // only when the viewport width changes. Falls back to raw text if glamour ever errors.
 
-// warmStyle is a glamour StyleConfig JSON tuned to the Ink "dark" theme (src/cli/themes.ts):
-// terracotta accent for headings/emphasis, bright-grey body text, flush-left margins, and a
-// background-less code block with desaturated syntax colors so output reads as content, not chrome.
+// mdStyle is a glamour StyleConfig JSON tuned to the "Graphite & Phosphor" system: phosphor accent
+// on top-level headings, Mist body text, flush-left margins, and a graphite-ground code block with
+// readable syntax colors so output reads as content, not chrome.
 var warmStyle = []byte(`{
-  "document": { "block_prefix": "", "block_suffix": "", "color": "#E6E6E6", "margin": 0 },
-  "block_quote": { "color": "#A0A0A0", "indent": 1, "indent_token": "│ " },
+  "document": { "block_prefix": "", "block_suffix": "", "color": "#EDEFF2", "margin": 0 },
+  "block_quote": { "color": "#9AA1AC", "indent": 1, "indent_token": "│ " },
   "paragraph": {},
   "list": { "level_indent": 2 },
-  "heading": { "block_suffix": "\n", "color": "#61AFEF", "bold": true },
-  "h1": { "prefix": "", "suffix": "", "color": "#73B8F8", "bold": true },
-  "h2": { "prefix": "## ", "color": "#61AFEF", "bold": true },
-  "h3": { "prefix": "### ", "color": "#61AFEF", "bold": true },
-  "h4": { "prefix": "#### ", "color": "#61AFEF", "bold": true },
-  "h5": { "prefix": "##### ", "color": "#61AFEF", "bold": true },
-  "h6": { "prefix": "###### ", "color": "#61AFEF", "bold": true },
+  "heading": { "block_suffix": "\n", "color": "#7EE7C4", "bold": true },
+  "h1": { "prefix": "", "suffix": "", "color": "#7EE7C4", "bold": true },
+  "h2": { "prefix": "## ", "color": "#7EE7C4", "bold": true },
+  "h3": { "prefix": "### ", "color": "#9AA1AC", "bold": true },
+  "h4": { "prefix": "#### ", "color": "#9AA1AC", "bold": true },
+  "h5": { "prefix": "##### ", "color": "#9AA1AC", "bold": true },
+  "h6": { "prefix": "###### ", "color": "#9AA1AC", "bold": true },
   "text": {},
-  "strong": { "color": "#E6E6E6", "bold": true },
+  "strong": { "color": "#EDEFF2", "bold": true },
   "emph": { "italic": true },
-  "hr": { "color": "#5A5A5A", "format": "\n────────\n" },
+  "hr": { "color": "#444A54", "format": "\n────────\n" },
   "item": { "block_prefix": "• " },
   "enumeration": { "block_prefix": ". " },
   "task": { "ticked": "[✓] ", "unticked": "[ ] " },
@@ -39,13 +39,13 @@ var warmStyle = []byte(`{
   "link_text": { "color": "#57C7C7", "bold": true },
   "image": { "color": "#57C7C7", "underline": true },
   "image_text": { "color": "#787878", "format": "Image: {{.text}}" },
-  "code": { "prefix": " ", "suffix": " ", "color": "#E5C07B", "background_color": "#2C313A" },
+  "code": { "prefix": " ", "suffix": " ", "color": "#EDEFF2", "background_color": "#23272E" },
   "code_block": {
     "color": "#ABB2BF",
-    "background_color": "#282C34",
+    "background_color": "#16181C",
     "margin": 2,
     "chroma": {
-      "text": { "color": "#ABB2BF", "background_color": "#282C34" },
+      "text": { "color": "#ABB2BF", "background_color": "#16181C" },
       "error": { "color": "#E06C75" },
       "comment": { "color": "#7F848E", "italic": true },
       "comment_preproc": { "color": "#C678DD" },
@@ -73,7 +73,7 @@ var warmStyle = []byte(`{
       "generic_emph": { "italic": true },
       "generic_strong": { "bold": true },
       "generic_subheading": { "color": "#7F848E" },
-      "background": { "background_color": "#282C34" }
+      "background": { "background_color": "#16181C" }
     }
   },
   "table": {},

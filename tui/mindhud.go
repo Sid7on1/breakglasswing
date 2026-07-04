@@ -39,7 +39,7 @@ func (m model) mindHudView() string {
 	inner := m.width - 10
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "%s%s\n", dashTitle.Render("🧠 Mind"), subtleStyle.Render("  — what the agent has learned about itself here"))
+	fmt.Fprintf(&b, "%s%s\n", dashTitle.Render("◇ Mind"), subtleStyle.Render("  — what the agent has learned about itself here"))
 
 	// --- Weak spots: the self-model's posterior distrust, with the evidence. ---
 	b.WriteString(dashColor("yellow").Render("Weak spots"))

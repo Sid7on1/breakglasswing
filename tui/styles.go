@@ -2,29 +2,29 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// Lip Gloss palette for the BiMax TUI — a faithful port of the Ink "dark" theme (src/cli/themes.ts).
-// Warm, low-chrome, content-first: a terracotta accent rather than a neon brand bar, muted greys for
-// chrome, and restrained semantic colors. Truecolor hex so it matches the Ink build pixel-for-pixel
-// on a capable terminal (lipgloss degrades it for 256/16-color terminals automatically).
+// Lip Gloss palette for the BiMax TUI — the "Graphite & Phosphor" design system (supersedes the old
+// Ink terracotta port). Instrument-grade and content-first: cool graphite neutrals carry the chrome,
+// a SINGLE phosphor accent marks only what is live / focused / active, and functional (Braun-dot)
+// semantics are reserved strictly for state. Truecolor hex; lipgloss degrades it for 256/16-color
+// terminals automatically. We paint foreground only — the ground is the user's own terminal.
 var (
-	// Core Ink "dark" palette (rgb → hex).
-	colAccent   = lipgloss.Color("#D77757") // terracotta — BiMax brand (was neon magenta)
-	colShimmer  = lipgloss.Color("#F59575") // lighter accent for the logo's middle row
-	colText     = lipgloss.Color("#E6E6E6") // bright text
-	colInactive = lipgloss.Color("#999999") // secondary text / summaries (Claude Code's `inactive`; was too dark at #787878)
-	colSubtle   = lipgloss.Color("#787878") // dim chrome (gutters, hints) — Ink subtle is darker but
-	//                                          #505050 is invisible on many terminals, so we lift it.
-	colDim     = lipgloss.Color("#5A5A5A")
-	colUser    = lipgloss.Color("#E6E6E6") // user lines: bright, marked by an accent caret
-	colAsst    = lipgloss.Color("#E6E6E6")
-	colTool    = lipgloss.Color("#50C850") // success green
-	colErr     = lipgloss.Color("#DC3246") // red
-	colWarn    = lipgloss.Color("#DCB432") // amber (running / in-progress)
-	colOK      = lipgloss.Color("#50C850")
-	colInfo    = lipgloss.Color("#5769F7") // blue (info / agent labels)
-	colDiffAdd = lipgloss.Color("#4ade80") // tailwind green-400 — add prefix / word fg
-	colDiffDel = lipgloss.Color("#f87171") // tailwind red-400 — remove prefix / word fg
-	colHunk    = lipgloss.Color("#57C7C7")
+	// Graphite & Phosphor core palette.
+	colAccent   = lipgloss.Color("#7EE7C4") // Phosphor — the one signal accent (live / focus / active)
+	colShimmer  = lipgloss.Color("#B8F2E0") // lighter phosphor for the shimmer highlight / logo mid-row
+	colText     = lipgloss.Color("#EDEFF2") // Mist — primary text
+	colInactive = lipgloss.Color("#9AA1AC") // secondary text / summaries (cool graphite)
+	colSubtle   = lipgloss.Color("#626974") // tertiary — dim chrome (gutters, hints)
+	colDim      = lipgloss.Color("#444A54") // faint graphite (empty meter cells, hairline text)
+	colUser     = lipgloss.Color("#EDEFF2") // user lines: bright, marked by the phosphor caret
+	colAsst     = lipgloss.Color("#EDEFF2")
+	colTool     = lipgloss.Color("#5FD08A") // ok green (Braun dot)
+	colErr      = lipgloss.Color("#E5534B") // signal red
+	colWarn     = lipgloss.Color("#E0B341") // sodium amber (running / in-progress / warn)
+	colOK       = lipgloss.Color("#5FD08A")
+	colInfo     = lipgloss.Color("#6E9BFF") // info blue (agent labels)
+	colDiffAdd  = lipgloss.Color("#7EE7A0") // diff add prefix / word fg
+	colDiffDel  = lipgloss.Color("#F08A82") // diff remove prefix / word fg
+	colHunk     = lipgloss.Color("#57C7C7")
 
 	// Welcome banner / wordmark.
 	logoStyle   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
@@ -102,16 +102,16 @@ var (
 	// Full-line diff (Claude-Code style): the WHOLE changed line gets a coloured background with
 	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
 	// warm theme). Line numbers sit in a dim gutter.
-	// Tailwind green-950/50 + green-400 / red-950/50 + red-400 (the spec'd terminal diff pair).
-	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#052e16")).Foreground(lipgloss.Color("#4ade80"))
-	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#450a0a")).Foreground(lipgloss.Color("#f87171"))
+	// Graphite-tinted diff pair: a deep green/red fill with a phosphor-adjacent readable fg.
+	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#0E2A1C")).Foreground(lipgloss.Color("#7EE7A0"))
+	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#2E1416")).Foreground(lipgloss.Color("#F08A82"))
 	// Diff gutter line numbers: bright white + bold so they read as a clear, prominent column (the
 	// dim grey was nearly invisible). Terminals can't change font size, so "big" = bold/bright.
 	diffLineNum = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
 
 	// Word-level diff (edit-tool preview): tinted background like Ink's diffWordsWithSpace.
-	diffAddWord = lipgloss.NewStyle().Background(lipgloss.Color("#1F3A1F")).Foreground(colDiffAdd)
-	diffDelWord = lipgloss.NewStyle().Background(lipgloss.Color("#3A1F1F")).Foreground(colDiffDel)
+	diffAddWord = lipgloss.NewStyle().Background(lipgloss.Color("#0E2A1C")).Foreground(colDiffAdd)
+	diffDelWord = lipgloss.NewStyle().Background(lipgloss.Color("#2E1416")).Foreground(colDiffDel)
 
 	// Search mode (Ctrl+F): the focused match gets the accent background; others a faint underline.
 	searchHL      = lipgloss.NewStyle().Background(colAccent).Foreground(lipgloss.Color("#1A1A1A")).Bold(true)

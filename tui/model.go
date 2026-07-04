@@ -371,7 +371,7 @@ func indentAwareWrap(text string, width int) string {
 		clean := ansi.Strip(line)
 		
 		indentStr := ""
-		if strings.HasPrefix(clean, "⏺ ") || strings.HasPrefix(clean, "❯ ") {
+		if strings.HasPrefix(clean, "● ") || strings.HasPrefix(clean, "❯ ") {
 			indentStr = "  "
 		} else {
 			for _, r := range clean {
@@ -661,7 +661,7 @@ func (m model) View() string {
 		if open := m.stream[m.streamCommitted:]; strings.TrimSpace(open) != "" {
 			md := indentLines(renderMarkdown(open), "  ")
 			if !m.turnAnswerStarted {
-				md = toolDot.Render("⏺ ") + strings.TrimPrefix(md, "  ")
+				md = caretStyle.Render("● ") + strings.TrimPrefix(md, "  ")
 			}
 			rows = append(rows, md)
 		}

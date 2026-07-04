@@ -18,9 +18,9 @@ var logoLines = []string{
 	"▐▌▄▄▟ ▗▄█▄▖ ▐▌  ▐▌ ▐▌ ▐▌ ▗▞▘▝▚▖",
 }
 
-// gradientLine sweeps the wordmark left → right from the brand terracotta into its lighter
-// shimmer and back — the same warm family the theme already uses, just with depth. Spaces are
-// skipped so the escape-code cost stays proportional to visible glyphs.
+// gradientLine sweeps the wordmark left → right from the phosphor accent into its lighter shimmer
+// and back — depth within the one signal color, never a second hue. Spaces are skipped so the
+// escape-code cost stays proportional to visible glyphs.
 func gradientLine(ln string) string {
 	runes := []rune(ln)
 	n := len(runes)
@@ -33,12 +33,12 @@ func gradientLine(ln string) string {
 			b.WriteRune(r)
 			continue
 		}
-		// Triangle wave 0→1→0 across the line: edges terracotta, center shimmer.
+		// Triangle wave 0→1→0 across the line: edges phosphor, center the lighter shimmer.
 		t := float64(i) / float64(n-1)
 		if t > 0.5 {
 			t = 1 - t
 		}
-		c := lerpRGB(baseRGB, rgb{245, 149, 117}, t*2) // colShimmer #F59575
+		c := lerpRGB(baseRGB, rgb{184, 242, 224}, t*2) // colShimmer #B8F2E0
 		b.WriteString(logoStyle.Foreground(lipgloss.Color(c.hex())).Render(string(r)))
 	}
 	return b.String()
@@ -64,7 +64,7 @@ func (m *model) showWelcome() {
 	for _, ln := range logoLines {
 		fmt.Fprintf(&b, "%s\n", gradientLine(ln))
 	}
-	fmt.Fprintf(&b, "\n%s%s\n\n", brandStyle.Render("BiMax "), tipStyle.Render("v1.0.0 · autonomous agent for your terminal"))
+	fmt.Fprintf(&b, "\n%s%s\n\n", brandStyle.Render("BiMax "), tipStyle.Render("v1.0.0 · two minds, one machine"))
 
 	model := shortModel(m.fCoding)
 	if model == "" {
@@ -82,11 +82,11 @@ func (m *model) showWelcome() {
 
 	mcpCount := countMcpServers(cwd)
 	if mcpCount > 0 {
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("mcp    "), metaVal.Render(fmt.Sprintf("%d server(s) configured", mcpCount)))
+		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("mcp    "), metaVal.Render(fmt.Sprintf("%d active", mcpCount)))
 	}
 
 	if m.fMode == "bypass" {
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("guard  "), warnStyle.Render("bypassed (YOLO)"))
+		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("guard  "), warnStyle.Render("bypassed — no approval prompts"))
 	}
 	fmt.Fprintf(&b, "\n%s\n", tipStyle.Render("Ask anything, or describe a task to run it with tools."))
 	fmt.Fprintf(&b, "%s", tipStyle.Render("/help · Ctrl+G palette · Ctrl+X mind · Ctrl+F search · Ctrl+O logs · Esc stash"))

@@ -85,7 +85,7 @@ func (m model) mapPanelView() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s%s\n", mapHdr.Render("Codebase Map · "), mapVal.Render(fmt.Sprintf("%d nodes · %d files", m.graph.NodeCount, m.graph.FileCount)))
 	if m.graph.Engine == "codebase-memory" {
-		fmt.Fprintf(&b, "%s%s\n", mapHdr.Render("engine: "), logOK.Render("⚡ codebase-memory · 158-lang · semantic"))
+		fmt.Fprintf(&b, "%s%s\n", mapHdr.Render("engine: "), logOK.Render("↯ codebase-memory · 158-lang · semantic"))
 	}
 	if len(m.graph.Modules) > 0 {
 		fmt.Fprintf(&b, "%s\n", mapHdr.Render("top modules (by criticality)"))
@@ -136,7 +136,7 @@ func (m model) compactMapView() string {
 	// whole live region multiplies on every tea.Println / zoom. A short left-aligned line can't wrap.
 	var b strings.Builder
 	if cbm {
-		fmt.Fprintf(&b, "%s", logOK.Render("⚡ codebase-memory"))
+		fmt.Fprintf(&b, "%s", logOK.Render("↯ codebase-memory"))
 		if m.graph.NodeCount > 0 {
 			fmt.Fprintf(&b, "%s", mapHdr.Render(fmt.Sprintf(" · %d nodes", m.graph.NodeCount)))
 		}
