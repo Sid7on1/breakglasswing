@@ -37,3 +37,4 @@ import './recipe';
 import './mode';
 import './selection';
 import './mind';
+import './calibration';
