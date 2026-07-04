@@ -4,7 +4,7 @@ import * as os from 'os';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createWriteFileTool } from '../tools/implementations/file.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
-import { createTodoWriteTool } from '../tools/implementations/todo.tool';
+import { createTodoWriteTool, getActiveTodos, todosTouchedThisTurn, beginTodoTurn, clearActiveTodos, getTodoPromptBlock } from '../tools/implementations/todo.tool';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { detectDegenerateAsk } from '../tools/ask-guard';
 import { IGovernor } from '../core/interfaces';
@@ -166,6 +166,34 @@ describe('TodoWriteTool', () => {
     });
     expect(res).toContain('0/1 done');
     expect(res).not.toContain('bad-status');
+  });
+
+  // Regression: the model forgot its own phases ("what phases are you talking about?") because the
+  // list was UI-only. It must now (a) survive a turn boundary and be re-injectable into the prompt,
+  // and (b) only trigger persistence auto-continue on the turn that actually touched it.
+  it('persists across turn boundaries and gates the persistence flag', async () => {
+    clearActiveTodos();
+    await tool.execute({
+      todos: [
+        { content: 'Phase 1', status: 'completed' },
+        { content: 'Phase 2', status: 'in_progress' },
+        { content: 'Phase 3', status: 'pending' },
+      ],
+    });
+    expect(todosTouchedThisTurn()).toBe(true);
+
+    // A new user turn begins: the touched flag resets but the list itself is retained as task memory.
+    beginTodoTurn();
+    expect(todosTouchedThisTurn()).toBe(false);
+    expect(getActiveTodos()).toHaveLength(3);
+
+    const block = getTodoPromptBlock();
+    expect(block).toContain('Phase 2');
+    expect(block).toContain('1/3 done');
+    expect(block).toMatch(/phases|tasks|plan/i); // steers the model to answer from the list
+
+    clearActiveTodos();
+    expect(getTodoPromptBlock()).toBe('');
   });
 });
 

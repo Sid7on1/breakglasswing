@@ -5,6 +5,7 @@ import { cliEvents, getSessionTokenEstimate } from '../events';
 import { globalMcpManager } from '../../mcp/manager';
 import { globalSkillService } from '../../skills/skill.service';
 import { getTaintTracker } from '../../mind/taint';
+import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getConfig } from '../config';
 import { modelMenuOptions, liveModelMenuOptions } from '../models';
 import { encode } from 'gpt-tokenizer';
@@ -321,6 +322,8 @@ globalCommandRegistry.register({
       try { context.restoreMessages?.([]); } catch { /* best-effort */ }
       // The untrusted content leaves the window with the history — taint lifts with it.
       try { getTaintTracker().clear('conversation cleared'); } catch { /* best-effort */ }
+      // Forget the durable task list too, so a fresh conversation doesn't inherit stale phases.
+      try { clearActiveTodos(); } catch { /* best-effort */ }
       cliEvents.emit('clear');
       return { type: 'message', level: 'success', content: 'Conversation cleared.' };
     }

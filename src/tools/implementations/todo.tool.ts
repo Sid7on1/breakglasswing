@@ -13,17 +13,44 @@ const STATUS_ICON: Record<TodoItem['status'], string> = {
   completed: '[x]',
 };
 
-// The most recent todo list the agent wrote this session. The agent loop reads it to decide whether
-// to keep going (persistence) when the model tries to stop with items still open.
+// The most recent todo list the agent wrote. Kept DURABLE across turns: it is the model's own task
+// memory, re-injected into the system prompt every turn (see getTodoPromptBlock) so the checklist
+// survives context compaction — the model must never forget its own phases mid-task. It is replaced
+// only when TodoWriteTool writes a fresh list, or wiped on a hard reset (/clear).
 let lastTodos: TodoItem[] = [];
+// Did THIS turn touch the list? The loop's persistence auto-continue keys off this so it only fires
+// when the model is actively working a checklist — a stray "thanks" after a task with open items
+// must not force a continue.
+let touchedThisTurn = false;
+
 export function getActiveTodos(): TodoItem[] { return lastTodos; }
-export function clearActiveTodos(): void { lastTodos = []; }
+export function todosTouchedThisTurn(): boolean { return touchedThisTurn; }
+/** Turn boundary: reset the per-turn touched flag but KEEP the list (it's persistent task memory). */
+export function beginTodoTurn(): void { touchedThisTurn = false; }
+/** Hard reset (new session / cleared history): forget the list entirely. */
+export function clearActiveTodos(): void { lastTodos = []; touchedThisTurn = false; }
 
 export function renderTodoList(todos: TodoItem[]): string {
   if (todos.length === 0) return 'Todo list is empty.';
   const done = todos.filter(t => t.status === 'completed').length;
   const lines = todos.map(t => `${STATUS_ICON[t.status]} ${t.content}`);
   return `Tasks (${done}/${todos.length} done):\n${lines.join('\n')}`;
+}
+
+/**
+ * The live task checklist formatted for injection into the system prompt EVERY turn. This is the fix
+ * for "what phases are you talking about?": the list is otherwise UI-only state that the model loses
+ * as soon as the creating turn is compacted out of history. Empty when there's no list at all.
+ */
+export function getTodoPromptBlock(): string {
+  if (lastTodos.length === 0) return '';
+  const done = lastTodos.filter(t => t.status === 'completed').length;
+  const allDone = done === lastTodos.length;
+  const lines = lastTodos.map(t => `${STATUS_ICON[t.status]} ${t.content}`);
+  const header = allDone
+    ? `### CURRENT TASK LIST — COMPLETE (${done}/${lastTodos.length} done)`
+    : `### CURRENT TASK LIST (${done}/${lastTodos.length} done) — your checklist for the work in progress`;
+  return `${header}\nThis is authoritative for what you are doing and what remains. If the user asks about progress, "the phases", "the tasks", or "the plan", answer from THIS list — never say you don't know what they mean. Keep it live with TodoWriteTool as statuses change.\n${lines.join('\n')}`;
 }
 
 export const createTodoWriteTool = (governor: IGovernor) => buildTool({
@@ -62,7 +89,8 @@ export const createTodoWriteTool = (governor: IGovernor) => buildTool({
         (t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed'),
     );
 
-    lastTodos = todos; // remember for the loop's persistence check
+    lastTodos = todos;      // durable: re-injected into the prompt every turn (task memory)
+    touchedThisTurn = true; // this turn is actively working a checklist → persistence may auto-continue
     // Push to the UI: full list into app state, compact progress into the status bar.
     cliEvents.emit('todo_update', todos);
     const done = todos.filter(t => t.status === 'completed').length;

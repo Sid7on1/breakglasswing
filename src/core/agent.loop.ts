@@ -6,7 +6,7 @@ import { IGovernor } from './interfaces';
 import { Logger } from '../utils';
 import { ContextManager } from '../memory/context.manager';
 import { cliEvents, ToolCallEntry } from '../cli/events';
-import { getActiveTodos } from '../tools/implementations/todo.tool';
+import { getActiveTodos, todosTouchedThisTurn } from '../tools/implementations/todo.tool';
 import { LoopDetector, LoopSignal } from './loop-detector';
 import { getGlobalPatternStore } from '../genome/pattern.store';
 import { globalTelemetry } from '../telemetry/telemetry';
@@ -468,7 +468,12 @@ export class AgentLoop {
         }
         // Persistence ("beast mode"): if the model tries to stop but its own todo list still has open
         // items, push it to keep going instead of handing back half-done. Bounded so it can't spin.
-        const incomplete = getActiveTodos().filter(t => t.status !== 'completed');
+        // Only auto-continue when THIS turn is actively working the checklist. The list is now
+        // durable across turns (for prompt injection), so without this gate a stray follow-up
+        // message after a task with open items would wrongly force a continue.
+        const incomplete = todosTouchedThisTurn()
+          ? getActiveTodos().filter(t => t.status !== 'completed')
+          : [];
         if (incomplete.length > 0 && persistenceNudges < MAX_PERSISTENCE_NUDGES) {
           persistenceNudges++;
           this.messages.push({

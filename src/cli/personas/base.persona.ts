@@ -14,7 +14,7 @@ import { isCodememReady } from '../../graph/codemem/backend';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
 import { loadProjectGuide } from '../projectGuide';
-import { clearActiveTodos } from '../../tools/implementations/todo.tool';
+import { beginTodoTurn, getTodoPromptBlock } from '../../tools/implementations/todo.tool';
 import { getGoalManager } from '../../memory/goal.manager';
 import { agentModePromptSection } from '../agentMode';
 import { getSelfModel } from '../../mind/self.model';
@@ -189,6 +189,14 @@ export abstract class AgentPersona {
       if (goalsBlock) sections.goals = goalsBlock;
     } catch { /* goals are best-effort — getGoalManager() throws if not yet initialized */ }
 
+    // Live task checklist: re-inject the agent's own todo list EVERY turn so it survives context
+    // compaction. Without this the list is UI-only and the model forgets its phases the moment the
+    // creating turn scrolls out of history ("what phases are you talking about?").
+    try {
+      const todoBlock = getTodoPromptBlock();
+      if (todoBlock) sections.todos = todoBlock;
+    } catch { /* best-effort */ }
+
     // Behavioral mode (5.2): explore / code specialization. Injected into the dynamic suffix.
     // 'explore' relies on the governor being flipped to plan mode for the read-only enforcement,
     // so the explicit plan-mode section below still renders the hard write-gate notice.
@@ -255,6 +263,7 @@ export abstract class AgentPersona {
       sections.drives,        // mind: homeostatic deviations to surface
       sections.calibration,   // mind: measured overconfidence → escalated verification
       sections.exemplars,     // mind: verified past episodes similar to THIS task (v2 §9.3)
+      sections.todos,         // live task checklist — re-injected each turn so phases survive compaction
       sections.plan,
     ].filter(Boolean).join('\n\n');
 
@@ -262,9 +271,10 @@ export abstract class AgentPersona {
   }
 
   public async execute(prompt: string, onToken?: (token: string) => void, options?: { maxIterations?: number; planMode?: boolean; useLite?: boolean; images?: string[]; signal?: AbortSignal }): Promise<string> {
-    // Fresh user turn: drop any leftover todos so the loop's persistence check only reacts to items
-    // this task actually opens (no spurious "keep going" on an unrelated next message).
-    clearActiveTodos();
+    // Fresh user turn: reset the per-turn "touched" flag so the loop's persistence check only reacts
+    // to items THIS turn opens (no spurious "keep going" on an unrelated next message). The list
+    // itself is kept — it's re-injected into the prompt so the model never forgets its own phases.
+    beginTodoTurn();
 
     // Theory of mind: corrections ("don't …", "always …") become standing preferences that are
     // re-injected into every future prompt, so the user never has to repeat themselves.
