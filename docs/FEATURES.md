@@ -127,7 +127,8 @@ file change before it lands. **Benefit:** autonomy you can actually trust, with 
 **Benefit:** BiMax grows new abilities without a rebuild.
 
 ## A genuinely clean terminal UX
-Built on Ink (React for the terminal): streaming markdown, syntax-highlighted code blocks,
+A Go / Bubble Tea TUI running in inline mode (committed lines go to the terminal's native
+scrollback; only the live region redraws): streaming markdown, syntax-highlighted code blocks,
 live tool-call lines (`⏺`/`⎿`), a command palette, inline diffs, dashboards, multiple
 themes, a thinking indicator with a live reasoning tail, ghost-free resize, **session
 save/resume** (`/sessions`, `/resume`), **transcript replay** (`/replay`), and live

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Buffer boot logs so they don't fight Ink's stdout
+// Buffer boot logs so they don't fight the front-end for stdout during boot
 const bootLogs: string[] = [];
 const originalConsoleLog = console.log;
 const originalConsoleWarn = console.warn;
@@ -58,7 +58,7 @@ const prompt = program.args[0];
 // Boot log capture moved to top of file
 
 function replayBootLogs() {
-  // Give Ink a moment to mount and take over console
+  // Give the front-end a moment to attach before replaying buffered boot logs as events
   setTimeout(() => {
     for (const msg of bootLogs) {
       cliEvents.emit('log', { id: 0, level: 'info', text: msg, timestamp: new Date() });
@@ -149,9 +149,9 @@ async function main() {
     process.exit(0);
   }
 
-  // Headless mode — drive the engine over an NDJSON stdio protocol instead of mounting Ink.
-  // This is the process an out-of-process front-end (the Go / Bubble Tea TUI) spawns. Forked here:
-  // after the container is wired, before Ink would take the TTY. The Ink path below is untouched.
+  // Headless mode — drive the engine over an NDJSON stdio protocol. This is the process the
+  // out-of-process front-end (the Go / Bubble Tea TUI) spawns, forked after the container is
+  // wired. This is the only interactive path; there is no in-process UI below (see §below).
   if (process.env.BIMAX_HEADLESS === '1' || cliFlags.headless) {
     const { startHeadless } = await import('./protocol/headless.entry');
     await startHeadless(container, config);

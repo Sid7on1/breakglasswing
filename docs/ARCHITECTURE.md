@@ -14,7 +14,8 @@ Source layout (`src/`): `core` `cli` `tools` `governor` `memory` `graph` `genome
 - **`src/index.ts` / `src/cli/index.ts`** — CLI entry. Parses flags (`-p/--print`,
   `--print-with-tools`, `--dangerously-skip-permissions`, agent, model), loads env
   (`src/cli/env.loader.ts`, which reads `~/.breakglass/.env`), boots the DI container, and
-  launches either the interactive Ink app or one-shot print mode.
+  either drives the engine over the NDJSON stdio protocol for the Go/Bubble Tea TUI (the sole
+  interactive front-end; see §13) or runs one-shot print mode.
 - **`src/core/container.ts`** — the **dependency-injection container**. Wires the entire
   graph in one factory: event bus, telemetry, DB, governor, LLM adapter, tool registry,
   graph store, memory, coordinator/worker, task pipeline. One place to understand how
@@ -204,14 +205,20 @@ Install and integrate third-party capabilities **directly from GitHub**:
   `LogEntry`, `ToolCallEntry`); bridges `cliEvents` → UI. Session save/resume (`/sessions`,
   `/resume`) and transcript replay (`/replay`) persist to `.breakglass/`.
 
-## 13. Terminal & UI (`src/cli`, `src/terminal`)
+## 13. Terminal & UI (`tui/`, `src/protocol`)
 
-- **`cli/screens/FullScreen.tsx`**: the Ink app — `<Static>` scrollback, streaming area,
-  command palette, prompt, diff/permission overlays, resize repaint, footer.
-- **Components** (`cli/components/`): `WelcomeBanner`, `Transcript`, `ToolCallLine`
-  (`⏺`/`⎿`), `ThinkingText` (`✻` + live reasoning tail), `Markdown`/`MarkdownRenderer`,
-  `DiffView`, `PermissionDialog`, `InteractiveMenu`, `InteractivePrompt`, `SimpleInput`,
-  `Footer`, `LogView`, `Dashboards`, `SearchHighlight`.
+The interactive front-end is a **Go / Bubble Tea TUI** in `tui/` (the earlier React/Ink UI
+was retired). The engine speaks to it out-of-process over an NDJSON stdio protocol
+(`src/protocol/`), so the front-end can be swapped without touching engine logic.
+
+- **`tui/model.go`**: the Bubble Tea model — inline mode (committed lines flushed to the
+  terminal's native scrollback via `tea.Println`; only the live region re-renders), streaming
+  area, resize/hardwrap guards, footer.
+- **`tui/`** render units: `diff.go` (colorized diff cards), `tools.go` (fixed-slot tool
+  cards), `markdown.go`, `panels.go`, `mindhud.go` (Ctrl+X second-mind HUD), `styles.go`
+  (Graphite & Phosphor tokens), `search.go`, `welcome.go`.
+- **`src/protocol/ui.snapshot.ts`**: engine-side footer/HUD state snapshotted for the
+  out-of-process front-end to read.
 - **Themes** (`cli/themes.ts` + `themes/*.json`): dark, light, ANSI, daltonized, bimax,
   dracula, catppuccin, gruvbox, nord. Switchable via `/config`.
 - **`terminal/multiplexer.ts` — `TerminalMultiplexer`** + **`queue.ts` — `CommandQueue`**:

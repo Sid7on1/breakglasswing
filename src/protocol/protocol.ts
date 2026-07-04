@@ -1,8 +1,8 @@
-// BiMax UI protocol — the wire contract between the engine (Node, unchanged) and a front-end
-// running out-of-process (the planned Go / Bubble Tea TUI). It exists so the engine's existing
-// UI seam — the `cliEvents` emitter (src/cli/events.ts) + the GlobalPrompter approval round-trip
-// — can be driven over a pipe instead of in-process, WITHOUT touching engine logic. Ink keeps
-// working in-process; this is purely additive and only activates in headless mode.
+// BiMax UI protocol — the wire contract between the engine (Node) and the out-of-process
+// front-end (the Go / Bubble Tea TUI in tui/). It exists so the engine's UI seam — the
+// `cliEvents` emitter (src/cli/events.ts) + the GlobalPrompter approval round-trip — can be
+// driven over a pipe instead of in-process, WITHOUT touching engine logic. This is the sole
+// interactive path; it activates in headless mode, which the TUI always spawns.
 //
 // Transport is newline-delimited JSON (NDJSON): one JSON object per line, both directions. See
 // codec.ts for framing and host.ts for the engine-side endpoint.
@@ -96,12 +96,11 @@ export const FORWARDED_EVENTS: readonly string[] = [
   'cost_update', 'todo_update', 'thinking', 'thinking_clear',
   'config_changed', 'graph_changed', 'cwd_changed', 'mcp_changed',
   'rerun_onboarding', 'shutdown', 'loop_detected', 'goals_changed',
-  // /clear wipes the front-end transcript (the engine has no Ink FullScreen to intercept it).
+  // /clear wipes the front-end transcript (the engine has no in-process UI to intercept it).
   'clear',
-  // Headless-only: the persona streams reply tokens through a direct callback in the Ink path;
-  // in headless mode the driver re-emits each token here so the front-end can render the stream.
+  // The driver re-emits each reply token here so the out-of-process front-end can render the stream.
   'stream_token',
-  // Footer state the Ink UI reads from engine singletons; snapshotted for out-of-process clients.
+  // Footer state read from engine singletons; snapshotted for the out-of-process front-end.
   'ui_snapshot',
 ];
 
