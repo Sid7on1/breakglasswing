@@ -58,6 +58,57 @@ describe('AgentLoop — recovers and executes a text-emitted tool call', () => {
 });
 
 /**
+ * Tool-result ordering: when a turn mixes concurrency-safe (parallel) and unsafe (sequential)
+ * tools, the pushed `tool` result messages must appear in the SAME order the model emitted the
+ * tool_calls — not "all parallel first, then all sequential". Order-sensitive OpenAI-compatible
+ * backends reject a mismatch, and every tool_call must be answered exactly once.
+ */
+describe('AgentLoop — tool results are pushed in tool_call order', () => {
+  it('pairs each result to its call in emission order across parallel/sequential tools', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'WriteFileTool', description: 'writes', schema: {},
+      isDestructive: true, isConcurrencySafe: false, // sequential
+      execute: async () => 'WROTE',
+    } as any);
+    registry.register({
+      name: 'ReadFileTool', description: 'reads', schema: {},
+      isDestructive: false, isConcurrencySafe: true, // parallel
+      execute: async () => 'READ',
+    } as any);
+
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        if (call === 1) {
+          // Emission order: sequential tool FIRST, parallel tool SECOND.
+          yield { type: 'tool_call', id: 'w1', name: 'WriteFileTool', args: '{"path":"/tmp/a","content":"x"}' };
+          yield { type: 'tool_call', id: 'r1', name: 'ReadFileTool', args: '{"path":"/tmp/b"}' };
+          yield { type: 'done' };
+        } else {
+          yield { type: 'token', text: 'Done.' };
+          yield { type: 'done' };
+        }
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, registry, null as any);
+    // eslint-disable-next-line no-empty
+    for await (const _ of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 3 })) {}
+
+    const toolMsgs = loop.messages.filter(m => m.role === 'tool');
+    // Both calls answered, in emission order (write result before read result).
+    expect(toolMsgs.map(m => m.tool_call_id)).toEqual(['w1', 'r1']);
+    // Each id answered exactly once — no gaps, no duplicates.
+    const asst = loop.messages.find(m => m.role === 'assistant' && m.tool_calls?.length);
+    const callIds = asst!.tool_calls!.map(tc => tc.id).sort();
+    const resultIds = toolMsgs.map(m => m.tool_call_id).sort();
+    expect(resultIds).toEqual(callIds);
+  });
+});
+
+/**
  * C3 live tool-arg streaming: a `tool_call_partial` event must surface as a live "running" tool
  * entry on the UI bus (so the call shows as it forms) WITHOUT being executed — only the final
  * authoritative `tool_call` runs the tool.

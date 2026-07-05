@@ -238,6 +238,10 @@ export class SubAgentManager {
       };
 
       worker.on('message', (message) => {
+        // Post-settlement guard: after a timeout (or any earlier terminal event) a late
+        // success/error message must NOT re-write the board — it would flip a timed-out agent to
+        // "done" or overwrite the real failure reason and fire a spurious board refresh.
+        if (settled && (message.type === 'success' || message.type === 'error')) return;
         if (message.type === 'success') {
           globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
           this.spawnConfigs.delete(taskId); // settled — no longer crash-recoverable
@@ -268,6 +272,7 @@ export class SubAgentManager {
       });
 
       worker.on('error', (err) => {
+        if (settled) return; // already resolved/rejected/timed-out — don't clobber the outcome
         globalSubAgentBlackboard.markFailed(taskId, err?.message || String(err));
         this.spawnConfigs.delete(taskId);
         this.emitBoard();
@@ -277,6 +282,9 @@ export class SubAgentManager {
       });
 
       worker.on('exit', (code) => {
+        // A terminate()-driven exit follows every timeout/error/success settle. Bail so it can't
+        // overwrite the recorded reason ("timed out after Nms" → "exited with code 1") or double-emit.
+        if (settled) return;
         if (code !== 0) {
           span.end('error', `exit code ${code}`);
           settleIsolation();

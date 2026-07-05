@@ -1,4 +1,5 @@
 import { SubAgentManager } from '../core/subagent.manager';
+import { globalSubAgentBlackboard } from '../core/subagent.blackboard';
 import { cliEvents, ToolCallEntry } from '../cli/events';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -49,6 +50,20 @@ describe('SubAgentManager — worker watchdog timeout', () => {
     expect(mgr.activeCount()).toBe(0);
     // Give any (incorrectly uncleared) timer a chance to fire — it must not.
     await new Promise(r => setTimeout(r, 50));
+  });
+
+  // Regression: after a timeout, terminate() fires an 'exit' event. The exit handler used to run
+  // its side-effects unconditionally, overwriting the board's "timed out after Nms" reason with
+  // "worker exited with code N". The settled-guard must keep the real (timeout) reason.
+  it('keeps the timeout reason on the board after the terminate-driven exit fires', async () => {
+    const mgr = new SubAgentManager({ workerScriptPath: hangScript, timeoutMs: 200 });
+    await expect(mgr.spawnWorker('t-clobber', cfg)).rejects.toThrow(/timed out/i);
+    // Let the exit event (from terminate) land — the guard must suppress its board write.
+    await new Promise(r => setTimeout(r, 150));
+    const claim = globalSubAgentBlackboard.all().find(c => c.taskId === 't-clobber');
+    expect(claim?.status).toBe('failed');
+    expect(claim?.error).toMatch(/timed out/i);
+    expect(claim?.error).not.toMatch(/exited with code/i);
   });
 });
 
