@@ -30,6 +30,7 @@ import './a11y';
 import './orchestrate';
 import './tier';
 import './goals';
+import './workspace';
 import './tx';
 import './changelog';
 import './scout';

@@ -84,6 +84,9 @@ export interface UiSnapshot {
   // Cumulative tokens saved this session by Headroom-style backlog compression — shown next to the
   // token meter so the user sees the compression paying off.
   compressionSaved: number;
+  // Multi-repo workspace: how many repos are in context and their names, so the TUI status bar
+  // always shows the working set (workspace.manager.ts). count <= 1 = single-repo session.
+  workspace: { count: number; names: string[]; writable: number };
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -178,7 +181,14 @@ function snapshot(graphStore?: IGraphStore): UiSnapshot {
     };
   } catch { /* mind layer best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved };
+  let workspace = { count: 0, names: [] as string[], writable: 0 };
+  try {
+    const { tryGetWorkspace } = require('../core/workspace.manager');
+    const ws = tryGetWorkspace();
+    if (ws) workspace = ws.snapshot();
+  } catch { /* workspace best-effort */ }
+
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace };
 }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
@@ -203,4 +213,6 @@ export function startUiSnapshot(graphStore?: IGraphStore): void {
   // Mind layer: re-snapshot when self-model / drives / habits change so the footer's 🧠 strip
   // stays live.
   cliEvents.on('mind_changed', emit);
+  // Workspace: repo registered / scoped / ignored → status-bar repo chip updates.
+  cliEvents.on('workspace_changed', emit);
 }

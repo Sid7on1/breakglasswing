@@ -292,6 +292,15 @@ func (m model) footerLine() string {
 	} else if m.fMind.Habits > 0 {
 		core = append(core, footerHint.Render(fmt.Sprintf("◇ %d habits ⌃X", m.fMind.Habits)))
 	}
+	// Multi-repo workspace chip: visible whenever the session spans more than one repo, so the
+	// user always knows the working set. Short names inline while they fit; count otherwise.
+	if m.fWorkspace.Count > 1 {
+		label := fmt.Sprintf("⌂ %d repos", m.fWorkspace.Count)
+		if joined := strings.Join(m.fWorkspace.Names, "+"); len(joined) <= 24 && joined != "" {
+			label = "⌂ " + joined
+		}
+		core = append(core, footerHint.Render(label))
+	}
 	if m.busy {
 		// Only numbers that are TRUE go on screen: streamed characters (counted) and elapsed time
 		// (measured). The old "tok/s" was chars/4/elapsed — an estimate dressed up as telemetry.

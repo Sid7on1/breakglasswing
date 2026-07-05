@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as ts from 'typescript';
-import { resolvePath } from '../path.util';
+import { resolvePath, workspaceWriteBlock } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
@@ -124,6 +124,8 @@ export const createSymbolEditTool = (governor: IGovernor) => buildTool({
     };
     const cwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, cwd);
+    const wsBlock = workspaceWriteBlock(fullPath);
+    if (wsBlock) return outcomeError('permission', `Error: ${wsBlock}`);
     const ext = path.extname(fullPath).toLowerCase();
     if (!SUPPORTED.has(ext)) {
       return outcomeError('invalid_args', `Error: SymbolEditTool only understands JS/TS files (got '${ext || 'no extension'}'). Use EditFileTool for other file types.`);

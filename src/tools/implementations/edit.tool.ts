@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { resolvePath, countOccurrences } from '../path.util';
+import { resolvePath, countOccurrences, workspaceWriteBlock } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
@@ -232,6 +232,9 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     };
     const cwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, cwd);
+
+    const wsBlock = workspaceWriteBlock(fullPath);
+    if (wsBlock) return outcomeError('permission', `Error: ${wsBlock}`);
 
     if (args.oldString === args.newString) {
       return outcomeError('invalid_args', 'Error: newString must be different from oldString.');

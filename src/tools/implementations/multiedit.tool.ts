@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { resolvePath, countOccurrences } from '../path.util';
+import { resolvePath, countOccurrences, workspaceWriteBlock } from '../path.util';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { backupFile, unifiedDiff, compactDiff, capDiff } from '../../cli/fileEditor';
@@ -81,6 +81,8 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
       if (!e.oldString) return outcomeError('invalid_args', `Error: edit #${i + 1} (${e.path}): oldString cannot be empty.`);
 
       const full = resolvePath(e.path, cwd);
+      const wsBlock = workspaceWriteBlock(full);
+      if (wsBlock) return outcomeError('permission', `Error: edit #${i + 1} (${e.path}): ${wsBlock}`);
       if (!working.has(full)) {
         try {
           const disk = await fs.readFile(full, 'utf8');

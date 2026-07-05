@@ -233,10 +233,13 @@ type model struct {
 	// structured log view (Ctrl+O toggles it in place of the transcript).
 	showLogs bool
 	showFullMap bool
-	// mind HUD overlay (Ctrl+X): the 🧠 chip's explainable panel — weak spots with posterior
+	// mind HUD overlay (Ctrl+X): the ◇ chip's explainable panel — weak spots with posterior
 	// stats, drives with sparklines, compiled habits (v2 §3.11).
 	showMind bool
-	logs     []LogEntry
+	// Active HUD tab: 0 = overview (all sections), then weak spots / drives / ledger / habits.
+	// Tab cycles forward, Shift+Tab back, while the HUD is open.
+	mindTab int
+	logs    []LogEntry
 
 	// masked free-form prompt (API keys): render the typed value as bullets in promptView.
 	reqMasked bool
@@ -278,6 +281,7 @@ type model struct {
 	fGoals  int    // active goal count
 	fMcp    int    // connected (non-disabled) MCP server count
 	fMind   MindStrip // mind layer: weak spots / drive deviations / compiled habits
+	fWorkspace WorkspaceStrip // multi-repo workspace: repo count/names for the status chip
 
 	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used
 	// for ephemeral one-liners (e.g. mode switches) that shouldn't linger or clutter the transcript.

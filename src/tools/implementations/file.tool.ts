@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { resolvePath } from '../path.util';
+import { resolvePath, workspaceWriteBlock } from '../path.util';
 import * as crypto from 'crypto';
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
@@ -152,6 +152,8 @@ Use this tool to write new code, update configuration files, or generate artifac
   execute: async (args: { path: string, content: string, overwrite?: boolean }, context?: any) => {
     const currentCwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, currentCwd);
+    const wsBlock = workspaceWriteBlock(fullPath);
+    if (wsBlock) return outcomeError('permission', `Error: ${wsBlock}`);
     const exists = await fs.access(fullPath).then(() => true).catch(() => false);
     // Write creates OR overwrites (standard agent behavior — models emit Write expecting it to
     // replace an existing file, and erroring "file already exists" just wedged them into a retry
@@ -227,6 +229,8 @@ Use this tool whenever the user explicitly asks you to delete, remove, or trash 
   execute: async (args: { path: string }, context?: any) => {
     const currentCwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, currentCwd);
+    const wsBlock = workspaceWriteBlock(fullPath);
+    if (wsBlock) return outcomeError('permission', `Error: ${wsBlock}`);
     // Verify the target actually exists BEFORE deleting. fs.rm with `force: true`
     // silently treats a missing path as success, which would let us report
     // "Successfully deleted" for a path that never existed (e.g. a bare name

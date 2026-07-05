@@ -142,6 +142,7 @@ func (m *model) handleEvent(o Outbound) {
 			m.ctxWindow = s.ContextWindow
 			m.ctxBaseline = s.TokensBaseline
 			m.ctxSaved = s.CompressionSaved
+			m.fWorkspace = s.Workspace
 		}
 
 	case "tool_call", "tool_call_result":

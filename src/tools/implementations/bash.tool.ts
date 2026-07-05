@@ -72,6 +72,11 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
         : await execAsync(cmd, execOpts);
       const out = stdout.trim();
       const err = stderr.trim();
+      // Workspace: a successful `git clone` makes the new repo an ask-once registration
+      // candidate (multi-repo awareness, workspace.manager.ts). Best-effort, never blocks.
+      if (/git\s+clone\s/.test(cmd)) {
+        try { require('../../core/workspace.manager').tryGetWorkspace()?.noticeCommand(cmd, currentCwd); } catch { /* best-effort */ }
+      }
       const payload = {
         stdout: out.length > MAX_OUTPUT_CHARS ? out.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : out,
         stderr: err.length > MAX_OUTPUT_CHARS ? err.slice(0, MAX_OUTPUT_CHARS) + '\n...[truncated]' : err,

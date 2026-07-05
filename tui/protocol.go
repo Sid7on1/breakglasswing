@@ -107,6 +107,16 @@ type UiSnapshot struct {
 	TokensBaseline int          `json:"tokensBaseline"`
 	// Cumulative tokens saved this session by Headroom-style backlog compression.
 	CompressionSaved int `json:"compressionSaved"`
+	// Multi-repo workspace working set (count <= 1 = single-repo session; chip hidden).
+	Workspace WorkspaceStrip `json:"workspace"`
+}
+
+// WorkspaceStrip — the multi-repo workspace summary for the status bar: how many repos are in
+// context, their names, and how many are writable. Mirrors UiSnapshot.workspace.
+type WorkspaceStrip struct {
+	Count    int      `json:"count"`
+	Names    []string `json:"names"`
+	Writable int      `json:"writable"`
 }
 
 // MindStrip — the mind layer's footer counters: learned weak spots being routed around,

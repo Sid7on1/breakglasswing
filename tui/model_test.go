@@ -340,6 +340,35 @@ func TestAmbientHealthLine(t *testing.T) {
 	}
 }
 
+// Multi-repo workspace chip: hidden in single-repo sessions, short names inline when they fit,
+// count form when they don't. Fed by ui_snapshot.workspace.
+func TestWorkspaceChipInFooter(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 100, 40
+
+	// Single repo (or none): no chip.
+	m.fWorkspace = WorkspaceStrip{Count: 1, Names: []string{"Bimax"}, Writable: 1}
+	if strings.Contains(stripANSI(m.footerLine()), "⌂") {
+		t.Fatalf("workspace chip must be hidden in single-repo sessions: %q", stripANSI(m.footerLine()))
+	}
+
+	// Two repos with short names → names inline.
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"workspace": map[string]any{"count": 2, "names": []string{"Bimax", "aider"}, "writable": 1},
+	}))
+	foot := stripANSI(m.footerLine())
+	if !strings.Contains(foot, "⌂ Bimax+aider") {
+		t.Fatalf("expected inline repo names in footer, got: %q", foot)
+	}
+
+	// Many/long names → count form.
+	m.fWorkspace = WorkspaceStrip{Count: 4, Names: []string{"Bimax", "aider", "vestige", "agent-lsp-server"}, Writable: 1}
+	foot = stripANSI(m.footerLine())
+	if !strings.Contains(foot, "⌂ 4 repos") {
+		t.Fatalf("expected count-form workspace chip, got: %q", foot)
+	}
+}
+
 // The working indicator names which mind is handling the turn — "fast" (lite) or "deep" (heavy) —
 // so BiMax's two-tier routing is visible live, not just in the footer pointer.
 func TestTierTagVisibleWhileWorking(t *testing.T) {

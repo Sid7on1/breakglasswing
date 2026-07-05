@@ -65,7 +65,9 @@ import { createGitTool } from '../tools/implementations/git.tool';
 import { createLspQueryTool } from '../tools/implementations/lsp.tool';
 import { createFreeContextTool } from '../tools/implementations/free-context.tool';
 import { createGoalsTool } from '../tools/implementations/goals.tool';
+import { createWorkspaceTool } from '../tools/implementations/workspace.tool';
 import { initGoalManager } from '../memory/goal.manager';
+import { initWorkspace } from './workspace.manager';
 import { initPlanManager } from '../memory/plan.manager';
 import { createPlanTool } from '../tools/implementations/plan.tool';
 import { createScoutTool } from '../tools/implementations/scout.tool';
@@ -90,6 +92,10 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
 
   // Plan Manager — VCS-backed structured plans in .bimax/plans/.
   initPlanManager(process.cwd());
+
+  // Multi-repo workspace — manifest refresh + sibling-clone scan on session start (PR1,
+  // docs/UPGRADE_2026_RESEARCH.md). Best-effort: a broken manifest must not block boot.
+  try { initWorkspace(process.cwd()); } catch (e: any) { Logger.warn(`[Workspace] init failed: ${e?.message ?? e}`); }
 
   // Core Events
   const eventBus = new EventBus();
@@ -169,6 +175,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createLspQueryTool(governor, graphStore));
   toolRegistry.register(createFreeContextTool(governor));
   toolRegistry.register(createGoalsTool(governor));
+  toolRegistry.register(createWorkspaceTool(governor));
   toolRegistry.register(createPlanTool(governor));
   toolRegistry.register(createScoutTool(governor));
   // Sketch Mode: the level-by-level Blueprint builder + LLM-training monitoring.
