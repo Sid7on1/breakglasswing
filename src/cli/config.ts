@@ -21,6 +21,9 @@ export interface CliConfig {
   defaultAgent: string;
   model: string;       // the CODING model — drives the main agent loop
   liteModel: string;   // the LITE model — used for cheap aux calls (summaries, self-critic, ask-user)
+  // Resilience chain: when the active model keeps failing mid-run (retry budget exhausted, or the
+  // provider starts rejecting it), the loop switches to this model once instead of dying. '' = off.
+  fallbackModel: string;
   timeout: number;
   temperature: number;
   topP: number; // nucleus sampling cap; clips the low-probability tail that drives dropped tool args / fabricated paths
@@ -77,6 +80,7 @@ const DEFAULTS: CliConfig = {
   // from token 1 so it no longer feels like it hangs.)
   model: 'stepfun-ai/step-3.7-flash',
   liteModel: 'stepfun-ai/step-3.7-flash', // valid NIM id (step-3.5-flash 400s "not a valid model ID")
+  fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   timeout: 120000,
   temperature: 0.7,
   topP: 0.95,

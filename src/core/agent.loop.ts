@@ -17,6 +17,7 @@ import { markToolTaint } from '../mind/taint';
 import { getHabitMiner } from '../mind/habit.compiler';
 import { getEpistemicLedger, isEvidenceCommand } from '../mind/epistemic.ledger';
 import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder';
+import { getTracer } from '../telemetry/trace';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -41,6 +42,9 @@ export function sanitizeToolArgs(raw: any): string {
 export class AgentLoop {
   private contextManager: ContextManager;
   public messages: Message[] = [];
+  // Model fallback chain (the Claude Code `fallbackModel` analogue): armed once per loop
+  // instance, so a session that failed over doesn't ping-pong between two broken models.
+  private fallbackApplied = false;
 
   constructor(
     private llm: LLMProvider,
@@ -54,6 +58,24 @@ export class AgentLoop {
     maxContextTokens?: number
   ) {
     this.contextManager = new ContextManager(llm, maxContextTokens);
+  }
+
+  /**
+   * The fallback model to fail over to, or null when there's nothing sensible to do: none
+   * configured, already failed over, or the fallback IS the currently failing model.
+   */
+  private fallbackModelFor(): string | null {
+    if (this.fallbackApplied) return null;
+    // Env beats config so headless/autonomous runs (and tests) can arm the chain per-process.
+    let fb = String(process.env.BIMAX_FALLBACK_MODEL || '').trim();
+    if (!fb) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        fb = String((require('../cli/config') as typeof import('../cli/config')).getConfig().fallbackModel || '').trim();
+      } catch { return null; }
+    }
+    const current = String((this.llm as any)?.userModel || (this.llm as any)?.defaultModel || '');
+    return fb && fb !== current ? fb : null;
   }
 
   async *execute(
@@ -97,6 +119,18 @@ export class AgentLoop {
     // self-flushing per call. /episodes replays it; BIMAX_RECORDER=0 disables.
     const recordedLlm = startEpisodeRecording(this.llm).llm;
 
+    // OTel GenAI trace: one invoke_agent span per execute(), with a chat span per LLM round and
+    // an execute_tool span per tool call nested under it. Exported as JSONL (+OTLP when
+    // configured) — see src/telemetry/trace.ts. The finally below covers every return path,
+    // including generator cleanup when the consumer stops iterating.
+    const tracer = getTracer();
+    const rootSpan = tracer.startSpan('invoke_agent bimax', {
+      'gen_ai.operation.name': 'invoke_agent',
+      'gen_ai.agent.name': 'bimax',
+    });
+    let llmRounds = 0;
+    try {
+
     for (let i = 0; i < maxIter; i++) {
       // Interrupted between turns: stop cleanly before spending another model call.
       if (signal?.aborted) return;
@@ -125,6 +159,20 @@ export class AgentLoop {
       // a transient-error retry); triggers the `continue` below.
       let discardTurn = false;
 
+      llmRounds++;
+      const chatSpan = tracer.startSpan(
+        `chat ${String((this.llm as any)?.userModel || (this.llm as any)?.defaultModel || 'unknown')}`,
+        {
+          'gen_ai.operation.name': 'chat',
+          'gen_ai.request.model': String((this.llm as any)?.userModel || (this.llm as any)?.defaultModel || 'unknown'),
+          'bimax.chat.round': i + 1,
+          ...(options?.useLite ? { 'bimax.chat.lite': true } : {}),
+        },
+        rootSpan.context
+      );
+      let chatErrorMsg: string | undefined;
+
+      try {
       for await (const event of generator) {
         // Interrupted mid-stream: stop pulling tokens. Returning here runs the generator's
         // cleanup (.return()), which closes the underlying LLM stream.
@@ -140,6 +188,7 @@ export class AgentLoop {
           const note = '\n\n⚠ *(response hit the max output limit — say "continue" for the rest, or raise it with `/config`)*';
           currentContent += note;
           anyTextYielded = true;
+          chatSpan.setAttribute('gen_ai.response.finish_reasons', 'length');
           yield note;
         } else if (event.type === 'thinking') {
           // Internal reasoning: surface to the UI status area, never into the reply
@@ -160,7 +209,12 @@ export class AgentLoop {
           } as ToolCallEntry);
         } else if (event.type === 'usage') {
           this.contextManager.updateTokens(event.prompt);
+          chatSpan.setAttributes({
+            'gen_ai.usage.input_tokens': event.prompt,
+            'gen_ai.usage.output_tokens': event.completion,
+          });
         } else if (event.type === 'error') {
+          chatErrorMsg = event.message;
           if (event.recoverable && event.kind === 'context') {
             // Internal recovery — never narrated into the answer stream (the reply must read as one
             // uninterrupted voice). The footer status + log view carry what's happening instead.
@@ -184,6 +238,20 @@ export class AgentLoop {
             discardTurn = true;
             break;
           } else {
+            // Before declaring the turn dead — transient budget exhausted OR a hard provider
+            // rejection — try the configured fallback model ONCE. This is what keeps a day-long
+            // autonomous run alive through a model outage or a rate-limit storm: switch the whole
+            // session to the fallback, restore the retry budget, and re-ask the same turn.
+            const fb = this.fallbackModelFor();
+            if (fb) {
+              this.fallbackApplied = true;
+              (this.llm as any).applyConfig?.({ model: fb });
+              transientRetries = 0;
+              cliEvents.emit('status', `Model failing — switched to fallback "${fb}"`);
+              cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Active model kept failing (${event.message}); failed over to fallback model "${fb}".`, timestamp: new Date() });
+              discardTurn = true;
+              break;
+            }
             // Unrecoverable: this IS the turn's outcome, so it belongs in the reply — but in a human
             // voice, not a "[AgentLoop]" log line. A bad/unknown model ID 400s every turn until
             // changed, so lead with the one thing that fixes it rather than the raw provider dump.
@@ -196,6 +264,13 @@ export class AgentLoop {
             return;
           }
         }
+      }
+      } finally {
+        // Covers clean completion, discardTurn breaks, unrecoverable returns, AND abort-driven
+        // generator cleanup. Error status only for real provider errors — a discarded/compacted
+        // turn is a normal control-flow event, not a failure.
+        chatSpan.setAttribute('bimax.chat.tool_calls', toolCalls.length);
+        chatSpan.end(chatErrorMsg && !discardTurn ? 'error' : 'ok', discardTurn ? undefined : chatErrorMsg);
       }
 
       // Discard the partial turn and let the outer loop re-ask (after compaction or a
@@ -282,6 +357,10 @@ export class AgentLoop {
         const sequential = toolCalls.filter(tc => !this.tools.getTool(tc.name)?.isConcurrencySafe);
 
         const executeTool = async (tc: { id: string, name: string, args: string }) => {
+          const toolSpan = tracer.startSpan(`execute_tool ${tc.name}`, {
+            'gen_ai.operation.name': 'execute_tool',
+            'gen_ai.tool.name': tc.name,
+          }, rootSpan.context);
           // Announce the call so the UI can render live tool activity
           const entry: ToolCallEntry = {
             id: tc.id,
@@ -350,6 +429,9 @@ export class AgentLoop {
                 const conf = getSelfModel().confidenceFor(tc.name, domain);
                 getEpistemicLedger().openClaim(domain, conf, claimFile);
                 getEventLedger().append('claim', { tool: tc.name, domain, file: claimFile, confidence: conf });
+                // Epistemic confidence lands on the trace span so dashboards can correlate
+                // a claim's confidence with what later happened to it.
+                toolSpan.setAttribute('bimax.claim.confidence', Number(conf.toFixed(4)));
               } else if (tc.name === 'BashTool' && bashCmd && isEvidenceCommand(bashCmd)) {
                 // Exit code (when Bash declared it) beats the regex guess: a red tsc/test run
                 // returns its output with exit≠0 and used to classify 'ok', silently settling
@@ -367,6 +449,8 @@ export class AgentLoop {
               // Additive typed-outcome fields — the TUI ignores unknown JSON keys.
               ...(typed ? { outcome: typed.status, errorClass: typed.errorClass } : {}),
             } as ToolCallEntry);
+            if (typed?.errorClass) toolSpan.setAttribute('bimax.tool.error_class', typed.errorClass);
+            toolSpan.end(isError ? 'error' : 'ok', isError ? result.slice(0, 200) : undefined);
             return { id: tc.id, result };
           };
 
@@ -521,5 +605,13 @@ export class AgentLoop {
     }
 
     yield `\n⚠ Stopped after ${maxIter} rounds without finishing — say "continue" to pick up where this left off.\n`;
+
+    } finally {
+      rootSpan.setAttributes({
+        'bimax.agent.llm_rounds': llmRounds,
+        ...(signal?.aborted ? { 'bimax.agent.interrupted': true } : {}),
+      });
+      rootSpan.end();
+    }
   }
 }

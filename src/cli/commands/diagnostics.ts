@@ -175,3 +175,41 @@ globalCommandRegistry.register({
     return { type: 'message', level: 'info', content: lines.join('\n') };
   },
 });
+
+globalCommandRegistry.register({
+  name: '/trace',
+  category: 'Session & Context',
+  description: 'Recent agent/LLM/tool trace spans (OTel GenAI) + export locations',
+  execute: async () => {
+    // Deferred require keeps command registration free of trace-module init order concerns.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getTracer } = require('../../telemetry/trace') as typeof import('../../telemetry/trace');
+    const tracer = getTracer();
+    if (!tracer.isEnabled()) {
+      return { type: 'message', level: 'info', content: 'Tracing is disabled (BIMAX_TRACE=0). Unset it to record spans.' };
+    }
+    const spans = tracer.recentSpans().slice(-25).reverse();
+    const dur = (s: { startTimeUnixNano: string; endTimeUnixNano: string }) =>
+      `${(Number(BigInt(s.endTimeUnixNano) - BigInt(s.startTimeUnixNano)) / 1e6).toFixed(0)}ms`;
+    const rows = spans.map(s => {
+      const glyph = s.status === 'error' ? '✗' : '✓';
+      const extra = [
+        s.attributes['gen_ai.usage.input_tokens'] != null ? `in ${s.attributes['gen_ai.usage.input_tokens']} tok` : '',
+        s.attributes['gen_ai.usage.output_tokens'] != null ? `out ${s.attributes['gen_ai.usage.output_tokens']} tok` : '',
+        s.attributes['bimax.claim.confidence'] != null ? `claim conf ${s.attributes['bimax.claim.confidence']}` : '',
+        s.attributes['bimax.tool.error_class'] ? `err ${s.attributes['bimax.tool.error_class']}` : '',
+      ].filter(Boolean).join(' · ');
+      return `- ${glyph} ${s.name} · ${dur(s)}${extra ? ` · ${extra}` : ''}`;
+    });
+    const otlp = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || process.env.BIMAX_OTLP_ENDPOINT;
+    const lines = [
+      '## Trace — OTel GenAI spans (newest first)',
+      '',
+      ...(rows.length ? rows : ['_No spans yet this session — run a prompt first._']),
+      '',
+      `- JSONL export: ${tracer.exportPath()}`,
+      otlp ? `- OTLP export: ${otlp}/v1/traces` : '- OTLP export: off — set OTEL_EXPORTER_OTLP_ENDPOINT to stream spans to a collector',
+    ];
+    return { type: 'message', level: 'info', content: lines.join('\n') };
+  },
+});

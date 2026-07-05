@@ -38,10 +38,15 @@ Use this tool when a user request is too massive or complex to be completed in a
           type: 'string',
           description: 'What this sub-agent OWNS — the files, directories, or topic it covers (e.g. "src/graph, src/mind" or "the auth flow"). Give each parallel sub-agent a DISJOINT scope so two agents never read/redo the same thing. Overlaps are flagged back to you.'
         },
+        isolation: {
+          type: 'string',
+          enum: ['worktree'],
+          description: 'Set to "worktree" to run the sub-agent in its own git worktree + branch (under .bimax/worktrees/). Use this whenever the sub-agent will EDIT files and siblings run in parallel — isolated agents can never clobber each other. The worktree is auto-removed if the agent changes nothing; otherwise its path and branch are reported for review/merge.'
+        },
       },
       required: ['prompt']
     },
-    execute: async (args: { agentType?: string, prompt: string, scope?: string }, context?: any) => {
+    execute: async (args: { agentType?: string, prompt: string, scope?: string, isolation?: 'worktree' }, context?: any) => {
       // Default to a BiMax sub-agent (a copy of ourselves) — never a stray legacy persona.
       const agentType = args.agentType || 'BiMax';
       const scope = args.scope || '';
@@ -67,6 +72,7 @@ Use this tool when a user request is too massive or complex to be completed in a
         cwd: currentCwd,
         parentMode: parentMode,
         scope,
+        ...(args.isolation === 'worktree' ? { isolation: 'worktree' as const } : {}),
       }).then(result => {
         Logger.info(`[SpawnSubagentTool] Sub-agent ${taskId} finished successfully.`);
         // Surface the result instead of discarding it (the prior code only logged). Posted as a
@@ -93,7 +99,7 @@ Use this tool when a user request is too massive or complex to be completed in a
       const overlapNote = collisions.length > 0
         ? ` ⚠ scope overlaps running sibling(s): ${collisions.map(c => `${c.agentType}[${c.scope}]`).join(', ')} — consider a disjoint scope so they don't redo the same work.`
         : '';
-      return `TASK_QUEUED: Sub-agent ${agentType} spawned${scope ? ` (scope: ${scope})` : ''} as ${taskId}.${overlapNote}`;
+      return `TASK_QUEUED: Sub-agent ${agentType} spawned${scope ? ` (scope: ${scope})` : ''}${args.isolation === 'worktree' ? ' in an isolated git worktree' : ''} as ${taskId}.${overlapNote}`;
     }
   }, governor);
 }

@@ -5,6 +5,8 @@ import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
 import { FLOOR_ENV } from '../sandbox/exec.sandbox';
 import { globalSubAgentBlackboard } from './subagent.blackboard';
+import { getTracer } from '../telemetry/trace';
+import { createWorktree, settleWorktree, WorktreeInfo } from './worktree.manager';
 
 // Line-delimited sentinels the sub-agent SUBPROCESS (bun-compiled binary re-execing itself) writes to
 // stdout, and the parent parses back into the same {type} messages a worker_thread posts. Shared with
@@ -32,6 +34,10 @@ export interface SubAgentConfig {
   // Bash confined by the OS sandbox to this root with network denied, file tools' workspace
   // narrowed to it, net-facing tools not registered. Carried via the worker's own env copy.
   sandboxFloorRoot?: string;
+  // Worktree isolation (the Cursor 2.0 / Claude Code pattern): the sub-agent runs in its own git
+  // worktree + branch under .bimax/worktrees/, so parallel agents can't clobber each other's
+  // edits. Auto-removed when the agent changed nothing; kept (and reported) when it did.
+  isolation?: 'worktree';
 }
 
 export class SubAgentManager {
@@ -133,8 +139,42 @@ export class SubAgentManager {
   public spawnWorker(taskId: string, config: SubAgentConfig): Promise<string> {
     return new Promise((resolve, reject) => {
       Logger.info(`[SubAgentManager] Spawning worker for task ${taskId} (Agent: ${config.agentType})`);
+
+      // Worktree isolation: give the agent its own checkout + branch BEFORE the config is frozen
+      // into workerData. Creation failing (not a git repo, git missing) falls back to running
+      // unisolated — the pre-worktree behavior — never a spawn failure. A floored episode is
+      // re-floored to the worktree so the OS sandbox confines it to its own copy.
+      let worktree: WorktreeInfo | null = null;
+      if (config.isolation === 'worktree') {
+        worktree = createWorktree(config.cwd, taskId);
+        if (worktree) {
+          config = {
+            ...config,
+            cwd: worktree.path,
+            ...(config.sandboxFloorRoot ? { sandboxFloorRoot: worktree.path } : {}),
+          };
+        }
+      }
+      // Settle exactly once on whichever completion path fires first: remove the worktree when
+      // the agent changed nothing, keep + describe it when it made edits/commits.
+      const settleIsolation = (): string => {
+        if (!worktree) return '';
+        const info = worktree;
+        worktree = null;
+        try { return settleWorktree(info).note; } catch { return ''; }
+      };
+
       globalSubAgentBlackboard.register(taskId, config.agentType, config.scope || '', config.prompt);
       this.emitBoard();
+
+      // Sub-agent lifetime span (OTel GenAI invoke_agent). end() is idempotent, so the
+      // timeout / error / exit paths can all settle it without coordination.
+      const span = getTracer().startSpan(`invoke_agent ${config.agentType}`, {
+        'gen_ai.operation.name': 'invoke_agent',
+        'gen_ai.agent.name': config.agentType,
+        'bimax.subagent.task_id': taskId,
+        ...(config.scope ? { 'bimax.subagent.scope': config.scope } : {}),
+      });
 
       const workerOpts = {
         workerData: config,
@@ -157,6 +197,9 @@ export class SubAgentManager {
         Logger.error(`[SubAgentManager] Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms. Terminating.`);
         this.activeWorkers.delete(taskId);
         Promise.resolve(worker.terminate()).catch(() => { /* best-effort */ });
+        span.end('error', `timed out after ${this.workerTimeoutMs}ms`);
+        const note = settleIsolation();
+        if (note) Logger.warn(`[SubAgentManager] ${taskId} timed out but left changes: ${note}`);
         reject(new Error(`Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms`));
       }, this.workerTimeoutMs);
 
@@ -172,10 +215,17 @@ export class SubAgentManager {
         if (message.type === 'success') {
           globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
           this.emitBoard();
-          finalize(() => resolve(message.result));
+          span.end('ok');
+          const note = settleIsolation();
+          finalize(() => resolve(
+            note && typeof message.result === 'string' ? `${message.result}\n\n${note}` : message.result
+          ));
         } else if (message.type === 'error') {
           globalSubAgentBlackboard.markFailed(taskId, String(message.error));
           this.emitBoard();
+          span.end('error', String(message.error));
+          const note = settleIsolation();
+          if (note) Logger.warn(`[SubAgentManager] ${taskId} failed but left changes: ${note}`);
           finalize(() => reject(new Error(message.error)));
         } else if (message.type === 'log') {
           Logger.info(`[Worker ${taskId}] ${message.content}`);
@@ -192,16 +242,22 @@ export class SubAgentManager {
       worker.on('error', (err) => {
         globalSubAgentBlackboard.markFailed(taskId, err?.message || String(err));
         this.emitBoard();
+        span.end('error', err?.message || String(err));
+        settleIsolation();
         finalize(() => reject(err));
       });
 
       worker.on('exit', (code) => {
         if (code !== 0) {
+          span.end('error', `exit code ${code}`);
+          settleIsolation();
           finalize(() => reject(new Error(`Worker stopped with exit code ${code}`)));
         } else {
+          span.end('ok');
+          const note = settleIsolation();
           // Worker exited cleanly but never posted a 'success' message — settle the
           // promise so the caller is never left hanging. No-op if already settled.
-          finalize(() => resolve('Worker exited cleanly with no explicit result.'));
+          finalize(() => resolve(`Worker exited cleanly with no explicit result.${note ? `\n\n${note}` : ''}`));
         }
       });
     });
