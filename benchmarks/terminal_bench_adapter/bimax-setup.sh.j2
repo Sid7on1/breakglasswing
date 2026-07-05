@@ -1,0 +1,8 @@
+#!/bin/sh
+# Arm the BiMax standalone binary that BiMaxAgent.perform_task copied into the container.
+# No Node/npm needed — the binary is bun --compile'd with everything embedded.
+set -e
+chmod +x /installed-agent/bimax
+ln -sf /installed-agent/bimax /usr/local/bin/bimax
+# Smoke check: the binary must at least start and print a version on this libc/arch.
+bimax --version

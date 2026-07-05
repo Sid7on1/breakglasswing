@@ -38,3 +38,4 @@ vendor/*/venv/
 .bimax/tdm.json
 .bimax/claims.json
 .bimax/policy-arms.json
+benchmarks/terminal_bench_adapter/bin/
