@@ -7,6 +7,7 @@ import { FLOOR_ENV } from '../sandbox/exec.sandbox';
 import { globalSubAgentBlackboard } from './subagent.blackboard';
 import { getTracer } from '../telemetry/trace';
 import { createWorktree, settleWorktree, WorktreeInfo } from './worktree.manager';
+import { saveCheckpoint, CheckpointedAgent } from './agent.checkpoint';
 
 // Line-delimited sentinels the sub-agent SUBPROCESS (bun-compiled binary re-execing itself) writes to
 // stdout, and the parent parses back into the same {type} messages a worker_thread posts. Shared with
@@ -38,7 +39,14 @@ export interface SubAgentConfig {
   // worktree + branch under .bimax/worktrees/, so parallel agents can't clobber each other's
   // edits. Auto-removed when the agent changed nothing; kept (and reported) when it did.
   isolation?: 'worktree';
+  // Nesting depth of this agent in the tree: the main session is 0, its sub-agents are 1, theirs
+  // are 2. Workers register SpawnSubagentTool only while depth < MAX_SUBAGENT_DEPTH, giving the
+  // 3-level agent trees Claude Code ships (main + two nested layers).
+  depth?: number;
 }
+
+/** Maximum nesting depth of the agent tree (main session = 0, so 3 ⇒ two nested worker layers). */
+export const MAX_SUBAGENT_DEPTH = 3;
 
 export class SubAgentManager {
   private activeWorkers = new Map<string, WorkerHandle>();
@@ -131,9 +139,21 @@ export class SubAgentManager {
     };
   }
 
-  /** Snapshot the blackboard onto the event bus so the /subagents view + TUI panel stay live. */
+  // The config each live task was spawned with — the recovery data the checkpoint persists.
+  private spawnConfigs = new Map<string, SubAgentConfig>();
+
+  /**
+   * Snapshot the blackboard onto the event bus (so the /subagents view + TUI panel stay live)
+   * AND checkpoint the agent tree to disk (so a crashed parent's swarm is recoverable).
+   */
   private emitBoard(): void {
     try { cliEvents.emit('subagent_update', globalSubAgentBlackboard.all()); } catch { /* best-effort */ }
+    try {
+      const agents: CheckpointedAgent[] = globalSubAgentBlackboard.all()
+        .filter(c => this.spawnConfigs.has(c.taskId))
+        .map(c => ({ claim: c, config: this.spawnConfigs.get(c.taskId)! }));
+      saveCheckpoint(agents);
+    } catch { /* best-effort */ }
   }
 
   public spawnWorker(taskId: string, config: SubAgentConfig): Promise<string> {
@@ -165,6 +185,7 @@ export class SubAgentManager {
       };
 
       globalSubAgentBlackboard.register(taskId, config.agentType, config.scope || '', config.prompt);
+      this.spawnConfigs.set(taskId, config);
       this.emitBoard();
 
       // Sub-agent lifetime span (OTel GenAI invoke_agent). end() is idempotent, so the
@@ -197,6 +218,11 @@ export class SubAgentManager {
         Logger.error(`[SubAgentManager] Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms. Terminating.`);
         this.activeWorkers.delete(taskId);
         Promise.resolve(worker.terminate()).catch(() => { /* best-effort */ });
+        // Settle the board too — a timed-out agent must not linger as 'running' (it would show
+        // forever in /subagents AND look crash-recoverable to the checkpoint).
+        globalSubAgentBlackboard.markFailed(taskId, `timed out after ${this.workerTimeoutMs}ms`);
+        this.spawnConfigs.delete(taskId);
+        this.emitBoard();
         span.end('error', `timed out after ${this.workerTimeoutMs}ms`);
         const note = settleIsolation();
         if (note) Logger.warn(`[SubAgentManager] ${taskId} timed out but left changes: ${note}`);
@@ -214,6 +240,7 @@ export class SubAgentManager {
       worker.on('message', (message) => {
         if (message.type === 'success') {
           globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
+          this.spawnConfigs.delete(taskId); // settled — no longer crash-recoverable
           this.emitBoard();
           span.end('ok');
           const note = settleIsolation();
@@ -222,6 +249,7 @@ export class SubAgentManager {
           ));
         } else if (message.type === 'error') {
           globalSubAgentBlackboard.markFailed(taskId, String(message.error));
+          this.spawnConfigs.delete(taskId);
           this.emitBoard();
           span.end('error', String(message.error));
           const note = settleIsolation();
@@ -241,6 +269,7 @@ export class SubAgentManager {
 
       worker.on('error', (err) => {
         globalSubAgentBlackboard.markFailed(taskId, err?.message || String(err));
+        this.spawnConfigs.delete(taskId);
         this.emitBoard();
         span.end('error', err?.message || String(err));
         settleIsolation();
@@ -251,10 +280,16 @@ export class SubAgentManager {
         if (code !== 0) {
           span.end('error', `exit code ${code}`);
           settleIsolation();
+          // A worker that died without posting an error would otherwise stay 'running' on the
+          // board — settle it so the panel and the crash checkpoint both see the truth.
+          globalSubAgentBlackboard.markFailed(taskId, `worker exited with code ${code}`);
+          this.spawnConfigs.delete(taskId);
+          this.emitBoard();
           finalize(() => reject(new Error(`Worker stopped with exit code ${code}`)));
         } else {
           span.end('ok');
           const note = settleIsolation();
+          this.spawnConfigs.delete(taskId);
           // Worker exited cleanly but never posted a 'success' message — settle the
           // promise so the caller is never left hanging. No-op if already settled.
           finalize(() => resolve(`Worker exited cleanly with no explicit result.${note ? `\n\n${note}` : ''}`));

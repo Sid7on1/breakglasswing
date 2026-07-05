@@ -25,6 +25,7 @@ import { getEpistemicLedger } from '../../mind/epistemic.ledger';
 import { getEventLedger } from '../../mind/event.ledger';
 import { getExemplarStore } from '../../mind/exemplar.store';
 import { getPolicyArms } from '../../mind/policy.arms';
+import { getHarnessTuner } from '../../mind/harness.tuner';
 
 export interface PersonaConfig {
   name: string;
@@ -222,6 +223,10 @@ export abstract class AgentPersona {
     try { const b = arm('user-model', getUserModel().getPromptBlock()); if (b) sections.userModel = b; } catch { /* best-effort */ }
     try { const b = arm('drives', getDrivesEngine().getPromptBlock()); if (b) sections.drives = b; } catch { /* best-effort */ }
     try { const b = arm('calibration', getEpistemicLedger().getPromptBlock()); if (b) sections.calibration = b; } catch { /* best-effort */ }
+    // Harness self-tuning (Self-Harness pattern): steering patches mined from this agent's own
+    // recurring failure signatures, each carrying its effectiveness accounting (auto-retired
+    // when it stops beating its baseline). See src/mind/harness.tuner.ts.
+    try { const b = getHarnessTuner().getPromptBlock(); if (b) sections.harnessPatches = b; } catch { /* best-effort */ }
 
     if (opts?.planMode) {
       sections.plan = `### PLAN MODE (ACTIVE — CRITICAL)\nYou are in read-only PLAN MODE. The Governor will reject every mutating action: writing or deleting files, and any non-read shell command. Do NOT attempt them — they will fail.\n- Use only read/search tools (read files, grep/glob, query the graph, fetch URLs, ask the user) to investigate.\n- When you understand the task, STOP and present a concrete, step-by-step implementation plan: the files you would change, what each change does, and any risks or open questions. Use a numbered list.\n- SAVE the plan: call PlanTool(action:"write", ...) — it is allowed in plan mode and persists to .bimax/plans/<slug>.md (git-tracked), so the plan survives the session and you can check off steps with PlanTool(action:"update_step") while executing. Tell the user the slug it saved under.\n- Do not claim you made any code changes. No source is written in plan mode (only the plan file itself).\n- End by telling the user they can approve and run \`/plan off\` to let you execute the plan.`;
@@ -262,6 +267,7 @@ export abstract class AgentPersona {
       sections.userModel,     // mind: learned user preferences (theory of mind)
       sections.drives,        // mind: homeostatic deviations to surface
       sections.calibration,   // mind: measured overconfidence → escalated verification
+      sections.harnessPatches, // mind: self-tuned steering mined from recurring failures
       sections.exemplars,     // mind: verified past episodes similar to THIS task (v2 §9.3)
       sections.todos,         // live task checklist — re-injected each turn so phases survive compaction
       sections.plan,
@@ -284,6 +290,9 @@ export abstract class AgentPersona {
     // event ledger so habit views can be rebuilt with the same episode structure.
     try { getHabitMiner().markBoundary(); } catch { /* best-effort */ }
     try { getEventLedger().append('boundary', {}); } catch { /* best-effort */ }
+    // Harness self-tuning: one cheap mining pass per episode boundary (tail read of the ledger)
+    // keeps the steering patches current and their effectiveness accounting honest.
+    try { getHarnessTuner().mine(); } catch { /* best-effort */ }
 
     // Resolve the active model's capabilities once for this turn — drives both vision attachment
     // and the context-window fallback below. Best-effort: FLOOR (no caps) on any failure.

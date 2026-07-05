@@ -5,7 +5,7 @@ import { LlmAdapter } from '../../core/llm.adapter';
 import { HermesPersona, OpenCodePersona, OpenClawPersona, BiMaxPersona } from '../../cli/personas/implementations';
 import { SkillLoader, DynamicPersona } from '../../cli/skills.loader';
 import { Logger } from '../../utils/logger';
-import { SubAgentManager, globalSubAgentManager } from '../../core/subagent.manager';
+import { SubAgentManager, globalSubAgentManager, MAX_SUBAGENT_DEPTH } from '../../core/subagent.manager';
 import { globalSubAgentBlackboard } from '../../core/subagent.blackboard';
 import { cliEvents } from '../../cli/events';
 import { randomUUID } from 'crypto';
@@ -63,6 +63,14 @@ Use this tool when a user request is too massive or complex to be completed in a
       const currentCwd = context?.cwd || process.cwd();
       const parentMode = (governor as any).mode; // Pass the permission bridge
 
+      // Nesting: this process's own depth is 0 in the main session; inside a worker it was set
+      // (thread-local env) by worker.entry.ts. The child is one level deeper, hard-capped so a
+      // runaway model can't fork-bomb an unbounded tree.
+      const myDepth = Number(process.env.BIMAX_SUBAGENT_DEPTH || '0');
+      if (myDepth + 1 >= MAX_SUBAGENT_DEPTH) {
+        return `Error: Maximum agent-tree depth (${MAX_SUBAGENT_DEPTH} levels) reached — this agent cannot spawn deeper. Do the work directly.`;
+      }
+
       const taskId = `subagent-${randomUUID()}`;
 
       // We don't await the worker here. We fire and forget.
@@ -72,6 +80,7 @@ Use this tool when a user request is too massive or complex to be completed in a
         cwd: currentCwd,
         parentMode: parentMode,
         scope,
+        depth: myDepth + 1,
         ...(args.isolation === 'worktree' ? { isolation: 'worktree' as const } : {}),
       }).then(result => {
         Logger.info(`[SpawnSubagentTool] Sub-agent ${taskId} finished successfully.`);

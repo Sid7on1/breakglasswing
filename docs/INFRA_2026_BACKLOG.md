@@ -52,26 +52,43 @@ Phases 1–2 are **shipped** (this pass); Phase 3 is the open backlog.
    to the worktree. Distinct from `evolution/worktree.manager.ts` (swarm waves) by design — see
    module docstring. Tests: `src/__tests__/worktree.isolation.test.ts`.
 
-## Phase 3 — Open backlog (ranked by impact/effort)
+## Phase 3 ✅ SHIPPED 2026-07-05 (same-day follow-up pass)
 
-4. **MCP Tasks extension** (impact: high · effort: high) — adopt the 2026-07-28 RC Tasks
-   extension so long-running MCP tools (builds, deploys, indexing) run as durable async tasks
-   with polling/deferred results instead of blocking a tool slot. Touchpoint: `src/mcp/manager.ts`
-   (self-healing layer already owns per-call lifecycle). Cite: MCP 2026-07-28 RC.
-5. **Nested sub-agents, depth ≤ 3** (impact: med-high · effort: med) — Claude Code ships 3-level
-   agent trees. BiMax workers don't register `SpawnSubagentTool`, so depth is 1. Add a depth
-   counter to `SubAgentConfig`, register the spawn tool in workers when `depth < 3`, cap total
-   tree size via the existing blackboard. Combines with worktree isolation (#3) for safe fan-out.
-6. **OTLP metrics export** (impact: med · effort: low) — extend `trace.ts` with a `/v1/metrics`
-   exporter for the counters that already exist (`globalTelemetry` tool latencies, cache hit
-   rate, Headroom savings), so Grafana dashboards get time series, not just spans. Cite: OTel
-   GenAI metrics conventions.
-7. **Harness self-tuning loop** (impact: high · effort: high) — Self-Harness (June 2026) shows
-   the agent mining its own failure patterns into harness patches (prompt steering, tool-schema
-   tweaks) for +15-21pt Terminal-Bench gains. BiMax already has the raw material (event ledger,
-   episode replay, dream engine); build a `harness.tuner` that proposes and A/B-replays harness
-   changes against recorded episodes. Cite: Self-Harness, Terminal-Bench 2.0.
-8. **Agent-tree checkpointing** (impact: med · effort: med) — Claude Code checkpoints the whole
-   agent tree (progress, intermediate outputs, pending queue). BiMax has episode recording +
-   session branches; add periodic sub-agent state snapshots to the blackboard so a crashed
-   parent can resume its swarm rather than respawn it.
+4. **MCP Tasks extension** (`src/mcp/tasks.ts` + wiring in `client.ts`) — a task-shaped
+   tools/call response (spec 2025-11-25 / 2026-07-28 RC: `result.task.taskId`, plus the `_meta`
+   fallback) is polled via `tasks/get` (500ms → 5s backoff, status lines to the footer) and its
+   `tasks/result` substituted in, all within the call's timeout budget — long-running server-side
+   work behaves like an ordinary slower tool call. `input_required`/`failed`/`cancelled`/timeout
+   all surface as normal tool errors. Tests: `src/__tests__/mcp.tasks.test.ts`.
+5. **Nested sub-agents, depth ≤ 3** (`SubAgentConfig.depth`, `MAX_SUBAGENT_DEPTH`) — workers with
+   depth budget register `SpawnSubagentTool` themselves (thread-local `BIMAX_SUBAGENT_DEPTH`);
+   the tool tags children depth+1 and refuses at the cap, so trees are main → worker → nested
+   worker and never deeper. Floored episodes don't nest. Tests: `subagent.nesting.test.ts`.
+6. **OTLP metrics export** (`src/telemetry/metrics.export.ts`) — per-tool call counts and
+   avg/p95 latency, cache-hit rate, prompt tokens, and Headroom savings exported as OTLP/HTTP
+   gauges to `{endpoint}/v1/metrics` every 60s (no-op without an endpoint; wired at boot in
+   `container.ts`). Tests: `metrics.export.test.ts`.
+7. **Harness self-tuning loop** (`src/mind/harness.tuner.ts`, `/harness`) — the Self-Harness
+   pattern: recurring failure signatures (tool × errorClass, ≥4 in the last 500 ledger events)
+   become steering patches injected into the system prompt (`sections.harnessPatches`), each
+   carrying baseline-vs-since failure accounting; patches that don't beat their baseline after
+   10 samples auto-retire and are never re-created for that signature. Mined once per episode
+   boundary. Tests: `harness.tuner.test.ts`.
+8. **Agent-tree checkpointing** (`src/core/agent.checkpoint.ts`, `/subagents resume`) — every
+   board change snapshots each live agent's claim + full spawn config to
+   `.bimax/agent-tree.json` (atomic rename). On boot, a checkpoint owned by a dead pid surfaces
+   its still-running agents; `/subagents resume` respawns them with a crash-context prompt
+   including prior tool-call progress. Timed-out/exit≠0 workers now settle the board too (they
+   used to linger as 'running'). Tests: `agent.checkpoint.test.ts`.
+
+## Phase 4 — Next open items
+
+9. **Terminal-Bench harness adapter** (impact: high — the leaderboard entry itself) — package
+   BiMax headless (`bimax -p`) as a tbench agent adapter (install script + agent class per
+   https://www.tbench.ai docs), run the 89-task suite locally in Docker, iterate with /harness
+   patches informed by failures. This is the concrete path to putting BiMax ON the leaderboard.
+10. **A/B replay validation for harness patches** — today a patch's effectiveness is judged on
+    live traffic; wire `replay.harness.ts` so a proposed patch is first validated against
+    recorded episodes (offline), Self-Harness style.
+11. **OTLP logs export** — ship the ledger's structured events as OTLP logs so traces, metrics,
+    and the epistemic ledger correlate in one backend.

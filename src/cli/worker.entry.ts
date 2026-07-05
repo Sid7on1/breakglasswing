@@ -2,7 +2,7 @@ import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
-import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT } from '../core/subagent.manager';
+import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
 import { loadConfig } from './config';
 import { SkillLoader, DynamicPersona } from './skills.loader';
 import { ToolRegistry } from '../tools/tool.registry';
@@ -52,6 +52,12 @@ async function runSubAgentCore(
   // root so Write/Edit/Delete outside the worktree are vetoed in-process.
   const episodeFloor = floorRoot();
   if (episodeFloor) SafetyPolicy.allowedWorkspace = episodeFloor;
+
+  // Nesting: record this worker's depth in its own (thread/process-local) env so the spawn tool
+  // inside this agent knows where in the tree it sits. Worker threads get a COPY of process.env,
+  // so this never leaks to the parent or siblings.
+  const depth = Math.max(1, Number(config.depth ?? 1));
+  process.env.BIMAX_SUBAGENT_DEPTH = String(depth);
 
   {
     const pool = buildKeyPool();
@@ -111,6 +117,16 @@ async function runSubAgentCore(
     loadHooksConfig(config.cwd || process.cwd());
     toolRegistry.register(createToolSearchTool(governor, toolRegistry));
     if (!episodeFloor) toolRegistry.register(createWebSearchTool(governor));
+
+    // Nested sub-agents (3-level agent trees, the Claude Code June-2026 pattern): a worker that
+    // still has depth budget can spawn its own children for layered task decomposition. The spawn
+    // tool re-checks BIMAX_SUBAGENT_DEPTH itself, so the registration gate here is belt-and-braces.
+    // Floored episodes don't get it — their children would inherit the floor but multiply the
+    // blast radius of an autonomous episode.
+    if (depth + 1 < MAX_SUBAGENT_DEPTH && !episodeFloor) {
+      const { createSpawnSubagentTool } = await import('../tools/implementations/spawn.tool');
+      toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));
+    }
 
     // 2. Instantiate Persona
     let agent: AgentPersona;

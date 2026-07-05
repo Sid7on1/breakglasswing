@@ -5,6 +5,7 @@ import { Logger } from '../utils/logger';
 import { withTimeout } from '../utils/withTimeout'; // shared, leak-safe — a hung server never blocks boot/add
 import { recordMcpCall } from './stats';
 import { McpServerSpec } from './config';
+import { extractTaskRef, awaitTaskResult } from './tasks';
 
 // The MCP SDK ships package "exports" maps that our classic TS moduleResolution can't follow
 // for types; the dual-published CJS build resolves fine at runtime, so we require() it at the
@@ -256,6 +257,14 @@ export async function connectAndRegister(
                 timeoutMs,
                 `MCP tool '${spec.name}/${t.name}' (after reconnect)`,
               );
+            }
+            // MCP Tasks extension: a task-shaped response means the server accepted the work
+            // and is running it asynchronously — poll it to completion (within the remaining
+            // call budget) and substitute the real result, so the agent never sees the stub.
+            const taskRef = extractTaskRef(res);
+            if (taskRef) {
+              const remaining = Math.max(1000, timeoutMs - (Date.now() - started));
+              res = await awaitTaskResult(client, spec.name, t.name, taskRef, remaining);
             }
             const text = contentToString(res);
             recordMcpCall(spec.name, t.name, Date.now() - started, res?.isError ? text : undefined);

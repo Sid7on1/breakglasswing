@@ -23,10 +23,39 @@ export function renderSubagents(claims: SubAgentClaim[]): string {
 
 globalCommandRegistry.register({
   name: '/subagents',
-  description: 'Live sub-agent coverage — who is running, their scope, and status',
+  description: 'Live sub-agent coverage — who is running, their scope, and status. `resume` respawns a crashed session\'s agents.',
   category: 'Code & Intelligence',
-  execute: async () => {
+  execute: async (args) => {
+    // Deferred requires keep command registration free of core-module init order concerns.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ckpt = require('../../core/agent.checkpoint') as typeof import('../../core/agent.checkpoint');
+
+    if ((args[0] || '').toLowerCase() === 'resume') {
+      const crashed = ckpt.crashedAgents();
+      if (crashed.length === 0) {
+        return { type: 'message', level: 'info', content: 'No crashed sub-agents to resume.' };
+      }
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { globalSubAgentManager } = require('../../core/subagent.manager') as typeof import('../../core/subagent.manager');
+      const { randomUUID } = require('crypto') as typeof import('crypto');
+      const lines = [`Respawning ${crashed.length} sub-agent(s) from the crashed session:`];
+      for (const a of crashed) {
+        const taskId = `subagent-${randomUUID()}`;
+        // Fire-and-forget like SpawnSubagentTool — results surface as system messages via the board.
+        globalSubAgentManager.spawnWorker(taskId, ckpt.resumeConfigFor(a)).catch(() => { /* board reports it */ });
+        lines.push(`  ◍ ${a.claim.agentType} · \`${a.claim.scope}\` · ${a.claim.prompt}`);
+      }
+      ckpt.clearCrashedAgents();
+      return { type: 'message', level: 'success', content: lines.join('\n') };
+    }
+
     globalSubAgentBlackboard.prune();
-    return { type: 'message', level: 'info', content: renderSubagents(globalSubAgentBlackboard.all()) };
+    let out = renderSubagents(globalSubAgentBlackboard.all());
+    const crashed = ckpt.crashedAgents();
+    if (crashed.length > 0) {
+      out += `\n\n  ⚠ ${crashed.length} agent(s) from a CRASHED session are recoverable — \`/subagents resume\` respawns them:`;
+      for (const a of crashed) out += `\n     ◍ ${a.claim.agentType} · \`${a.claim.scope}\` · ${a.claim.prompt}`;
+    }
+    return { type: 'message', level: 'info', content: out };
   },
 });

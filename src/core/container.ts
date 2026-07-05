@@ -12,6 +12,7 @@
 
 import { EventBus } from './event.bus';
 import { Logger } from '../utils/logger';
+import { cliEvents } from '../cli/events';
 import { GraphStore } from '../graph/graph.store';
 import { CodebaseIndexer } from '../graph/indexer';
 import { StaticAnalyzer } from '../graph/static.analyzer';
@@ -198,6 +199,16 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
     .connectAll(toolRegistry, governor, projectRoot)
     .then(() => globalMcpManager.startWatchdog(toolRegistry, governor))
     .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
+
+  // OTLP metrics — silent no-op unless OTEL_EXPORTER_OTLP_ENDPOINT/BIMAX_OTLP_ENDPOINT is set.
+  import('../telemetry/metrics.export').then(m => m.startMetricsExporter()).catch(() => {});
+
+  // Crash recovery: if a previous session died mid-swarm, its agent-tree checkpoint names the
+  // sub-agents that were still running. Surface them; '/subagents resume' respawns the tree.
+  import('./agent.checkpoint').then(m => {
+    const n = m.detectCrashedTree();
+    if (n > 0) cliEvents.emit('status', `${n} sub-agent(s) from a crashed session are recoverable — run /subagents resume`);
+  }).catch(() => {});
 
   // Genome & Evolution — used by /evolve (gated by allowSelfEvolution config, off by default).
   const genomeRepo = new GenomeRepository(projectRoot);

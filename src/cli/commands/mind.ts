@@ -543,3 +543,40 @@ globalCommandRegistry.register({
     return { type: 'message', level: 'warn' as any, content: lines.join('\n') };
   },
 });
+
+globalCommandRegistry.register({
+  name: '/harness',
+  category: 'Code & Intelligence',
+  description: 'Self-tuned harness patches — steering mined from recurring failures. `retire <id>` drops one, `mine` forces a pass.',
+  execute: async (args) => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getHarnessTuner } = require('../../mind/harness.tuner') as typeof import('../../mind/harness.tuner');
+    const tuner = getHarnessTuner();
+
+    if ((args[0] || '').toLowerCase() === 'mine') {
+      const r = tuner.mine();
+      return { type: 'message', level: 'info', content: `Mining pass done — ${r.created} patch(es) created, ${r.retired} retired.` };
+    }
+    if ((args[0] || '').toLowerCase() === 'retire' && args[1]) {
+      return tuner.retire(args[1])
+        ? { type: 'message', level: 'success', content: `Patch ${args[1]} retired.` }
+        : { type: 'message', level: 'error', content: `No active patch with id ${args[1]}.` };
+    }
+
+    const patches = tuner.all();
+    if (patches.length === 0) {
+      return { type: 'message', level: 'info', content: '## Harness patches\n\nNone yet — patches appear once a failure signature recurs ≥4× in the recent ledger. Force a pass with `/harness mine`.' };
+    }
+    const lines = ['## Harness patches — self-tuned steering (Self-Harness pattern)', ''];
+    for (const p of patches) {
+      const glyph = p.status === 'active' ? '◍' : '✗';
+      const eff = p.samplesSince > 0
+        ? ` · since: ${p.failuresSince}/${p.samplesSince} failures (baseline ${(p.baselineRate * 100).toFixed(0)}%)`
+        : '';
+      lines.push(`${glyph} \`${p.id}\` **${p.tool} × ${p.errorClass}** — ${p.evidenceCount} failures mined${eff}${p.status === 'retired' ? ` · retired: ${p.retiredReason}` : ''}`);
+      lines.push(`   ${p.rule}`);
+    }
+    lines.push('', '_`/harness retire <id>` to drop one · `/harness mine` to re-mine now_');
+    return { type: 'message', level: 'info', content: lines.join('\n') };
+  },
+});
