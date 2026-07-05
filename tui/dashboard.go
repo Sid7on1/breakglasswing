@@ -18,6 +18,7 @@ func renderShortcuts() string {
 		{"Ctrl+O", "Toggle log view"},
 		{"Ctrl+X", "Mind HUD (weak spots · drives · habits)"},
 		{"Ctrl+B", "Collapse/expand tool calls"},
+		{"Ctrl+A", "Focus sub-agent panel (↑/↓ · enter)"},
 		{"Ctrl+P", "Preview pasted blocks"},
 		{"Esc", "Stash input / dismiss"},
 		{"Ctrl+R", "Resume stashed input"},

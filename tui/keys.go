@@ -223,6 +223,42 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Sub-agent panel focus (Ctrl+A): while focused, ↑/↓ select an agent and enter expands/collapses
+	// its detail card (prompt · tools · output). Intercepted BEFORE history/global chords so the panel
+	// owns these keys while active; esc releases focus. Auto-releases when the board empties (events.go).
+	if m.saFocus && len(m.subagents) > 0 {
+		switch msg.String() {
+		case "up":
+			if m.saSel > 0 {
+				m.saSel--
+			}
+			m.relayout()
+			return m, nil
+		case "down":
+			if m.saSel < len(m.subagents)-1 {
+				m.saSel++
+			}
+			m.relayout()
+			return m, nil
+		case "enter":
+			// Accordion: expanding a card collapses the others, so the panel is never a wall of
+			// stacked detail — at most one agent's prompt/tools/output is open at a time.
+			id := m.subagents[m.saSel].TaskID
+			open := !m.saExpanded[id]
+			m.saExpanded = map[string]bool{}
+			if open {
+				m.saExpanded[id] = true
+			}
+			m.relayout()
+			return m, nil
+		case "esc":
+			m.saFocus = false
+			m.status = "Sub-agent panel: focus released"
+			m.relayout()
+			return m, nil
+		}
+	}
+
 	// Input history: up/down at the first/last line recalls past submissions. Mid-text they move
 	// the cursor between lines (textarea), so only intercept at the boundaries.
 	switch msg.String() {
@@ -287,6 +323,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Tool calls collapse when long (Ctrl+B to expand)"
 		} else {
 			m.status = "Tool calls expanded (Ctrl+B to collapse)"
+		}
+		m.relayout()
+		return m, nil
+	case "ctrl+a":
+		// Focus the live sub-agent panel: ↑/↓ select an agent, enter expands its prompt/tools/output,
+		// esc releases. No-op when no sub-agents are on the board.
+		if len(m.subagents) == 0 {
+			m.status = "No sub-agents running"
+			return m, nil
+		}
+		m.saFocus = !m.saFocus
+		if m.saFocus {
+			if m.saSel >= len(m.subagents) {
+				m.saSel = 0
+			}
+			m.status = "Sub-agents focused — ↑/↓ select · enter expand · esc release"
+		} else {
+			m.status = "Sub-agent panel: focus released"
 		}
 		m.relayout()
 		return m, nil

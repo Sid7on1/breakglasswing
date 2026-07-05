@@ -6,6 +6,7 @@ import { HermesPersona, OpenCodePersona, OpenClawPersona, BiMaxPersona } from '.
 import { SkillLoader, DynamicPersona } from '../../cli/skills.loader';
 import { Logger } from '../../utils/logger';
 import { SubAgentManager, globalSubAgentManager } from '../../core/subagent.manager';
+import { globalSubAgentBlackboard } from '../../core/subagent.blackboard';
 import { cliEvents } from '../../cli/events';
 import { randomUUID } from 'crypto';
 
@@ -33,12 +34,20 @@ Use this tool when a user request is too massive or complex to be completed in a
           type: 'string',
           description: 'The highly detailed prompt/task for the sub-agent.'
         },
+        scope: {
+          type: 'string',
+          description: 'What this sub-agent OWNS — the files, directories, or topic it covers (e.g. "src/graph, src/mind" or "the auth flow"). Give each parallel sub-agent a DISJOINT scope so two agents never read/redo the same thing. Overlaps are flagged back to you.'
+        },
       },
       required: ['prompt']
     },
-    execute: async (args: { agentType?: string, prompt: string }, context?: any) => {
+    execute: async (args: { agentType?: string, prompt: string, scope?: string }, context?: any) => {
       // Default to a BiMax sub-agent (a copy of ourselves) — never a stray legacy persona.
       const agentType = args.agentType || 'BiMax';
+      const scope = args.scope || '';
+      // Coordination: warn (don't block) if this scope collides with an already-running sibling, so
+      // the orchestrator can re-partition instead of two agents grinding the same files.
+      const collisions = globalSubAgentBlackboard.overlapping(scope);
       // Hard cap — NOT model-controllable. Keeping this as a constant (not an arg) prevents
       // the model from passing maxSubAgents:100 and spawning 100 worker threads.
       const MAX_CONCURRENT = 5;
@@ -56,7 +65,8 @@ Use this tool when a user request is too massive or complex to be completed in a
         agentType,
         prompt: args.prompt,
         cwd: currentCwd,
-        parentMode: parentMode
+        parentMode: parentMode,
+        scope,
       }).then(result => {
         Logger.info(`[SpawnSubagentTool] Sub-agent ${taskId} finished successfully.`);
         // Surface the result instead of discarding it (the prior code only logged). Posted as a
@@ -80,7 +90,10 @@ Use this tool when a user request is too massive or complex to be completed in a
         });
       });
 
-      return `TASK_QUEUED: Sub-agent ${agentType} spawned successfully as WorkerThread ${taskId}.`;
+      const overlapNote = collisions.length > 0
+        ? ` ⚠ scope overlaps running sibling(s): ${collisions.map(c => `${c.agentType}[${c.scope}]`).join(', ')} — consider a disjoint scope so they don't redo the same work.`
+        : '';
+      return `TASK_QUEUED: Sub-agent ${agentType} spawned${scope ? ` (scope: ${scope})` : ''} as ${taskId}.${overlapNote}`;
     }
   }, governor);
 }

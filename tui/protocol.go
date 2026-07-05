@@ -210,6 +210,21 @@ type TodoItem struct {
 	Status  string `json:"status"` // "pending" | "in_progress" | "completed"
 }
 
+// SubAgent mirrors the engine's SubAgentClaim (subagent.blackboard.ts) — one row per spawned
+// sub-agent, forwarded live via the subagent_update event and drawn in the sub-agent panel.
+type SubAgent struct {
+	TaskID    string `json:"taskId"`
+	AgentType string `json:"agentType"`
+	Scope     string `json:"scope"`
+	Prompt    string `json:"prompt"`
+	Status    string `json:"status"` // "running" | "done" | "failed"
+	ToolCalls int    `json:"toolCalls"`
+	StartedAt int64  `json:"startedAt"`
+	EndedAt   int64  `json:"endedAt"`
+	Result    string `json:"result"`
+	Error     string `json:"error"`
+}
+
 // Menu — a command result forwarded as a `message` with uiComponent="menu". InitialIndex is the
 // option the cursor should land on when the menu opens (e.g. the currently-set value in a toggle
 // submenu) so an ON/OFF picker highlights the live setting instead of always starting at the top.

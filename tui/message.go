@@ -164,6 +164,14 @@ func (m *model) renderMessage(me MessageEntry) {
 		b.WriteString(md)
 		m.append(b.String())
 	default: // system
+		// A finished sub-agent posts its ENTIRE report (hundreds of lines) as a success message.
+		// Committing that wall to scrollback buries the parent's synthesized answer, so collapse it to
+		// a single marker line — the full output stays live in the sub-agent panel (Ctrl+A), and the
+		// parent folds it into its own reply. This is the single biggest source of transcript noise.
+		if strings.HasPrefix(me.ID, "subagent-result-") {
+			m.append(subAgentResultLine(me))
+			return
+		}
 		st := dimStyle
 		switch me.Level {
 		case "error":
@@ -173,6 +181,34 @@ func (m *model) renderMessage(me MessageEntry) {
 		}
 		m.append(st.Render(me.Content))
 	}
+}
+
+// subAgentResultLine collapses a sub-agent's full-report system message into ONE transcript line:
+// "✓ Sub-agent BiMax finished · 312 lines · Ctrl+A to read". The header is cleaned of the noisy
+// "(subagent-uuid)" id and trailing colon; the body line-count is surfaced so the user knows there's
+// more to read in the panel. Green on success, red on failure.
+func subAgentResultLine(me MessageEntry) string {
+	head, body := me.Content, ""
+	if i := strings.Index(head, "\n"); i >= 0 {
+		body = strings.TrimSpace(head[i:])
+		head = strings.TrimSpace(head[:i])
+	}
+	// Drop the " (subagent-…)" id chunk and any trailing ": " so the line reads like a clean status.
+	if a := strings.Index(head, " ("); a >= 0 {
+		if b := strings.Index(head[a:], ")"); b >= 0 {
+			head = head[:a] + head[a+b+1:]
+		}
+	}
+	head = strings.TrimRight(head, ": ")
+	st := okStyle
+	if me.Level == "error" {
+		st = errStyle
+	}
+	line := st.Render(head)
+	if lines := strings.Count(body, "\n") + 1; body != "" && lines > 1 {
+		line += dimStyle.Render(fmt.Sprintf(" · %d lines · Ctrl+A to read", lines))
+	}
+	return line
 }
 
 func (m *model) answer(value string) {

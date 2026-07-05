@@ -93,7 +93,7 @@ export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelect
 export const FORWARDED_EVENTS: readonly string[] = [
   'log', 'message', 'tool_call', 'tool_call_result',
   'spinner_state', 'status', 'mode_change', 'model_tier', 'set_tier',
-  'cost_update', 'todo_update', 'thinking', 'thinking_clear',
+  'cost_update', 'todo_update', 'subagent_update', 'thinking', 'thinking_clear',
   'config_changed', 'graph_changed', 'cwd_changed', 'mcp_changed',
   'rerun_onboarding', 'shutdown', 'loop_detected', 'goals_changed',
   // /clear wipes the front-end transcript (the engine has no in-process UI to intercept it).

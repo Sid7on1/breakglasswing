@@ -39,3 +39,4 @@ import './selection';
 import './mind';
 import './calibration';
 import './perf';
+import './subagents';

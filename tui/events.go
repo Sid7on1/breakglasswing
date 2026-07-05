@@ -143,11 +143,16 @@ func (m *model) handleEvent(o Outbound) {
 	case "tool_call", "tool_call_result":
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
-			// Update the tool in its existing slot if we've seen this id (pending → running → done),
-			// else append at the end in start order. The card fills in place — it never moves. The
-			// finished leading prefix leaves for scrollback on the next non-tool content (flushToolRun),
-			// where a long boring burst collapses to category counts instead of pages of lines.
-			if idx := m.toolIdx(tc.ID); tc.ID != "" && idx >= 0 {
+			if tc.ParentID != "" {
+				// Sub-agent tool call: nest it UNDER its spawner (the live sub-agent panel) instead of
+				// the parent's flat run, so it doesn't interleave into the main transcript. Upsert by id
+				// so pending→running→done fills the same slot.
+				m.upsertSubAgentTool(tc)
+			} else if idx := m.toolIdx(tc.ID); tc.ID != "" && idx >= 0 {
+				// Update the tool in its existing slot if we've seen this id (pending → running → done),
+				// else append at the end in start order. The card fills in place — it never moves. The
+				// finished leading prefix leaves for scrollback on the next non-tool content (flushToolRun),
+				// where a long boring burst collapses to category counts instead of pages of lines.
 				m.turnTools[idx] = tc
 			} else {
 				m.turnTools = append(m.turnTools, tc)
@@ -176,6 +181,21 @@ func (m *model) handleEvent(o Outbound) {
 		// Pinned above the prompt by belowSections() while any task is unfinished, so it stays
 		// visible instead of scrolling off into the transcript.
 
+	case "subagent_update":
+		// Live sub-agent coverage (blackboard snapshot). Pinned as a panel while any sub-agent runs,
+		// then disappears once they all finish — same lifecycle as the task list.
+		var subs []SubAgent
+		if len(o.Args) > 0 {
+			_ = json.Unmarshal(o.Args[0], &subs)
+		}
+		m.subagents = subs
+		if m.saSel >= len(subs) { // keep the selection cursor in range as agents come and go
+			m.saSel = 0
+		}
+		if len(subs) == 0 {
+			m.saFocus = false // nothing to focus once the board empties
+		}
+
 	case "clear":
 		// /clear: wipe the transcript + per-turn state, then re-show the welcome banner so the screen
 		// looks freshly launched (the engine has already reset the conversation history). pendingClear
@@ -190,6 +210,11 @@ func (m *model) handleEvent(o Outbound) {
 		m.turnTools = nil
 		m.todos = nil
 		m.lastTodoRender = ""
+		m.subagents = nil
+		m.subAgentTools = map[string][]ToolCall{}
+		m.saExpanded = map[string]bool{}
+		m.saSel = 0
+		m.saFocus = false
 		m.histTokens = 0
 		m.welcomed = false
 		m.pendingClear = true

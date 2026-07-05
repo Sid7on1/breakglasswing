@@ -154,6 +154,16 @@ type model struct {
 	todos          []TodoItem
 	lastTodoRender string
 
+	// live sub-agent coverage (subagent_update). Pinned as a live panel while any sub-agent runs.
+	subagents []SubAgent
+	// per-agent tool activity, keyed by the spawn taskId. Sub-agent tool calls (parentId set) are
+	// routed HERE — nested under their agent — instead of the parent's flat turnTools run, so the
+	// panel can show each agent's live action + full tool list without polluting the transcript.
+	subAgentTools map[string][]ToolCall
+	saSel         int             // selected agent row in the panel (for keyboard expand)
+	saExpanded    map[string]bool // taskId → is this agent's card expanded
+	saFocus       bool            // panel has keyboard focus (ctrl+a); ↑/↓ select, enter expand
+
 	// pending approval (from a `request` message)
 	reqOpen     bool
 	reqID       int
@@ -294,6 +304,8 @@ func initialModel(e *Engine) model {
 		histIdx:  len(hist),
 		vp:            vp,
 		collapseTools: true,
+		subAgentTools: map[string][]ToolCall{},
+		saExpanded:    map[string]bool{},
 		status:       "Starting engine…",
 		sessionVerb:  spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))],
 		bell:         os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
@@ -751,13 +763,19 @@ func (m model) belowSections() []string {
 	overlay := m.menuOpen || m.compOpen || m.searchMode || m.showLogs || m.reqOpen || m.showFullMap || m.showMind
 	if !overlay {
 		td := m.activeTodoPanel()
+		sa := m.subAgentPanel()
 		cm := m.compactMapView()
 		hl := m.healthLineView() // ambient repo-health: only non-empty when a drive is off setpoint
 
 		// Add a blank spacer above the pinned panels so they don't stick directly to the transcript
 		// or working indicators.
-		if td != "" || cm != "" || hl != "" {
+		if td != "" || sa != "" || cm != "" || hl != "" {
 			s = append(s, "")
+		}
+
+		// Pin the live sub-agent coverage panel while any sub-agent is running, above the task list.
+		if sa != "" {
+			s = append(s, sa)
 		}
 
 		// Pin the task list above the prompt while any task is unfinished (Claude-Code-style live

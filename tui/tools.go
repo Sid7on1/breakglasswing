@@ -251,6 +251,34 @@ func formatRun(run []ToolCall, width int, collapse bool) []string {
 // pending/running placeholder). A finished tool can commit to scrollback; a running one cannot.
 func toolFinished(tc ToolCall) bool { return tc.Status != "running" && tc.Status != "" }
 
+// upsertSubAgentTool records a sub-agent's tool call under its spawn (tc.ParentID), filling the same
+// slot on pending→running→done so the panel shows one row per call with a live status. Never touches
+// the parent's turnTools/scrollback — sub-agent work stays nested under its agent card.
+func (m *model) upsertSubAgentTool(tc ToolCall) {
+	if m.subAgentTools == nil {
+		m.subAgentTools = map[string][]ToolCall{}
+	}
+	run := m.subAgentTools[tc.ParentID]
+	for i := range run {
+		if tc.ID != "" && run[i].ID == tc.ID {
+			run[i] = tc
+			m.subAgentTools[tc.ParentID] = run
+			return
+		}
+	}
+	m.subAgentTools[tc.ParentID] = append(run, tc)
+}
+
+// latestSubAgentTool returns the most recent tool call for a spawn (last in start order), or a zero
+// ToolCall (ToolName=="") if the agent hasn't run one yet.
+func (m model) latestSubAgentTool(taskID string) ToolCall {
+	run := m.subAgentTools[taskID]
+	if len(run) == 0 {
+		return ToolCall{}
+	}
+	return run[len(run)-1]
+}
+
 // toolIdx returns the index of the tool with id in turnTools, or -1.
 func (m *model) toolIdx(id string) int {
 	for i := range m.turnTools {

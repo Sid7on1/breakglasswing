@@ -4,6 +4,7 @@ import { existsSync } from 'fs';
 import { Logger } from '../utils/logger';
 import { cliEvents } from '../cli/events';
 import { FLOOR_ENV } from '../sandbox/exec.sandbox';
+import { globalSubAgentBlackboard } from './subagent.blackboard';
 
 // Line-delimited sentinels the sub-agent SUBPROCESS (bun-compiled binary re-execing itself) writes to
 // stdout, and the parent parses back into the same {type} messages a worker_thread posts. Shared with
@@ -24,6 +25,9 @@ export interface SubAgentConfig {
   prompt: string;
   cwd: string;
   parentMode: string;
+  // What this agent is responsible for (paths/globs/topic) — its claim on the blackboard, used to
+  // detect overlap with sibling agents and to show coverage in /subagents and the TUI panel.
+  scope?: string;
   // Sandbox floor (BiMax v2): when set, the worker runs as an isolated autonomous episode —
   // Bash confined by the OS sandbox to this root with network denied, file tools' workspace
   // narrowed to it, net-facing tools not registered. Carried via the worker's own env copy.
@@ -121,9 +125,16 @@ export class SubAgentManager {
     };
   }
 
+  /** Snapshot the blackboard onto the event bus so the /subagents view + TUI panel stay live. */
+  private emitBoard(): void {
+    try { cliEvents.emit('subagent_update', globalSubAgentBlackboard.all()); } catch { /* best-effort */ }
+  }
+
   public spawnWorker(taskId: string, config: SubAgentConfig): Promise<string> {
     return new Promise((resolve, reject) => {
       Logger.info(`[SubAgentManager] Spawning worker for task ${taskId} (Agent: ${config.agentType})`);
+      globalSubAgentBlackboard.register(taskId, config.agentType, config.scope || '', config.prompt);
+      this.emitBoard();
 
       const workerOpts = {
         workerData: config,
@@ -159,20 +170,28 @@ export class SubAgentManager {
 
       worker.on('message', (message) => {
         if (message.type === 'success') {
+          globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
+          this.emitBoard();
           finalize(() => resolve(message.result));
         } else if (message.type === 'error') {
+          globalSubAgentBlackboard.markFailed(taskId, String(message.error));
+          this.emitBoard();
           finalize(() => reject(new Error(message.error)));
         } else if (message.type === 'log') {
           Logger.info(`[Worker ${taskId}] ${message.content}`);
         } else if (message.type === 'tool_event' && message.call) {
           // T3 — re-emit a sub-agent's tool activity on the main event bus, tagged so the UI nests
           // it under this spawn. Tag-and-forward only; never settles the spawn promise.
+          globalSubAgentBlackboard.incTool(taskId);
+          if (message.subtype === 'tool_call') this.emitBoard(); // one board refresh per new call, not per result
           const call = { ...message.call, parentId: taskId, agentLabel: config.agentType };
           cliEvents.emit(message.subtype === 'tool_call_result' ? 'tool_call_result' : 'tool_call', call);
         }
       });
 
       worker.on('error', (err) => {
+        globalSubAgentBlackboard.markFailed(taskId, err?.message || String(err));
+        this.emitBoard();
         finalize(() => reject(err));
       });
 
