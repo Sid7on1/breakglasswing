@@ -39,3 +39,17 @@ vendor/*/venv/
 .bimax/claims.json
 .bimax/policy-arms.json
 benchmarks/terminal_bench_adapter/bin/
+
+# Benchmark + agent run output (reproducible, large — never committed)
+jobs/
+runs/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# OTel GenAI trace dumps (runtime artifact)
+.bimax/traces/
+
+# Local Claude Code workspace settings/agents (machine-local)
+.claude/

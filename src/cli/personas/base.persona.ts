@@ -190,6 +190,14 @@ export abstract class AgentPersona {
       if (goalsBlock) sections.goals = goalsBlock;
     } catch { /* goals are best-effort — getGoalManager() throws if not yet initialized */ }
 
+    // Multi-repo workspace: which repos are in context, their edit scopes, and any fresh clones
+    // awaiting the one-time registration ask. Empty (and omitted) in single-repo sessions.
+    try {
+      const { tryGetWorkspace } = require('../../core/workspace.manager') as typeof import('../../core/workspace.manager');
+      const wsBlock = tryGetWorkspace()?.contextBlock();
+      if (wsBlock) sections.workspace = wsBlock;
+    } catch { /* best-effort */ }
+
     // Live task checklist: re-inject the agent's own todo list EVERY turn so it survives context
     // compaction. Without this the list is UI-only and the model forgets its phases the moment the
     // creating turn scrolls out of history ("what phases are you talking about?").
@@ -261,6 +269,7 @@ export abstract class AgentPersona {
       sections.pathRules,
       sections.memory,
       sections.goals,   // cross-session persistent goals (injected after memory, before plan mode)
+      sections.workspace, // multi-repo workspace map (repos in context + edit scopes + pending clones)
       sections.agentMode, // behavioral mode (explore/code) specialization
       sections.selfKnowledge, // mind: learned failure rates → routing rules
       sections.habits,        // mind: compiled procedural memory
@@ -341,7 +350,11 @@ export abstract class AgentPersona {
     // governor is undefined here: tools already carry their own injected governor, and the loop
     // doesn't enforce policy itself (see AgentLoop constructor).
     const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow);
-    const maxIterations = options?.maxIterations ?? 130;
+    // BIMAX_MAX_ITERATIONS: benchmark/headless runs raise this (the container's wall clock is
+    // the real budget there). Must be applied HERE too — this callsite always passes
+    // maxIterations down, so the loop-level env fallback never sees an undefined value.
+    const maxIterations = options?.maxIterations
+      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || 130);
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
     const systemPrompt = this.getSystemPrompt({ planMode: options?.planMode, memory, exemplars, contextMode });
 

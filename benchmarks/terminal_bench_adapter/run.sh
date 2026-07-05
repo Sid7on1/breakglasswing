@@ -18,6 +18,14 @@ fi
 # benchmarks.terminal_bench_adapter.*.
 export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$PWD"
 
+# Model default: the container has no ~/.breakglass/config.json, so without BGW_MODEL the
+# engine falls back to its hardcoded default model. Mirror the host's configured model
+# unless the caller chose one explicitly (TB_MODEL / BGW_MODEL).
+if [ -z "${TB_MODEL:-}" ] && [ -z "${BGW_MODEL:-}" ] && [ -f "$HOME/.breakglass/config.json" ]; then
+  BGW_MODEL=$(node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.env.HOME+"/.breakglass/config.json","utf8")).model||"")}catch{}' 2>/dev/null || true)
+  [ -n "$BGW_MODEL" ] && export BGW_MODEL && echo "→ using host-configured model: $BGW_MODEL"
+fi
+
 # Harbor = the Terminal-Bench 2.x harness (the current leaderboard).
 DATASET="${TB_DATASET:-terminal-bench/terminal-bench-2}"
 CONCURRENCY="${TB_CONCURRENCY:-1}"
@@ -34,7 +42,10 @@ case "$MODE" in
     exec harbor run "${COMMON[@]}" ;;
   task)
     shift
-    ARGS=(); for t in "$@"; do ARGS+=(--include-task-name "$t"); done
+    # Harbor task ids are org-prefixed ("terminal-bench/circuit-fibsqrt"); accept bare
+    # names by prepending the dataset's org so `./run.sh task circuit-fibsqrt` just works.
+    ORG="${DATASET%%/*}"
+    ARGS=(); for t in "$@"; do case "$t" in */*) ;; *) t="$ORG/$t" ;; esac; ARGS+=(--include-task-name "$t"); done
     exec harbor run "${COMMON[@]}" "${ARGS[@]}" ;;
   *)
     echo "usage: $0 smoke|full|task <name>..." >&2; exit 2 ;;

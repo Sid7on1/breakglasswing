@@ -85,7 +85,10 @@ export class AgentLoop {
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
-    const maxIter = options?.maxIterations ?? 130;
+    // Env override for headless/benchmark runs: a hard task can legitimately need hundreds of
+    // rounds, and there the wall clock (container/task timeout) is the real budget, not this.
+    const maxIter = options?.maxIterations
+      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || 130);
     const contextMode = options?.contextMode ?? 'smart';
     // Cooperative cancellation: the front-end's interrupt aborts this signal. We don't tear the
     // in-flight fetch down mid-byte; we stop at the next safe boundary (next streamed token, or
@@ -110,6 +113,13 @@ export class AgentLoop {
     // spin the loop, while a flaky one still gets a fresh attempt (new key / re-sample).
     let transientRetries = 0;
     const MAX_TRANSIENT_RETRIES = 2;
+    // Bounds the auto-continue after an output-token cutoff (finish_reason: length). Long
+    // code-writing answers legitimately need several rounds to finish, but a model stuck
+    // re-emitting the ceiling forever must not spin the loop. Headless/print runs depend on
+    // this — there is no user there to say "continue".
+    let truncationContinues = 0;
+    const MAX_TRUNCATION_CONTINUES =
+      parseInt(process.env.BIMAX_MAX_CONTINUES || '', 10) || 12;
     // Bounds the "keep going while todos are open" persistence below, so a model that refuses to
     // finish (or keeps re-opening items) can't spin the loop forever.
     let persistenceNudges = 0;
@@ -158,6 +168,9 @@ export class AgentLoop {
       // Set when the partial turn must be discarded and re-asked (after compaction or
       // a transient-error retry); triggers the `continue` below.
       let discardTurn = false;
+      // Set when the model hit the output-token ceiling this round (finish_reason: length);
+      // handled after the stream ends — auto-continue, or surface the cutoff if capped.
+      let turnTruncated = false;
 
       llmRounds++;
       const chatSpan = tracer.startSpan(
@@ -183,13 +196,11 @@ export class AgentLoop {
           yield event.text;
         } else if (event.type === 'truncated') {
           // The model hit the output-token ceiling mid-answer (finish_reason: length), so this reply
-          // is CUT OFF, not finished. Surface it in the reply's own voice so the user knows there's
-          // more — rather than silently presenting a half-answer as complete. One line, appended once.
-          const note = '\n\n⚠ *(response hit the max output limit — say "continue" for the rest, or raise it with `/config`)*';
-          currentContent += note;
-          anyTextYielded = true;
+          // is CUT OFF, not finished. Decided after the stream ends: auto-continue the turn (persist
+          // the partial reply, re-ask) so long answers stitch together — or, past the cap, surface
+          // the cutoff in the reply's own voice rather than presenting a half-answer as complete.
+          turnTruncated = true;
           chatSpan.setAttribute('gen_ai.response.finish_reasons', 'length');
-          yield note;
         } else if (event.type === 'thinking') {
           // Internal reasoning: surface to the UI status area, never into the reply
           cliEvents.emit('thinking', event.text);
@@ -288,6 +299,41 @@ export class AgentLoop {
       // land in the reply or the history, and learn whether the turn was nothing but.
       const sanitized = responseSanitizer.sanitize(currentContent);
       currentContent = sanitized.text;
+
+      // Output-token cutoff: the reply (or a tool call) was severed mid-stream. A human can say
+      // "continue"; headless/print runs cannot — so the loop continues for them, stitching the
+      // answer together across rounds. Bounded by MAX_TRUNCATION_CONTINUES.
+      if (turnTruncated) {
+        // A trailing tool call whose args were cut mid-JSON is unrunnable — drop it so the model
+        // re-issues it whole next round. Earlier calls in the same turn parsed fine and still run.
+        while (toolCalls.length > 0) {
+          try { JSON.parse(toolCalls[toolCalls.length - 1].args || '{}'); break; }
+          catch { toolCalls.pop(); }
+        }
+        if (toolCalls.length === 0 && truncationContinues < MAX_TRUNCATION_CONTINUES) {
+          truncationContinues++;
+          if (currentContent) this.messages.push({ role: 'assistant', content: currentContent });
+          this.messages.push({
+            role: 'user',
+            content:
+              'Your previous response was cut off by the output-token limit before it finished. ' +
+              'Continue from exactly where it stopped — do not repeat anything already written and ' +
+              'do not restart the answer. If a tool call was cut off, re-issue it in full; for ' +
+              'large files, write them in several smaller pieces (write the first part, then ' +
+              'append the rest) so no single call hits the limit.',
+          });
+          cliEvents.emit('status', `Output limit hit — continuing automatically (${truncationContinues}/${MAX_TRUNCATION_CONTINUES})`);
+          cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Response hit the output-token ceiling; auto-continuing (${truncationContinues}/${MAX_TRUNCATION_CONTINUES}).`, timestamp: new Date() });
+          continue;
+        }
+        if (toolCalls.length === 0) {
+          // Cap exhausted: stop stitching and tell the user, in the reply's own voice.
+          const note = '\n\n⚠ *(response hit the max output limit — say "continue" for the rest, or raise it with `/config`)*';
+          currentContent += note;
+          anyTextYielded = true;
+          yield note;
+        }
+      }
 
       // Recover any tool call the model wrote as plain-text JSON instead of via the
       // function-calling API. Gated on real tool names, so user JSON is never run.
@@ -485,29 +531,39 @@ export class AgentLoop {
           }
         };
 
-        const parallelPromises = parallel.map(tc => executeTool(tc));
-        const parallelResults = await Promise.all(parallelPromises);
+        const parallelResults = await Promise.all(parallel.map(tc => executeTool(tc)));
+        const resultById = new Map<string, string>();
+        for (const res of parallelResults) resultById.set(res.id, res.result);
 
-        const loopSignals: LoopSignal[] = [];
-
-        for (const res of parallelResults) {
-          this.messages.push({ role: 'tool', tool_call_id: res.id, content: res.result });
-          const tc = parallel.find(t => t.id === res.id);
-          if (tc) {
-            const sig = loopDetector.record(tc.name, tc.args, res.result);
-            if (sig) loopSignals.push(sig);
-          }
-        }
-
+        let interrupted = false;
         for (const tc of sequential) {
           // Interrupted mid-chain: stop before starting the next tool so esc halts a continuous
           // run of tool calls promptly, instead of waiting out the whole batch + another model call.
-          if (signal?.aborted) return;
+          if (signal?.aborted) { interrupted = true; break; }
           const res = await executeTool(tc);
-          this.messages.push({ role: 'tool', tool_call_id: res.id, content: res.result });
-          const sig = loopDetector.record(tc.name, tc.args, res.result);
-          if (sig) loopSignals.push(sig);
+          resultById.set(res.id, res.result);
         }
+
+        // Push tool results in the SAME order the model emitted the calls, and answer EVERY
+        // tool_call. Two correctness reasons: (1) an assistant tool_calls message left partially
+        // answered — any id without a matching tool result — makes the NEXT request 400 on strict
+        // OpenAI-compatible backends (so un-run tools after an interrupt get an explicit stub, never
+        // a gap); (2) results were previously pushed as "all parallel, then all sequential", an order
+        // that didn't match the tool_calls order — order-sensitive servers reject that, and weaker
+        // models misread which result belongs to which call.
+        const loopSignals: LoopSignal[] = [];
+        for (const tc of toolCalls) {
+          const ran = resultById.has(tc.id);
+          const result = ran ? resultById.get(tc.id)! : 'Tool call interrupted before it ran.';
+          this.messages.push({ role: 'tool', tool_call_id: tc.id, content: result });
+          if (ran) {
+            const sig = loopDetector.record(tc.name, tc.args, result);
+            if (sig) loopSignals.push(sig);
+          }
+        }
+        // History is now well-formed (every tool_call answered) even on interrupt — so stop here
+        // instead of leaving a dangling turn, and the next user message appends to a valid log.
+        if (interrupted) return;
 
         // One mind-strip refresh per tool batch (not per call): the footer's 🧠 counters
         // (weak spots / drive deviations / habits) re-snapshot after the batch lands.

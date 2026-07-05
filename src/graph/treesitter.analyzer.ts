@@ -3,7 +3,7 @@ import * as path from 'path';
 import { minimatch } from 'minimatch';
 import Parser from 'web-tree-sitter';
 import { IGraphStore, GraphNode } from './models';
-import { Logger } from '../utils';
+import { Logger, treeSitterRuntimeAvailable } from '../utils';
 
 // M1 — tree-sitter multi-language backend. Indexes non-TS/JS languages (Python first) into
 // the SAME graph model (FILE/CLASS/FUNCTION nodes + CONTAINS/CALLS edges) with line ranges,
@@ -81,13 +81,22 @@ export class TreeSitterAnalyzer {
 
   /** Extensions this analyzer can index given the grammars actually present on disk. */
   public static supportedExtensions(): string[] {
+    if (!treeSitterRuntimeAvailable()) return [];
     return Object.keys(LANGUAGES).filter(ext => resolveGrammarWasm(LANGUAGES[ext].wasm) !== null);
   }
 
-  private async init(): Promise<void> {
-    if (this.parser) return;
+  /** False when the wasm runtime isn't on disk (standalone binary) — callers must bail. */
+  private async init(): Promise<boolean> {
+    if (this.parser) return true;
+    // Parser.init() without the wasm file aborts with an UNCATCHABLE unhandled rejection
+    // (Emscripten) — never call it unless the runtime is really present.
+    if (!treeSitterRuntimeAvailable()) {
+      Logger.warn('[TreeSitter] wasm runtime not present — non-TS indexing disabled.');
+      return false;
+    }
     await Parser.init();
     this.parser = new Parser();
+    return true;
   }
 
   private async languageFor(ext: string): Promise<Parser.Language | null> {
@@ -136,7 +145,7 @@ export class TreeSitterAnalyzer {
 
   /** Index every supported non-TS file under the project root into the shared graph. */
   public async analyzeProject(): Promise<void> {
-    await this.init();
+    if (!(await this.init())) return;
     const files = this.collectFiles(this.projectRoot);
     if (files.length === 0) return;
 
@@ -169,7 +178,7 @@ export class TreeSitterAnalyzer {
   public async analyzeSingleFile(absolutePath: string): Promise<void> {
     const ext = path.extname(absolutePath);
     if (!LANGUAGES[ext]) return;
-    await this.init();
+    if (!(await this.init())) return;
     const lang = await this.languageFor(ext);
     if (!lang) return;
     let source: string;

@@ -1,5 +1,5 @@
 import Parser from 'web-tree-sitter';
-import { Logger } from '../utils';
+import { Logger, treeSitterRuntimeAvailable } from '../utils';
 
 export interface Classification {
   category: 'read' | 'write' | 'network_exec' | 'install' | 'unknown';
@@ -73,6 +73,12 @@ export class BashStaticAnalyzer {
   public async warmUp(): Promise<void> {
     if (this.warmStarted) return;
     this.warmStarted = true;
+    // Standalone-binary guard: Parser.init() with no wasm on disk aborts with an unhandled
+    // rejection that escapes this try/catch (Emscripten). Check before touching it.
+    if (!treeSitterRuntimeAvailable()) {
+      Logger.warn('[BashAnalyzer] tree-sitter wasm runtime not present — using regex fallback.');
+      return;
+    }
     try {
       // Parser.init + WASM loading are process-wide work. Governors can be created repeatedly in
       // tests and sub-systems; sharing the promise prevents parallel WASM loads and descriptor

@@ -153,6 +153,9 @@ function spawnProxy(): ChildProcess {
  */
 export async function ensureHeadroomProxy(): Promise<boolean> {
   if (process.env.BIMAX_DISABLE_HEADROOM === '1') return false;
+  // Compression disabled ⇒ the proxy would never be used — don't provision a Python venv +
+  // hundreds of MB of pip installs for nothing (this bit hard in benchmark containers).
+  if (process.env.BIMAX_DISABLE_COMPRESSION === '1') return false;
   // Respect a user-provided external proxy — don't spawn our own.
   if (process.env.HEADROOM_PROXY_URL && !process.env.HEADROOM_PROXY_URL.includes(`:${PORT}`)) { _ready = true; return true; }
   if (_ready) return true;

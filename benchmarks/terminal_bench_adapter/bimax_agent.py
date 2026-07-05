@@ -76,7 +76,20 @@ class BiMaxAgent(AbstractInstalledAgent):
             # Container hygiene: no Headroom sidecar provisioning, no update checks; keep
             # the run reproducible and the cold start fast.
             "BIMAX_DISABLE_COMPRESSION": "1",
+            "BIMAX_DISABLE_HEADROOM": "1",
             "BIMAX_MCP_WATCHDOG": "0",
+            # TB2 tasks write big files; the engine's 4096-token default output ceiling
+            # truncates them constantly. 8192 is accepted across the NVIDIA catalog; the
+            # agent loop's auto-continue stitches anything longer.
+            "BGW_MAX_TOKENS": os.environ.get("TB_MAX_TOKENS", "8192"),
+            # The task's container timeout is the real budget — don't let the engine's
+            # interactive-scale caps (130 rounds / 12 stitched continuations) end a hard
+            # task early.
+            "BIMAX_MAX_ITERATIONS": os.environ.get("TB_MAX_ITERATIONS", "500"),
+            "BIMAX_MAX_CONTINUES": os.environ.get("TB_MAX_CONTINUES", "40"),
+            # Governor's $5 default is per-container here (fresh state each trial) and NVIDIA
+            # tokens are free — don't let a cost estimate veto a task 15 minutes in.
+            "MAX_DAILY_SPEND": os.environ.get("TB_MAX_SPEND", "50"),
             # Traces land in the task cwd's .bimax/traces — harmless and useful post-mortem.
         }
         model = self._bare_model()
