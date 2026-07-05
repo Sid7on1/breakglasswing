@@ -16,7 +16,7 @@ func renderShortcuts() string {
 		{"Ctrl+G", "Command palette"},
 		{"Ctrl+F", "Search transcript & logs"},
 		{"Ctrl+O", "Toggle log view"},
-		{"Ctrl+X", "Mind HUD (weak spots · drives · habits)"},
+		{"Ctrl+X", "Mind HUD (Tab pages its sections)"},
 		{"Ctrl+B", "Collapse/expand tool calls"},
 		{"Ctrl+A", "Focus sub-agent panel (↑/↓ · enter)"},
 		{"Ctrl+P", "Preview pasted blocks"},

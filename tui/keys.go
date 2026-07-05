@@ -311,8 +311,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.relayout()
 		return m, nil
 	case "ctrl+x":
-		// Toggle the mind HUD — the 🧠 chip's explainable panel (weak spots, drives, habits).
+		// Toggle the mind HUD — the ◇ chip's explainable panel (weak spots, drives, habits).
 		m.showMind = !m.showMind
+		m.mindTab = 0 // always land on the overview
 		m.relayout()
 		return m, nil
 	case "ctrl+b":
@@ -362,6 +363,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.engine.Send(encodeInput("/tier " + next))
 		return m, nil
 	case "shift+tab":
+		// While the mind HUD is open, Shift+Tab pages its sections backwards.
+		if m.showMind {
+			m.mindTab = (m.mindTab + mindTabCount - 1) % mindTabCount
+			m.relayout()
+			return m, nil
+		}
 		// Cycle the agent behavioral mode: general → explore → sketch → code → beast → general.
 		// Drives /mode (engine emits mode_change → footer updates m.fMode). Mirrors the workflow
 		// arc: orient → architect → execute → autonomous build → neutral default.
@@ -413,6 +420,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.CursorEnd()
 		return m, m.requestCompletions()
 	case "tab":
+		// While the mind HUD is open, Tab pages through its sections instead of completing.
+		if m.showMind {
+			m.mindTab = (m.mindTab + 1) % mindTabCount
+			m.relayout()
+			return m, nil
+		}
 		if m.compOpen {
 			m.acceptCompletion()
 		}

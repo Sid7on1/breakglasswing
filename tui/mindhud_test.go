@@ -90,6 +90,58 @@ func TestMindHudToggleAndEsc(t *testing.T) {
 	}
 }
 
+// Tab pages through the HUD's sections: overview shows everything, a section tab shows
+// only its own block, Shift+Tab pages backwards, and Ctrl+X always reopens on overview.
+func TestMindHudTabs(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"mind": map[string]any{
+			"weak":       []map[string]any{{"tool": "EditFileTool", "domain": "go", "failRate": 0.4, "pWeak": 0.9, "n": 9}},
+			"drives":     []map[string]any{{"label": "types clean", "value": "ok", "ok": true, "spark": []int{1}}},
+			"habitNames": []string{"some-habit"},
+		},
+	}))
+
+	nm, _ := m.update(tea.KeyMsg{Type: tea.KeyCtrlX})
+	m = nm.(model)
+	if m.mindTab != 0 {
+		t.Fatal("Ctrl+X should open on the overview tab")
+	}
+	// Overview carries every section.
+	out := stripANSI(m.mindHudView())
+	for _, want := range []string{"Weak spots", "Drives", "Ledger", "Habits"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("overview missing %q in:\n%s", want, out)
+		}
+	}
+
+	// Tab → weak spots only.
+	nm, _ = m.update(tea.KeyMsg{Type: tea.KeyTab})
+	m = nm.(model)
+	out = stripANSI(m.mindHudView())
+	if !strings.Contains(out, "Weak spots") || strings.Contains(out, "Habits") {
+		t.Fatalf("weak-spots tab should show only its section, got:\n%s", out)
+	}
+
+	// Shift+Tab pages back to overview (and must NOT fire the /mode cycle).
+	nm, _ = m.update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = nm.(model)
+	if m.mindTab != 0 {
+		t.Fatalf("Shift+Tab should page back to overview, got tab %d", m.mindTab)
+	}
+
+	// Reopen always lands on overview even after paging.
+	nm, _ = m.update(tea.KeyMsg{Type: tea.KeyTab})
+	m = nm.(model)
+	nm, _ = m.update(tea.KeyMsg{Type: tea.KeyCtrlX}) // close
+	m = nm.(model)
+	nm, _ = m.update(tea.KeyMsg{Type: tea.KeyCtrlX}) // reopen
+	m = nm.(model)
+	if m.mindTab != 0 {
+		t.Fatal("reopening the HUD should reset to the overview tab")
+	}
+}
+
 // Empty mind state still renders an honest panel (no data ≠ broken panel).
 func TestMindHudEmptyState(t *testing.T) {
 	m, _ := newTestModel()

@@ -7,9 +7,9 @@ import (
 )
 
 // Markdown rendering for assistant output (bold, lists, and syntax-highlighted code blocks),
-// matching the Ink UI's warm, low-chrome look. glamour's built-in "dark" style is loud — a
+// in the low-chrome Graphite & Phosphor look. glamour's built-in "dark" style is loud — a
 // yellow-on-purple H1 bar, neon-pink inline code, and rainbow syntax over a solid grey block
-// (the "static" look). We swap it for the warm BiMax palette: terracotta headings, muted code,
+// (the "static" look). We swap it for the BiMax palette: phosphor headings, muted code,
 // and NO code-block background fill. The renderer is width-dependent, so we cache it and rebuild
 // only when the viewport width changes. Falls back to raw text if glamour ever errors.
 

@@ -36,7 +36,7 @@ var (
 	metaVal     = lipgloss.NewStyle().Foreground(colInactive)
 	statusStyle = lipgloss.NewStyle().Foreground(colInactive)
 
-	// User echo is the accent color (terracotta) so a turn's prompt is instantly distinct from the
+	// User echo is the accent color (phosphor) so a turn's prompt is instantly distinct from the
 	// white assistant reply — they were both bright white before and ran together.
 	userStyle   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	caretStyle  = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
@@ -85,7 +85,7 @@ var (
 		"explore": colWarn,   // yellow / amber
 		"sketch":  colSketch, // purple
 		"code":    colOK,     // green
-		"beast":   colAccent, // terracotta (brand)
+		"beast":   colAccent, // phosphor (brand)
 	}
 	// dark text on the colored block for contrast.
 	modeChipBase = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1A1A1A")).Padding(0, 1)
@@ -102,7 +102,7 @@ var (
 
 	// Full-line diff (Claude-Code style): the WHOLE changed line gets a coloured background with
 	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
-	// warm theme). Line numbers sit in a dim gutter.
+	// graphite theme). Line numbers sit in a dim gutter.
 	// Graphite-tinted diff pair: a deep green/red fill with a phosphor-adjacent readable fg.
 	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#0E2A1C")).Foreground(lipgloss.Color("#7EE7A0"))
 	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#2E1416")).Foreground(lipgloss.Color("#F08A82"))

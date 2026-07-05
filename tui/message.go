@@ -206,7 +206,7 @@ func (m *model) subAgentResultBlock(me MessageEntry) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(okStyle.Render("⏺ " + head))
+	b.WriteString(okStyle.Render("● " + head))
 	if body == "" {
 		return b.String()
 	}
