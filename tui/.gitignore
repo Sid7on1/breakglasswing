@@ -3,3 +3,5 @@ bimaxtui
 engine.log
 *.log
 .bimax/
+.bimax/traces/
+.bimax/worktrees/
