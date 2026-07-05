@@ -92,11 +92,7 @@ class BiMax(BaseInstalledAgent):
 
     # ---- install ----------------------------------------------------------------------
 
-    @property
-    def _binary_path(self) -> Path:
-        arch = os.environ.get("BIMAX_TB_ARCH")
-        if not arch:
-            arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    def _binary_for(self, arch: str) -> Path:
         p = Path(__file__).parent / "bin" / f"bimax-linux-{arch}"
         if not p.exists():
             raise FileNotFoundError(
@@ -104,13 +100,32 @@ class BiMax(BaseInstalledAgent):
             )
         return p
 
+    async def _container_arch(self, environment: BaseEnvironment) -> str:
+        """The CONTAINER's arch, not the host's — task images may be amd64-only and run
+        emulated on an arm64 Mac, where an arm64 binary would 'exec format error'."""
+        override_arch = os.environ.get("BIMAX_TB_ARCH")
+        if override_arch:
+            return override_arch
+        try:
+            r = await environment.exec(command="uname -m")
+            machine = (r.stdout or "").strip().lower()
+        except Exception:
+            machine = ""
+        if machine in ("arm64", "aarch64"):
+            return "arm64"
+        if machine in ("x86_64", "amd64"):
+            return "x64"
+        # Unknown output — fall back to the host's arch as the best guess.
+        return "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+
     @override
     def get_version_command(self) -> str | None:
         return "bimax --version"
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await environment.upload_file(self._binary_path, "/installed-agent/bimax")
+        arch = await self._container_arch(environment)
+        await environment.upload_file(self._binary_for(arch), "/installed-agent/bimax")
         await self.exec_as_root(
             environment,
             command=(
