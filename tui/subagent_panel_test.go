@@ -51,7 +51,7 @@ func TestSubAgentPanelLiveAndExpand(t *testing.T) {
 	m.handleEngine(ev("subagent_update", board))
 
 	exp := stripANSI(m.subAgentPanel())
-	for _, want := range []string{"PROMPT", "Explore core TS", "TOOLS", "Searching blackboard", "OUTPUT", "Found the blackboard pattern", "✓ done"} {
+	for _, want := range []string{"PROMPT", "Explore core TS", "TOOLS", "Searching blackboard", "OUTPUT", "Found the blackboard pattern", "done"} {
 		if !strings.Contains(exp, want) {
 			t.Errorf("expanded card missing %q in:\n%s", want, exp)
 		}

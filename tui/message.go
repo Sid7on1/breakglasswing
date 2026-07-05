@@ -169,7 +169,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		// a single marker line — the full output stays live in the sub-agent panel (Ctrl+A), and the
 		// parent folds it into its own reply. This is the single biggest source of transcript noise.
 		if strings.HasPrefix(me.ID, "subagent-result-") {
-			m.append(subAgentResultLine(me))
+			m.append(m.subAgentResultBlock(me))
 			return
 		}
 		st := dimStyle
@@ -183,32 +183,48 @@ func (m *model) renderMessage(me MessageEntry) {
 	}
 }
 
-// subAgentResultLine collapses a sub-agent's full-report system message into ONE transcript line:
-// "✓ Sub-agent BiMax finished · 312 lines · Ctrl+A to read". The header is cleaned of the noisy
-// "(subagent-uuid)" id and trailing colon; the body line-count is surfaced so the user knows there's
-// more to read in the panel. Green on success, red on failure.
-func subAgentResultLine(me MessageEntry) string {
+// subAgentResultBlock renders a finished sub-agent's report into the transcript: a colored header
+// (with the noisy "(subagent-uuid)" id stripped) followed by the report body as clean markdown. It's
+// capped so a runaway report can't flood scrollback again — but generous enough that the output is
+// actually THERE to read (the earlier one-line collapse read as "no output"). Full text stays live in
+// the panel too (Ctrl+A). Errors render as a single red line.
+func (m *model) subAgentResultBlock(me MessageEntry) string {
 	head, body := me.Content, ""
-	if i := strings.Index(head, "\n"); i >= 0 {
-		body = strings.TrimSpace(head[i:])
-		head = strings.TrimSpace(head[:i])
+	if i := strings.Index(me.Content, "\n"); i >= 0 {
+		body = strings.TrimSpace(me.Content[i:])
+		head = strings.TrimSpace(me.Content[:i])
 	}
-	// Drop the " (subagent-…)" id chunk and any trailing ": " so the line reads like a clean status.
+	// Drop the " (subagent-…)" id chunk and any trailing ": " so the header reads like a clean status.
 	if a := strings.Index(head, " ("); a >= 0 {
 		if b := strings.Index(head[a:], ")"); b >= 0 {
 			head = head[:a] + head[a+b+1:]
 		}
 	}
 	head = strings.TrimRight(head, ": ")
-	st := okStyle
 	if me.Level == "error" {
-		st = errStyle
+		return errStyle.Render(head)
 	}
-	line := st.Render(head)
-	if lines := strings.Count(body, "\n") + 1; body != "" && lines > 1 {
-		line += dimStyle.Render(fmt.Sprintf(" · %d lines · Ctrl+A to read", lines))
+
+	var b strings.Builder
+	b.WriteString(okStyle.Render("⏺ " + head))
+	if body == "" {
+		return b.String()
 	}
-	return line
+	// Cap the body so four parallel agents can't dump 1200 lines; keep enough that it reads as a report.
+	const maxLines = 60
+	lines := strings.Split(body, "\n")
+	truncated := 0
+	if len(lines) > maxLines {
+		truncated = len(lines) - maxLines
+		lines = lines[:maxLines]
+	}
+	if md := indentLines(renderMarkdown(strings.Join(lines, "\n")), "  "); strings.TrimSpace(md) != "" {
+		b.WriteString("\n" + md)
+	}
+	if truncated > 0 {
+		b.WriteString("\n" + subtleStyle.Render(fmt.Sprintf("  … +%d more lines — Ctrl+A to open this agent's card", truncated)))
+	}
+	return b.String()
 }
 
 func (m *model) answer(value string) {

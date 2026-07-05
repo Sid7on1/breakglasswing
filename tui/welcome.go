@@ -91,7 +91,13 @@ func (m *model) showWelcome() {
 	fmt.Fprintf(&b, "\n%s\n", tipStyle.Render("Ask anything, or describe a task to run it with tools."))
 	fmt.Fprintf(&b, "%s", tipStyle.Render("/help · Ctrl+G palette · Ctrl+X mind · Ctrl+F search · Ctrl+O logs · Esc stash"))
 
-	m.append("\n" + welcomeBox.Render(b.String()) + "\n")
+	// Stretch the banner across the terminal instead of hugging its content. width-3 keeps the box one
+	// column short of the edge (border 2 + a spare col) so it never wraps the inline renderer.
+	box := welcomeBox
+	if m.width > 20 {
+		box = box.Width(m.width - 6) // content width; border(2)+padding(4) bring the outer box to width-2
+	}
+	m.append("\n" + box.Render(b.String()) + "\n")
 }
 
 func countMcpServers(cwd string) int {

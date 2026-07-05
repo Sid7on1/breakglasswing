@@ -130,9 +130,20 @@ func (m model) subAgentPanel() string {
 				chevron = subtleStyle.Render("▾ ")
 			}
 		}
-		// 🤖 SubAgent Explore · <live status>. The fixed prefix is short; only the status is clipped.
-		head := cursor + chevron + dimStyle.Render("🤖 SubAgent ") + agentBadge.Render(s.AgentType) +
-			dimStyle.Render(" · ") + m.subAgentStatus(s, textW-24)
+		// Leading status glyph: a live animated spinner while running, a green ✓ / red ✗ once finished —
+		// this is what makes a running agent read as ALIVE instead of a static gray line.
+		var glyph string
+		switch s.Status {
+		case "done":
+			glyph = okStyle.Render("✓")
+		case "failed":
+			glyph = errStyle.Render("✗")
+		default:
+			glyph = saSpin.Render(m.saSpinner())
+		}
+		// <spinner> 🤖 SubAgent <type> · <live status>. Fixed prefix is short; only the status is clipped.
+		head := cursor + chevron + glyph + " " + saRobot.Render("🤖") + dimStyle.Render(" SubAgent ") +
+			saType.Render(s.AgentType) + dimStyle.Render(" · ") + m.subAgentStatus(s, textW-26)
 		b.WriteString(head + "\n")
 		// Detail cards only when the panel is focused — the unfocused view is a clean one-line-per-agent
 		// live monitor; you opt into the heavy prompt/tools/output detail with Ctrl+A + enter.
@@ -153,28 +164,37 @@ func (m model) subAgentStatus(s SubAgent, budget int) string {
 	if budget < 8 {
 		budget = 8
 	}
+	// The leading row glyph already carries done/failed state, so the status text omits its own ✓/✗.
 	switch s.Status {
 	case "done":
-		return okStyle.Render("✓ done") + subtleStyle.Render(fmt.Sprintf(" · %d tools", s.ToolCalls))
+		return okStyle.Render("done") + subtleStyle.Render(fmt.Sprintf(" · %d tools", s.ToolCalls))
 	case "failed":
-		msg := "✗ Failed"
+		msg := "failed"
 		if s.Error != "" {
 			msg += ": " + s.Error
 		}
 		return errStyle.Render(clip(msg, budget))
 	}
 	tc := m.latestSubAgentTool(s.TaskID)
-	if tc.ToolName != "" && !toolFinished(tc) {
+	if tc.ToolName != "" {
 		verb, target := subAgentAction(tc)
-		return toolLabel.Render(verb+" ") + toolArgs.Render(clip(target, budget-len(verb)-1))
+		if !toolFinished(tc) {
+			// Live: the tool is running right now — bright verb + its target (the file/command/pattern).
+			return saVerb.Render(verb+" ") + toolArgs.Render(clip(target, budget-len(verb)-1))
+		}
+		// Between tools (agent reasoning): keep the LAST activity visible with a "working…" hint instead
+		// of reverting to the giant prompt — so the row always reflects what the agent is doing, not its
+		// task text. The spinner glyph already signals it's alive.
+		const hint = " · working…"
+		return dimStyle.Render(clip(verb+" "+target, budget-len(hint))) + subtleStyle.Render(hint)
 	}
-	// Between tools, show the human task (the prompt) — matching the GUI's idle rows — falling back to
-	// the coordination scope only when no prompt is on the board.
-	label := s.Prompt
+	// No tool has run yet (agent still booting / first reasoning pass): a short "starting…" hint plus a
+	// brief task clip — never the full multi-line prompt dumped into the row.
+	label := firstLine(s.Prompt)
 	if label == "" {
-		label = s.Scope
+		label = firstLine(s.Scope)
 	}
-	return toolArgs.Render(clip(label, budget))
+	return subtleStyle.Render("starting… ") + toolArgs.Render(clip(label, clampInt(budget-10, 8, 60)))
 }
 
 // subAgentDetail is the expanded card body: PROMPT, the agent's full TOOLS list (most recent last,
@@ -208,7 +228,7 @@ func (m model) subAgentDetail(s SubAgent, textW int) string {
 	switch {
 	case s.Status == "done" && s.Result != "":
 		b.WriteString(ind + subtleStyle.Render("OUTPUT") + "\n")
-		for _, ln := range clipLines(s.Result, iw, 3) {
+		for _, ln := range clipLines(s.Result, iw, 6) {
 			b.WriteString(ind + dimStyle.Render(ln) + "\n")
 		}
 	case s.Status == "failed" && s.Error != "":

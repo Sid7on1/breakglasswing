@@ -169,6 +169,12 @@ var (
 	// Agent-label badge on sub-agent tool calls.
 	agentBadge = lipgloss.NewStyle().Foreground(colInfo).Bold(true)
 
+	// Sub-agent live panel — a bright animated accent so a running agent reads as ALIVE, not chrome.
+	saSpin  = lipgloss.NewStyle().Foreground(colAccent).Bold(true) // animated braille spinner
+	saType  = lipgloss.NewStyle().Foreground(colAccent).Bold(true) // agent type (BiMax/Explore)
+	saVerb  = lipgloss.NewStyle().Foreground(colText).Bold(true)   // action verb (Reading/Running)
+	saRobot = lipgloss.NewStyle().Foreground(colInfo)              // 🤖 tint (kept subtle)
+
 	// Footer status glyph + hint text (Ink Footer.tsx parity).
 	footerIcon = lipgloss.NewStyle().Foreground(colAccent)
 	footerIdle = lipgloss.NewStyle().Foreground(colSubtle)

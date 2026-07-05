@@ -6,6 +6,25 @@ import (
 	"strings"
 )
 
+// firstLine returns the first line of s, trimmed — so a multi-line prompt renders as a single row.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
+// clampInt bounds v to [lo, hi].
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 // clip truncates s to n runes with an ellipsis.
 func clip(s string, n int) string {
 	r := []rune(s)

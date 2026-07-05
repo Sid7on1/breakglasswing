@@ -39,10 +39,32 @@ func (m model) nextTick() tea.Cmd {
 	if reducedMotion {
 		return tickCmd(500 * time.Millisecond)
 	}
-	if m.working() || !m.resizeAt.IsZero() {
+	// Also run the fast cadence while sub-agents are working in the BACKGROUND — the parent turn may
+	// have already ended (so m.working() is false), but their live panel still needs to animate.
+	if m.working() || m.subAgentsRunning() || !m.resizeAt.IsZero() {
 		return tickCmd(50 * time.Millisecond)
 	}
 	return tickCmd(500 * time.Millisecond)
+}
+
+// subAgentsRunning reports whether any spawned sub-agent is still running — used to keep the animation
+// cadence fast (and the panel live) even when the parent turn is idle.
+func (m model) subAgentsRunning() bool {
+	for _, s := range m.subagents {
+		if s.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// saSpinner returns the current braille frame for a running sub-agent, advanced off the 50ms chrome
+// tick (~10fps). Static under reduced-motion so it never strobes for motion-sensitive users.
+func (m model) saSpinner() string {
+	if reducedMotion {
+		return "●"
+	}
+	return brailleFrames[(m.thinkTick/2)%len(brailleFrames)]
 }
 
 // pasteChip is a collapsed multi-line paste: shown as "[Pasted text #N +L lines]" in the input and

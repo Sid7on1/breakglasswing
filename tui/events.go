@@ -34,6 +34,10 @@ func (m *model) handleEvent(o Outbound) {
 		if m.turnThoughtMs == 0 && !m.turnThinkStart.IsZero() {
 			m.turnThoughtMs = int(time.Since(m.turnThinkStart).Milliseconds())
 		}
+		// Answer text is non-tool content: commit any finished tool run to scrollback BEFORE this text
+		// renders, so a post-tool answer paragraph lands below the tool card (text → tool → text order)
+		// rather than briefly floating above it in the live region.
+		m.flushToolRun()
 		m.stream += argString(o.Args, 0)
 		m.lastTokenAt = time.Now()
 		// Commit any markdown blocks that just closed to native scrollback (formatted, never to
@@ -148,7 +152,16 @@ func (m *model) handleEvent(o Outbound) {
 				// the parent's flat run, so it doesn't interleave into the main transcript. Upsert by id
 				// so pending→running→done fills the same slot.
 				m.upsertSubAgentTool(tc)
-			} else if idx := m.toolIdx(tc.ID); tc.ID != "" && idx >= 0 {
+				break
+			}
+			// A NEW main-agent tool call starting while assistant text is mid-stream means the model
+			// finished a text part and is now acting. Commit that text block to scrollback FIRST so the
+			// transcript reads text → tool → text (Claude-Code interleaving) instead of every tool
+			// jumping ABOVE the answer when the turn ends (the "text and tools swap places" mess).
+			if o.Name == "tool_call" && m.streamCommitted < len(m.stream) {
+				m.commitAssistantStream(true)
+			}
+			if idx := m.toolIdx(tc.ID); tc.ID != "" && idx >= 0 {
 				// Update the tool in its existing slot if we've seen this id (pending → running → done),
 				// else append at the end in start order. The card fills in place — it never moves. The
 				// finished leading prefix leaves for scrollback on the next non-tool content (flushToolRun),
