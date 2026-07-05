@@ -14,7 +14,7 @@ import { isCodememReady } from '../../graph/codemem/backend';
 import { globalSkillService } from '../../skills/skill.service';
 import { getConfig } from '../config';
 import { loadProjectGuide } from '../projectGuide';
-import { beginTodoTurn, getTodoPromptBlock } from '../../tools/implementations/todo.tool';
+import { beginTodoTurn, getTodoPromptBlock, retireCompletedTodos } from '../../tools/implementations/todo.tool';
 import { getGoalManager } from '../../memory/goal.manager';
 import { agentModePromptSection } from '../agentMode';
 import { getSelfModel } from '../../mind/self.model';
@@ -385,6 +385,10 @@ export abstract class AgentPersona {
         }
       } catch { /* adversarial verifier is best-effort */ }
     }
+
+    // Turn end: retire the todo list if every item is done, so a finished checklist doesn't linger
+    // in the prompt/TUI across later turns (it stays only while work is genuinely open).
+    try { retireCompletedTodos(); } catch { /* best-effort */ }
 
     return executionLog;
   }

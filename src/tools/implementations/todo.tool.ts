@@ -30,6 +30,20 @@ export function beginTodoTurn(): void { touchedThisTurn = false; }
 /** Hard reset (new session / cleared history): forget the list entirely. */
 export function clearActiveTodos(): void { lastTodos = []; touchedThisTurn = false; }
 
+/**
+ * Turn-end cleanup: once every item is completed the task is DONE, so retire the list — otherwise a
+ * finished checklist lingers forever (re-injected into the prompt and pinned in the TUI) until the
+ * next /clear. Clears the UI panel too. No-op while any item is still open (that must survive to the
+ * next turn as task memory).
+ */
+export function retireCompletedTodos(): void {
+  if (lastTodos.length > 0 && lastTodos.every(t => t.status === 'completed')) {
+    lastTodos = [];
+    touchedThisTurn = false;
+    try { cliEvents.emit('todo_update', []); } catch { /* best-effort */ }
+  }
+}
+
 export function renderTodoList(todos: TodoItem[]): string {
   if (todos.length === 0) return 'Todo list is empty.';
   const done = todos.filter(t => t.status === 'completed').length;
