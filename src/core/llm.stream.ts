@@ -20,6 +20,48 @@ export function markCacheBreakpoint(msg: any): any {
   };
 }
 
+/**
+ * Attach a `cache_control` breakpoint to a message regardless of content shape — string content is
+ * lifted into a single text part; array content gets the marker on its LAST part. Returns the SAME
+ * reference when there is nothing markable (empty / tool-call-only content), so callers can detect
+ * "couldn't place a breakpoint here" by identity. Pure; never mutates the input.
+ */
+export function withCacheControl(msg: any): any {
+  if (!msg) return msg;
+  if (typeof msg.content === 'string') {
+    if (msg.content.length === 0) return msg;
+    return { ...msg, content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }] };
+  }
+  if (Array.isArray(msg.content) && msg.content.length > 0) {
+    const parts = msg.content.map((p: any) => ({ ...p }));
+    parts[parts.length - 1] = { ...parts[parts.length - 1], cache_control: { type: 'ephemeral' } };
+    return { ...msg, content: parts };
+  }
+  return msg;
+}
+
+/**
+ * Place prompt-cache breakpoints so the WHOLE stable prefix is cached, not just the system prompt.
+ * Anthropic caches everything up to a `cache_control` marker, so we set two (well under the 4-max):
+ *   1. the first message  — the static system prompt (reused every turn of the session).
+ *   2. the last markable message — the conversation-so-far, so the NEXT turn AND each tool round
+ *      within THIS turn read the accumulated history from cache instead of re-billing it in full.
+ * Previously only (1) was marked, leaving the growing conversation — the bulk of a long session — at
+ * the uncached rate. No-op-safe: returns a new array; unmarkable tails simply skip breakpoint 2.
+ */
+export function applyCacheBreakpoints(messages: any[]): any[] {
+  if (!messages || messages.length === 0) return messages;
+  const out = messages.slice();
+  out[0] = withCacheControl(out[0]);
+  // Walk from the tail to the first message that can actually hold a breakpoint (skip empty /
+  // tool-call-only assistant turns). Stop at index 1 so we never double-mark message[0].
+  for (let i = out.length - 1; i >= 1; i--) {
+    const marked = withCacheControl(out[i]);
+    if (marked !== out[i]) { out[i] = marked; break; }
+  }
+  return out;
+}
+
 /** One accumulated streaming tool call: stable id, name, and the concatenated arguments JSON. */
 export interface ToolCallSlot { id: string; name: string; args: string; }
 

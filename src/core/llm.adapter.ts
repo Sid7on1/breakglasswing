@@ -10,12 +10,12 @@ import { globalTelemetry } from '../telemetry/telemetry';
 // focused on the adapter class). Imported for internal use and re-exported so existing importers
 // and tests (which import these from ./llm.adapter) keep working unchanged.
 import {
-  markCacheBreakpoint, applyToolCallDelta, classifyStreamError,
+  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson,
 } from './llm.stream';
 import type { ToolCallSlot } from './llm.stream';
 export {
-  markCacheBreakpoint, applyToolCallDelta, classifyStreamError,
+  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson,
 };
 export type { ToolCallSlot };
@@ -478,8 +478,12 @@ export class LlmAdapter implements LLMProvider {
       // other model this branch is skipped and messages stay as plain strings (FLOOR = unchanged).
       // BiMax's universal answer to the same problem is the graph-native context engine (send less),
       // which runs regardless — caching simply stacks on top when the model can do it.
+      // Two breakpoints (system + conversation tail) so the WHOLE stable prefix caches, not just the
+      // system prompt — the big win is each tool round within a turn re-reading the history from cache
+      // instead of re-billing it. (Adapted from Claude Code's cache-aware hot path; see
+      // docs/ENGINE_TUI_COMPARISON.md §A4.)
       if (caps.promptCaching && options.system && finalMessages.length > 0) {
-        finalMessages = [markCacheBreakpoint(finalMessages[0]), ...finalMessages.slice(1)];
+        finalMessages = applyCacheBreakpoints(finalMessages);
       }
 
       const model = this.pickModel(kr, options.lite);
@@ -547,6 +551,10 @@ export class LlmAdapter implements LLMProvider {
       // one partial every PARTIAL_EMIT_MS; the final authoritative tool_call always fires regardless.
       const PARTIAL_EMIT_MS = 80;
       let lastPartialAt = 0;
+      // Track the provider's stop reason so we can detect a response cut off at the output-token
+      // ceiling (finish_reason === 'length') — otherwise a truncated answer is silently presented as
+      // if it were complete. Captured per-chunk; the last non-null value is authoritative.
+      let finishReason: string | null = null;
       // Native-thinking fast-path: a model with a structured reasoning channel (Claude, o-series,
       // DeepSeek-R1, minimax) delivers its reasoning out-of-band via `reasoning_content`; the
       // content channel is the answer, with no opener-less `</think>` to guard against. Implicit
@@ -605,6 +613,7 @@ export class LlmAdapter implements LLMProvider {
         receivedFirstChunk = true;
 
         const chunk = result.value;
+        if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
 
         if (debugStream) {
           const delta = chunk.choices?.[0]?.delta;
@@ -718,6 +727,13 @@ export class LlmAdapter implements LLMProvider {
       // one's arguments are whole. (Skips empty slots a provider may have opened without a name.)
       for (const [, slot] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
         if (slot.name) yield { type: 'tool_call', id: slot.id || `call-${Date.now()}-${slot.name}`, name: slot.name, args: slot.args };
+      }
+
+      // Output-limit truncation: the model stopped because it hit max_tokens, not because it finished.
+      // Only signal it when there were NO tool calls (a tool-call turn legitimately stops to act, and
+      // the loop continues on its own). Surfaced so the answer isn't silently presented as complete.
+      if (finishReason === 'length' && toolAcc.size === 0) {
+        yield { type: 'truncated' };
       }
 
       yield { type: 'done' };

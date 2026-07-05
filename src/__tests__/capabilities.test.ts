@@ -1,5 +1,5 @@
 import { capabilitiesFor, capabilityGlyphs, FLOOR, isFirstPartyAnthropic, anthropicBetaHeaders } from '../core/capabilities';
-import { markCacheBreakpoint } from '../core/llm.adapter';
+import { markCacheBreakpoint, applyCacheBreakpoints } from '../core/llm.adapter';
 
 // The capability layer is the spine of BiMax's "Claude-when-you-can, universal-always" design.
 // Two invariants matter most: (1) unknown models resolve to the FLOOR so behavior is unchanged,
@@ -139,6 +139,51 @@ describe('markCacheBreakpoint — Anthropic cache_control', () => {
     const already = { role: 'system', content: [{ type: 'text', text: 'a' }] };
     expect(markCacheBreakpoint(already)).toBe(already);
     expect(markCacheBreakpoint({ role: 'system', content: '' }).content).toBe('');
+  });
+});
+
+describe('applyCacheBreakpoints — full-prefix caching', () => {
+  const cc = { type: 'ephemeral' };
+  const marked = (m: any) => Array.isArray(m.content) && m.content[m.content.length - 1]?.cache_control?.type === 'ephemeral';
+
+  it('marks BOTH the system message and the conversation tail', () => {
+    const msgs = [
+      { role: 'system', content: 'stable system prompt' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi there' },
+      { role: 'user', content: 'do the thing' },
+    ];
+    const out = applyCacheBreakpoints(msgs);
+    expect(marked(out[0])).toBe(true);          // system cached
+    expect(marked(out[3])).toBe(true);          // conversation tail cached
+    expect(Array.isArray(out[1].content)).toBe(false); // middle untouched
+    expect(Array.isArray(out[2].content)).toBe(false);
+  });
+
+  it('handles array (tool-result) tail content by marking its last part', () => {
+    const out = applyCacheBreakpoints([
+      { role: 'system', content: 'sys' },
+      { role: 'tool', content: [{ type: 'text', text: 'result' }] },
+    ]);
+    expect(out[1].content[0].cache_control).toEqual(cc);
+  });
+
+  it('skips an unmarkable (empty / tool-call-only) tail and marks the previous message', () => {
+    const out = applyCacheBreakpoints([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'ask' },
+      { role: 'assistant', content: '' }, // tool-call-only: nothing to attach to
+    ]);
+    expect(marked(out[0])).toBe(true);
+    expect(marked(out[1])).toBe(true); // fell back to the last markable message
+    expect(out[2].content).toBe('');   // untouched
+  });
+
+  it('does not mutate the input array or its messages', () => {
+    const input = [{ role: 'system', content: 'a' }, { role: 'user', content: 'b' }];
+    applyCacheBreakpoints(input);
+    expect(input[0].content).toBe('a');
+    expect(input[1].content).toBe('b');
   });
 });
 

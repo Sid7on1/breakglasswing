@@ -31,6 +31,9 @@ export type ChatEvent =
   // render live activity can ignore it.
   | { type: 'tool_call_partial'; id: string; name: string; args: string }
   | { type: 'usage'; prompt: number; completion: number }
+  // The stream stopped because the model hit the output-token ceiling (finish_reason: 'length'), not
+  // because it finished — the answer is cut off. Only emitted when no tool call was produced.
+  | { type: 'truncated' }
   // `kind` tells the agent loop *how* to recover: 'context' → compact and retry;
   // 'transient' → bounded re-ask (new key / re-sampled output). Absent when fatal.
   | { type: 'error'; message: string; recoverable: boolean; kind?: 'context' | 'transient'; retryAfterSecs?: number }

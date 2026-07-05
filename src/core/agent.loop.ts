@@ -133,6 +133,14 @@ export class AgentLoop {
           currentContent += event.text;
           if (event.text) anyTextYielded = true;
           yield event.text;
+        } else if (event.type === 'truncated') {
+          // The model hit the output-token ceiling mid-answer (finish_reason: length), so this reply
+          // is CUT OFF, not finished. Surface it in the reply's own voice so the user knows there's
+          // more — rather than silently presenting a half-answer as complete. One line, appended once.
+          const note = '\n\n⚠ *(response hit the max output limit — say "continue" for the rest, or raise it with `/config`)*';
+          currentContent += note;
+          anyTextYielded = true;
+          yield note;
         } else if (event.type === 'thinking') {
           // Internal reasoning: surface to the UI status area, never into the reply
           cliEvents.emit('thinking', event.text);
