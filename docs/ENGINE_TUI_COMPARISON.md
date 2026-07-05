@@ -108,6 +108,30 @@ counts.
 
 ---
 
+## C2. TOOL BREADTH — honest diff (corrected after reading, not skimming)
+
+A tool-by-tool diff after actually reading `src/tools/implementations/` — several "gaps" from the
+first pass were **already implemented** and are struck out here.
+
+**Already present (my earlier audit was wrong):** ~~LSP~~ (`LspQueryTool` + real `src/lsp/client.ts`
+JSON-RPC client + registry, diagnostics/references, graph-fused), ~~microcompaction~~ (`microCompact`
+idempotent stubs), ~~graded recovery~~ (context/transient/unrecoverable tiers). Plus we match on
+Agent/Spawn, AskUserQuestion, Skill, ToolSearch, Web*, File*, Glob/Grep/Todo, MCP-manage, Config
+(Mode/Model), Plan.
+
+**Genuine gaps — BUILT 2026-07-05:**
+- ✅ **`TasksTool`** (`src/tools/implementations/tasks.tool.ts`) — `list` / `get` / `stop` for spawned
+  sub-agents, exposing the blackboard + `SubAgentManager` to the orchestrator. Completes the
+  map→reduce loop (was fire-and-forget). Parity with their `TaskList/TaskGet/TaskStop`. 7 tests.
+- ✅ **`NotebookEditTool`** (`src/tools/implementations/notebook.tool.ts`) — cell-addressed Jupyter
+  `.ipynb` editing (read/edit/insert/delete), preserving outputs + metadata. Parity with their
+  `NotebookEditTool`. 6 tests.
+
+**Remaining real gaps (deferred — niche, platform-specific, or need careful workflow integration):**
+Worktree tools (we have `WorktreeManager` internally), REPLTool (stateful REPL), ScheduleCronTool
+(needs a daemon), SendMessage/RemoteTrigger (inter-agent/remote), Team* (we have swarm), PowerShell
+(Windows). Not padding the tool count with these until each earns its complexity.
+
 ## D. Prioritized recommendations
 
 1. **A4 — full prefix cache breakpoint** (small change, big cost/latency win; we already have the mechanism).

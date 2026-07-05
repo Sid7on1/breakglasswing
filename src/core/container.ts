@@ -52,6 +52,8 @@ import { createRememberTool } from '../tools/implementations/remember.tool';
 import { globalProjectMemory } from '../memory/project.memory';
 import { VectorStore } from '../memory';
 import { createSpawnSubagentTool } from '../tools/implementations/spawn.tool';
+import { createTasksTool } from '../tools/implementations/tasks.tool';
+import { createNotebookEditTool } from '../tools/implementations/notebook.tool';
 import { createRegisterAgentTool } from '../tools/implementations/register.tool';
 import { createAskUserTool } from '../tools/implementations/ask_user.tool';
 import { createBlueprintTool } from '../tools/implementations/blueprint.tool';
@@ -158,6 +160,8 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createMemoryQueryTool(governor, vectorStore));
   toolRegistry.register(createRememberTool(governor, globalProjectMemory));
   toolRegistry.register(createSpawnSubagentTool(governor, toolRegistry, llmAdapter));
+  toolRegistry.register(createTasksTool(governor));
+  toolRegistry.register(createNotebookEditTool(governor));
   toolRegistry.register(createRegisterAgentTool(governor, toolRegistry));
   toolRegistry.register(createAskUserTool(governor, llmAdapter));
   toolRegistry.register(createGitTool(governor));
