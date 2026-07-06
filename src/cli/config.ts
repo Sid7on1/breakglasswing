@@ -24,6 +24,9 @@ export interface CliConfig {
   // Resilience chain: when the active model keeps failing mid-run (retry budget exhausted, or the
   // provider starts rejecting it), the loop switches to this model once instead of dying. '' = off.
   fallbackModel: string;
+  // Model sub-agents run on. '' (default) = inherit the main model. A per-spawn `model` arg on
+  // SpawnSubagentTool overrides this for that one agent.
+  subagentModel: string;
   timeout: number;
   temperature: number;
   topP: number; // nucleus sampling cap; clips the low-probability tail that drives dropped tool args / fabricated paths
@@ -81,6 +84,8 @@ const DEFAULTS: CliConfig = {
   model: 'stepfun-ai/step-3.7-flash',
   liteModel: 'stepfun-ai/step-3.7-flash', // valid NIM id (step-3.5-flash 400s "not a valid model ID")
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
+  subagentModel: '', // '' = sub-agents use the main model
+
   timeout: 120000,
   temperature: 0.7,
   topP: 0.95,

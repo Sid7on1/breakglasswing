@@ -24,9 +24,11 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
 - Before creating a deeply nested directory (e.g., \`mkdir -p foo/bar/baz\`), use \`ls\` on the parent to verify you are in the correct location.
 
 - Chain dependent commands with \`&&\`. Each call is a fresh subshell.
+- NEVER run interactive or long-lived commands — they produce no output and hang until the timeout kills them: no \`git rebase -i\`, no editors (vim/nano), no watch modes or dev servers (\`npm run dev\`, \`--watch\`), no commands that prompt for input. Use non-interactive flags (\`-y\`, \`--no-edit\`, \`CI=1\`) and one-shot equivalents (\`npm run build\`, a single test run).
+- Output is truncated after 50,000 characters — pipe noisy commands through \`tail\`/\`head\`/\`grep\` to keep the part you need.
 - Use \`~\` for home directory — it will be resolved.
 - Quote paths with spaces using double quotes.
-- Git: never force-push or reset --hard unless explicitly asked.`,
+- Git: never force-push or reset --hard unless explicitly asked; never commit unless asked.`,
   isDestructive: true,
   schema: {
     type: 'object',

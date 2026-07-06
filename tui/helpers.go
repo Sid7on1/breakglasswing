@@ -25,11 +25,20 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// clip truncates s to n runes with an ellipsis.
+// clip truncates s to n runes with an ellipsis. Callers frequently pass a
+// width computed from the terminal size (e.g. inner-44, budget-len(verb)-1),
+// which can go <= 0 on a narrow terminal; guard against a negative slice bound
+// so a small window never panics the whole TUI.
 func clip(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
+	}
+	if n == 1 {
+		return "…"
 	}
 	return string(r[:n-1]) + "…"
 }

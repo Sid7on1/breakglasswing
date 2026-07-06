@@ -132,7 +132,14 @@ globalCommandRegistry.register({
         },
       });
     };
+    const applySubagent = (model: string) => {
+      const val = model === '__inherit__' ? '' : model;
+      context.saveConfig({ subagentModel: val });
+      cliEvents.emit('config_changed');
+      context.addSystemMessage('success', val ? `Sub-agent model → ${val}` : 'Sub-agent model → (inherits main model)');
+    };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
+    const subagentOf = () => { try { return getConfig().subagentModel; } catch { return ''; } };
 
     // The picker offers the IDs the provider actually serves (root fix for "400 — invalid model").
     // Falls back to the static catalog when the provider has no /models endpoint or we're offline.
@@ -144,17 +151,30 @@ globalCommandRegistry.register({
       return modelMenuOptions(cur);
     };
 
-    // /model lite [id]  |  /model coding [id]
+    // /model lite [id]  |  /model coding [id]  |  /model subagent [id|inherit]
     const slot = (args[0] || '').toLowerCase();
-    if (slot === 'lite' || slot === 'coding') {
-      const apply = slot === 'lite' ? applyLite : applyCoding;
+    if (slot === 'lite' || slot === 'coding' || slot === 'subagent') {
+      const apply = slot === 'lite' ? applyLite : slot === 'subagent' ? applySubagent : applyCoding;
       const rest = args.slice(1).join(' ').trim();
-      if (rest) { if (rest === '__custom__') promptCustom(apply); else apply(rest); return { type: 'none' }; }
-      const cur = slot === 'lite' ? (liteOf() || '(uses coding model)') : (context.options.model || 'default');
+      if (rest) {
+        if (rest === '__custom__') promptCustom(apply);
+        else if (slot === 'subagent' && (rest === 'inherit' || rest === 'off' || rest === 'main')) apply('__inherit__');
+        else apply(rest);
+        return { type: 'none' };
+      }
+      const cur = slot === 'lite' ? (liteOf() || '(uses coding model)')
+        : slot === 'subagent' ? (subagentOf() || '(inherits main model)')
+        : (context.options.model || 'default');
+      const title = slot === 'lite' ? 'Select LITE (fast/cheap) model'
+        : slot === 'subagent' ? 'Select SUB-AGENT model (what spawned agents run on)'
+        : 'Select CODING (primary) model';
+      const extraOptions = slot === 'subagent'
+        ? [{ label: '↩ Inherit main model', value: '__inherit__', desc: 'Sub-agents use whatever the main model is (default)', category: 'Slots' }]
+        : [];
       return {
         type: 'menu',
-        title: `Select ${slot === 'lite' ? 'LITE (fast/cheap)' : 'CODING (primary)'} model — current: ${cur}`,
-        options: [...(await pickerOptions(cur)), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
+        title: `${title} — current: ${cur}`,
+        options: [...extraOptions, ...(await pickerOptions(cur)), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
         onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustom(apply) : apply(opt.value)),
       };
     }
@@ -176,16 +196,18 @@ globalCommandRegistry.register({
     const current = context.options.model || 'default';
     return {
       type: 'menu',
-      title: `Models — Coding: ${current}  ·  Lite: ${liteOf() || '(uses coding)'}`,
+      title: `Models — Coding: ${current}  ·  Lite: ${liteOf() || '(uses coding)'}  ·  Sub-agents: ${subagentOf() || '(inherit)'}`,
       options: [
         { label: '⚙ Set CODING model…', value: '/model coding', desc: `Primary agent model — the heavy/coding slot (current: ${current})`, category: 'Slots' },
         { label: '⚙ Set LITE model…', value: '/model lite', desc: `Fast model for summaries / self-critic / ask-user (current: ${liteOf() || 'uses coding'})`, category: 'Slots' },
+        { label: '⚙ Set SUB-AGENT model…', value: '/model subagent', desc: `What spawned sub-agents run on (current: ${subagentOf() || 'inherits main'})`, category: 'Slots' },
         ...(await pickerOptions(current)),
         { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' },
       ],
       onSelect: (opt: any) =>
         opt.value === '/model coding' ? context.executeCommand('/model coding')
         : opt.value === '/model lite' ? context.executeCommand('/model lite')
+        : opt.value === '/model subagent' ? context.executeCommand('/model subagent')
         : opt.value === '__custom__' ? promptCustom(applyCoding)
         : applyCoding(opt.value),
     };

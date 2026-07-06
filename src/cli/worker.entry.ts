@@ -72,6 +72,10 @@ async function runSubAgentCore(
         maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, parallelToolCalls: cfg.parallelToolCalls,
       });
     } catch { /* fall back to adapter defaults if config can't be read in the worker */ }
+    // Per-agent model override (spawn tool's `model` arg / config.subagentModel) wins over the
+    // inherited config. Set as BOTH slots so the router's unified short-circuit applies — a
+    // sub-agent on an explicit model never burns a pre-flight classifier call.
+    if (config.model) llmAdapter.applyConfig({ model: config.model, liteModel: config.model });
     // Permission bridge: inherit parent's mode
     const eventBus = new EventBus();
     const governor = new Governor(eventBus);

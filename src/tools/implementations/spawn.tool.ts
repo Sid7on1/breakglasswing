@@ -13,14 +13,16 @@ import { randomUUID } from 'crypto';
 export function createSpawnSubagentTool(governor: IGovernor, registry: ToolRegistry, llmAdapter: LlmAdapter): BuiltTool {
   return buildTool({
     name: 'SpawnSubagentTool',
-    description: `Spawns an asynchronous, parallel sub-agent as a native WorkerThread to handle a delegated task.
+    description: `Spawns an asynchronous, parallel sub-agent (own worker, own context window) to handle a delegated task.
 
-Use this tool when a user request is too massive or complex to be completed in a single sequential thought process.
+Use it when work can genuinely run in parallel (independent sub-tasks across disjoint files) or when a big exploration would flood your own context. Do NOT use it for small sequential steps — doing those yourself is faster than a spawn round-trip.
 
-# Instructions
-- **Decomposition:** Mentally break the user's goal into isolated sub-tasks.
-- **Specific Prompts:** The sub-agent boots with a BLANK short-term memory. The prompt must contain everything it needs to know.
-- **Asynchronous:** You get a \`TASK_QUEUED\` confirmation immediately. The sub-agent runs in the background; when it finishes, its result is posted into the conversation as a system message (visible to you and the user). It is NOT injected silently into your context mid-turn — so if you need to act on the output, finish your current turn and the result will be waiting.`,
+# How to spawn well
+- **Self-contained prompt:** The sub-agent boots with a BLANK memory — no conversation history, no idea what the user said. Its prompt must carry everything: the goal, relevant file paths, constraints, what "done" looks like, and what to report back.
+- **Disjoint scopes:** Give each parallel sibling a \`scope\` that doesn't overlap the others (overlaps are flagged, not blocked). Two agents on the same files = wasted, conflicting work.
+- **Worktree when editing in parallel:** Set \`isolation: "worktree"\` whenever the sub-agent will EDIT files while siblings run — each gets its own git worktree + branch, so they can never clobber each other. Read-only agents don't need it.
+- **Model:** By default the sub-agent inherits your model. Pass \`model\` to run it on a different one (e.g. a cheaper/faster model for bulk mechanical work, a heavier one for a gnarly refactor).
+- **Asynchronous:** You get \`TASK_QUEUED\` immediately. The result is posted into the conversation as a system message when the agent finishes — it is NOT injected mid-turn. Finish your current turn; the result will be waiting. Don't spin-wait or re-spawn the same task.`,
     isDestructive: false,
     schema: {
       type: 'object',
@@ -43,13 +45,23 @@ Use this tool when a user request is too massive or complex to be completed in a
           enum: ['worktree'],
           description: 'Set to "worktree" to run the sub-agent in its own git worktree + branch (under .bimax/worktrees/). Use this whenever the sub-agent will EDIT files and siblings run in parallel — isolated agents can never clobber each other. The worktree is auto-removed if the agent changes nothing; otherwise its path and branch are reported for review/merge.'
         },
+        model: {
+          type: 'string',
+          description: 'Model id this sub-agent runs on (e.g. "stepfun-ai/step-3.7-flash"). Omit to inherit the main model (or the configured subagentModel). Use a fast model for bulk mechanical tasks, a heavier one for hard reasoning.'
+        },
       },
       required: ['prompt']
     },
-    execute: async (args: { agentType?: string, prompt: string, scope?: string, isolation?: 'worktree' }, context?: any) => {
+    execute: async (args: { agentType?: string, prompt: string, scope?: string, isolation?: 'worktree', model?: string }, context?: any) => {
       // Default to a BiMax sub-agent (a copy of ourselves) — never a stray legacy persona.
       const agentType = args.agentType || 'BiMax';
       const scope = args.scope || '';
+      // Model resolution: per-spawn arg > config.subagentModel > inherit (worker loads config.model).
+      let model = (args.model || '').trim();
+      if (!model) {
+        try { model = ((await (await import('../../cli/config')).loadConfig()).subagentModel || '').trim(); }
+        catch { /* config optional — inherit */ }
+      }
       // Coordination: warn (don't block) if this scope collides with an already-running sibling, so
       // the orchestrator can re-partition instead of two agents grinding the same files.
       const collisions = globalSubAgentBlackboard.overlapping(scope);
@@ -81,6 +93,7 @@ Use this tool when a user request is too massive or complex to be completed in a
         parentMode: parentMode,
         scope,
         depth: myDepth + 1,
+        ...(model ? { model } : {}),
         ...(args.isolation === 'worktree' ? { isolation: 'worktree' as const } : {}),
       }).then(result => {
         Logger.info(`[SpawnSubagentTool] Sub-agent ${taskId} finished successfully.`);
@@ -108,7 +121,7 @@ Use this tool when a user request is too massive or complex to be completed in a
       const overlapNote = collisions.length > 0
         ? ` ⚠ scope overlaps running sibling(s): ${collisions.map(c => `${c.agentType}[${c.scope}]`).join(', ')} — consider a disjoint scope so they don't redo the same work.`
         : '';
-      return `TASK_QUEUED: Sub-agent ${agentType} spawned${scope ? ` (scope: ${scope})` : ''}${args.isolation === 'worktree' ? ' in an isolated git worktree' : ''} as ${taskId}.${overlapNote}`;
+      return `TASK_QUEUED: Sub-agent ${agentType} spawned${scope ? ` (scope: ${scope})` : ''}${model ? ` on ${model}` : ''}${args.isolation === 'worktree' ? ' in an isolated git worktree' : ''} as ${taskId}.${overlapNote}`;
     }
   }, governor);
 }

@@ -19,7 +19,7 @@ export interface RouteDecision {
   /** One-line framing for the heavy model; only set when escalating. */
   brief?: string;
   /** How the decision was reached — for logging / the footer tooltip. */
-  via: 'heuristic' | 'classifier' | 'pinned' | 'fallback' | 'cache';
+  via: 'heuristic' | 'classifier' | 'pinned' | 'fallback' | 'cache' | 'unified';
 }
 
 // Obvious conversational turns that never need the heavy model. Anchored to the whole (short)
@@ -91,6 +91,13 @@ export function clearClassifierCache(): void { _classifierCache.clear(); }
 
 export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier | null): Promise<RouteDecision> {
   if (pinned) return { tier: pinned, via: 'pinned' };
+
+  // Unified single-model setup (the default: both slots = Step 3.7 Flash) — the tiers resolve to
+  // the same model, so routing is a no-op. Skip the heuristic AND the pre-flight classifier LLM
+  // call entirely; that call was up to CLASSIFIER_TIMEOUT_MS of dead first-token latency per turn
+  // for zero effect on which model answered.
+  const mainModel = llm.userModel || llm.defaultModel || '';
+  if (!llm.liteModel || llm.liteModel === mainModel) return { tier: 'lite', via: 'unified' };
 
   const h = heuristicTier(prompt);
   if (h) return { tier: h, via: 'heuristic' };

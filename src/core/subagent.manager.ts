@@ -31,6 +31,9 @@ export interface SubAgentConfig {
   // What this agent is responsible for (paths/globs/topic) — its claim on the blackboard, used to
   // detect overlap with sibling agents and to show coverage in /subagents and the TUI panel.
   scope?: string;
+  // Model this sub-agent runs on. Unset = inherit the parent's configured model. Set per-spawn
+  // (SpawnSubagentTool's `model` arg) or globally (config.subagentModel).
+  model?: string;
   // Sandbox floor (BiMax v2): when set, the worker runs as an isolated autonomous episode —
   // Bash confined by the OS sandbox to this root with network denied, file tools' workspace
   // narrowed to it, net-facing tools not registered. Carried via the worker's own env copy.
@@ -118,8 +121,13 @@ export class SubAgentManager {
     const child = spawn(process.execPath, [], { env, stdio: ['ignore', 'pipe', 'inherit'] });
     const emitter = new EventEmitter();
     let buf = '';
+    // StringDecoder, not per-chunk toString(): a multibyte UTF-8 char split across two pipe
+    // reads would otherwise decode to U+FFFD and corrupt the sub-agent's result text.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { StringDecoder } = require('string_decoder') as typeof import('string_decoder');
+    const utf8 = new StringDecoder('utf8');
     child.stdout?.on('data', (d: Buffer) => {
-      buf += d.toString();
+      buf += utf8.write(d);
       let nl: number;
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl); buf = buf.slice(nl + 1);

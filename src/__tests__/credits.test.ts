@@ -25,10 +25,55 @@ describe('ApiKeyManager', () => {
   it('puts keys on cooldown and skips them', async () => {
     await manager.getNextKey(); // key1
     manager.reportKeyResult(0, 429); // rate limit key1
-    
+
     // next should be key2, then key3, then key2 again since key1 is on cooldown
     expect((await manager.getNextKey()).keyStr).toBe('key2');
     expect((await manager.getNextKey()).keyStr).toBe('key3');
     expect((await manager.getNextKey()).keyStr).toBe('key2'); // skips key1!
+  });
+
+  it('RPM pacing: a burst fans out across the pool instead of hammering one key', async () => {
+    // 6 rapid calls against 3 keys — each key must be used exactly twice, never 3+ times in the
+    // window (that's the pattern that trips per-key RPM limits while siblings sit idle).
+    const counts: Record<string, number> = {};
+    for (let i = 0; i < 6; i++) {
+      const k = await manager.getNextKey();
+      counts[k.keyStr!] = (counts[k.keyStr!] || 0) + 1;
+    }
+    expect(counts).toEqual({ key1: 2, key2: 2, key3: 2 });
+  });
+
+  it('RPM pacing never blocks: exhausted pool still returns a key immediately', async () => {
+    // All keys "hot" (used within the reuse window) → Pass 2 must still hand one out with no wait.
+    for (let i = 0; i < 3; i++) await manager.getNextKey();
+    const k = await manager.getNextKey();
+    expect(k.keyStr).not.toBeNull();
+    expect(k.waitTimeSecs).toBe(0);
+  });
+
+  it('setKeys preserves cooldown state for surviving keys and dedupes', async () => {
+    await manager.getNextKey(); // key1
+    manager.reportKeyResult(0, 429); // key1 on cooldown
+
+    // Rebuild the pool: key1 survives (must KEEP its cooldown), key4 is new, key4 duplicated.
+    manager.setKeys([
+      { keyStr: 'key1', provider: 'openai', label: 'openai #1' },
+      { keyStr: 'key4', provider: 'openai', label: 'openai #2' },
+      { keyStr: 'key4', provider: 'openai', label: 'dupe' },
+    ]);
+    const states = manager.getStates();
+    expect(states).toHaveLength(2); // deduped
+    expect(states.find(s => s.label === 'openai #1')!.onCooldown).toBe(true); // no clean slate
+
+    // And rotation only hands out the fresh key while key1 cools down.
+    expect((await manager.getNextKey()).keyStr).toBe('key4');
+    expect((await manager.getNextKey()).keyStr).toBe('key4');
+  });
+
+  it('setKeys to an empty pool yields the null key result, not a crash', async () => {
+    manager.setKeys([]);
+    const k = await manager.getNextKey();
+    expect(k.keyStr).toBeNull();
+    expect(k.idx).toBeNull();
   });
 });

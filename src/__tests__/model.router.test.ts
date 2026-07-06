@@ -34,8 +34,10 @@ describe('model.router — heuristicTier', () => {
   });
 });
 
+// The mocks carry DISTINCT coding/lite models so the heuristic + classifier paths are exercised;
+// when the two slots resolve to the same model, decideTier short-circuits via 'unified' (tested below).
 describe('model.router — decideTier', () => {
-  const fakeLlm = (reply: string) => ({ chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
+  const fakeLlm = (reply: string) => ({ userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
 
   it('a manual pin wins outright, no classifier call', async () => {
     const llm = fakeLlm('{"tier":"lite"}');
@@ -61,14 +63,36 @@ describe('model.router — decideTier', () => {
   });
 
   it('falls back to lite if the classifier throws', async () => {
-    const llm = { chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
+    const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
     const d = await decideTier(llm, 'do something ambiguous and long enough to pass the heuristic', null);
     expect(d).toEqual({ tier: 'lite', via: 'fallback' });
   });
 });
 
+describe('model.router — unified single-model short-circuit', () => {
+  it('skips heuristic AND classifier when both slots resolve to the same model', async () => {
+    const llm = { userModel: 'stepfun-ai/step-3.7-flash', liteModel: 'stepfun-ai/step-3.7-flash', chatCompletion: jest.fn() } as any;
+    const d = await decideTier(llm, 'refactor the parser to support async', null); // heavy-verb prompt — still unified
+    expect(d).toEqual({ tier: 'lite', via: 'unified' });
+    expect(llm.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits when no lite model is configured at all', async () => {
+    const llm = { userModel: 'stepfun-ai/step-3.7-flash', liteModel: undefined, chatCompletion: jest.fn() } as any;
+    const d = await decideTier(llm, 'please rework the tokenizer to stream', null);
+    expect(d).toEqual({ tier: 'lite', via: 'unified' });
+    expect(llm.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it('a manual pin still wins over unified', async () => {
+    const llm = { userModel: 'same/model', liteModel: 'same/model', chatCompletion: jest.fn() } as any;
+    const d = await decideTier(llm, 'anything', 'heavy');
+    expect(d).toEqual({ tier: 'heavy', via: 'pinned' });
+  });
+});
+
 describe('model.router — classifier cache', () => {
-  const fakeLlm = (reply: string) => ({ chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
+  const fakeLlm = (reply: string) => ({ userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
   beforeEach(() => clearClassifierCache());
 
   it('serves a repeated prompt from cache without re-calling the classifier', async () => {
@@ -92,7 +116,7 @@ describe('model.router — classifier cache', () => {
   });
 
   it('does not cache a fallback (transient failure must not pin the route)', async () => {
-    const llm = { chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
+    const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
     const p = 'an ambiguous request long enough to pass the heuristic gate';
     const a = await decideTier(llm, p, null);
     const b = await decideTier(llm, p, null);

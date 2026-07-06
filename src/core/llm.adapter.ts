@@ -72,6 +72,17 @@ export class LlmAdapter implements LLMProvider {
     this.budgetVeto = budgetVeto;
   }
 
+  /**
+   * Swap the key pool live (the /keys command calls this after saving a new key). Clears the
+   * per-key client cache and the live-models cache so the next request/picker uses the new key —
+   * previously a key added mid-session only took effect after a restart.
+   */
+  public setKeys(keys: import('../credits/api.key.manager').KeyConfig[]): void {
+    this.apiKeyManager.setKeys(keys);
+    this.clientCache.clear();
+    this.liveModelsCache = null;
+  }
+
   public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
     if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
@@ -372,7 +383,7 @@ export class LlmAdapter implements LLMProvider {
       return JSON.parse(extractJson(stripThink(response.choices[0].message.content || "")) || "{}");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
-      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
+      this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
       Logger.error(`[LlmAdapter] Failed semantic analysis for ${nodeId}`);
       return null;
     }
@@ -406,7 +417,9 @@ export class LlmAdapter implements LLMProvider {
       return stripThink(response.choices[0].message.content || "");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
-      this.apiKeyManager.reportKeyResult(kr.idx!, 500);
+      // Report the REAL status (429/408/…), not a blanket 500 — the key manager's rotation
+      // and backoff decisions depend on it (a 429 key should cool down, not be marked broken).
+      this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
       throw e;
     }
   }
@@ -606,6 +619,15 @@ export class LlmAdapter implements LLMProvider {
         let result: any;
         try {
           result = await Promise.race([nextPromise, timeoutPromise]);
+        } catch (raceErr) {
+          // The stall timer (or the stream itself) rejected. If the timer won, `nextPromise` is now
+          // an ORPHAN — if the underlying iterator later rejects (socket reset on a dead stream),
+          // that becomes an unhandledRejection, which kills the whole process on modern Node.
+          // Silence the orphan and abort the HTTP stream so the socket is actually released
+          // instead of lingering until the provider closes it.
+          nextPromise.catch(() => { /* orphaned after timeout — already handled via raceErr */ });
+          try { (stream as any)?.controller?.abort?.(); } catch { /* best-effort close */ }
+          throw raceErr;
         } finally {
           clearTimeout(timeoutHandle!);
         }
@@ -684,12 +706,18 @@ export class LlmAdapter implements LLMProvider {
         // Guard against a provider sending more than one usage chunk: record once, or
         // the reservation would be released repeatedly.
         if (chunk.usage && !usageRecorded) {
+          // Coerce token counts to real numbers: several providers omit completion_tokens (or send
+          // null) on mid-stream usage chunks, and `prompt + undefined` is NaN — which would poison
+          // the context manager's token tracking AND the budget's currentDailySpend (NaN > cap is
+          // always false, so the daily veto silently never fires again, and NaN gets persisted).
+          const promptToks = Number(chunk.usage.prompt_tokens) || 0;
+          const completionToks = Number(chunk.usage.completion_tokens) || 0;
           const cacheRead = chunk.usage.cache_read_input_tokens ?? 0;
           const cacheCreate = chunk.usage.cache_creation_input_tokens ?? 0;
-          globalTelemetry.recordUsage(chunk.usage.prompt_tokens ?? 0, cacheRead, cacheCreate);
-          yield { type: 'usage', prompt: chunk.usage.prompt_tokens, completion: chunk.usage.completion_tokens };
+          globalTelemetry.recordUsage(promptToks, cacheRead, cacheCreate);
+          yield { type: 'usage', prompt: promptToks, completion: completionToks };
           if (this.budgetVeto) {
-            const actualCostUsd = this.estCost(chunk.usage.prompt_tokens + chunk.usage.completion_tokens);
+            const actualCostUsd = this.estCost(promptToks + completionToks);
             await this.budgetVeto.recordSpend(actualCostUsd, estimatedCostUsd);
           }
           usageRecorded = true;

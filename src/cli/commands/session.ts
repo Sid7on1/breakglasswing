@@ -1,5 +1,5 @@
 import { globalCommandRegistry } from './registry';
-import { getProviders, setProvider, getCurrentProvider } from '../provider';
+import { getProviders, setProvider, getCurrentProvider, buildKeyPool } from '../provider';
 import { saveApiKeyToEnv } from '../env.loader';
 import { SessionStore } from '../session';
 import { listSessionMeta } from '../../db/session.meta';
@@ -106,6 +106,11 @@ function promptForKey(providerName: string, context: any) {
         saveApiKeyToEnv(match.apiKeyEnv, key);
         process.env[match.apiKeyEnv] = key;
         context.addSystemMessage('success', `${match.apiKeyEnv} saved to ~/.breakglass/.env`);
+        // Make the key LIVE now, not on next restart: rebuild the adapter's key pool (clears the
+        // client + live-models caches too), then open the model picker — it fetches the provider's
+        // real /models list with the fresh key, so the catalog appears the moment a key lands.
+        try { context.options?.llmAdapter?.setKeys?.(buildKeyPool()); } catch { /* adapter optional */ }
+        context.executeCommand?.('/model');
       } catch (e: any) {
         context.addSystemMessage('error', `Failed to save key: ${e.message}`);
       }
