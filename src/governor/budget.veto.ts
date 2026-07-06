@@ -9,6 +9,11 @@ import { Mutex } from 'async-mutex';
 export class BudgetVeto {
   private currentDailySpend: number = 0;
   private reservedSpend: number = 0;
+  // The day `currentDailySpend` belongs to. A long-running process (day-long autonomous loops)
+  // crosses midnight, so the reset can't live only in the constructor — it's re-checked on every
+  // spend/veto via rolloverIfNewDay(), otherwise yesterday's spend carries into today (tripping the
+  // cap early) and gets persisted stamped with today's date.
+  private spendDate: string = new Date().toISOString().split('T')[0];
   private readonly spendFilePath: string;
   private budgetMutex = new Mutex();
   // When the governor is bypassed (/governor off), the budget stops vetoing — it still TRACKS spend
@@ -37,6 +42,7 @@ export class BudgetVeto {
         
         // Reset budget if it's a new day
         const today = new Date().toISOString().split('T')[0];
+        this.spendDate = today;
         if (data.date !== today) {
           this.currentDailySpend = 0;
           this.savePersistentSpendSync();
@@ -54,25 +60,39 @@ export class BudgetVeto {
   }
 
   private savePersistentSpendSync() {
-    const today = new Date().toISOString().split('T')[0];
     const data = {
-      date: today,
+      date: this.spendDate,
       spend: this.currentDailySpend
     };
     fsSync.writeFileSync(this.spendFilePath, JSON.stringify(data, null, 2), 'utf8');
   }
 
   private async savePersistentSpendAsync() {
-    const today = new Date().toISOString().split('T')[0];
     const data = {
-      date: today,
+      date: this.spendDate,
       spend: this.currentDailySpend
     };
     await fs.writeFile(this.spendFilePath, JSON.stringify(data, null, 2), 'utf8');
   }
 
+  /**
+   * Roll the daily counters over when the wall-clock day has advanced since the last spend was
+   * recorded. Called inside the budget mutex at the top of every spend/veto path so a process that
+   * outlives midnight resets exactly once, instead of carrying yesterday's total into today.
+   */
+  private rolloverIfNewDay() {
+    const today = new Date().toISOString().split('T')[0];
+    if (this.spendDate !== today) {
+      this.currentDailySpend = 0;
+      this.reservedSpend = 0;
+      this.spendDate = today;
+      Logger.info(`[Governor] New day detected mid-session. Budget reset to $0.00.`);
+    }
+  }
+
   async recordSpend(actualCostUsd: number, estimatedCostUsd: number = 0): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
+      this.rolloverIfNewDay();
       this.reservedSpend = Math.max(0, this.reservedSpend - estimatedCostUsd);
       this.currentDailySpend += actualCostUsd;
       await this.savePersistentSpendAsync();
@@ -82,6 +102,7 @@ export class BudgetVeto {
 
   async checkVeto(estimatedCostUsd: number): Promise<void> {
     await this.budgetMutex.runExclusive(async () => {
+      this.rolloverIfNewDay();
       // Bypassed governor → reserve (to keep the running estimate honest) but never veto.
       if (this.enabled && this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
@@ -99,11 +120,12 @@ export class BudgetVeto {
 
   async executeWithBudget<T>(estimatedCostUsd: number, action: () => Promise<{ actualCostUsd: number, result: T }>): Promise<T> {
     return await this.budgetMutex.runExclusive(async () => {
+      this.rolloverIfNewDay();
       if (this.enabled && this.currentDailySpend + this.reservedSpend + estimatedCostUsd > SafetyPolicy.maxDailySpendUsd) {
         Logger.error(`[Governor: Veto] API call blocked. Exceeds daily limit of $${SafetyPolicy.maxDailySpendUsd}`);
         throw new GovernorVetoError(`Daily budget of $${SafetyPolicy.maxDailySpendUsd.toFixed(2)} reached (spent $${this.currentDailySpend.toFixed(2)}). Disable the cap with /governor off, or raise it via MAX_DAILY_SPEND.`);
       }
-      
+
       const { actualCostUsd, result } = await action();
       this.currentDailySpend += actualCostUsd;
       await this.savePersistentSpendAsync();

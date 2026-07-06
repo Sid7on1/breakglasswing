@@ -114,7 +114,9 @@ export const createMultiEditTool = (governor: IGovernor) => buildTool({
         occ = countOccurrences(content, resolvedOld);
       }
       if (occ > 1 && !e.replaceAll) return outcomeError('ambiguous_match', `Error: edit #${i + 1} (${e.path}): oldString appears ${occ} times — add context or set replaceAll: true.`);
-      const updated = e.replaceAll ? content.split(resolvedOld).join(e.newString) : content.replace(resolvedOld, e.newString);
+      // Replacer FUNCTION, not a string: avoids String.replace interpreting `$$`/`$&`/`` $` ``/`$'`
+      // in newString (would corrupt Makefiles, shell `$$`, sed/regex code). See edit.tool.ts.
+      const updated = e.replaceAll ? content.split(resolvedOld).join(e.newString) : content.replace(resolvedOld, () => e.newString);
       working.set(full, updated);
     }
 

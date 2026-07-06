@@ -66,11 +66,54 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e: any) { return e?.code === 'EPERM'; }
 }
 
+/** Block the current thread for `ms` without busy-spinning — used for lock backoff. */
+function sleepSyncMs(ms: number): void {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch { /* SAB unavailable — fall through, caller re-checks the deadline */ }
+}
+
 export class FileClaims {
   private filePath: string;
+  private lockPath: string;
+  // A crashed holder must never wedge the store, so a lock older than this is stolen. Critical
+  // sections here are a single small read+write (milliseconds), so 5s is safely beyond any real hold.
+  private static readonly STALE_LOCK_MS = 5_000;
+  // Total time to wait for the lock before proceeding UNLOCKED. Falling back keeps behavior no worse
+  // than the pre-lock code (a rare lost update) instead of blocking the agent loop indefinitely.
+  private static readonly LOCK_WAIT_MS = 2_000;
 
   constructor(projectRoot: string = process.cwd()) {
     this.filePath = path.join(projectRoot, '.bimax', 'claims.json');
+    this.lockPath = `${this.filePath}.lock`;
+  }
+
+  /**
+   * Run `fn` while holding an exclusive cross-process lock so the read-modify-write is atomic.
+   * The atomic rename in write() only stops a half-written FILE; it does NOT stop two processes
+   * from both reading, both seeing no conflict, and both writing (lost update / double-grant). An
+   * O_EXCL lockfile is the actual mutex. Best-effort: after LOCK_WAIT_MS we run unlocked rather
+   * than wedge, and a stale lock (crashed holder) is stolen.
+   */
+  private withLock<T>(fn: () => T): T {
+    try { fs.mkdirSync(path.dirname(this.filePath), { recursive: true }); } catch { /* best-effort */ }
+    const deadline = Date.now() + FileClaims.LOCK_WAIT_MS;
+    let fd = -1;
+    for (;;) {
+      try { fd = fs.openSync(this.lockPath, 'wx'); break; }
+      catch {
+        try {
+          const st = fs.statSync(this.lockPath);
+          if (Date.now() - st.mtimeMs > FileClaims.STALE_LOCK_MS) { fs.unlinkSync(this.lockPath); continue; }
+        } catch { continue; } // lock vanished between open and stat — retry immediately
+        if (Date.now() >= deadline) return fn(); // give up locking; proceed rather than block forever
+        sleepSyncMs(15);
+      }
+    }
+    try { return fn(); }
+    finally {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+      try { fs.unlinkSync(this.lockPath); } catch { /* already gone */ }
+    }
   }
 
   private read(): Claim[] {
@@ -85,44 +128,53 @@ export class FileClaims {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       const tmp = `${this.filePath}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(claims, null, 2), 'utf-8');
-      fs.renameSync(tmp, this.filePath); // atomic on POSIX — the cross-process story
+      fs.renameSync(tmp, this.filePath); // atomic on POSIX — no half-written file is ever observed
     } catch { /* best-effort */ }
+  }
+
+  /** Pure prune: drop expired leases and leases whose holder process died. No I/O of its own. */
+  private prune(all: Claim[]): Claim[] {
+    const now = Date.now();
+    return all.filter(c => now - c.at <= c.ttlMs && pidAlive(c.pid));
   }
 
   /** Live claims only: expired leases and leases whose holder process died are pruned. */
   live(): Claim[] {
-    const now = Date.now();
-    const all = this.read();
-    const live = all.filter(c => now - c.at <= c.ttlMs && pidAlive(c.pid));
-    if (live.length !== all.length) this.write(live);
-    return live;
+    return this.withLock(() => {
+      const all = this.read();
+      const live = this.prune(all);
+      if (live.length !== all.length) this.write(live);
+      return live;
+    });
   }
 
   /** Try to lease `paths` for `agent`. Overlap with another holder → not granted, holders named. */
   acquire(agent: string, paths: string[], opts?: { ttlMs?: number }): AcquireResult {
     const wanted = paths.filter(Boolean);
     if (wanted.length === 0) return { granted: true, id: undefined, conflicts: [] };
-    const live = this.live();
-    const conflicts: { path: string; holder: string }[] = [];
-    for (const c of live) {
-      if (c.agent === agent) continue; // re-entrant: an agent never conflicts with itself
-      for (const mine of wanted) {
-        for (const theirs of c.paths) {
-          if (pathsOverlap(mine, theirs)) conflicts.push({ path: mine, holder: c.agent });
+    return this.withLock(() => {
+      const live = this.prune(this.read());
+      const conflicts: { path: string; holder: string }[] = [];
+      for (const c of live) {
+        if (c.agent === agent) continue; // re-entrant: an agent never conflicts with itself
+        for (const mine of wanted) {
+          for (const theirs of c.paths) {
+            if (pathsOverlap(mine, theirs)) conflicts.push({ path: mine, holder: c.agent });
+          }
         }
       }
-    }
-    if (conflicts.length > 0) {
-      try { getEventLedger().append('file_claim', { agent, paths: wanted.slice(0, 20), granted: false, conflicts: conflicts.slice(0, 5) }); } catch { /* best-effort */ }
-      return { granted: false, conflicts };
-    }
-    const claim: Claim = {
-      id: `${agent}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`,
-      agent, pid: process.pid, paths: wanted, at: Date.now(), ttlMs: opts?.ttlMs ?? DEFAULT_TTL_MS,
-    };
-    this.write([...live, claim]);
-    try { getEventLedger().append('file_claim', { agent, paths: wanted.slice(0, 20), granted: true, id: claim.id }); } catch { /* best-effort */ }
-    return { granted: true, id: claim.id, conflicts: [] };
+      if (conflicts.length > 0) {
+        try { getEventLedger().append('file_claim', { agent, paths: wanted.slice(0, 20), granted: false, conflicts: conflicts.slice(0, 5) }); } catch { /* best-effort */ }
+        return { granted: false, conflicts };
+      }
+      const claim: Claim = {
+        id: `${agent}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`,
+        agent, pid: process.pid, paths: wanted, at: Date.now(), ttlMs: opts?.ttlMs ?? DEFAULT_TTL_MS,
+      };
+      this.write([...live, claim]);
+      try { getEventLedger().append('file_claim', { agent, paths: wanted.slice(0, 20), granted: true, id: claim.id }); } catch { /* best-effort */ }
+      return { granted: true, id: claim.id, conflicts: [] };
+    });
   }
 
   /** Queue politely: retry acquire until granted or the timeout — the merge-queue verb. */
@@ -138,14 +190,16 @@ export class FileClaims {
   }
 
   release(idOrAgent: string): number {
-    const live = this.live();
-    const keep = live.filter(c => c.id !== idOrAgent && c.agent !== idOrAgent);
-    const released = live.length - keep.length;
-    if (released > 0) {
-      this.write(keep);
-      try { getEventLedger().append('file_release', { idOrAgent, released }); } catch { /* best-effort */ }
-    }
-    return released;
+    return this.withLock(() => {
+      const live = this.prune(this.read());
+      const keep = live.filter(c => c.id !== idOrAgent && c.agent !== idOrAgent);
+      const released = live.length - keep.length;
+      if (released > 0) {
+        this.write(keep);
+        try { getEventLedger().append('file_release', { idOrAgent, released }); } catch { /* best-effort */ }
+      }
+      return released;
+    });
   }
 }
 

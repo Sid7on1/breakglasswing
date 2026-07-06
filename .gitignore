@@ -38,6 +38,8 @@ vendor/*/venv/
 .bimax/tdm.json
 .bimax/claims.json
 .bimax/policy-arms.json
+.bimax/workspace.json
+.bimax/*.lock
 benchmarks/terminal_bench_adapter/bin/
 
 # Benchmark + agent run output (reproducible, large — never committed)

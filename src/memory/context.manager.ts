@@ -405,7 +405,15 @@ Comma-separated list of files created, modified, or important to the task.`,
 
   /** Reactive recovery: fires when the API rejects a request as too long. Cuts the window hard. */
   async reactiveCompact(messages: Message[], error: any): Promise<Message[]> {
-    if (error?.message?.includes('too long') || error?.code === 'prompt_too_long' || error?.message?.includes('maximum context length')) {
+    // Match everything classifyStreamError treats as a context overflow (413s, "too large",
+    // provider codes), not just two message spellings — a mismatch here meant the agent loop
+    // decided "compact and retry" but this guard rethrew, killing the turn instead.
+    const msg = String(error?.message || '');
+    const isContextOverflow =
+      /too long|too large|maximum context|context length|context window/i.test(msg) ||
+      error?.code === 'prompt_too_long' || error?.code === 'context_length_exceeded' ||
+      error?.status === 413;
+    if (isContextOverflow) {
       Logger.warn(`[ContextManager] Reactive compact triggered by API error: ${error.message}`);
       this.currentTokens = this.MAX_TOKENS; // force it
       const systemMessages = messages.filter(m => m.role === 'system');

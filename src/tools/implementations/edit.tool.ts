@@ -298,9 +298,13 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
       ));
     }
 
+    // Use a replacer FUNCTION, not a string: String.replace interprets `$$`, `$&`, `` $` ``, `$'`
+    // in a string replacement even when the pattern is a plain string, so a newString containing
+    // e.g. `$$` (Makefiles, shell PID/`$$`) or `$&` (regex/sed code) would be silently corrupted.
+    // A function return value is inserted verbatim. (split/join for replaceAll is already literal.)
     const updated = args.replaceAll
       ? content.split(resolvedOld).join(args.newString)
-      : content.replace(resolvedOld, args.newString);
+      : content.replace(resolvedOld, () => args.newString);
 
     // Guard against the "flattened file" corruption (e.g. a whole-file oldString replaced by a
     // newline-stripped newString). Refuse before touching disk.

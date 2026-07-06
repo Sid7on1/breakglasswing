@@ -231,7 +231,13 @@ export class AgentLoop {
             // uninterrupted voice). The footer status + log view carry what's happening instead.
             cliEvents.emit('status', 'Context overflow — compacting and retrying…');
             cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Context overflow (${event.message}); compacting and re-asking.`, timestamp: new Date() });
-            this.messages = await this.contextManager.reactiveCompact(this.messages, new Error(event.message));
+            // Tag the error as a context overflow explicitly: the classifier already decided this
+            // (kind === 'context' covers HTTP 413 and provider-specific codes whose MESSAGE text
+            // doesn't match reactiveCompact's patterns — e.g. a bare "Request Entity Too Large").
+            // Without the tag, reactiveCompact would rethrow and the turn would die un-compacted.
+            const ctxErr: any = new Error(event.message);
+            ctxErr.code = 'context_length_exceeded';
+            this.messages = await this.contextManager.reactiveCompact(this.messages, ctxErr);
             discardTurn = true;
             break;
           } else if (event.recoverable && event.kind === 'transient' && transientRetries < MAX_TRANSIENT_RETRIES) {

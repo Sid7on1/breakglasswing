@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 
 /**
  * True if `cwd` is inside a git work tree. Unlike getGitStatus, this works on a freshly
@@ -52,13 +52,18 @@ export function getGitStatus(cwd: string): GitStatus | null {
 
 export function gitLog(cwd: string, count = 10): string {
   try {
-    return execSync(`git log --oneline -${count}`, { cwd, encoding: 'utf-8' });
+    // execFile (argv array, no shell): a non-integer `count` can't inject shell metacharacters.
+    const n = Math.max(1, Math.floor(Number(count) || 10));
+    return execFileSync('git', ['log', '--oneline', `-${n}`], { cwd, encoding: 'utf-8' });
   } catch { return '(not a git repo)'; }
 }
 
 export function gitDiff(cwd: string, file?: string): string {
   try {
-    const arg = file ? ` -- "${file}"` : '';
-    return execSync(`git diff${arg}`, { cwd, encoding: 'utf-8' });
+    // execFile with an argv array — NOT a shell string — so a model-supplied `file` (GitTool's
+    // `paths` arg) can't break out of the quoting and inject a command (`x"; rm -rf ~ #`). The
+    // pathspec is passed as a discrete argv element, shell-metacharacter-safe by construction.
+    const args = file ? ['diff', '--', file] : ['diff'];
+    return execFileSync('git', args, { cwd, encoding: 'utf-8' });
   } catch { return '(diff failed)'; }
 }

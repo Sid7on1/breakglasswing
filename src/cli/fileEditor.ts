@@ -136,7 +136,9 @@ export async function editFileLines(filePath: string, search: string, replace: s
     const content = await fs.readFile(absPath, 'utf-8');
     if (!content.includes(search)) return false;
     await backupFile(filePath);
-    const updated = content.replace(search, replace);
+    // Replacer function so `$$`/`$&`/`` $` ``/`$'` in the replacement text aren't interpreted by
+    // String.replace and silently corrupt the write (e.g. `$$` → `$`). See edit.tool.ts.
+    const updated = content.replace(search, () => replace);
     await fs.writeFile(absPath, updated, 'utf-8');
     return true;
   } catch { return false; }

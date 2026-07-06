@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { StringDecoder } from 'string_decoder';
 import { ProtocolHost, HostHandlers } from './host';
 import { LineDecoder, encode } from './codec';
 import { Inbound, Outbound } from './protocol';
@@ -29,8 +30,14 @@ export function startStdioHost(opts: StdioHostOptions): () => void {
   const decoder = new LineDecoder<Inbound>((line, err) =>
     process.stderr.write(`[stdio.host] dropped malformed line: ${String(err)}\n`));
 
+  // StringDecoder, NOT per-chunk Buffer.toString: a pipe read can split a multibyte UTF-8
+  // character (emoji/CJK in a user message) across two chunks, and decoding each chunk
+  // independently turns the split character into U+FFFD garbage. StringDecoder buffers the
+  // partial sequence until the rest arrives.
+  const utf8 = new StringDecoder('utf8');
   const onData = (chunk: Buffer | string) => {
-    for (const msg of decoder.push(chunk.toString('utf8'))) host.ingest(msg);
+    const text = typeof chunk === 'string' ? chunk : utf8.write(chunk);
+    for (const msg of decoder.push(text)) host.ingest(msg);
   };
 
   inp.on('data', onData);

@@ -126,9 +126,9 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
 
 export const createWriteFileTool = (governor: IGovernor) => buildTool({
   name: 'WriteFileTool',
-  description: `Creates, overwrites, or modifies a file on the local file system.
+  description: `Creates a new file, or fully replaces an existing one. To CHANGE part of an existing file, use EditFileTool instead — this tool always writes the complete content.
 
-Use this tool to write new code, update configuration files, or generate artifacts. It is significantly faster, safer, and more reliable than attempting to use \`echo\` or \`cat <<EOF\` via the BashTool.
+Use this tool to write new code, config files, or artifacts. It is significantly faster, safer, and more reliable than attempting to use \`echo\` or \`cat <<EOF\` via the BashTool.
 
 # Instructions
 - **Supports \`~/Desktop/...\` paths** — home directory is automatically resolved.

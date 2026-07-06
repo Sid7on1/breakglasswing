@@ -218,19 +218,26 @@ export class WorkspaceManager {
    */
   public checkWrite(filePath: string): { allowed: boolean; reason?: string } {
     const full = path.resolve(filePath);
+    // The INNERMOST containing repo governs scope: a read-only repo nested inside the
+    // writable primary (a clone landed in a subdir) must win over the primary, or its
+    // files would be writable because the primary's root prefix-matches first. Pick the
+    // repo with the longest matching root, not the first in iteration order.
+    let best: WorkspaceRepo | undefined;
+    let bestLen = -1;
     for (const r of this.active()) {
       const root = path.resolve(r.path);
-      if (full === root || full.startsWith(root + path.sep)) {
-        if (r.scope === 'write') return { allowed: true };
-        return {
-          allowed: false,
-          reason: `${r.name} is registered READ-ONLY in this workspace (reference repo). ` +
-            `Quote/adapt its code into a writable repo instead — or, if the user explicitly asked to modify ${r.name}, ` +
-            `unlock it first with WorkspaceTool {action:"scope", path:"${r.path}", scope:"write"}.`,
-        };
+      if ((full === root || full.startsWith(root + path.sep)) && root.length > bestLen) {
+        best = r;
+        bestLen = root.length;
       }
     }
-    return { allowed: true };
+    if (!best || best.scope === 'write') return { allowed: true };
+    return {
+      allowed: false,
+      reason: `${best.name} is registered READ-ONLY in this workspace (reference repo). ` +
+        `Quote/adapt its code into a writable repo instead — or, if the user explicitly asked to modify ${best.name}, ` +
+        `unlock it first with WorkspaceTool {action:"scope", path:"${best.path}", scope:"write"}.`,
+    };
   }
 
   /** System-prompt block: the model's map of what repos are in context and what it may touch. */
