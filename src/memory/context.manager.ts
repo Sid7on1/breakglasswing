@@ -61,6 +61,32 @@ export class ContextManager {
   private readonly KEEP_RECENT_TOOL_RESULTS = 6;  // most recent tool outputs left fully intact
   private readonly SNIP_TRIGGER_MESSAGES = 100;   // only guard against truly runaway histories
   private readonly SNIP_KEEP_TAIL = 60;
+  private readonly RESTORE_BUDGET_CHARS = 40_000; // total post-compact file re-injection budget (~10k tok)
+
+  // Real-usage overhead calibration (C4): our estimate only sees `messages`, but the request also
+  // carries the system prompt + tool schemas (10-30k tokens the estimate is blind to). The provider's
+  // usage report includes everything, so (real − estimate-of-what-we-sent) measures that invisible
+  // overhead; folding it into every pressure ratio makes compaction fire when the REQUEST nears the
+  // window, not when the visible history does — which was systematically late.
+  private lastSentEstimate = 0;
+  private overheadTokens = 0;
+
+  // System messages the manager (or the persona) re-generates fresh each turn/compaction. Preserving
+  // them across compactions was pure context rot: every compact accreted another stale summary +
+  // stale file restorations that all later compacts dutifully kept forever.
+  private static readonly TRANSIENT_SYSTEM_PREFIXES = [
+    '[Previous Context Summary]',
+    '[Post-Compact Restoration',
+    '[RepoMap]',
+    '[TurnContext]',
+    '[ContextManager]',
+    '[Older messages aggressively compacted',
+  ];
+
+  private isTransientSystem(m: Message): boolean {
+    return m.role === 'system' && typeof m.content === 'string' &&
+      ContextManager.TRANSIENT_SYSTEM_PREFIXES.some(p => (m.content as string).startsWith(p));
+  }
 
   // Epoch counter: incremented at the start of each compact() call.
   // Lets callers detect whether compaction ran between two points in time (ABA prevention).
@@ -84,6 +110,16 @@ export class ContextManager {
   /** Called by the AgentLoop when the LLM returns token usage. */
   updateTokens(promptTokens: number) {
     this.currentTokens = promptTokens;
+    // Calibrate the invisible request overhead (system prompt + tool schemas + serialization):
+    // real reported prompt tokens minus our estimate of the history we actually sent.
+    if (this.lastSentEstimate > 0 && promptTokens > 0) {
+      this.overheadTokens = Math.max(0, promptTokens - this.lastSentEstimate);
+    }
+  }
+
+  /** Estimated request tokens = visible history + calibrated invisible overhead (C4). */
+  private effectiveTokens(messages: Message[]): number {
+    return this.estimateTokens(messages) + this.overheadTokens;
   }
 
   /**
@@ -92,7 +128,11 @@ export class ContextManager {
    * only if still over the token threshold.
    */
   async checkAndCompact(messages: Message[], mode: ContextMode = 'smart'): Promise<Message[]> {
-    if (mode === 'full') return messages;
+    if (mode === 'full') {
+      // Even with no compaction, record what we're sending so updateTokens can calibrate overhead.
+      this.lastSentEstimate = this.estimateTokens(messages);
+      return messages;
+    }
 
     // Layer 0 — Headroom Kompress compression. The REAL ML compressor (chopratejas/kompress-v2-base
     // ONNX via the localhost proxy) crushes the noisy bulk of the context (tool outputs, logs, file
@@ -100,7 +140,7 @@ export class ContextManager {
     // under TOKEN PRESSURE — once the backlog is near the compaction threshold, where it pays for
     // itself; cheap turns stay instant. Opt out with BIMAX_DISABLE_COMPRESSION=1.
     let msgs: Message[] = messages;
-    const pressureRatio = this.estimateTokens(messages) / this.MAX_TOKENS;
+    const pressureRatio = this.effectiveTokens(messages) / this.MAX_TOKENS;
     if (process.env.BIMAX_DISABLE_COMPRESSION !== '1' && pressureRatio >= this.COMPACT_THRESHOLD) {
       // Which model the saving is attributed to (for the per-model /headroom report).
       let model = 'unknown';
@@ -154,7 +194,12 @@ export class ContextManager {
     }
 
     msgs = this.capToolResults(msgs);
-    msgs = this.microCompact(msgs);
+    // microCompact only under pressure (C3): running it unconditionally destroyed old tool results
+    // even at 5% usage (context the model may still need, for zero benefit) AND moved its stub
+    // boundary every round — rewriting history bytes mid-prefix, churning the provider cache.
+    if (this.effectiveTokens(msgs) / this.MAX_TOKENS >= this.WARN_THRESHOLD) {
+      msgs = this.microCompact(msgs);
+    }
     msgs = this.snip(msgs);
 
     // RepoMap (aider-style): refresh it EVERY turn so it reflects current files and re-ranks toward
@@ -187,8 +232,8 @@ export class ContextManager {
     }
 
     // Heavy fallback: summarize only when the cheap passes left us above the threshold.
-    const estimated = this.estimateTokens(msgs);
-    const ratio = estimated / this.MAX_TOKENS;
+    // Ratio includes the calibrated request overhead (system prompt + schemas) — see updateTokens.
+    const ratio = this.effectiveTokens(msgs) / this.MAX_TOKENS;
 
     // One-time early nudge at 50% so the model can be conservative before forced compaction.
     if (!this.halfWindowWarnEmitted && ratio >= this.WARN_THRESHOLD) {
@@ -207,6 +252,9 @@ export class ContextManager {
       Logger.warn(`[ContextManager] ${Math.round(ratio * 100)}% after cheap passes — summarizing older history.`);
       msgs = await this.compact(msgs);
     }
+    // What we're actually sending this round — updateTokens diffs the provider's real usage
+    // against this to keep the overhead calibration current.
+    this.lastSentEstimate = this.estimateTokens(msgs);
     return msgs;
   }
 
@@ -306,7 +354,14 @@ export class ContextManager {
 
   /** Layer 4 — summarize older messages into a single system note (the one LLM-backed pass). */
   async compact(messages: Message[]): Promise<Message[]> {
-    const systemMessages = messages.filter(m => m.role === 'system');
+    // Keep only DURABLE system messages (C2). Transients are either superseded by this compact
+    // (the previous summary — folded into the new summarization input below — and the previous
+    // file restorations) or regenerated fresh next turn (RepoMap, TurnContext, pressure nudges).
+    // The old behavior kept every one of them forever: each compaction accreted another stale
+    // summary + up to 250KB of stale restorations that all later compactions preserved.
+    const systemMessages = messages.filter(m => m.role === 'system' && !this.isTransientSystem(m));
+    const priorSummaries = messages.filter(m =>
+      this.isTransientSystem(m) && (m.content as string).startsWith('[Previous Context Summary]'));
 
     // Preserve the last 15 messages. Trim any leading orphan tool results so the window can't
     // begin with a `tool` message whose parent assistant tool_calls was cut.
@@ -334,7 +389,12 @@ export class ContextManager {
     // Flatten any multimodal (image) content to text before serializing: a base64 data URL can be
     // megabytes, and embedding it in the summary prompt would blow up tokens/cost and likely 400 the
     // very summarizer meant to SHRINK context. contentToText replaces image parts with "[image]".
-    const olderForSummary = olderMessages.map(m => ({ ...m, content: contentToText(m.content) }));
+    // The previous compaction's summary leads the input so its goal/decisions/progress carry forward
+    // into the NEW summary instead of being silently dropped with the transient strip above.
+    const olderForSummary = [
+      ...priorSummaries.map(m => ({ role: 'system' as const, content: contentToText(m.content) })),
+      ...olderMessages.map(m => ({ ...m, content: contentToText(m.content) })),
+    ];
 
     const summaryPrompt: Message[] = [
       {
@@ -387,15 +447,24 @@ Comma-separated list of files created, modified, or important to the task.`,
     };
 
     // Post-compact file restoration: re-inject recently-read files as synthetic attachments
-    // so the model doesn't need to re-read files it was actively working with.
+    // so the model doesn't need to re-read files it was actively working with. Bounded by a TOTAL
+    // budget (C5): unbudgeted, 5 files × 50KB could pour ~60k tokens right back into the window the
+    // compaction just fought to free. Most-recent files first; one oversized file can't starve a
+    // smaller, newer one behind it.
     const recentReads = fileStateCache.getRecentReads();
-    const fileAttachments: Message[] = recentReads.map(f => ({
-      role: 'system' as const,
-      content: `[Post-Compact Restoration — ${f.path} — unchanged since last read]\n${f.content}`,
-    }));
+    const fileAttachments: Message[] = [];
+    let restoreUsed = 0, restoreSkipped = 0;
+    for (const f of recentReads) {
+      if (restoreUsed + f.content.length > this.RESTORE_BUDGET_CHARS) { restoreSkipped++; continue; }
+      restoreUsed += f.content.length;
+      fileAttachments.push({
+        role: 'system' as const,
+        content: `[Post-Compact Restoration — ${f.path} — unchanged since last read]\n${f.content}`,
+      });
+    }
 
-    if (fileAttachments.length > 0) {
-      Logger.info(`[ContextManager] Restored ${fileAttachments.length} recently-read file(s) post-compact.`);
+    if (fileAttachments.length > 0 || restoreSkipped > 0) {
+      Logger.info(`[ContextManager] Restored ${fileAttachments.length} recently-read file(s) post-compact${restoreSkipped ? ` (${restoreSkipped} skipped — over the ${this.RESTORE_BUDGET_CHARS}-char budget)` : ''}.`);
     }
 
     const compacted = [...systemMessages, summaryMsg, ...fileAttachments, ...recentMessages];
@@ -416,11 +485,22 @@ Comma-separated list of files created, modified, or important to the task.`,
     if (isContextOverflow) {
       Logger.warn(`[ContextManager] Reactive compact triggered by API error: ${error.message}`);
       this.currentTokens = this.MAX_TOKENS; // force it
-      const systemMessages = messages.filter(m => m.role === 'system');
+      // Same transient strip as compact() (C6) — an overflow caused by accreted summaries/
+      // restorations must actually SHRINK here, or the retry 413s again and the turn dies.
+      // Exception: keep the newest [Previous Context Summary] — no new summary is generated on
+      // this path, so dropping it would erase everything the session learned before the overflow.
+      const durableSystem = messages.filter(m => m.role === 'system' && !this.isTransientSystem(m));
+      const lastSummary = [...messages].reverse().find(m =>
+        this.isTransientSystem(m) && (m.content as string).startsWith('[Previous Context Summary]'));
       const recentMessages = this.dropLeadingOrphanToolMessages(
         messages.filter(m => m.role !== 'system').slice(-5)
       );
-      return [...systemMessages, { role: 'system', content: '[Older messages aggressively compacted due to API context limits]' } as Message, ...recentMessages];
+      return [
+        ...durableSystem,
+        ...(lastSummary ? [lastSummary] : []),
+        { role: 'system', content: '[Older messages aggressively compacted due to API context limits]' } as Message,
+        ...recentMessages,
+      ];
     }
     throw error;
   }

@@ -69,10 +69,12 @@ describe('ContextManager — layered passes (smart vs full)', () => {
     expect(toolMsg.content).toContain('chars elided');
   });
 
-  it('micro-compact clears OLD tool results but keeps the last 6 intact', async () => {
-    const cm = new ContextManager(noopLlm);
+  it('micro-compact under pressure clears OLD tool results but keeps the last 6 intact', async () => {
+    // The padded user turn puts the estimate in the [50%, 70%) band of the 420-token window:
+    // over the micro-compact gate, under the summarize threshold.
+    const cm = new ContextManager(noopLlm, 420);
     const messages: Message[] = [
-      { role: 'user', content: 'go' },
+      { role: 'user', content: 'go ' + 'pad '.repeat(200) },
       ...Array.from({ length: 10 }).flatMap((_, i) => toolExchange(`c${i}`, `result-${i}`)),
     ];
     const out = await cm.checkAndCompact(messages, 'smart');
@@ -83,6 +85,19 @@ describe('ContextManager — layered passes (smart vs full)', () => {
     expect(tools.slice(-6).map(t => t.content)).toEqual(
       ['result-4', 'result-5', 'result-6', 'result-7', 'result-8', 'result-9'],
     );
+  });
+
+  it('micro-compact does NOT run at low pressure — old tool results stay intact', async () => {
+    // Plenty of old tool results, but a huge window: destroying context the model may still
+    // need (and churning history bytes → provider cache) buys nothing at 1% usage.
+    const cm = new ContextManager(noopLlm); // default 128k window
+    const messages: Message[] = [
+      { role: 'user', content: 'go' },
+      ...Array.from({ length: 10 }).flatMap((_, i) => toolExchange(`c${i}`, `result-${i}`)),
+    ];
+    const out = await cm.checkAndCompact(messages, 'smart');
+    const tools = out.filter(m => m.role === 'tool');
+    expect(tools.map(t => t.content)).toEqual(Array.from({ length: 10 }).map((_, i) => `result-${i}`));
   });
 
   it('micro-compact never breaks tool pairing (no orphaned tool messages)', async () => {
@@ -148,5 +163,66 @@ describe('ContextManager — layered passes (smart vs full)', () => {
     ];
     const out = await cm.checkAndCompact(messages, 'smart');
     expect(out).toEqual(messages);
+  });
+});
+
+describe('ContextManager — compaction hygiene (no transient accumulation)', () => {
+  const durable = { role: 'system' as const, content: 'durable system rule' };
+  const oldSummary = { role: 'system' as const, content: '[Previous Context Summary]\nOLD GOAL: refactor auth' };
+  const oldRestore = { role: 'system' as const, content: '[Post-Compact Restoration — /x.ts — unchanged since last read]\nold file body' };
+  const repoMap = { role: 'system' as const, content: '[RepoMap] outline...' };
+  const turnCtx = { role: 'system' as const, content: '[TurnContext]\nstale memory' };
+  const filler = (n: number): Message[] =>
+    Array.from({ length: n }).map((_, i) => ({ role: 'user' as const, content: `m${i} ` + 'word '.repeat(30) } as Message));
+
+  it('compact() drops stale transients, keeps durable system messages, and folds the prior summary into the new one', async () => {
+    const captured: string[] = [];
+    const llm: LLMProvider = {
+      async *chat(messages: Message[]): AsyncGenerator<ChatEvent> {
+        captured.push(JSON.stringify(messages));
+        yield { type: 'token', text: 'NEW-SUMMARY' } as ChatEvent;
+      },
+    };
+    const messages: Message[] = [durable, oldSummary, oldRestore, repoMap, turnCtx, ...filler(20)];
+    const out = await new ContextManager(llm, 1000).compact(messages);
+
+    // Durable system message survives; every stale transient is gone.
+    expect(out).toContainEqual(durable);
+    expect(out.map(m => contentToText(m.content)).join('\n')).not.toContain('stale memory');
+    expect(out.map(m => contentToText(m.content)).join('\n')).not.toContain('old file body');
+    expect(out.map(m => contentToText(m.content)).join('\n')).not.toContain('[RepoMap]');
+    // Exactly ONE summary — the new one (accumulating a summary per compaction was context rot).
+    const summaries = out.filter(m => m.role === 'system' && contentToText(m.content).startsWith('[Previous Context Summary]'));
+    expect(summaries).toHaveLength(1);
+    expect(contentToText(summaries[0].content)).toContain('NEW-SUMMARY');
+    // ...but the OLD summary's content reached the summarizer, so its facts carry forward.
+    expect(captured[0]).toContain('OLD GOAL: refactor auth');
+  });
+
+  it('reactiveCompact strips transients but keeps the newest prior summary (no new one is generated)', async () => {
+    const newerSummary = { role: 'system' as const, content: '[Previous Context Summary]\nNEWER GOAL' };
+    const messages: Message[] = [durable, oldSummary, oldRestore, repoMap, turnCtx, newerSummary, ...filler(10)];
+    const out = await new ContextManager(noopLlm, 1000).reactiveCompact(messages, { status: 413, message: 'Request too large' });
+
+    expect(out).toContainEqual(durable);
+    const joined = out.map(m => contentToText(m.content)).join('\n');
+    expect(joined).toContain('NEWER GOAL');            // newest summary preserved
+    expect(joined).not.toContain('OLD GOAL');          // older duplicates dropped
+    expect(joined).not.toContain('old file body');     // restorations dropped
+    expect(joined).not.toContain('stale memory');      // turn context dropped
+    expect(out.filter(m => m.role !== 'system')).toHaveLength(5); // hard tail cut intact
+  });
+
+  it('folds real reported usage into the pressure ratio (C4 — overhead calibration)', async () => {
+    const cm = new ContextManager(summarizerLlm('OVERHEAD-SUMMARY'), 1000);
+    const messages: Message[] = [...filler(20)];
+    // Visible history alone is ~35% of the window → no summarization.
+    const first = await cm.checkAndCompact([...messages], 'smart');
+    expect(first.some(m => contentToText(m.content).includes('OVERHEAD-SUMMARY'))).toBe(false);
+    // The provider reports the request was actually ~950 tokens (system prompt + schemas we can't
+    // see). That overhead must count: the same history now sits near the window edge → summarize.
+    cm.updateTokens(950);
+    const second = await cm.checkAndCompact([...messages], 'smart');
+    expect(second.some(m => contentToText(m.content).includes('OVERHEAD-SUMMARY'))).toBe(true);
   });
 });

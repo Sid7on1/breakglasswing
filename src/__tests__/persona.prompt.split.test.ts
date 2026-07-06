@@ -2,6 +2,7 @@ import { IGovernor } from '../core/interfaces';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
+import { AgentPersona } from '../cli/personas/base.persona';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -25,7 +26,7 @@ function persona(): BiMaxPersona {
   return new BiMaxPersona(r, llm);
 }
 
-describe('Persona system prompt — static/dynamic cache split', () => {
+describe('Persona system prompt — static/session/turn cache split', () => {
   it('static prefix is byte-identical across turns regardless of memory / plan mode', () => {
     const p = persona();
     const a = p.getSystemPromptParts({ memory: 'remembered fact A', planMode: false });
@@ -36,16 +37,28 @@ describe('Persona system prompt — static/dynamic cache split', () => {
     expect(p.getSystemPrompt({ memory: 'x' }).startsWith(a.staticPrefix)).toBe(true);
   });
 
-  it('volatile content lives in the dynamic suffix, not the static prefix', () => {
+  it('per-turn volatile content (memory) lives in turnContext — NOT in the system prompt segments', () => {
     const p = persona();
-    const { staticPrefix, dynamicSuffix } = p.getSystemPromptParts({ memory: 'SECRET-MEMORY-TOKEN', planMode: true });
+    const { staticPrefix, dynamicSuffix, turnContext } = p.getSystemPromptParts({ memory: 'SECRET-MEMORY-TOKEN', planMode: true });
+    // Recalled memory changes bytes every turn; in the system prompt it would invalidate the
+    // provider's prompt-prefix cache from position 0 each turn.
     expect(staticPrefix).not.toContain('SECRET-MEMORY-TOKEN');
-    expect(dynamicSuffix).toContain('SECRET-MEMORY-TOKEN');
+    expect(dynamicSuffix).not.toContain('SECRET-MEMORY-TOKEN');
+    expect(turnContext).toContain('SECRET-MEMORY-TOKEN');
+    // Plan mode toggles rarely → session suffix (one cache miss per toggle is fine).
     expect(staticPrefix).not.toContain('PLAN MODE');
     expect(dynamicSuffix).toContain('PLAN MODE');
     // Environment (cwd) is per-session/dynamic.
     expect(staticPrefix).not.toContain('### ENVIRONMENT');
     expect(dynamicSuffix).toContain('### ENVIRONMENT');
+  });
+
+  it('the session suffix is byte-stable when only per-turn content changes', () => {
+    const p = persona();
+    const a = p.getSystemPromptParts({ memory: 'fact A', exemplars: 'exemplar A' });
+    const b = p.getSystemPromptParts({ memory: 'fact B', exemplars: 'exemplar B' });
+    expect(a.dynamicSuffix).toBe(b.dynamicSuffix);
+    expect(a.turnContext).not.toBe(b.turnContext);
   });
 
   it('identity and behavioural rules stay in the static prefix', () => {
@@ -62,10 +75,60 @@ describe('Persona system prompt — static/dynamic cache split', () => {
     expect(dynamicSuffix).toContain('MemoryQueryTool');
   });
 
-  it('getSystemPrompt = staticPrefix + dynamicSuffix joined', () => {
+  it('getSystemPrompt = all three segments joined', () => {
     const p = persona();
     const parts = p.getSystemPromptParts({ memory: 'm' });
     const full = p.getSystemPrompt({ memory: 'm' });
-    expect(full).toBe([parts.staticPrefix, parts.dynamicSuffix].filter(Boolean).join('\n\n'));
+    expect(full).toBe([parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].filter(Boolean).join('\n\n'));
+  });
+});
+
+describe('injectTurnContext — cache-safe tail placement', () => {
+  const tc = 'USER PREFERS TABS';
+
+  it('inserts a [TurnContext] system message immediately before the latest user message', () => {
+    const msgs: any[] = [
+      { role: 'user', content: 'first task' },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'second task' },
+    ];
+    AgentPersona.injectTurnContext(msgs, tc);
+    expect(msgs).toHaveLength(4);
+    expect(msgs[2].role).toBe('system');
+    expect(msgs[2].content).toContain('[TurnContext]');
+    expect(msgs[2].content).toContain(tc);
+    expect(msgs[3].content).toBe('second task');
+    // Never at the head — that would invalidate the whole-history prefix cache every turn.
+    expect(msgs[0].content).toBe('first task');
+  });
+
+  it('strips the previous turn\'s [TurnContext] so exactly one copy exists', () => {
+    const msgs: any[] = [
+      { role: 'system', content: '[TurnContext]\nstale block from last turn' },
+      { role: 'user', content: 'first task' },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'second task' },
+    ];
+    AgentPersona.injectTurnContext(msgs, tc);
+    const tcMsgs = msgs.filter(m => m.role === 'system' && String(m.content).startsWith('[TurnContext]'));
+    expect(tcMsgs).toHaveLength(1);
+    expect(tcMsgs[0].content).toContain(tc);
+    expect(tcMsgs[0].content).not.toContain('stale block');
+  });
+
+  it('empty turn context strips old copies and injects nothing', () => {
+    const msgs: any[] = [
+      { role: 'system', content: '[TurnContext]\nstale' },
+      { role: 'user', content: 'task' },
+    ];
+    AgentPersona.injectTurnContext(msgs, '');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].content).toBe('task');
+  });
+
+  it('appends when there is no user message (never targets the head)', () => {
+    const msgs: any[] = [{ role: 'assistant', content: 'hello' }];
+    AgentPersona.injectTurnContext(msgs, tc);
+    expect(msgs[1].content).toContain(tc);
   });
 });

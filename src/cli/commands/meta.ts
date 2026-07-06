@@ -232,9 +232,9 @@ globalCommandRegistry.register({
       const persona = context.options.persona;
       if (persona && typeof persona.getSystemPromptParts === 'function') {
         const planMode = context.options.governor?.mode === 'plan';
-        const { staticPrefix, dynamicSuffix } = persona.getSystemPromptParts({ planMode, contextMode: mode });
-        const total = tok(staticPrefix) + tok(dynamicSuffix);
-        promptDesc = `~${total.toLocaleString()} tokens of instructions sent each turn (${tok(staticPrefix).toLocaleString()} fixed + ${tok(dynamicSuffix).toLocaleString()} that change)`;
+        const { staticPrefix, dynamicSuffix, turnContext } = persona.getSystemPromptParts({ planMode, contextMode: mode });
+        const total = tok(staticPrefix) + tok(dynamicSuffix) + tok(turnContext);
+        promptDesc = `~${total.toLocaleString()} tokens of instructions (${tok(staticPrefix).toLocaleString()} fixed + ${tok(dynamicSuffix).toLocaleString()} per-session + ${tok(turnContext).toLocaleString()} per-turn, sent near the tail so caching holds)`;
       }
       if (registry) {
         const sent = registry.getSchemas({ mode }).length;

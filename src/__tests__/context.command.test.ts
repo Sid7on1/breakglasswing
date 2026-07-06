@@ -35,7 +35,7 @@ describe('/context — context engine readout', () => {
     expect(res.type).toBe('menu');
     const by = (label: string) => res.options.find((o: any) => o.label === label);
 
-    expect(by('Instructions size').desc).toMatch(/\d+ .*fixed.*change/);
+    expect(by('Instructions size').desc).toMatch(/\d+ .*fixed.*per-session.*per-turn/);
     // "Tools sent now" leads with the mode and shows the deferred count (WebFetchTool is deferred).
     expect(by('Tools sent now').desc).toMatch(/Smart.*ready now.*when needed/);
     expect(by('History trimming (compaction)').desc).toMatch(/auto-trims/);

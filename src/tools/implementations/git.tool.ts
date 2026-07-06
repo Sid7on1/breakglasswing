@@ -21,7 +21,7 @@ export const createGitTool = (governor: IGovernor) => buildTool({
 - \`diff\` — unstaged diff (optionally limited to \`paths\`).
 - \`log\` — recent commits.
 - \`add\` — stage \`paths\` (default: everything).
-- \`commit\` — stage all and commit with your \`message\`. Compose a concise, conventional message describing the change.
+- \`commit\` — stage + commit with your \`message\`. Stages ONLY \`paths\` when given; with no \`paths\` it stages EVERYTHING, including untracked files — pass \`paths\` whenever the working tree may hold unrelated changes, so they don't ride along. Compose a concise, conventional message describing the change.
 
 Does NOT push. Use commit to checkpoint a logical unit of work.`,
   isDestructive: false, // per-action governance handled inside
@@ -31,7 +31,7 @@ Does NOT push. Use commit to checkpoint a logical unit of work.`,
     properties: {
       action: { type: 'string', enum: ['status', 'diff', 'log', 'add', 'commit'], description: 'The git operation.' },
       message: { type: 'string', description: 'Commit message (required when action is "commit").' },
-      paths: { type: 'string', description: 'Optional space-separated paths for add/diff (default: all).' },
+      paths: { type: 'string', description: 'Optional space-separated paths for add/diff/commit (default: all).' },
     },
     required: ['action'],
   },
@@ -57,8 +57,11 @@ Does NOT push. Use commit to checkpoint a logical unit of work.`,
       }
       case 'commit': {
         if (!args.message?.trim()) return 'Error: commit requires a non-empty `message`.';
-        await governor.approveTaskExecution('OS_COMMAND', { command: 'git commit', isDestructive: true });
-        git(['add', '-A'], cwd);
+        // Honor `paths` exactly like `add` does: a scoped commit must not sweep up unrelated
+        // working-tree changes (the description promises this — keep them in lockstep).
+        const commitPaths = args.paths?.trim() ? args.paths.trim().split(/\s+/) : ['-A'];
+        await governor.approveTaskExecution('OS_COMMAND', { command: `git add ${commitPaths.join(' ')} && git commit`, isDestructive: true });
+        git(['add', ...commitPaths], cwd);
         try {
           const out = git(['commit', '-m', args.message.trim()], cwd);
           return out.trim() || 'Committed.';

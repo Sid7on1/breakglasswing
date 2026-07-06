@@ -28,7 +28,7 @@ export const createReadFileTool = (governor: IGovernor) => buildTool({
 Use this tool to inspect source code, configuration files, or logs. It natively handles truncation for massive files and is significantly more token-efficient than using \`cat\` in the BashTool.
 
 # Instructions
-- **Absolute Paths Required:** You MUST provide the absolute path to the target file.
+- **Paths:** Absolute, or relative to the current working directory — both resolve. Prefer the path exactly as the user or a prior tool result gave it.
 - **Line Ranges:** If you are working with a massive file (>1000 lines), do NOT attempt to read the entire file at once. Use the \`startLine\` and \`endLine\` parameters to read localized chunks.
 - **Context Gathering:** When investigating a bug, do not read files blindly. First, use the \`GraphQueryTool\` to find the exact file paths and class names relevant to the feature.
 - **No Directories:** This tool only works on files. If you need to see the contents of a directory, use the \`BashTool\` with \`ls -la\`.`,
@@ -39,7 +39,7 @@ Use this tool to inspect source code, configuration files, or logs. It natively 
     properties: {
       path: {
         type: 'string',
-        description: 'Absolute path to the file.'
+        description: 'Path to the file (absolute, or relative to the current working directory).'
       },
       startLine: {
         type: 'number',
