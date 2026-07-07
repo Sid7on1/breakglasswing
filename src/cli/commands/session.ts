@@ -124,15 +124,40 @@ globalCommandRegistry.register({
   category: 'Configuration',
   execute: async (args, context) => {
     const providers = getProviders();
+
+    // WS1.5: live pool health from the adapter's key manager (ok/fail counts, cooldowns).
+    // Rendered as an informational category above the provider picker.
+    let poolOptions: any[] = [];
+    try {
+      const states = context.options?.llmAdapter?.getKeyStates?.() ?? [];
+      poolOptions = states.map((s: any) => ({
+        label: `${s.onCooldown ? '⏸' : '●'} ${s.label}`,
+        value: s.label,
+        desc: [
+          s.model !== 'default' ? s.model : null,
+          `${s.ok} ok / ${s.fail} fail`,
+          s.onCooldown ? `cooldown ${Math.ceil(s.cooldownSecs)}s` : null,
+        ].filter(Boolean).join(' · '),
+        category: 'Pool health (this session)',
+      }));
+    } catch { /* adapter optional — key pool UI degrades to provider list only */ }
+
     return {
       type: 'menu',
       title: 'Select a provider to add / replace its API key',
-      options: providers.map(p => ({
-        label: p.name,
-        value: p.name,
-        desc: process.env[p.apiKeyEnv] ? `${p.apiKeyEnv} · configured` : `${p.apiKeyEnv} · missing`,
-      })),
-      onSelect: (opt: any) => promptForKey(opt.value, context),
+      options: [
+        ...providers.map(p => ({
+          label: p.name,
+          value: p.name,
+          desc: process.env[p.apiKeyEnv] ? `${p.apiKeyEnv} · configured` : `${p.apiKeyEnv} · missing`,
+          category: 'Add / replace key',
+        })),
+        ...poolOptions,
+      ],
+      onSelect: (opt: any) => {
+        // Pool-health rows are informational; only provider rows open the key prompt.
+        if (providers.some(p => p.name === opt.value)) promptForKey(opt.value, context);
+      },
     };
   }
 });

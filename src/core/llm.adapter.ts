@@ -83,6 +83,11 @@ export class LlmAdapter implements LLMProvider {
     this.liveModelsCache = null;
   }
 
+  /** Live per-key pool health (ok/fail counts, cooldown) — read-only, for the /keys UI (WS1.5). */
+  public getKeyStates() {
+    return this.apiKeyManager.getStates();
+  }
+
   public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
     if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;

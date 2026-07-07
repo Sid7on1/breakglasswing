@@ -26,7 +26,7 @@ Order of attack. Each workstream ends with a verification gate (build + tests +
 manual check) before the next one starts. Status markers updated in place:
 `[ ]` pending · `[~]` in progress · `[x]` done.
 
-### WS1 — Key management (provider-aware, unstoppable) `[~]`
+### WS1 — Key management (provider-aware, unstoppable) `[x]`
 
 Survey verdict: the core is already sound — the key pool is **single-provider
 by design** (`provider.ts:buildKeyPool`), which already prevents the exact
@@ -35,20 +35,25 @@ Rotation, 429 cooldowns, and RPM pacing exist in `api.key.manager.ts`.
 
 Remaining work:
 1. `[x]` Document the real behavior → `docs/KEY_MANAGEMENT.md` (done 2026-07-06).
-2. `[ ]` Model↔provider validation at the moment the user sets a model:
-   query the active provider's `GET /models` and warn immediately if the id
-   isn't served there — fail at config time, not mid-task with a 400.
-3. `[ ]` On a 400 "model not found" at request time: error message must name
-   the active provider and suggest `/provider` + `/model`, not just dump the
-   raw API error.
+2. `[x]` Model↔provider validation at set time (done 2026-07-08): `/model`
+   validates the id against the active provider's live `/models` list the
+   moment it is set (`meta.ts` `warnIfUnserved`, fire-and-forget so the
+   command stays instant); picker options come from the live list itself.
+3. `[x]` 400 "model not found" enrichment (done 2026-07-08):
+   `llm.adapter.ts` `enrichModelNotFound` rewrites the error to name the
+   provider + model and point at `/model` / `/provider`; raw API text kept
+   in parens. No-op for all other errors.
 4. `[x]` Per-provider request shaping audit (done 2026-07-08): capability
    registry in `src/core/capabilities.ts` (`capabilitiesFor(model, provider)`)
    drives request shaping in `llm.adapter.ts` — unsupported params
    (`reasoning_effort`, `parallel_tool_calls`, `temperature`/`top_p` on
    fixed-sampling models, structured outputs) are stripped per provider/model
    before send instead of 400ing. 36 tests cover the matrix.
-5. `[ ]` `/keys` UX: show pool health (ok/fail/cooldown per key) — states
-   already exist via `getStates()`, just needs clean TUI rendering (feeds WS3).
+5. `[x]` `/keys` UX: show pool health (done 2026-07-08): `/keys` menu now
+   renders a "Pool health (this session)" category — per-key ok/fail counts,
+   cooldown countdown (`getStates()` gained `cooldownSecs`), surfaced through
+   `LlmAdapter.getKeyStates()`. Informational rows; provider rows still open
+   the key prompt.
 
 ### WS2 — Subagent infrastructure (slow / possibly fake) `[ ]`
 
