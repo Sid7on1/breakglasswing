@@ -44,6 +44,13 @@ export interface ModelCapabilities {
   /** Accepts a `reasoning_effort` knob (thinking models); sending it to a model that lacks it can 400. */
   reasoningEffortKnob: boolean;
   /**
+   * Model REJECTS sampling control — `temperature`/`top_p` must be left at the provider default or
+   * the request 400s ("Unsupported value: 'temperature' does not support …"). True for OpenAI's
+   * o-series and gpt-5 reasoning models. When set, the adapter omits both fields (WS1.4). FLOOR is
+   * false, so every other model still sends them exactly as before.
+   */
+  fixedSampling: boolean;
+  /**
    * CONFIRMED non-reasoning model: its content channel is ALWAYS the answer — it never emits an
    * opener-less `</think>` closer or an out-of-band reasoning channel. Tells the streaming filter to
    * skip implicit think-buffering entirely and stream from the very first token, instead of holding
@@ -72,6 +79,7 @@ export const FLOOR: ModelCapabilities = {
   parallelToolCalls: false,
   structuredOutputs: false,
   reasoningEffortKnob: false,
+  fixedSampling: false,
   plainContent: false,
   visionInput: false,
   contextWindow: 32_000,
@@ -110,6 +118,7 @@ const RULES: CapabilityRule[] = [
     caps: {
       structuredOutputs: true,
       reasoningEffortKnob: true,
+      fixedSampling: true, // o-series/gpt-5 reject temperature/top_p overrides → 400
       parallelToolCalls: true,
       partialJsonTools: true,
       nativeThinking: true,
@@ -223,6 +232,7 @@ function applyOverrides(caps: ModelCapabilities): ModelCapabilities {
   const pt = envFlag('BGW_CAP_PARALLEL_TOOL_CALLS');    if (pt !== undefined) out.parallelToolCalls = pt;
   const so = envFlag('BGW_CAP_STRUCTURED_OUTPUTS');     if (so !== undefined) out.structuredOutputs = so;
   const re = envFlag('BGW_CAP_REASONING_EFFORT');       if (re !== undefined) out.reasoningEffortKnob = re;
+  const fs = envFlag('BGW_CAP_FIXED_SAMPLING');         if (fs !== undefined) out.fixedSampling = fs;
   const pl = envFlag('BGW_CAP_PLAIN_CONTENT');          if (pl !== undefined) out.plainContent = pl;
   const vi = envFlag('BGW_CAP_VISION');                 if (vi !== undefined) out.visionInput = vi;
   const cw = process.env.BGW_CAP_CONTEXT_WINDOW;        if (cw && !Number.isNaN(parseInt(cw, 10))) out.contextWindow = parseInt(cw, 10);

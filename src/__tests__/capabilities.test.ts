@@ -76,6 +76,26 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('local', 'mystery-7b').reasoningEffortKnob).toBe(false);
   });
 
+  // WS1.4 — fixedSampling gates the temperature/top_p fields: o-series/gpt-5 400 on any sampling
+  // override, so they must be flagged; everyone else must stay false so their sampling regime
+  // (incl. the minimax temp-1.0 pin) keeps being sent exactly as before. Lock both polarities.
+  it('fixedSampling: on for o-series/gpt-5 (sampling overrides 400), off for everything else', () => {
+    expect(capabilitiesFor('openai', 'o3-mini').fixedSampling).toBe(true);
+    expect(capabilitiesFor('openai', 'o1-preview').fixedSampling).toBe(true);
+    expect(capabilitiesFor('openai', 'gpt-5').fixedSampling).toBe(true);
+    expect(capabilitiesFor('openai', 'gpt-4o').fixedSampling).toBe(false);
+    expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').fixedSampling).toBe(false);
+    expect(capabilitiesFor('nvidia', 'minimaxai/minimax-m3').fixedSampling).toBe(false);
+    expect(capabilitiesFor('local', 'mystery-7b').fixedSampling).toBe(false); // FLOOR default
+  });
+
+  it('BGW_CAP_FIXED_SAMPLING overrides the table in both directions', () => {
+    process.env.BGW_CAP_FIXED_SAMPLING = 'true';
+    expect(capabilitiesFor('local', 'mystery-7b').fixedSampling).toBe(true);
+    process.env.BGW_CAP_FIXED_SAMPLING = 'false';
+    expect(capabilitiesFor('openai', 'o3-mini').fixedSampling).toBe(false);
+  });
+
   // inlineReasoning drives the streaming think-filter's preamble-cap lift: the NIM reasoning models
   // that emit chain-of-thought inline (before a tool call) must be flagged, or their reasoning leaks
   // into the reply. Plain/structured-reasoning models stay false so the cap protects them.

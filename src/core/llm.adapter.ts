@@ -173,6 +173,16 @@ export class LlmAdapter implements LLMProvider {
     return { temperature: override ?? this.temperature, top_p: this.topP };
   }
 
+  /**
+   * WS1.4 — sampling fields for the aux (non-chat) request sites, as a spreadable partial.
+   * Models with `fixedSampling` (o-series/gpt-5) 400 on any temperature/top_p override, so for
+   * them this returns `{}` and the field is omitted; every other model sends exactly what it
+   * sent before. Aux sites historically send only `temperature` (no top_p), and that stays true.
+   */
+  private samplingFieldsFor(model: string, temperature: number): { temperature?: number } {
+    return capabilitiesFor(undefined, model).fixedSampling ? {} : { temperature };
+  }
+
   private pickModel(keyResult: KeyResult, lite?: boolean): string {
     if (lite && this.liteModel) return this.liteModel;
     // The user's explicit choice (set via /model → applyConfig) must win. Previously the key's
@@ -219,6 +229,23 @@ export class LlmAdapter implements LLMProvider {
   private errorStatus(e: any): number {
     if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) return 408;
     return e?.status || 500;
+  }
+
+  // WS1.3 (MASTER_REBUILD_PLAN): a 400 "model not found" must name WHICH provider rejected WHICH
+  // model and how to fix it — not just dump the raw API error. The key pool is single-provider by
+  // design (provider.ts:buildKeyPool), so this mismatch always means "the configured model id
+  // isn't in the active provider's namespace". Rewrites e.message in place when it matches;
+  // no-op for every other error, so existing classification/retry behavior is untouched.
+  private enrichModelNotFound(e: any, kr: KeyResult, lite?: boolean): void {
+    if ((e?.status ?? 0) !== 400) return;
+    const raw = String(e?.message || '');
+    if (e?.code !== 'model_not_found' &&
+        !(/model/i.test(raw) && /not.{0,4}found|not.{0,4}a.{0,4}valid|does not exist|invalid|unknown|no such|unavailable/i.test(raw))) return;
+    const model = this.pickModel(kr, lite);
+    const provider = kr.provider || 'the active provider';
+    e.message = `Model "${model}" is not served by provider "${provider}". ` +
+      `Run /model to pick an id ${provider} serves, or /provider to switch to the provider that has it. ` +
+      `(API said: ${raw.trim()})`;
   }
 
   async generateTinyPlans(userPrompt: string, systemContext: string) {
@@ -287,7 +314,7 @@ export class LlmAdapter implements LLMProvider {
           { role: 'user', content: userPrompt }
         ],
         max_tokens: maxTokens,
-        temperature: 0.0
+        ...this.samplingFieldsFor(this.pickModel(kr), 0.0)
       }, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       const usage = response.usage;
@@ -321,7 +348,7 @@ export class LlmAdapter implements LLMProvider {
           { role: 'system', content: systemContext },
           ...messages
         ],
-        temperature: this.temperature,
+        ...this.samplingFieldsFor(this.pickModel(kr), this.temperature),
         max_tokens: this.maxTokens,
       }, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
@@ -403,7 +430,7 @@ export class LlmAdapter implements LLMProvider {
       const response = await client.chat.completions.create({
         model: this.pickModel(kr, opts?.lite),
         messages: finalMessages,
-        temperature: this.temperature,
+        ...this.samplingFieldsFor(this.pickModel(kr, opts?.lite), this.temperature),
         max_tokens: this.maxTokens,
       }, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
@@ -420,6 +447,7 @@ export class LlmAdapter implements LLMProvider {
       // Report the REAL status (429/408/…), not a blanket 500 — the key manager's rotation
       // and backoff decisions depend on it (a 429 key should cool down, not be marked broken).
       this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
+      this.enrichModelNotFound(e, kr, opts?.lite);
       throw e;
     }
   }
@@ -442,7 +470,7 @@ export class LlmAdapter implements LLMProvider {
         model: this.pickModel(kr),
         messages: finalMessages,
         stream: true,
-        temperature: this.temperature,
+        ...this.samplingFieldsFor(this.pickModel(kr), this.temperature),
         max_tokens: this.maxTokens,
       }, { timeout: this.requestTimeout });
       for await (const chunk of stream) {
@@ -455,6 +483,7 @@ export class LlmAdapter implements LLMProvider {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       const status = this.errorStatus(e);
       this.apiKeyManager.reportKeyResult(kr.idx!, status);
+      this.enrichModelNotFound(e, kr);
       throw e;
     }
   }
@@ -506,10 +535,15 @@ export class LlmAdapter implements LLMProvider {
         messages: finalMessages,
         stream: true,
         stream_options: { include_usage: true },
-        temperature: sampling.temperature,
-        top_p: sampling.top_p,
         max_tokens: options.maxTokens ?? this.maxTokens,
       };
+      // WS1.4 — per-provider request shaping: o-series/gpt-5 reject temperature/top_p overrides
+      // (400 "Unsupported value"). Only attach sampling when the model accepts it; every other
+      // model gets exactly the fields it got before.
+      if (!caps.fixedSampling) {
+        requestOptions.temperature = sampling.temperature;
+        requestOptions.top_p = sampling.top_p;
+      }
 
       if (options.tools && options.tools.length > 0) {
         requestOptions.tools = options.tools.map((t: any) => ({
@@ -778,6 +812,7 @@ export class LlmAdapter implements LLMProvider {
       // reservation, otherwise we would release it a second time.
       if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
 
+      this.enrichModelNotFound(e, kr, options.lite);
       const { status, recoverable, kind, retryAfterSecs } = classifyStreamError(e);
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
       yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
