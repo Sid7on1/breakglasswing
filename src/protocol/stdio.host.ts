@@ -24,7 +24,10 @@ export function startStdioHost(opts: StdioHostOptions): () => void {
 
   const host = new ProtocolHost(
     (msg: Outbound) => out.write(encode(msg)),
-    { onInput: opts.onInput, onInterrupt: opts.onInterrupt, onQuery: opts.onQuery, onMenuSelect: opts.onMenuSelect },
+    {
+      onInput: opts.onInput, onInterrupt: opts.onInterrupt, onQuery: opts.onQuery,
+      onMenuSelect: opts.onMenuSelect, onConfigGet: opts.onConfigGet, onConfigSet: opts.onConfigSet,
+    },
   );
 
   const decoder = new LineDecoder<Inbound>((line, err) =>

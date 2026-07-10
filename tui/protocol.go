@@ -8,7 +8,12 @@ import "encoding/json"
 // supportedProtocol is the wire version this TUI speaks — must match PROTOCOL_VERSION in
 // src/protocol/protocol.ts. The engine reports its version in the `ready` handshake; a mismatch
 // is surfaced to the user instead of silently dropping/garbling messages.
-const supportedProtocol = 1
+// v2 (2026-07-10): ui_snapshot gained optional sessions/checkpoints/git fields — additive only;
+// this decoder ignores unknown JSON fields, so only the constant needs to move.
+// v3 (2026-07-11): silent config round-trip (configGet/configSet → configResult) for graphical
+// settings pages. This TUI drives settings through the engine's menus instead, but it carries
+// the encoders + Config decode field so the protocol contract stays fully covered.
+const supportedProtocol = 3
 
 // Outbound — engine → TUI. One struct covers all three message kinds (event/request/ready);
 // only the relevant fields are populated per `t`.
@@ -26,6 +31,7 @@ type Outbound struct {
 	Protocol int               `json:"protocol,omitempty"` // ready handshake
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
 	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
+	Config   json.RawMessage   `json:"config,omitempty"`   // configResult (v3) — allowlisted settings subset
 }
 
 // CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.
@@ -285,6 +291,19 @@ func encodeMenuSelect(id, value string) []byte {
 // is a zombie whose pipe hasn't closed) — the heartbeat in model.go surfaces that in the footer.
 func encodePing(id int) []byte {
 	b, _ := json.Marshal(map[string]any{"t": "ping", "id": id})
+	return append(b, '\n')
+}
+
+// encodeConfigGet asks the engine for its allowlisted settings subset (v3). Unused by this TUI's
+// menu-driven settings today; present so the protocol contract covers every inbound message.
+func encodeConfigGet(id int) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "configGet", "id": id})
+	return append(b, '\n')
+}
+
+// encodeConfigSet merges a settings patch into the engine config (v3).
+func encodeConfigSet(id int, patch map[string]any) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "configSet", "id": id, "patch": patch})
 	return append(b, '\n')
 }
 

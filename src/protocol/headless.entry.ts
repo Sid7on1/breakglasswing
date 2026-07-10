@@ -57,12 +57,43 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     } catch { return 0; }
   });
 
+  // Settings surface (protocol v3): the allowlisted, JSON-safe subset of CliConfig a graphical
+  // front-end may read and write directly — the silent path behind settings pages, replacing
+  // transcript menus. Sensitive/engine-internal keys (API keys, workspaceRoot,
+  // dangerouslySkipPermissions, onboarding flags) stay OFF the wire on purpose.
+  const CONFIG_WIRE_KEYS = [
+    'model', 'liteModel', 'fallbackModel', 'subagentModel',
+    'temperature', 'topP', 'maxTokens', 'timeout',
+    'reasoningEffort', 'contextMode', 'contextWindowTokens', 'parallelToolCalls',
+    'maxToolIterations', 'maxSubAgents',
+    'notificationBell', 'verbose', 'reducedMotion', 'theme',
+    'autoIndex', 'gitAutoCommit', 'autoVerify', 'sandboxBash',
+    'selfCritic', 'adversarialVerify', 'diffApproval', 'blastGate',
+    'showMapPanel', 'showTokenMeter',
+  ] as const;
+  const configSubset = (): Record<string, any> => {
+    const c = getConfig() as any;
+    const out: Record<string, any> = {};
+    for (const k of CONFIG_WIRE_KEYS) if (c[k] !== undefined) out[k] = c[k];
+    return out;
+  };
+
   const dispose = startStdioHost({
     emitter: cliEvents,
     onInput: (text) => { void session.dispatch(text); },
     onInterrupt: () => session.interrupt(),
     onQuery: (text) => completeInput(text, graphStore, process.cwd()),
     onMenuSelect: (id, value) => session.selectMenu(id, value),
+    onConfigGet: configSubset,
+    onConfigSet: async (patch) => {
+      const safe: Record<string, any> = {};
+      for (const k of CONFIG_WIRE_KEYS) if (patch[k] !== undefined) safe[k] = patch[k];
+      if (Object.keys(safe).length > 0) {
+        await saveConfig(safe as any);
+        cliEvents.emit('config_changed'); // re-snapshot + notify every attached front-end
+      }
+      return configSubset();
+    },
   });
 
   // Register the inline diff-approval gate over the protocol (Ink registers its own in FullScreen).

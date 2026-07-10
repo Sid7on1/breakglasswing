@@ -31,8 +31,8 @@ func TestEngineRoundTrip(t *testing.T) {
 			switch {
 			case m.T == "ready":
 				gotReady = true
-				if m.Protocol != 1 {
-					t.Fatalf("unexpected protocol version: %d", m.Protocol)
+				if m.Protocol != supportedProtocol {
+					t.Fatalf("unexpected protocol version: %d (want %d)", m.Protocol, supportedProtocol)
 				}
 				eng.Send(encodeInput("/help")) // ask for the command palette
 			case m.T == "event" && m.Name == "message" && len(m.Args) > 0:

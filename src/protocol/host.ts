@@ -14,6 +14,10 @@ export interface HostHandlers {
   onQuery?: (text: string) => CompletionItem[] | Promise<CompletionItem[]>;
   /** The front-end picked an option in a menu the engine emitted — run that menu's onSelect. */
   onMenuSelect?: (id: string, value: string) => void;
+  /** Settings page read — return the allowlisted config subset (v3). */
+  onConfigGet?: () => Record<string, any>;
+  /** Settings page write — merge the allowlisted patch, return the post-write subset (v3). */
+  onConfigSet?: (patch: Record<string, any>) => Record<string, any> | Promise<Record<string, any>>;
 }
 
 /**
@@ -115,6 +119,19 @@ export class ProtocolHost {
         Promise.resolve(this.handlers.onQuery?.(text) ?? [])
           .then(items => this.write({ t: 'queryResult', id, items }))
           .catch(() => this.write({ t: 'queryResult', id, items: [] }));
+        return;
+      }
+      case 'configGet': {
+        let config: Record<string, any> = {};
+        try { config = this.handlers.onConfigGet?.() ?? {}; } catch { /* answer empty, never hang */ }
+        this.write({ t: 'configResult', id: msg.id, config });
+        return;
+      }
+      case 'configSet': {
+        const { id, patch } = msg;
+        Promise.resolve(this.handlers.onConfigSet?.(patch ?? {}) ?? {})
+          .then(config => this.write({ t: 'configResult', id, config }))
+          .catch(() => this.write({ t: 'configResult', id, config: {} }));
         return;
       }
     }

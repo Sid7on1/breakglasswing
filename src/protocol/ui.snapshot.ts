@@ -67,6 +67,34 @@ export interface UiSnapshotMind {
   ledger?: UiSnapshotMindLedger;
 }
 
+// --- Protocol v2 additive fields ------------------------------------------------------------
+// All optional: a v1 front-end ignores them, a v2 front-end hides the matching panel when absent.
+
+/** One saved session for the front-end's session list (sidebar) — from db/session.meta. */
+export interface UiSnapshotSession {
+  id: string;
+  title: string;
+  startedAt: string; // ISO
+  messageCount: number;
+  cwd: string;
+  current: boolean;  // the live session this engine process is writing
+}
+
+/** One Time Machine checkpoint (sandbox/checkpoint.manager) for the History strip. */
+export interface UiSnapshotCheckpoint {
+  id: string;
+  label: string;
+  ts: number;   // epoch ms
+  auto: boolean;
+}
+
+export interface UiSnapshotGit {
+  branch: string;
+  dirty: number; // changed files (index + worktree + untracked)
+  ahead: number;
+  behind: number;
+}
+
 export interface UiSnapshot {
   models: { coding: string; lite: string };
   goalCount: number;
@@ -87,6 +115,13 @@ export interface UiSnapshot {
   // Multi-repo workspace: how many repos are in context and their names, so the TUI status bar
   // always shows the working set (workspace.manager.ts). count <= 1 = single-repo session.
   workspace: { count: number; names: string[]; writable: number };
+  // v2: recent sessions (newest first, capped) for the front-end sidebar; resume via `/resume <id>`.
+  sessions?: UiSnapshotSession[];
+  // v2: Time Machine checkpoints (newest first, capped) for the History strip; restore via `/rewind <id>`.
+  checkpoints?: UiSnapshotCheckpoint[];
+  // v2: coarse git state for header pills. Front-ends that can poll git natively (the Electron app)
+  // may prefer their own fresher poll; this is for the ones that can't.
+  git?: UiSnapshotGit;
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -188,7 +223,46 @@ function snapshot(graphStore?: IGraphStore): UiSnapshot {
     if (ws) workspace = ws.snapshot();
   } catch { /* workspace best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace };
+  // v2 fields — each independently best-effort so one broken subsystem never blanks the others.
+  let sessions: UiSnapshotSession[] | undefined;
+  try {
+    const { listSessionMeta, getCurrentSessionId } = require('../db/session.meta');
+    const current = getCurrentSessionId();
+    sessions = (listSessionMeta(20) as any[]).map((m) => ({
+      id: m.id,
+      title: m.title || '(no messages yet)',
+      startedAt: m.startedAt || '',
+      messageCount: m.messageCount || 0,
+      cwd: m.cwd || '',
+      current: m.id === current,
+    }));
+  } catch { /* session meta best-effort */ }
+
+  let checkpoints: UiSnapshotCheckpoint[] | undefined;
+  try {
+    const { globalCheckpointManager } = require('../sandbox/checkpoint.manager');
+    if (globalCheckpointManager.isGitRepo()) {
+      checkpoints = (globalCheckpointManager.list() as any[]).slice(0, 15).map((c) => ({
+        id: c.id, label: c.label, ts: c.timestamp, auto: !!c.auto,
+      }));
+    }
+  } catch { /* checkpoints best-effort */ }
+
+  let git: UiSnapshotGit | undefined;
+  try {
+    const { getGitStatus } = require('../cli/git');
+    const s = getGitStatus(process.cwd());
+    if (s) {
+      git = {
+        branch: s.branch,
+        dirty: s.added.length + s.modified.length + s.deleted.length + s.unstaged.length,
+        ahead: s.ahead,
+        behind: s.behind,
+      };
+    }
+  } catch { /* git best-effort */ }
+
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git };
 }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
@@ -215,4 +289,7 @@ export function startUiSnapshot(graphStore?: IGraphStore): void {
   cliEvents.on('mind_changed', emit);
   // Workspace: repo registered / scoped / ignored → status-bar repo chip updates.
   cliEvents.on('workspace_changed', emit);
+  // v2: checkpoint created / rewound → History strip updates; clear/resume → session list updates.
+  cliEvents.on('timemachine_changed', emit);
+  cliEvents.on('clear', emit);
 }

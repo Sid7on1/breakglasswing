@@ -1,12 +1,47 @@
+import { execFileSync } from 'child_process';
 import { globalCommandRegistry } from './registry';
 import { getGitStatus, gitDiff, gitLog } from '../git';
 import { setGitAutoCommitEnabled, isGitAutoCommitEnabled } from '../../tools/git.autocommit';
 
 globalCommandRegistry.register({
   name: '/git',
-  description: 'Git status',
+  description: 'Git status · /git commit <msg> · /git checkout <branch>',
   category: 'Source Control',
   execute: async (args, context) => {
+    const sub = (args[0] || '').toLowerCase();
+
+    // Writes route through here (not raw git in the UI shells) so the ledger and attribution
+    // pipeline observe them like any other engine action.
+    if (sub === 'commit') {
+      const message = args.slice(1).join(' ').trim();
+      if (!message) return { type: 'message', level: 'error', content: 'Usage: /git commit <message>' };
+      try {
+        execFileSync('git', ['add', '-A'], { cwd: context.cwd, stdio: 'pipe' });
+        const out = execFileSync('git', ['commit', '-m', message], { cwd: context.cwd, encoding: 'utf-8', stdio: 'pipe' });
+        return { type: 'message', level: 'success', content: out.trim().split('\n')[0] || `Committed: ${message}` };
+      } catch (err: any) {
+        const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
+        return { type: 'message', level: 'error', content: `Commit failed: ${detail.slice(0, 400)}` };
+      }
+    }
+
+    if (sub === 'checkout' || sub === 'switch') {
+      const name = (args[1] || '').trim();
+      if (!name) return { type: 'message', level: 'error', content: 'Usage: /git checkout <branch>' };
+      try {
+        try {
+          execFileSync('git', ['checkout', name], { cwd: context.cwd, stdio: 'pipe' });
+          return { type: 'message', level: 'success', content: `Switched to branch ${name}` };
+        } catch {
+          execFileSync('git', ['checkout', '-b', name], { cwd: context.cwd, stdio: 'pipe' });
+          return { type: 'message', level: 'success', content: `Created and switched to new branch ${name}` };
+        }
+      } catch (err: any) {
+        const detail = String(err?.stderr || err?.message || err).trim();
+        return { type: 'message', level: 'error', content: `Checkout failed: ${detail.slice(0, 400)}` };
+      }
+    }
+
     const status = getGitStatus(context.cwd);
     if (!status) return { type: 'message', level: 'info', content: 'Not a git repository' };
     

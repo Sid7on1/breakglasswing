@@ -7,7 +7,11 @@
 // Transport is newline-delimited JSON (NDJSON): one JSON object per line, both directions. See
 // codec.ts for framing and host.ts for the engine-side endpoint.
 
-export const PROTOCOL_VERSION = 1;
+// v2 (2026-07-10): ui_snapshot gains optional sessions / checkpoints / git fields (all additive —
+// a v1 front-end ignores them; a v2 front-end hides the matching UI when they're absent).
+// v3 (2026-07-11): silent config round-trip — configGet/configSet inbound + configResult outbound,
+// so graphical front-ends drive settings pages without printing menus into the transcript.
+export const PROTOCOL_VERSION = 3;
 
 // A JSON-safe value. The codec guarantees only these cross the wire (sanitizeArgs strips the rest).
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
@@ -53,7 +57,13 @@ export interface QueryResultMsg { t: 'queryResult'; id: number; items: Completio
 /** Liveness answer to a {@link PingMsg} — echoes `id` so the front-end can match it. */
 export interface PongMsg { t: 'pong'; id: number; }
 
-export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg;
+/**
+ * The engine's settings, answering a {@link ConfigGetMsg} or {@link ConfigSetMsg} — only the
+ * allowlisted, JSON-safe subset of CliConfig crosses the wire (headless.entry owns the list).
+ */
+export interface ConfigResultMsg { t: 'configResult'; id: number; config: { [k: string]: JsonValue }; }
+
+export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg | ConfigResultMsg;
 
 // --- Inbound: front-end → engine -----------------------------------------------------------
 
@@ -83,7 +93,17 @@ export interface MenuSelectMsg { t: 'menuSelect'; id: string; value: string; }
  */
 export interface PingMsg { t: 'ping'; id: number; }
 
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg;
+/** Read the engine's settings (allowlisted subset) — answered with a {@link ConfigResultMsg}. */
+export interface ConfigGetMsg { t: 'configGet'; id: number; }
+
+/**
+ * Write settings: `patch` merges into the engine config (allowlisted keys only; unknown keys are
+ * dropped, never errors). Answered with the post-write {@link ConfigResultMsg} and followed by a
+ * `config_changed` event so every attached front-end (and ui_snapshot) refreshes.
+ */
+export interface ConfigSetMsg { t: 'configSet'; id: number; patch: { [k: string]: JsonValue }; }
+
+export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg | ConfigGetMsg | ConfigSetMsg;
 
 // --- Event vocabulary ----------------------------------------------------------------------
 
