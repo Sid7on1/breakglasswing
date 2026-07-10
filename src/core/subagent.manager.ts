@@ -8,6 +8,7 @@ import { globalSubAgentBlackboard } from './subagent.blackboard';
 import { getTracer } from '../telemetry/trace';
 import { createWorktree, settleWorktree, WorktreeInfo } from './worktree.manager';
 import { saveCheckpoint, CheckpointedAgent } from './agent.checkpoint';
+import { journalSubagent } from './subagent.journal';
 
 // Line-delimited sentinels the sub-agent SUBPROCESS (bun-compiled binary re-execing itself) writes to
 // stdout, and the parent parses back into the same {type} messages a worker_thread posts. Shared with
@@ -168,6 +169,20 @@ export class SubAgentManager {
     return new Promise((resolve, reject) => {
       Logger.info(`[SubAgentManager] Spawning worker for task ${taskId} (Agent: ${config.agentType})`);
 
+      // WS2.1 — lifecycle instrumentation. All timestamps are parent-side (message arrival),
+      // so the journal adds zero overhead inside the worker. t0 is taken BEFORE worktree
+      // creation so isolation cost lands in msToFirstEvent, where it belongs.
+      const t0 = Date.now();
+      let sawFirstEvent = false;
+      let toolCallCount = 0;
+      const journalFirstEvent = () => {
+        if (sawFirstEvent) return;
+        sawFirstEvent = true;
+        journalSubagent({ taskId, phase: 'first_event', ms: Date.now() - t0 });
+      };
+      const journalSettled = (outcome: 'done' | 'failed' | 'timeout') =>
+        journalSubagent({ taskId, phase: 'settled', outcome, ms: Date.now() - t0, toolCalls: toolCallCount });
+
       // Worktree isolation: give the agent its own checkout + branch BEFORE the config is frozen
       // into workerData. Creation failing (not a git repo, git missing) falls back to running
       // unisolated — the pre-worktree behavior — never a spawn failure. A floored episode is
@@ -195,6 +210,13 @@ export class SubAgentManager {
       globalSubAgentBlackboard.register(taskId, config.agentType, config.scope || '', config.prompt);
       this.spawnConfigs.set(taskId, config);
       this.emitBoard();
+
+      journalSubagent({
+        taskId, phase: 'spawned', agentType: config.agentType,
+        ...(config.model ? { model: config.model } : {}),
+        ...(config.depth ? { depth: config.depth } : {}),
+        ...(config.isolation ? { isolation: config.isolation } : {}),
+      });
 
       // Sub-agent lifetime span (OTel GenAI invoke_agent). end() is idempotent, so the
       // timeout / error / exit paths can all settle it without coordination.
@@ -232,6 +254,7 @@ export class SubAgentManager {
         this.spawnConfigs.delete(taskId);
         this.emitBoard();
         span.end('error', `timed out after ${this.workerTimeoutMs}ms`);
+        journalSettled('timeout');
         const note = settleIsolation();
         if (note) Logger.warn(`[SubAgentManager] ${taskId} timed out but left changes: ${note}`);
         reject(new Error(`Worker for task ${taskId} timed out after ${this.workerTimeoutMs}ms`));
@@ -250,11 +273,13 @@ export class SubAgentManager {
         // success/error message must NOT re-write the board — it would flip a timed-out agent to
         // "done" or overwrite the real failure reason and fire a spurious board refresh.
         if (settled && (message.type === 'success' || message.type === 'error')) return;
+        journalFirstEvent(); // any first message — log, tool event, or immediate result
         if (message.type === 'success') {
           globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
           this.spawnConfigs.delete(taskId); // settled — no longer crash-recoverable
           this.emitBoard();
           span.end('ok');
+          journalSettled('done');
           const note = settleIsolation();
           finalize(() => resolve(
             note && typeof message.result === 'string' ? `${message.result}\n\n${note}` : message.result
@@ -264,6 +289,7 @@ export class SubAgentManager {
           this.spawnConfigs.delete(taskId);
           this.emitBoard();
           span.end('error', String(message.error));
+          journalSettled('failed');
           const note = settleIsolation();
           if (note) Logger.warn(`[SubAgentManager] ${taskId} failed but left changes: ${note}`);
           finalize(() => reject(new Error(message.error)));
@@ -273,7 +299,11 @@ export class SubAgentManager {
           // T3 — re-emit a sub-agent's tool activity on the main event bus, tagged so the UI nests
           // it under this spawn. Tag-and-forward only; never settles the spawn promise.
           globalSubAgentBlackboard.incTool(taskId);
-          if (message.subtype === 'tool_call') this.emitBoard(); // one board refresh per new call, not per result
+          if (message.subtype === 'tool_call') {
+            this.emitBoard(); // one board refresh per new call, not per result
+            toolCallCount++;
+            journalSubagent({ taskId, phase: 'tool_call', tool: message.call.toolName, ms: Date.now() - t0 });
+          }
           const call = { ...message.call, parentId: taskId, agentLabel: config.agentType };
           cliEvents.emit(message.subtype === 'tool_call_result' ? 'tool_call_result' : 'tool_call', call);
         }
