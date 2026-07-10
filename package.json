@@ -21,7 +21,8 @@
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",
-    "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js"
+    "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js",
+    "check:protocol-mirror": "node scripts/check-protocol-mirror.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

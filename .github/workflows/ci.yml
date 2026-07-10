@@ -40,6 +40,29 @@ jobs:
       - name: Test
         run: npm run test:ci
 
+  app:
+    name: App (typecheck · build · protocol mirror)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # The app keeps a hand-written mirror of the engine's wire contract; this gate fails the
+      # build the moment the mirror's version or message vocabulary drifts from src/protocol.
+      - name: Protocol mirror in sync with engine
+        run: npm run check:protocol-mirror
+      - run: npm ci
+        working-directory: app
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: app
+      - name: Build (electron-vite bundles; no packaging)
+        run: npm run build
+        working-directory: app
+
   tui:
     name: TUI (build · test)
     strategy:
