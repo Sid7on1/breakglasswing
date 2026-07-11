@@ -22,6 +22,7 @@
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",
     "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js",
+    "gen:app-protocol": "node scripts/gen-app-protocol.mjs",
     "check:protocol-mirror": "node scripts/check-protocol-mirror.mjs"
   },
   "dependencies": {

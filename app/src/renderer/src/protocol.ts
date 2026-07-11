@@ -1,62 +1,14 @@
-// Mirror of the engine's wire contract (src/protocol/protocol.ts in the repo root) plus the
-// payload shapes the renderer consumes (src/cli/events.ts, src/protocol/ui.snapshot.ts).
-// Keep in sync by hand — the protocol is versioned (PROTOCOL_VERSION) and the app refuses to
-// drive a mismatched engine.
+// The desktop app's protocol module. The WIRE CONTRACT half (PROTOCOL_VERSION, the message
+// interfaces, Inbound/Outbound, FORWARDED_EVENTS, sanitizeArgs) is GENERATED verbatim from the
+// engine's src/protocol/protocol.ts into ./protocol.gen.ts — never hand-edit that mirror; run
+// `npm run gen:app-protocol` and let the CI gate (npm run check:protocol-mirror) enforce it.
+//
+// This file re-exports the generated contract and adds the RENDERER-ONLY payload shapes the app
+// consumes off the wire (event payloads from src/cli/events.ts, the ui_snapshot from
+// src/protocol/ui.snapshot.ts) — types the engine doesn't publish in its protocol module.
+export * from './protocol.gen';
 
-// v2 (2026-07-10): ui_snapshot gains optional sessions / checkpoints / git — all additive; this
-// app hides the matching UI (sessions list, History strip) when a field is absent, so an older
-// engine still works behind the mismatch banner.
-// v3 (2026-07-11): silent config round-trip (configGet/configSet → configResult) — Settings
-// pages read/write the engine config directly, nothing prints into the transcript.
-export const PROTOCOL_VERSION = 3;
-
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
-
-// --- Outbound: engine → app ---------------------------------------------------------------
-
-export interface EventMsg { t: 'event'; name: string; args: any[] }
-
-export interface RequestMsg {
-  t: 'request';
-  id: number;
-  kind: 'prompt' | 'diff' | 'input';
-  question: string;
-  options: string[];
-  isAsk?: boolean;
-  isMulti?: boolean;
-  body?: string;
-  masked?: boolean;
-}
-
-export interface ReadyMsg { t: 'ready'; protocol: number }
-
-export interface CompletionItem {
-  value: string;
-  label: string;
-  desc: string;
-  kind: 'command' | 'symbol' | 'path';
-  disabled?: boolean;
-  disabledReason?: string;
-}
-
-export interface QueryResultMsg { t: 'queryResult'; id: number; items: CompletionItem[] }
-export interface PongMsg { t: 'pong'; id: number }
-export interface ConfigResultMsg { t: 'configResult'; id: number; config: { [k: string]: JsonValue } }
-
-export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg | ConfigResultMsg;
-
-// --- Inbound: app → engine ------------------------------------------------------------------
-
-export interface ReplyMsg { t: 'reply'; id: number; value: string }
-export interface InputMsg { t: 'input'; text: string }
-export interface InterruptMsg { t: 'interrupt' }
-export interface QueryMsg { t: 'query'; id: number; text: string }
-export interface MenuSelectMsg { t: 'menuSelect'; id: string; value: string }
-export interface PingMsg { t: 'ping'; id: number }
-export interface ConfigGetMsg { t: 'configGet'; id: number }
-export interface ConfigSetMsg { t: 'configSet'; id: number; patch: { [k: string]: JsonValue } }
-
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg | ConfigGetMsg | ConfigSetMsg;
+// --- Renderer-only payload shapes ------------------------------------------------------------
 
 /** The engine settings the wire exposes (allowlist lives in headless.entry.ts). */
 export interface EngineConfig {

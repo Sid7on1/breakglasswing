@@ -50,8 +50,8 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: app/package-lock.json
-      # The app keeps a hand-written mirror of the engine's wire contract; this gate fails the
-      # build the moment the mirror's version or message vocabulary drifts from src/protocol.
+      # The app's wire contract is generated from src/protocol (app/src/renderer/src/protocol.gen.ts);
+      # this gate regenerates and fails the build if the committed file is stale.
       - name: Protocol mirror in sync with engine
         run: npm run check:protocol-mirror
       - run: npm ci

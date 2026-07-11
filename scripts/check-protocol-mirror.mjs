@@ -1,44 +1,34 @@
 #!/usr/bin/env node
-// check-protocol-mirror.mjs — the desktop app keeps a hand-written mirror of the engine's wire
-// contract (app/src/renderer/src/protocol.ts ← src/protocol/protocol.ts). The engine↔Go-TUI pair
-// is covered by generated fixtures + contract tests; this gate is the equivalent for the app:
-// CI fails the moment the mirror's version or message vocabulary drifts from the engine's.
+// check-protocol-mirror.mjs — CI gate for the desktop app's copy of the engine wire contract.
 //
-// Checks (engine is the source of truth; the mirror may be a superset — it also carries
-// renderer-only payload shapes):
-//   1. PROTOCOL_VERSION must be identical.
-//   2. Every wire message tag (`t: '...'`) in the engine file must appear in the mirror.
+// Phase 1 of the consolidation plan retired the hand-written mirror: app/src/renderer/src/
+// protocol.gen.ts is now GENERATED verbatim from src/protocol/protocol.ts (see
+// scripts/gen-app-protocol.mjs), and protocol.ts re-exports it. So the check is no longer a
+// fuzzy version+tag comparison — it's an exact regenerate-and-diff: if the committed generated
+// file isn't byte-identical to what the generator would emit today, the engine protocol changed
+// without `npm run gen:app-protocol` being run, and CI fails.
 import { readFileSync } from 'node:fs';
+import { generate } from './gen-app-protocol.mjs';
 
-const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8');
-const ENGINE = 'src/protocol/protocol.ts';
-const MIRROR = 'app/src/renderer/src/protocol.ts';
-const engine = read(ENGINE);
-const mirror = read(MIRROR);
+const OUT = new URL('../app/src/renderer/src/protocol.gen.ts', import.meta.url);
 
-const version = (src, name) => {
-  const m = src.match(/PROTOCOL_VERSION\s*=\s*(\d+)/);
-  if (!m) { console.error(`${name}: PROTOCOL_VERSION not found`); process.exit(1); }
-  return Number(m[1]);
-};
-
-// Wire message tags as written in the interfaces: `t: 'event';` etc.
-const tags = (src) => new Set([...src.matchAll(/\bt:\s*'([A-Za-z_]+)'/g)].map((m) => m[1]));
-
-const errors = [];
-const ev = version(engine, ENGINE);
-const mv = version(mirror, MIRROR);
-if (ev !== mv) errors.push(`PROTOCOL_VERSION mismatch: engine=v${ev}, app mirror=v${mv}`);
-
-const engineTags = tags(engine);
-for (const t of engineTags) {
-  if (!tags(mirror).has(t)) errors.push(`message tag '${t}' exists in the engine protocol but is missing from the app mirror`);
-}
-
-if (errors.length) {
-  console.error(`protocol mirror drift — ${MIRROR} no longer matches ${ENGINE}:`);
-  for (const e of errors) console.error(`  ✗ ${e}`);
-  console.error('update the mirror (and its version-history comment) in the same change as the engine protocol.');
+let committed;
+try {
+  committed = readFileSync(OUT, 'utf8');
+} catch {
+  console.error('protocol mirror missing: app/src/renderer/src/protocol.gen.ts');
+  console.error('run `npm run gen:app-protocol` and commit the result.');
   process.exit(1);
 }
-console.log(`protocol mirror in sync: v${ev}, ${engineTags.size} message tags covered`);
+
+const expected = generate();
+if (committed !== expected) {
+  console.error('protocol mirror drift — app/src/renderer/src/protocol.gen.ts is stale.');
+  console.error('the engine protocol (src/protocol/protocol.ts) changed but the generated app');
+  console.error('mirror was not regenerated. run `npm run gen:app-protocol` and commit the file.');
+  process.exit(1);
+}
+
+const version = expected.match(/PROTOCOL_VERSION\s*=\s*(\d+)/)?.[1] ?? '?';
+const tags = new Set([...expected.matchAll(/\bt:\s*'([A-Za-z_]+)'/g)].map((m) => m[1]));
+console.log(`protocol mirror in sync: v${version}, ${tags.size} message tags, generated file byte-identical`);
