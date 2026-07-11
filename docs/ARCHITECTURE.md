@@ -129,17 +129,24 @@ sub-agents), **`ask-guard.ts` `detectDegenerateAsk`** (AskUser quality gate, wir
 - **All guards above are load-bearing** — none dead, none a duplicate of another's purpose. The
   founder's "hell of guards, idk how many" resolves to **one ordered pipeline of ~13 checks + 5
   write-path integrity guards**, most short-circuiting for read-only work.
-- **Asymmetry (flag, not a bug):** sub-agents build `new Governor(eventBus)` with **no
-  `YoloClassifier`** (`worker.entry.ts`), so T7 is a no-op for them — auto-mode bash approval differs
-  between the main session and workers. Intentional-ish (workers run in worktrees under the parent's
-  mode) but undocumented until now.
-- **Cleanup candidates (refactor, not delete):** (a) W3+W4 are copy-pasted inline across four write
-  tools — factor into one `guardWrite(prior,next,path)` helper. (b) `MultiEditTool`/`SymbolEditTool`
-  aren't in `tool.factory.ts` `TASK_TYPE_MAP`, so `buildTool`'s outer gate treats them as generic
-  `TOOL_EXECUTION` and they re-invoke `approveTaskExecution('FILE_WRITE')` per file — correct, but the
-  asymmetry with `EditFileTool` should be documented in the map or removed.
-- **WS5 step 3 (not yet done):** no **per-guard timing** exists — add lightweight timing so a slow
-  guard is visible before it's blamed. This is the one open WS5 item; tracked in `ROADMAP.md`.
+- **✅ Fixed (WS5 step 3): SymbolEdit permission gap.** `SymbolEditTool` wrote files but called the
+  governor nowhere (it relied on its own `workspaceWriteBlock` + opt-in diff approval), so in
+  interactive mode it wrote WITHOUT the permission prompt `EditFileTool` gets. It's now mapped to
+  `FILE_WRITE` in `tool.factory.ts` `TASK_TYPE_MAP`, so `buildTool` runs T5+T8 on it like any write.
+- **✅ Done (WS5 step 3): per-guard timing.** `tools/guard.timing.ts` accumulates wall-time for
+  `governor:approve` / `hooks:pre` / `hooks:post` per session; `/perf` renders it so a slow guard is
+  visible before it's blamed. (In-memory, best-effort, off the LLM hot path.)
+- **Decision (kept as-is): sub-agents have no `YoloClassifier`.** Workers build `new Governor(eventBus)`
+  without it (`worker.entry.ts`), so T7 is a no-op for them. Left unchanged deliberately — the ML
+  classifier is LLM-backed (adds a token-costing call per ambiguous bash command), so arming it in
+  every worker would tax autonomous swarms; workers run in worktrees under the parent's mode. Now
+  documented rather than accidental.
+- **Deferred (low value): W3+W4 factoring.** `detectCorruptWrite` (W3, write-only) + `shieldEdit`
+  (W4) are called inline per write tool, but the real logic already lives in one place each
+  (`write-guard.ts`, `syntax.check.ts`); the call sites only format tool-specific error text. A
+  `guardWrite()` wrapper would unify ~3 lines apiece at the cost of flattening those messages — not
+  worth the churn now. `MultiEditTool` stays out of `TASK_TYPE_MAP` by design (multi-file; gates
+  per-file internally) — now commented in the map.
 
 ## 5. Memory stack (`src/memory`)
 

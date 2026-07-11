@@ -45,13 +45,12 @@ Deduplicated across the four source docs, ordered by leverage. Each item cites w
    graph `loadFromDisk` and `await loadConfig()` on every spawn (`worker.entry.ts`), and whether
    swarm's per-wave `runWithPool` warms spawns in parallel. Re-measure after each fix.
    *This is consolidation-plan Phase 4's "measured WS2".*
-2. **WS5 — Guard audit** *(MASTER WS5)*. **Steps 1–2 DONE 2026-07-11** — enumerated + classified in
-   `ARCHITECTURE.md` §4: one ordered pipeline (~13 tool-path checks via `buildTool`→governor + 5
-   write-path integrity guards + 3 request-path guards), all load-bearing, none dead. **Remaining
-   (step 3):** (a) add **per-guard timing** so a slow guard is visible before it's blamed — the only
-   real gap; (b) factor copy-pasted W3+W4 (`detectCorruptWrite`+`shieldEdit`) into one `guardWrite`
-   helper; (c) resolve the `TASK_TYPE_MAP` asymmetry for MultiEdit/SymbolEdit; (d) decide whether
-   sub-agents should get the `YoloClassifier` (T7) the main session has.
+2. **WS5 — Guard audit** *(MASTER WS5)*. **DONE 2026-07-11.** Steps 1–2: enumerated + classified in
+   `ARCHITECTURE.md` §4 (one ordered pipeline, all load-bearing). Step 3: added **per-guard timing**
+   (`tools/guard.timing.ts` → `/perf`); **fixed a real permission gap** (SymbolEdit wrote without the
+   governor prompt — now mapped to `FILE_WRITE`); documented the sub-agent `YoloClassifier` omission
+   as a deliberate cost decision; MultiEdit's `TASK_TYPE_MAP` exclusion now commented. The W3+W4
+   `guardWrite` factoring was deferred as low-value (logic already centralized). Nothing left open.
 3. **WS6 — Tools audit, full pass** *(MASTER WS6)* — surgical-precision tools shipped (SymbolEdit,
    Edit Shield, RelatedTests); the systematic inventory (schema/description/error/streaming
    quality vs frontier-CLI baseline, fix worst-first) is still open.
