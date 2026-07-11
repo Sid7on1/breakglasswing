@@ -74,21 +74,72 @@ governor gating, destructive/concurrency flags, and schema. Every tool the model
 | **RegisterAgentTool** | Register a newly-installed CLI as a new agent persona. |
 | **AskUserTool** | Ask the user a real decision (only when genuinely blocked). |
 
-## 4. Governor & security (`src/governor`, `src/security`)
+## 4. Governor & security — the guard pipeline (`src/governor`, `src/security`, `src/tools`)
 
-Multi-layer permission engine; every risky tool call passes through it.
-- **`governor.ts` — `Governor`**: orchestrates the layers and modes — `interactive`,
-  `auto`, `strict`, `plan` (read-only), `bypass` (YOLO). Emits `veto_prompt` to the UI.
-- **`bash.analyzer.ts` — `BashStaticAnalyzer`**: classifies command risk (e.g. `rm -rf`,
-  `curl | bash` → high; `npm install` → medium; `ls` → none).
-- **`security/yolo.classifier.ts` — `YoloClassifier`**: ML-style risk classification for
-  ambiguous cases in `auto` mode (LLM-backed).
-- **`budget.veto.ts` — `BudgetVeto`**: **hard daily spend cap** (default $5, `MAX_DAILY_SPEND`),
-  mutex-guarded reserve→record→release accounting, persisted to `.breakglass/credits/spend.json`,
-  auto-reset per day.
-- **`fs.veto.ts` — `FileSystemVeto`**: confines edits to the workspace root, blocks
-  forbidden paths/extensions.
-- **`policy.engine.ts` — `SafetyPolicy`**: central policy constants (limits, caps).
+There is **one ordered guard pipeline**, not a scattering of ad-hoc checks. Every tool the model
+calls is wrapped by `tool.factory.ts` `buildTool`, so the sequence below is fixed and centralized;
+the write-path tools add a few integrity guards *inside* their own `execute`. This is the WS5 audit
+(the count the founder asked for): **enumerated, ordered, and classified.**
+
+### 4.1 Per-LLM-request guards (before a model call)
+
+| # | Guard | File | Purpose | Class |
+|---|---|---|---|---|
+| R1 | **Capability shaping** | `core/capabilities.ts` → `llm.adapter.ts` | Strip params the target provider/model doesn't serve (`reasoning_effort`, `parallel_tool_calls`, fixed-sampling `temperature`) before send, instead of 400ing. | load-bearing (WS1) |
+| R2 | **BudgetVeto** | `governor/budget.veto.ts` (held by the adapter via `setBudgetVeto`) | Hard daily spend cap (`MAX_DAILY_SPEND`, default $5), mutex reserve→record→release, persisted, per-day reset. Lifted with `bypass`. | load-bearing |
+| R3 | **Headroom compression** | `memory/headroom.compress.ts` | Gated under token pressure only; code-guarded (`looksLikeCode` restores code verbatim). | load-bearing (optional) |
+
+### 4.2 Per-tool-call guards (every tool, via `buildTool`)
+
+Fixed order. `governor.approveTaskExecution` is itself a layered engine (`governor.ts`):
+
+| # | Guard / layer | File:sym | Applies to | Class |
+|---|---|---|---|---|
+| T1 | **bypass short-circuit** | `governor.ts` | all (mode=`bypass`) | load-bearing |
+| T2 | **plan-mode block** | `governor.ts` | mutating tasks when mode=`plan` | load-bearing |
+| T3 | **taint restriction** | `mind/taint.ts` `taintRestriction` | `OS_COMMAND` after untrusted content entered context | load-bearing |
+| T4 | **persistent rules** | `governor.ts` `rules[]` | allow/deny by taskType (taint can't waive) | load-bearing |
+| T5 | **fs veto** | `governor/fs.veto.ts` | `FILE_WRITE`/`FILE_DELETE` — workspace confinement, forbidden paths/exts | load-bearing |
+| T6 | **bash static analysis** | `governor/bash.analyzer.ts` | `OS_COMMAND` — tree-sitter risk classify; read-safe auto-approves | load-bearing |
+| T7 | **ML classifier** | `security/yolo.classifier.ts` | `OS_COMMAND`, mode=`auto`, ambiguous | load-bearing — **but wired only in the main session** (see 4.4) |
+| T8 | **interactive prompt** | `governor.ts` → `GlobalPrompter` | destructive tasks / mode=`strict` | load-bearing |
+| T9 | **PreToolUse hooks** | `tools/hooks.ts` | all — user hooks may block | load-bearing |
+| … | *(tool executes)* | | | |
+| T10 | **PostToolUse hooks** | `tools/hooks.ts` | all — may append (e.g. verify-loop typecheck feedback) | load-bearing |
+
+### 4.3 Write-path integrity guards (inside `file`/`edit`/`multiedit`/`symboledit` tools)
+
+These run *after* T1–T9, in each write tool's `execute`. Purposes are distinct (permission ≠
+integrity ≠ approval ≠ rollback), so none is redundant with the governor:
+
+| # | Guard | File:sym | Purpose |
+|---|---|---|---|
+| W1 | **blast-radius gate** | `cli/blastGate.ts` `checkBlastRadius` | Confirm before overwriting a graph-critical symbol. **Opt-in** (`enabled=false` default). |
+| W2 | **diff approval** | `requestDiffApproval` | Inline diff confirm; no-op unless enabled + approver registered. |
+| W3 | **corrupt-write guard** | `tools/write-guard.ts` `detectCorruptWrite` | Refuse a flattened/newline-stripped full-file overwrite. |
+| W4 | **Edit Shield** | `tools/syntax.check.ts` `shieldEdit` | Refuse a write that adds NEW syntax errors vs. disk. |
+| W5 | **transaction + backup** | `sandbox` rollback / `backupFile` | Snapshot pre-write state for `/undo`, `/diff-file`, `/tx` rollback. |
+
+Also cross-cutting: **`policy.engine.ts` `SafetyPolicy.allowedWorkspace`** (narrowed for floored
+sub-agents), **`ask-guard.ts` `detectDegenerateAsk`** (AskUser quality gate, wired in `ask_user.tool.ts`),
+**`sandbox/exec.sandbox.ts`** (kernel sandbox for Bash under a floor), **`plugins/plugin.sandbox.ts`**.
+
+### 4.4 Findings (WS5 step 2 — classify: load-bearing / redundant / dead)
+
+- **All guards above are load-bearing** — none dead, none a duplicate of another's purpose. The
+  founder's "hell of guards, idk how many" resolves to **one ordered pipeline of ~13 checks + 5
+  write-path integrity guards**, most short-circuiting for read-only work.
+- **Asymmetry (flag, not a bug):** sub-agents build `new Governor(eventBus)` with **no
+  `YoloClassifier`** (`worker.entry.ts`), so T7 is a no-op for them — auto-mode bash approval differs
+  between the main session and workers. Intentional-ish (workers run in worktrees under the parent's
+  mode) but undocumented until now.
+- **Cleanup candidates (refactor, not delete):** (a) W3+W4 are copy-pasted inline across four write
+  tools — factor into one `guardWrite(prior,next,path)` helper. (b) `MultiEditTool`/`SymbolEditTool`
+  aren't in `tool.factory.ts` `TASK_TYPE_MAP`, so `buildTool`'s outer gate treats them as generic
+  `TOOL_EXECUTION` and they re-invoke `approveTaskExecution('FILE_WRITE')` per file — correct, but the
+  asymmetry with `EditFileTool` should be documented in the map or removed.
+- **WS5 step 3 (not yet done):** no **per-guard timing** exists — add lightweight timing so a slow
+  guard is visible before it's blamed. This is the one open WS5 item; tracked in `ROADMAP.md`.
 
 ## 5. Memory stack (`src/memory`)
 
