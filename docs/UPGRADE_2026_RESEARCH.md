@@ -1,5 +1,9 @@
 # 2026 Agentic-Coding Upgrade — Research, Verdicts, PR Plan
 
+> **Superseded for tracking by [`ROADMAP.md`](./ROADMAP.md)** (2026-07-11). Kept for the clone
+> verdicts and pattern rationale. PR1+PR2 (multi-repo workspace) shipped 2026-07-06; PR3–PR5
+> (cross-repo context packing, FSRS/daily-journal memory, agent-lsp) are open — tracked in the roadmap.
+
 Phase 1–3 output (2026-07-06). Sources: Anthropic 2026 Agentic Coding Trends Report
 (resources.anthropic.com/2026-agentic-coding-trends-report), bradAGI/awesome-cli-coding-agents,
 hands-on inspection of five cloned repos in ~/Desktop/bimax-research/.

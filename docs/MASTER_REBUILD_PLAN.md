@@ -1,6 +1,8 @@
 # Bimax Master Rebuild — Directive & Plan
 
-> Status: PLANNING → will be updated in-place as work proceeds.
+> **Superseded for tracking by [`ROADMAP.md`](./ROADMAP.md)** (2026-07-11). This doc is kept for
+> the founder directive (verbatim, Part 1) and the six-problem framing; live status of WS2–WS6
+> lives in the roadmap's Open/Next section.
 > Created: 2026-07-04. Source: user directive (saved verbatim below so it never needs re-writing).
 
 ---

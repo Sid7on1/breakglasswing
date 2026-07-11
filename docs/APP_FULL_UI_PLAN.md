@@ -1,5 +1,10 @@
 # Bimax Desktop — Full-Capability UI Plan
 
+> **Shipped record (2026-07-11).** All phases P0–P6 delivered (2026-07-10/11); this is now a
+> historical spec of what the desktop app is, not a forward plan. Forward tracking lives in
+> [`ROADMAP.md`](./ROADMAP.md) (see "Release hardening" for the app's remaining Windows/signing/
+> renderer-test items).
+
 **Goal.** The desktop app must surface *everything* Bimax can do — not a chat bubble in front of an
 86-command engine. Benchmark: Claude Code desktop / Cursor-class agent shells (three-pane IDE
 layout, rich transcript with edit chips, right utility dock with Terminal/Files/Review/Browser,
