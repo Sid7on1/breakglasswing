@@ -20,6 +20,7 @@ import { agentModePromptSection } from '../agentMode';
 import { getSelfModel } from '../../mind/self.model';
 import { getHabitMiner } from '../../mind/habit.compiler';
 import { getUserModel } from '../../mind/user.model';
+import { journalPreloadBlock } from '../../mind/daily.journal';
 import { getDrivesEngine } from '../../mind/drives.engine';
 import { getEpistemicLedger } from '../../mind/epistemic.ledger';
 import { getEventLedger } from '../../mind/event.ledger';
@@ -241,6 +242,9 @@ export abstract class AgentPersona {
     try { const b = arm('self-knowledge', getSelfModel().getPromptBlock()); if (b) sections.selfKnowledge = b; } catch { /* best-effort */ }
     try { const b = arm('habits', getHabitMiner().getPromptBlock()); if (b) sections.habits = b; } catch { /* best-effort */ }
     try { const b = arm('user-model', getUserModel().getPromptBlock()); if (b) sections.userModel = b; } catch { /* best-effort */ }
+    // Daily journal (PR4, pi-mem): today + yesterday's work, projected from the event ledger, so a
+    // new session opens with continuity instead of a cold start. Best-effort; empty when idle.
+    try { const b = arm('journal', journalPreloadBlock()); if (b) sections.journal = b; } catch { /* best-effort */ }
     try { const b = arm('drives', getDrivesEngine().getPromptBlock()); if (b) sections.drives = b; } catch { /* best-effort */ }
     try { const b = arm('calibration', getEpistemicLedger().getPromptBlock()); if (b) sections.calibration = b; } catch { /* best-effort */ }
     // Harness self-tuning (Self-Harness pattern): steering patches mined from this agent's own

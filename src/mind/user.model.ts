@@ -71,6 +71,11 @@ const ALPHA_CAP = 30;        // quiet consequence saturates; it never outvotes a
 const CONFIRM_MEAN = 0.6;    // posterior mean where a candidate earns 'confirmed'
 const RETIRE_MEAN = 0.35;    // posterior mean where an assertion stops steering anything
 const DECAY_HALFLIFE_DAYS = 120; // un-evidenced assertions drift toward the 0.5 prior
+// FSRS-lite (UPGRADE PR4, vestige pattern): each explicit restatement is a "review" that grows the
+// assertion's STABILITY, so a repeatedly-stated preference decays slower. count=1 keeps the base
+// half-life; count=2 → base×growth; count≥3 stays durable (the human restated it three times — it
+// has earned permanence). Consequence-only evidence (quiet alpha) never confers durability.
+const STABILITY_GROWTH = 2.5;
 
 /** Correction/preference openers — messages that are instructions about HOW to work. */
 const CORRECTION_RE = /^\s*(no[,.!\s]|don'?t\b|do not\b|never\b|always\b|stop\b|not like|that'?s wrong|wrong[,.!\s]|instead\b|make sure (you|to)\b|remember (to|that)\b|from now on\b|please stop\b)/i;
@@ -344,8 +349,10 @@ export class UserModel {
   /** Posterior mean decayed toward the 0.5 prior with time since last evidence (drift). */
   confidence(a: Assertion): number {
     const ageDays = Math.max(0, (Date.now() - new Date(a.lastSeen).getTime()) / 86_400_000);
-    // Durable preferences (stated ≥3×) have earned permanence — the v1 rule, kept.
-    const decay = a.count >= 3 ? 1 : Math.exp(-(Math.LN2 * ageDays) / DECAY_HALFLIFE_DAYS);
+    // FSRS-lite: stability (effective half-life) grows with each restatement; ≥3× is durable.
+    // count=1 → base 120d (v1 behavior); count=2 → 300d; count≥3 → permanent (decay 1).
+    const stabilityDays = DECAY_HALFLIFE_DAYS * Math.pow(STABILITY_GROWTH, Math.max(0, a.count - 1));
+    const decay = a.count >= 3 ? 1 : Math.exp(-(Math.LN2 * ageDays) / stabilityDays);
     return 0.5 + (this.mean(a) - 0.5) * decay;
   }
 
