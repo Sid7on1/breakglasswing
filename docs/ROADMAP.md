@@ -51,11 +51,15 @@ Deduplicated across the four source docs, ordered by leverage. Each item cites w
    governor prompt — now mapped to `FILE_WRITE`); documented the sub-agent `YoloClassifier` omission
    as a deliberate cost decision; MultiEdit's `TASK_TYPE_MAP` exclusion now commented. The W3+W4
    `guardWrite` factoring was deferred as low-value (logic already centralized). Nothing left open.
-3. **WS6 — Tools audit, full pass** *(MASTER WS6)* — surgical-precision tools shipped (SymbolEdit,
-   Edit Shield, RelatedTests); the systematic inventory (schema/description/error/streaming
-   quality vs frontier-CLI baseline, fix worst-first) is still open.
-4. **WS3 phase B — Design tokens** *(MASTER WS3)* — carry the cinematic pass beyond block-streaming
-   into the full token/type/motion system across remaining TUI surfaces.
+3. **WS6 — Tools audit, full pass** *(MASTER WS6)*. **DONE 2026-07-11** — full 41-tool inventory +
+   quality assessment in `ARCHITECTURE.md` §3/§3.1. Verdict: surface is solid (rich schemas +
+   descriptions; typed outcomes scoped to attributed mutating tools by design). The one real defect
+   (SymbolEdit permission gap) was fixed under WS5 step 3. No worst-first emergencies.
+4. **WS3 phase B — Design tokens** *(MASTER WS3)*. **DONE 2026-07-11** — `tui/styles.go` is now the
+   single source of truth: added semantic tokens (`colInk`/`colBright`/`colDiffAddBg`/`colDiffDelBg`),
+   removed every raw hex from style definitions (incl. two literals that duplicated `colDiffAdd`/
+   `colDiffDel`), tokenized `diff.go`, and documented markdown.go's separate chroma syntax palette.
+   Go build + `go test ./...` green.
 
 ### Infrastructure
 
@@ -71,12 +75,14 @@ Deduplicated across the four source docs, ordered by leverage. Each item cites w
 8. **UPGRADE PR3 — Cross-repo context packing** — index registered repos into the graph store under
    per-repo namespaces; rank cross-repo context aider-style (PageRank personalization seeded by the
    task's mentioned files/symbols); `GraphContext` accepts `repo:` qualifiers. *(UPGRADE PR3)*
-9. **UPGRADE PR4 — Memory upgrades** — FSRS-lite retrievability decay on assertion recall (vestige
-   pattern) + plain-markdown daily journal with today+yesterday preload (pi-mem pattern), mirrored
-   from the event ledger. *(UPGRADE PR4)*
-10. **UPGRADE PR5 — LSP depth** — add agent-lsp to the MCP catalog with intent keywords ("rename
-    symbol", "find implementations", "call hierarchy") so the agent self-installs it on demand.
-    *(UPGRADE PR5)*
+9. **UPGRADE PR4 — Memory upgrades**. **DONE 2026-07-11** — FSRS-lite growing-stability decay on
+   assertions (`user.model.ts`: half-life grows per restatement, ≥3× durable) + plain-markdown daily
+   journal (`mind/daily.journal.ts`) projected from the event ledger, today+yesterday preloaded into
+   the system prompt, `/journal` command + `.bimax/journal/*.md` artifacts. Tests green.
+10. **UPGRADE PR5 — LSP depth**. **DONE 2026-07-11** — agent-lsp added to the MCP catalog
+    (`mcp/catalog.ts`) with intent keywords (rename symbol / find implementations / call hierarchy /
+    diagnostics) so the agent self-installs it on demand. *(Verify the exact npm package name on
+    first real install — the catalog command is a best-effort `npx -y agent-lsp`.)*
 
 ### Release hardening *(consolidation-plan Phase 5)*
 

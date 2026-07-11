@@ -52,27 +52,52 @@ Source layout (`src/`): `core` `cli` `tools` `governor` `memory` `graph` `genome
 ## 3. Tools (`src/tools`)
 
 `tool.registry.ts` (`ToolRegistry`) holds tools; `tool.factory.ts` builds them with
-governor gating, destructive/concurrency flags, and schema. Every tool the model can call:
+governor gating, destructive/concurrency flags, and schema. The full surface (41 tools across
+`src/tools/implementations/`, grouped by domain — this is the WS6 inventory):
 
-| Tool | What it does |
-|---|---|
-| **BashTool** | Run shell commands (installs, builds, git, processes); risk-classified. |
-| **ReadFileTool** | Read a file. |
-| **WriteFileTool** | Create/overwrite a file (auto-backed-up via the undo system). |
-| **EditFileTool** | Exact search/replace edit in a file. |
-| **MultiEditTool** | Multiple edits in one file atomically. |
-| **DeleteTool** | Delete a file (governed `FILE_DELETE`). |
-| **GrepTool** | Content search across files. |
-| **GlobTool** | Filename/pattern search. |
-| **ChangeDirectoryTool** | Change the working directory (not `cd` in Bash). |
-| **WebFetchTool** | Fetch a URL → text, with SSRF protection (blocks localhost/internal IPs) and a 30s timeout. |
-| **GraphQueryTool** | Query the live code graph. |
-| **MemoryQueryTool** | Semantic search over long-term memory. |
-| **RememberTool** | Save a durable project memory (convention/decision/gotcha). |
-| **TodoWriteTool** | Maintain a live task checklist rendered in the UI. |
-| **SpawnSubagentTool** | Spawn a sub-agent worker for a sub-task. |
-| **RegisterAgentTool** | Register a newly-installed CLI as a new agent persona. |
-| **AskUserTool** | Ask the user a real decision (only when genuinely blocked). |
+**Editing & files** — **ReadFileTool**, **WriteFileTool** (auto-backed-up), **EditFileTool** (exact
+search/replace), **MultiEditTool** (atomic multi-file batch), **SymbolEditTool** (AST-addressed edit
+by symbol name), **DeleteTool** (`FILE_DELETE`), **CreateDirectoryTool**, **NotebookEditTool** (edit
+`.ipynb` cells).
+
+**Search & navigation** — **GrepTool** (content), **GlobTool** (filename), **ChangeDirectoryTool**,
+**GraphQueryTool** / **GraphContextTool** (live code graph; index-gated), **LspQueryTool** (built-in
+LSP subset), **ScoutTool** (fast read-only recon), **ToolSearchTool** (fuzzy tool discovery).
+
+**Execution & VCS** — **BashTool** (risk-classified shell), **GitTool** (status/diff/log/add/commit,
+no push), **RelatedTestsTool** (jest/vitest/go related-tests).
+
+**Web** — **WebFetchTool** (URL→text, SSRF-guarded, 30s), **WebSearchTool**.
+
+**Memory & context** — **RememberTool** (durable project memory), **MemoryQueryTool** (semantic
+recall), **FreeContextTool** (drop stale context under pressure), **GoalsTool** (session goals).
+
+**Sub-agents & planning** — **SpawnSubagentTool** (worker for a sub-task), **TasksTool** (manage/kill
+live sub-agents), **PlanTool** (structured plan), **AskUserTool** (real decision when blocked).
+
+**Tasks & extensions** — **TodoWriteTool** (live checklist), **SkillTool** / **SkillInstallTool** /
+**SkillAuthorTool** (use/install/author skills), **McpManageTool** (discover/add MCP servers),
+**RegisterAgentTool** (register a CLI as a persona), **ModeTool**, **ModelManageTool**,
+**WorkspaceTool** (multi-repo).
+
+**Blueprints & training** — **BlueprintTool**, **TrainLaunchTool**, **TrainMonitorTool**.
+
+### 3.1 WS6 tool-quality assessment (2026-07-11)
+
+Audited for schema quality, description quality, error behavior, and streaming. **Verdict: the
+surface is solid** — the founder's "some tools improperly built / used below capability" predated
+the hardening + surgical-precision-tools work that has since landed.
+
+- **Schemas**: typed JSON schema with per-parameter `description` and `required` arrays throughout.
+- **Descriptions**: the model-facing tools (Bash, Edit family, Git, Graph, Spawn) carry rich
+  multi-line usage docs (actions, addressing, when-to-use). No thin one-liners on load-bearing tools.
+- **Error behavior**: mutating/executing tools whose outcomes the mind layer *attributes* (Bash,
+  Write, Edit, MultiEdit, SymbolEdit) all return **typed outcomes** (`outcomeOk`/`outcomeError` with
+  a class). Meta/read tools (mode, model, goals, memory, search, git-read) return plain strings by
+  design — the typed-outcome contract is intentionally scoped to attributed actions, not universal.
+- **No worst-first emergencies** were found; the earlier `SymbolEdit` permission gap (see §4.4) was
+  the one real defect and is fixed. Remaining polish (e.g. broaden typed outcomes to more tools) is
+  optional, tracked in `ROADMAP.md`, not blocking.
 
 ## 4. Governor & security — the guard pipeline (`src/governor`, `src/security`, `src/tools`)
 
