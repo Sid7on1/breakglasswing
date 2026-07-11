@@ -147,6 +147,18 @@ export const MCP_CATALOG: CatalogEntry[] = [
     keywords: ['time', 'date', 'timezone', 'clock', 'convert time', 'utc'],
     command: 'uvx', args: ['mcp-server-time'],
   },
+  {
+    // UPGRADE PR5 — deep LSP surface. BiMax's built-in LspQueryTool covers a fraction of LSP;
+    // agent-lsp is a full 50+-tool language-server MCP (rename symbol, find implementations, call
+    // hierarchy, diagnostics). Catalog-discoverable so the agent self-installs it when a task
+    // genuinely needs real LSP, instead of us embedding a second language-server stack.
+    id: 'agent-lsp',
+    title: 'LSP (deep code intelligence)',
+    description: 'Full Language Server surface — rename symbol, find references/implementations, call hierarchy, go-to-definition, workspace diagnostics — across the languages your LSPs support.',
+    keywords: ['lsp', 'language server', 'rename symbol', 'find references', 'find implementations', 'call hierarchy', 'go to definition', 'type definition', 'refactor', 'diagnostics', 'symbol search'],
+    command: 'npx', args: ['-y', 'agent-lsp'],
+    argHint: 'the project root to index; agent-lsp auto-detects installed language servers',
+  },
 ];
 
 /** Token-overlap score of a free-text query against one entry. Higher = better match. */
