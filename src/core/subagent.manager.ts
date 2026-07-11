@@ -16,6 +16,7 @@ import { journalSubagent } from './subagent.journal';
 export const SUB_RESULT = '\x00BIMAX_SUB_RESULT\x00';
 export const SUB_ERROR = '\x00BIMAX_SUB_ERROR\x00';
 export const SUB_EVENT = '\x00BIMAX_SUB_EVENT\x00';
+export const SUB_READY = '\x00BIMAX_SUB_READY\x00';
 
 // The uniform surface both a Worker (Node dev/dist) and a child-process handle (bun binary) expose,
 // so the spawn/timeout/settle logic below is identical for both transports.
@@ -135,6 +136,7 @@ export class SubAgentManager {
         try {
           if (line.startsWith(SUB_RESULT)) emitter.emit('message', { type: 'success', result: JSON.parse(line.slice(SUB_RESULT.length)).result });
           else if (line.startsWith(SUB_ERROR)) emitter.emit('message', { type: 'error', error: JSON.parse(line.slice(SUB_ERROR.length)).error });
+          else if (line.startsWith(SUB_READY)) emitter.emit('message', { type: 'ready' });
           else if (line.startsWith(SUB_EVENT)) { const e = JSON.parse(line.slice(SUB_EVENT.length)); emitter.emit('message', { type: 'tool_event', subtype: e.subtype, call: e.call }); }
           // any other line is stray child stdout — ignore it
         } catch { /* malformed sentinel line — ignore */ }
@@ -273,7 +275,13 @@ export class SubAgentManager {
         // success/error message must NOT re-write the board — it would flip a timed-out agent to
         // "done" or overwrite the real failure reason and fire a spurious board refresh.
         if (settled && (message.type === 'success' || message.type === 'error')) return;
-        journalFirstEvent(); // any first message — log, tool event, or immediate result
+        // 'ready' = boot finished, about to make the first llm call. It's OUR overhead and precedes
+        // any real work, so record it as its own phase and do NOT let it consume first_event.
+        if (message.type === 'ready') {
+          if (!settled) journalSubagent({ taskId, phase: 'ready', ms: Date.now() - t0 });
+          return;
+        }
+        journalFirstEvent(); // first substantive message — log, tool event, or immediate result
         if (message.type === 'success') {
           globalSubAgentBlackboard.markDone(taskId, typeof message.result === 'string' ? message.result : JSON.stringify(message.result));
           this.spawnConfigs.delete(taskId); // settled — no longer crash-recoverable

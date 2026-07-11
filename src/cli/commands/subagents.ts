@@ -23,12 +23,29 @@ export function renderSubagents(claims: SubAgentClaim[]): string {
 
 globalCommandRegistry.register({
   name: '/subagents',
-  description: 'Live sub-agent coverage — who is running, their scope, and status. `resume` respawns a crashed session\'s agents.',
+  description: 'Live sub-agent coverage — who is running, their scope, and status. `timings` shows boot vs model latency; `resume` respawns a crashed session\'s agents.',
   category: 'Code & Intelligence',
   execute: async (args) => {
     // Deferred requires keep command registration free of core-module init order concerns.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const ckpt = require('../../core/agent.checkpoint') as typeof import('../../core/agent.checkpoint');
+
+    if ((args[0] || '').toLowerCase() === 'timings') {
+      // WS2 measurement view: where do the seconds go — boot overhead (ours) vs the model's
+      // time-to-first-action vs the tool loop. Folded from the lifecycle journal in the ledger.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { foldSubagentRuns, summarizeRun } = require('../../core/subagent.journal') as typeof import('../../core/subagent.journal');
+      const runs = foldSubagentRuns();
+      if (runs.length === 0) {
+        return { type: 'message', level: 'info', content: 'No sub-agent runs recorded yet (journal is empty).' };
+      }
+      const boots = runs.map(r => r.msToReady).filter((n): n is number => n !== undefined).sort((a, b) => a - b);
+      const median = boots.length ? boots[Math.floor(boots.length / 2)] : undefined;
+      const lines = [`● **Sub-agent timings** — ${runs.length} run(s)`, ''];
+      if (median !== undefined) lines.push(`  Median boot overhead: **${median}ms**  (key pool · config · graph load · tool registration · persona)`, '');
+      for (const r of runs.slice(-20)) lines.push(`  ${summarizeRun(r)}`);
+      return { type: 'message', level: 'info', content: lines.join('\n') };
+    }
 
     if ((args[0] || '').toLowerCase() === 'resume') {
       const crashed = ckpt.crashedAgents();

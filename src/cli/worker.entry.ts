@@ -2,7 +2,7 @@ import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
-import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
+import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, SUB_READY, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
 import { loadConfig } from './config';
 import { SkillLoader, DynamicPersona } from './skills.loader';
 import { ToolRegistry } from '../tools/tool.registry';
@@ -45,6 +45,7 @@ import { SafetyPolicy } from '../governor/policy.engine';
 async function runSubAgentCore(
   config: SubAgentConfig,
   emitEvent: (subtype: 'tool_call' | 'tool_call_result', call: any) => void,
+  signalReady?: () => void,
 ): Promise<string> {
   // Sandbox floor (BiMax v2): this worker is an isolated autonomous episode. Bash enforcement
   // lives in bash.tool.ts (kernel sandbox via the thread-local FLOOR_ENV), but the Node-side
@@ -162,6 +163,11 @@ async function runSubAgentCore(
     cliEvents.on('tool_call', onCall);
     cliEvents.on('tool_call_result', onResult);
 
+    // Boot done — everything above (key pool, config, graph store, ~18 tools, persona/system-prompt)
+    // is the fixable per-spawn overhead WS2 measures. Signal it NOW, before the first llm call, so
+    // the parent can split boot time from the model's time-to-first-action.
+    signalReady?.();
+
     // 3. Execute
     try {
       return await agent.execute(config.prompt, () => { /* streaming ignored in sub-agents */ });
@@ -177,7 +183,11 @@ async function runWorker(): Promise<void> {
   if (!parentPort) return;
   const config = workerData as SubAgentConfig;
   try {
-    const result = await runSubAgentCore(config, (subtype, call) => parentPort!.postMessage({ type: 'tool_event', subtype, call }));
+    const result = await runSubAgentCore(
+      config,
+      (subtype, call) => parentPort!.postMessage({ type: 'tool_event', subtype, call }),
+      () => parentPort!.postMessage({ type: 'ready' }),
+    );
     parentPort.postMessage({ type: 'success', result });
   } catch (err: any) {
     parentPort.postMessage({ type: 'error', error: err?.message || String(err) });
@@ -193,7 +203,11 @@ export async function runAsSubprocess(): Promise<void> {
   try { config = JSON.parse(process.env.BIMAX_SUBAGENT_CONFIG || '{}') as SubAgentConfig; }
   catch { write(SUB_ERROR + JSON.stringify({ error: 'invalid BIMAX_SUBAGENT_CONFIG' })); process.exit(1); return; }
   try {
-    const result = await runSubAgentCore(config, (subtype, call) => write(SUB_EVENT + JSON.stringify({ subtype, call })));
+    const result = await runSubAgentCore(
+      config,
+      (subtype, call) => write(SUB_EVENT + JSON.stringify({ subtype, call })),
+      () => write(SUB_READY),
+    );
     write(SUB_RESULT + JSON.stringify({ result }));
     process.exit(0);
   } catch (err: any) {
