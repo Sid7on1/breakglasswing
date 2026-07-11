@@ -148,10 +148,10 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 		var line string
 		switch r.sign {
 		case '+':
-			line = diffAddLine.Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(num) + diffAddLine.Render("+ ") +
+			line = diffAddLine.Foreground(colBright).Bold(true).Render(num) + diffAddLine.Render("+ ") +
 				chromaRender(diffAddLine, lexer, txt) + diffAddLine.Render(strings.Repeat(" ", pad))
 		case '-':
-			line = diffDelLine.Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Render(num) + diffDelLine.Render("- ") +
+			line = diffDelLine.Foreground(colBright).Bold(true).Render(num) + diffDelLine.Render("- ") +
 				chromaRender(diffDelLine, lexer, txt) + diffDelLine.Render(strings.Repeat(" ", pad))
 		default:
 			// Context: white+bold line number (diffLineNum) + subtle syntax colours (dim fallback), no bg.

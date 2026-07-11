@@ -27,6 +27,15 @@ var (
 	colDiffDel  = lipgloss.Color("#F08A82") // diff remove prefix / word fg
 	colHunk     = lipgloss.Color("#57C7C7")
 
+	// Extended semantic tokens (WS3-B) — named so NO style below carries a raw hex; this block is
+	// the single source of truth for every colour in the TUI's chrome. (The code-syntax palette in
+	// markdown.go is a separate chroma theme by design; views.go/welcome.go hold rgb decompositions
+	// of these tokens for gradient math, annotated with the token they mirror.)
+	colInk       = lipgloss.Color("#1A1A1A") // near-black text ON a colored block (mode chip, search hit)
+	colBright    = lipgloss.Color("#FFFFFF") // max-contrast text (diff line numbers)
+	colDiffAddBg = lipgloss.Color("#0E2A1C") // deep green fill behind an added diff line / word
+	colDiffDelBg = lipgloss.Color("#2E1416") // deep red fill behind a removed diff line / word
+
 	// Welcome banner / wordmark.
 	logoStyle   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	logoMid     = lipgloss.NewStyle().Foreground(colShimmer).Bold(true)
@@ -88,7 +97,7 @@ var (
 		"beast":   colAccent, // phosphor (brand)
 	}
 	// dark text on the colored block for contrast.
-	modeChipBase = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1A1A1A")).Padding(0, 1)
+	modeChipBase = lipgloss.NewStyle().Bold(true).Foreground(colInk).Padding(0, 1)
 	// Connected-MCP segment: bold yellow, same family as the chip so the two read as one cluster.
 	mcpChipStyle = lipgloss.NewStyle().Bold(true).Foreground(colWarn)
 
@@ -104,18 +113,18 @@ var (
 	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
 	// graphite theme). Line numbers sit in a dim gutter.
 	// Graphite-tinted diff pair: a deep green/red fill with a phosphor-adjacent readable fg.
-	diffAddLine = lipgloss.NewStyle().Background(lipgloss.Color("#0E2A1C")).Foreground(lipgloss.Color("#7EE7A0"))
-	diffDelLine = lipgloss.NewStyle().Background(lipgloss.Color("#2E1416")).Foreground(lipgloss.Color("#F08A82"))
+	diffAddLine = lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colDiffAdd)
+	diffDelLine = lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDiffDel)
 	// Diff gutter line numbers: bright white + bold so they read as a clear, prominent column (the
 	// dim grey was nearly invisible). Terminals can't change font size, so "big" = bold/bright.
-	diffLineNum = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+	diffLineNum = lipgloss.NewStyle().Foreground(colBright).Bold(true)
 
 	// Word-level diff (edit-tool preview): tinted background like Ink's diffWordsWithSpace.
-	diffAddWord = lipgloss.NewStyle().Background(lipgloss.Color("#0E2A1C")).Foreground(colDiffAdd)
-	diffDelWord = lipgloss.NewStyle().Background(lipgloss.Color("#2E1416")).Foreground(colDiffDel)
+	diffAddWord = lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colDiffAdd)
+	diffDelWord = lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDiffDel)
 
 	// Search mode (Ctrl+F): the focused match gets the accent background; others a faint underline.
-	searchHL      = lipgloss.NewStyle().Background(colAccent).Foreground(lipgloss.Color("#1A1A1A")).Bold(true)
+	searchHL      = lipgloss.NewStyle().Background(colAccent).Foreground(colInk).Bold(true)
 	searchHLOther = lipgloss.NewStyle().Foreground(colWarn).Bold(true)
 	searchCur     = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	searchSrc     = lipgloss.NewStyle().Foreground(colSubtle)

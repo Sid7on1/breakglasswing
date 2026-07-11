@@ -16,6 +16,14 @@ import (
 // mdStyle is a glamour StyleConfig JSON tuned to the "Graphite & Phosphor" system: phosphor accent
 // on top-level headings, Mist body text, flush-left margins, and a graphite-ground code block with
 // readable syntax colors so output reads as content, not chrome.
+//
+// WS3-B note — two palettes live here on purpose:
+//   1. CHROME colours (document/heading/quote/hr/link) mirror the styles.go tokens — keep them in
+//      sync: #EDEFF2=colText, #9AA1AC=colInactive, #7EE7C4=colAccent, #444A54=colDim, #57C7C7=colHunk.
+//   2. The code-block SYNTAX colours (one-dark family: #C678DD, #E06C75, #98C379, …) are a distinct
+//      chroma theme for highlighting, intentionally NOT part of the chrome token set.
+// glamour requires literal hex inside this JSON blob (no Go-value interpolation), so these can't
+// reference the tokens directly; the mapping above is the contract.
 var warmStyle = []byte(`{
   "document": { "block_prefix": "", "block_suffix": "", "color": "#EDEFF2", "margin": 0 },
   "block_quote": { "color": "#9AA1AC", "indent": 1, "indent_token": "│ " },
