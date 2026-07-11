@@ -72,9 +72,14 @@ Deduplicated across the four source docs, ordered by leverage. Each item cites w
 
 ### Context & memory depth
 
-8. **UPGRADE PR3 — Cross-repo context packing** — index registered repos into the graph store under
-   per-repo namespaces; rank cross-repo context aider-style (PageRank personalization seeded by the
-   task's mentioned files/symbols); `GraphContext` accepts `repo:` qualifiers. *(UPGRADE PR3)*
+8. **UPGRADE PR3 — Cross-repo context packing**. **DONE 2026-07-11** — `graph/cross.repo.ts` composes
+   each registered repo's own on-disk index (per-repo namespace; secondary stores loaded lazily +
+   session-cached, never creating an index in a read-only reference repo). The RepoMap injection
+   (`context.manager.ts`) now merges all indexed repos into one aider-ranked map (primary gets ~60%
+   of the budget, secondaries split the rest, same focus-term personalization) and collapses to the
+   exact single-repo outline when there's one repo. `GraphQueryTool`/`GraphContextTool` accept a
+   `repo:<name>` qualifier to scope any verb to another repo. pagerank caches widened to capped maps
+   so multi-repo turns don't thrash. Tests: `cross.repo.test.ts`; graph/repomap regressions green.
 9. **UPGRADE PR4 — Memory upgrades**. **DONE 2026-07-11** — FSRS-lite growing-stability decay on
    assertions (`user.model.ts`: half-life grows per restatement, ≥3× durable) + plain-markdown daily
    journal (`mind/daily.journal.ts`) projected from the event ledger, today+yesterday preloaded into

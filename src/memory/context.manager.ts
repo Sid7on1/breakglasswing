@@ -4,7 +4,7 @@ import { encode } from 'gpt-tokenizer';
 import { Logger } from '../utils/logger';
 import { fileStateCache } from './file-state-cache';
 import { IGraphStore } from '../graph/models';
-import { formatRepoMapOutline } from '../graph/pagerank';
+import { crossRepoMapSync } from '../graph/cross.repo';
 import { compressBacklog, proxyCompress, recordCompression } from './headroom.compress';
 import { cliEvents } from '../cli/events';
 
@@ -215,7 +215,9 @@ export class ContextManager {
     if (_graphStore) {
       try {
         msgs = msgs.filter(m => !(m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[RepoMap]')));
-        const outline = formatRepoMapOutline(_graphStore, 1500, focusTermsFromMessages(msgs));
+        // Cross-repo (PR3): merges every indexed repo in a multi-repo workspace into one map; with a
+        // single repo it returns exactly the old single-repo outline. Sync — never blocks on disk.
+        const outline = crossRepoMapSync(_graphStore, 1500, focusTermsFromMessages(msgs));
         if (outline) {
           const mapMsg = { role: 'system' as const, content: outline };
           let lastUser = -1;
