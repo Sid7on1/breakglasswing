@@ -32,9 +32,14 @@ the autonomy measurement.
 | `06-session-schema-migration` | Hard | Implement an idempotent v1→v2 session migration across reader, migrator, writer, and summary modules. | Long multi-file change, compatibility reasoning, persistence round trips, error-path handling. | 15–20 | External check creates a fresh temporary store with unseen v1, v2, and malformed records; it asserts migrated public reads, v2 round-trip behavior, idempotence on a second migration, preservation of unknown metadata, deterministic summaries, and unchanged caller-owned objects. |
 | `07-dependency-scheduler` | Hard | Repair a bounded-concurrency DAG scheduler with dependency ordering, stable results, and useful invalid-graph failures. | Algorithmic reasoning, async orchestration, concurrency instrumentation, cycle/error handling. | 13–18 | External check runs unseen DAGs through controlled deferred jobs, records start/finish order and active-job count, asserts dependencies precede dependents and the limit is never exceeded, checks deterministic output ordering plus cycle/missing-node errors, and deep-compares the original graph. |
 
-## Proposed first authoring batch
+## Implementation status
 
-After architect approval, author only `02-ledger-contract-refactor` and `03-retry-cache-runtime`.
-Together with task 01 they establish three distinct signals: a focused behavioral repair, a multi-file
-contract refactor, and a runtime-only asynchronous defect. Tasks 04–07 remain plan-only until a later
-review gate.
+All seven tasks are authored with isolated fixtures, prompt-contract-reviewed external graders, and
+deterministic trajectories. On 2026-07-14 the complete suite passed both modes:
+
+- Offline pipeline smoke: 7/7 scripted trajectories (pipeline evidence only).
+- Live production-provider run: 7/7 external graders, one run per task, no retries or result
+  selection; 649,374 total measured tokens, median 81,507 tokens and 15 turns.
+
+The live evidence report is
+`benchmarks/autonomy/results/run-2026-07-14T15-23-42-677Z.json` (local evaluation artifact).

@@ -1,0 +1,6 @@
+{
+  "name": "dependency-scheduler-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node test.mjs" }
+}

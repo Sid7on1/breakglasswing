@@ -1,0 +1,35 @@
+[
+  { "tool": "ReadFileTool", "args": { "path": "package.json" } },
+  { "expectLastToolContains": "node test.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "command exited with code 1", "tool": "ReadFileTool", "args": { "path": "src/migrator.mjs" } },
+  {
+    "expectLastToolContains": "mutates the caller",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/migrator.mjs",
+      "oldString": "  if (record.version === 2) return record;",
+      "newString": "  if (record.version === 2) return structuredClone(record);"
+    }
+  },
+  {
+    "expectLastToolContains": "Edited src/migrator.mjs",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/migrator.mjs",
+      "oldString": "  // BUG: this mutates the caller and discards metadata while translating the schema.\n  record.version = 2;\n  record.owner = { id: record.user };\n  record.createdAt = record.startedAt;\n  record.messages = record.turns.map(turn => ({ role: turn.role, content: turn.text }));\n  record.metadata = {};\n  delete record.user;\n  delete record.startedAt;\n  delete record.turns;\n  return record;",
+      "newString": "  const { user, startedAt, turns, ...rest } = structuredClone(record);\n  return {\n    ...rest,\n    version: 2,\n    owner: { id: user },\n    createdAt: startedAt,\n    messages: turns.map(({ text, ...turn }) => ({ ...turn, content: text })),\n  };"
+    }
+  },
+  { "expectLastToolContains": "Edited src/migrator.mjs", "tool": "ReadFileTool", "args": { "path": "src/summary.mjs" } },
+  {
+    "expectLastToolContains": "sorting the caller's array",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/summary.mjs",
+      "oldString": "  return records.sort((a, b) => a.startedAt.localeCompare(b.startedAt)).map(record => {\n    const session = migrateSession(record);",
+      "newString": "  return records.map(record => migrateSession(record)).sort((a, b) =>\n    a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)\n  ).map(session => {"
+    }
+  },
+  { "expectLastToolContains": "Edited src/summary.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "fixture tests passed", "text": "Made migration idempotent and pure, preserved unknown fields, and made summaries stable; tests pass." }
+]

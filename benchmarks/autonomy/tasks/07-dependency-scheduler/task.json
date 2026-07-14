@@ -1,0 +1,11 @@
+{
+  "id": "07-dependency-scheduler",
+  "fixture": "fixture",
+  "promptFile": "prompt.md",
+  "trajectoryFile": "trajectory.json",
+  "successCheck": {
+    "command": "node",
+    "args": ["./check.mjs"],
+    "timeoutMs": 30000
+  }
+}

@@ -14,7 +14,7 @@ Date: 2026-07-14
 6. Artifact version and help identity.
 7. Clean isolated installation.
 8. First-user dogfood: packaged TUI, CLI help, and built site all passed.
-9. Three-task deterministic autonomy-pipeline smoke (3/3; not represented as a live autonomy score).
+9. Seven-task deterministic autonomy-pipeline smoke (7/7; kept separate from the live score).
 10. SHA-256 checksum.
 
 ## Release artifacts
@@ -40,5 +40,7 @@ The four archives and `SHA256SUMS` are in `build/`:
 ## Honest scope
 
 This is a technically verified public-beta release candidate. It is not evidence of a completed
-multi-hour private beta or a 100% live autonomy benchmark. Those are post-candidate external
-validation gates and remain visible in `docs/MASTER_CLI.md`.
+multi-hour private beta. The expanded live autonomy suite subsequently passed 7/7 in one
+production-provider run with no retries or result selection. Sustained fault injection, external
+no-help beta feedback, signing/notarization, and the hosted release remain visible in
+`docs/MASTER_CLI.md`.

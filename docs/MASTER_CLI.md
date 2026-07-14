@@ -92,11 +92,16 @@ Implemented foundations:
 Required before a general-availability claim (not blockers for today's public beta):
 
 - Multi-hour fault-injection dogfooding of browser/research/recovery state on real projects.
-- The planned seven-task live autonomy suite; today's 3/3 result is explicitly a deterministic
-  pipeline smoke, not an autonomy score.
 - External private-beta feedback without verbal setup assistance.
 - Platform signing/notarization credentials and the actual hosted GitHub release/tag. Archives are
   checksummed and ready to upload; signing requires the release owner's platform identities.
+
+Completed external validation:
+
+- The authored seven-task autonomy suite passed 7/7 in a single live production-provider run on
+  2026-07-14, with one run per task, no retries or result selection, 649,374 measured tokens, median
+  81,507 tokens, and median 15 turns. The same seven-task deterministic pipeline smoke also passed
+  7/7 and remains labelled separately from the live autonomy result.
 
 ## North star
 
