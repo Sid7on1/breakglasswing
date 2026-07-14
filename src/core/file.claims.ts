@@ -97,7 +97,7 @@ export class FileClaims {
   private withLock<T>(fn: () => T): T {
     try { fs.mkdirSync(path.dirname(this.filePath), { recursive: true }); } catch { /* best-effort */ }
     const deadline = Date.now() + FileClaims.LOCK_WAIT_MS;
-    let fd = -1;
+    let fd: number;
     for (;;) {
       try { fd = fs.openSync(this.lockPath, 'wx'); break; }
       catch {

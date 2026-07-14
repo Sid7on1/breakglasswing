@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import type { Browser, HTTPResponse, Page } from 'puppeteer';
+import type { Browser, Page } from 'puppeteer';
 
 export type BrowserWaitUntil = 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2';
 
@@ -211,7 +211,6 @@ export class BrowserRuntime implements BrowserRuntimePort {
     const timeout = boundedInt(command.timeout, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS);
     const maxAttempts = boundedInt(command.retries, 2, 1, 4);
     let attempts = 1;
-    let response: HTTPResponse | null = null;
     const base = (ok: boolean, summary: string, data?: unknown): BrowserCommandResult => ({
       ok, action: command.action, url: this.page?.url(), status: this.lastStatus,
       summary, data, consoleErrors: this.consoleErrors.slice(-20), failedRequests: this.failedRequests.slice(-20),
@@ -236,7 +235,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
             if (!result) throw new Error('Navigation returned no response.');
             return result;
           });
-          response = run.value; attempts = run.attempts; this.lastStatus = response.status();
+          const response = run.value; attempts = run.attempts; this.lastStatus = response.status();
           const title = await page.title();
           this.checkpoint(cwd);
           return { ...base(response.ok(), `Loaded ${page.url()} (${response.status()})`), title };
@@ -293,14 +292,16 @@ export class BrowserRuntime implements BrowserRuntimePort {
           await (handle as any).uploadFile(target);
           return base(true, `Uploaded ${path.relative(cwd, target)} through ${command.selector}.`);
         }
-        case 'back':
-          response = await page.goBack({ waitUntil: command.waitUntil || 'networkidle2', timeout });
+        case 'back': {
+          const response = await page.goBack({ waitUntil: command.waitUntil || 'networkidle2', timeout });
           this.lastStatus = response?.status(); this.checkpoint(cwd);
           return base(!!response?.ok(), `Navigated back to ${page.url()}.`);
-        case 'reload':
-          response = await page.reload({ waitUntil: command.waitUntil || 'networkidle2', timeout });
+        }
+        case 'reload': {
+          const response = await page.reload({ waitUntil: command.waitUntil || 'networkidle2', timeout });
           this.lastStatus = response?.status(); this.checkpoint(cwd);
           return base(!!response?.ok(), `Reloaded ${page.url()}.`);
+        }
         case 'inspect': {
           const selector = command.selector || 'body';
           const data = await page.$eval(selector, element => ({
@@ -377,6 +378,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
           }), title: await page.title() };
         }
       }
+      return base(false, `Unsupported browser action: ${String((command as { action?: unknown }).action)}.`);
     } catch (error: any) {
       this.checkpoint(cwd);
       return base(false, error?.message || String(error));
