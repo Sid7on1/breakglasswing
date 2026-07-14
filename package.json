@@ -6,6 +6,9 @@
     "bimax": "bin/bimax.js"
   },
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "start": "node bin/bimax.js",
     "dev": "tsx src/index.ts",
