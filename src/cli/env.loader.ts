@@ -5,9 +5,23 @@ import * as fs from 'fs';
 import * as readline from 'readline';
 import * as crypto from 'crypto';
 
+function writeGlobalEnv(globalEnvPath: string, content: string): void {
+  const globalDir = path.dirname(globalEnvPath);
+  fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
+  // Existing installs may have inherited a permissive umask. Tighten both the directory and the
+  // secret file every time credentials change instead of trusting creation-time defaults.
+  fs.chmodSync(globalDir, 0o700);
+  fs.writeFileSync(globalEnvPath, content, { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(globalEnvPath, 0o600);
+}
+
 export function loadGlobalEnv(): void {
   const globalEnvPath = path.join(os.homedir(), '.breakglass', '.env');
   if (fs.existsSync(globalEnvPath)) {
+    try {
+      fs.chmodSync(path.dirname(globalEnvPath), 0o700);
+      fs.chmodSync(globalEnvPath, 0o600);
+    } catch { /* best-effort on filesystems without POSIX permissions */ }
     const parsed = dotenv.parse(fs.readFileSync(globalEnvPath, 'utf-8'));
     for (const [key, value] of Object.entries(parsed)) {
       if (!process.env[key]) {
@@ -39,15 +53,13 @@ export async function ensureApiKeys(): Promise<void> {
     return;
   }
 
-  fs.mkdirSync(path.dirname(globalEnvPath), { recursive: true });
-  fs.writeFileSync(globalEnvPath, `NVIDIA_API_KEY=${trimmed}\n`, 'utf-8');
+  writeGlobalEnv(globalEnvPath, `NVIDIA_API_KEY=${trimmed}\n`);
   process.env.NVIDIA_API_KEY = trimmed;
   console.log(`[Env] Saved API key to ${globalEnvPath}`);
 }
 
 export function saveApiKeyToEnv(envVar: string, key: string): void {
   const globalEnvPath = path.join(os.homedir(), '.breakglass', '.env');
-  fs.mkdirSync(path.dirname(globalEnvPath), { recursive: true });
   const existing: Record<string, string> = {};
   if (fs.existsSync(globalEnvPath)) {
     const parsed = dotenv.parse(fs.readFileSync(globalEnvPath, 'utf-8'));
@@ -57,7 +69,7 @@ export function saveApiKeyToEnv(envVar: string, key: string): void {
   const content = Object.entries(existing)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n') + '\n';
-  fs.writeFileSync(globalEnvPath, content, 'utf-8');
+  writeGlobalEnv(globalEnvPath, content);
   process.env[envVar] = key;
 }
 
