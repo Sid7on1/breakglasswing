@@ -11,6 +11,10 @@
 // a v1 front-end ignores them; a v2 front-end hides the matching UI when they're absent).
 // v3 (2026-07-11): silent config round-trip — configGet/configSet inbound + configResult outbound,
 // so graphical front-ends drive settings pages without printing menus into the transcript.
+// v3 additive (2026-07-12): `boot` + `health` outbound (startup progress + liveness heartbeat for
+// the desktop supervisor) and `resume` inbound (typed session-resume, so front-ends never have to
+// synthesize a slash command). All additive — a front-end that doesn't know them ignores them, an
+// engine that predates `resume` drops it — so the version stays 3.
 export const PROTOCOL_VERSION = 3;
 
 // A JSON-safe value. The codec guarantees only these cross the wire (sanitizeArgs strips the rest).
@@ -63,7 +67,34 @@ export interface PongMsg { t: 'pong'; id: number; }
  */
 export interface ConfigResultMsg { t: 'configResult'; id: number; config: { [k: string]: JsonValue }; }
 
-export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg | ConfigResultMsg;
+/**
+ * Startup progress. Emitted on stdout BEFORE the protocol host attaches (boot.status.ts writes it
+ * directly), so a supervising front-end can show real phases instead of an indefinite spinner.
+ * Phases arrive in order; `ready` (the handshake) supersedes them all.
+ */
+export interface BootMsg {
+  t: 'boot';
+  phase: 'booting' | 'loading_storage' | 'loading_graph' | 'loading_tools' | 'restoring_session';
+  detail?: string;
+  pid: number;
+}
+
+/**
+ * Periodic liveness heartbeat, emitted every few seconds once the engine is interactive. A stalled
+ * stream of these means the event loop is wedged (or the process is gone) — the supervising
+ * front-end distinguishes that from legitimate long work via `activeTurn`.
+ */
+export interface HealthMsg {
+  t: 'health';
+  uptimeMs: number;
+  rssMb: number;
+  heapMb: number;
+  eventLoopDelayMs: number; // p99 event-loop delay since the last heartbeat
+  activeTurn: boolean;      // a user turn is executing (long work is expected)
+  phase: 'ready';
+}
+
+export type Outbound = EventMsg | RequestMsg | ReadyMsg | QueryResultMsg | PongMsg | ConfigResultMsg | BootMsg | HealthMsg;
 
 // --- Inbound: front-end → engine -----------------------------------------------------------
 
@@ -103,7 +134,26 @@ export interface ConfigGetMsg { t: 'configGet'; id: number; }
  */
 export interface ConfigSetMsg { t: 'configSet'; id: number; patch: { [k: string]: JsonValue }; }
 
-export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg | ConfigGetMsg | ConfigSetMsg;
+/**
+ * Resume a saved session by id — the typed equivalent of the user running /resume. Lets a
+ * graphical front-end's recovery flow restore a thread without synthesizing slash-command text.
+ * Ignored (never an error) when the id doesn't resolve to a saved session.
+ */
+export interface ResumeMsg { t: 'resume'; id: string; }
+
+/**
+ * Atomically apply shell controls. A graphical front-end must not synthesize several independent
+ * slash-command messages for one autonomy preset: those dispatch concurrently and can leave the
+ * governor, plan mode, and diff gate disagreeing. The headless session serializes this one request.
+ */
+export interface ControlsMsg {
+  t: 'controls';
+  mode?: 'general' | 'explore' | 'sketch' | 'code' | 'beast';
+  tier?: 'auto' | 'lite' | 'heavy';
+  autonomy?: 'ask' | 'auto' | 'plan' | 'full';
+}
+
+export type Inbound = ReplyMsg | InputMsg | InterruptMsg | QueryMsg | MenuSelectMsg | PingMsg | ConfigGetMsg | ConfigSetMsg | ResumeMsg | ControlsMsg;
 
 // --- Event vocabulary ----------------------------------------------------------------------
 
@@ -118,6 +168,16 @@ export const FORWARDED_EVENTS: readonly string[] = [
   'rerun_onboarding', 'shutdown', 'loop_detected', 'goals_changed',
   // /clear wipes the front-end transcript (the engine has no in-process UI to intercept it).
   'clear',
+  // True resume: `{ id, entries }` — the saved thread's transcript (messages + tool lines) so a
+  // graphical front-end can rebuild its scrollback, not just inject invisible context.
+  'session_restore',
+  // Review domain: the current thread's derived review snapshot (plan, approvals, attributed
+  // changes, verification runs, checkpoint state). Always a FULL snapshot — a reconnecting
+  // front-end is correct again on the next emit.
+  'review_update',
+  // Outcome domain: compact full snapshot of the active contract, acceptance gate, task/gap counts,
+  // iteration and blocker. Null means this thread has no substantial outcome contract yet.
+  'outcome_update',
   // The driver re-emits each reply token here so the out-of-process front-end can render the stream.
   'stream_token',
   // Footer state read from engine singletons; snapshotted for the out-of-process front-end.

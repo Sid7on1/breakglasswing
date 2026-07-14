@@ -151,6 +151,8 @@ export class Tracer {
   private otlpBuffer: EndedSpan[] = [];
   private otlpTimer: NodeJS.Timeout | null = null;
   private jsonlDirEnsured = false;
+  private pendingWrites = new Set<Promise<void>>();
+  private closed = false;
   // Recent-span ring for /trace + tests — capped so a day-long session can't grow it unbounded.
   private recent: EndedSpan[] = [];
   private static readonly RECENT_MAX = 200;
@@ -183,6 +185,7 @@ export class Tracer {
   }
 
   onSpanEnd(span: EndedSpan): void {
+    if (this.closed) return;
     this.recent.push(span);
     if (this.recent.length > Tracer.RECENT_MAX) this.recent.splice(0, this.recent.length - Tracer.RECENT_MAX);
 
@@ -194,7 +197,11 @@ export class Tracer {
         fs.mkdirSync(dir, { recursive: true });
         this.jsonlDirEnsured = true;
       }
-      fs.appendFile(this.exportPath(), JSON.stringify(span) + '\n', () => { /* best-effort */ });
+      let write!: Promise<void>;
+      write = fs.promises.appendFile(this.exportPath(), JSON.stringify(span) + '\n')
+        .catch(() => undefined)
+        .finally(() => this.pendingWrites.delete(write));
+      this.pendingWrites.add(write);
     } catch { /* tracing must never break the agent */ }
 
     // OTLP exporter — buffered; flushed on size or timer.
@@ -227,6 +234,18 @@ export class Tracer {
       Logger.warn(`[Trace] OTLP export failed (${e?.message}); spans remain in ${this.exportPath()}`);
     }
   }
+
+  /** Stop accepting spans and drain local/remote exporters for a clean process or test teardown. */
+  async shutdown(): Promise<void> {
+    if (this.closed) {
+      await Promise.allSettled([...this.pendingWrites]);
+      return;
+    }
+    this.closed = true;
+    if (this.otlpTimer) { clearTimeout(this.otlpTimer); this.otlpTimer = null; }
+    await Promise.allSettled([...this.pendingWrites]);
+    await this.flushOtlp();
+  }
 }
 
 let _tracer: Tracer | null = null;
@@ -237,7 +256,12 @@ export function getTracer(): Tracer {
   return _tracer;
 }
 
-/** Test seam — drop the singleton so the next getTracer() re-reads the environment. */
-export function resetTracerForTests(): void {
+/** Flush and drop the singleton so the next getTracer() re-reads the environment. */
+export async function resetTracerForTests(): Promise<void> {
+  const previous = _tracer;
   _tracer = null;
+  await previous?.shutdown();
 }
+
+/** Flush the existing singleton without creating one solely for shutdown. */
+export async function shutdownTracer(): Promise<void> { await _tracer?.shutdown(); }

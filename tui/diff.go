@@ -19,9 +19,10 @@ var hunkRe = regexp.MustCompile(`@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 const diffApprovalRows = 16
 
 type diffRow struct {
-	num  int
-	sign byte
-	text string
+	oldNum int
+	newNum int
+	sign   byte
+	text   string
 }
 
 // parseDiffRows turns a unified diff into displayable rows; `@@` hunk headers are consumed to
@@ -39,20 +40,20 @@ func parseDiffRows(diff string) []diffRow {
 			continue
 		}
 		if ln == "" {
-			rows = append(rows, diffRow{newLn, ' ', ""})
+			rows = append(rows, diffRow{oldLn, newLn, ' ', ""})
 			oldLn++
 			newLn++
 			continue
 		}
 		switch ln[0] {
 		case '+':
-			rows = append(rows, diffRow{newLn, '+', ln[1:]})
+			rows = append(rows, diffRow{0, newLn, '+', ln[1:]})
 			newLn++
 		case '-':
-			rows = append(rows, diffRow{oldLn, '-', ln[1:]})
+			rows = append(rows, diffRow{oldLn, 0, '-', ln[1:]})
 			oldLn++
 		default:
-			rows = append(rows, diffRow{newLn, ' ', strings.TrimPrefix(ln, " ")})
+			rows = append(rows, diffRow{oldLn, newLn, ' ', strings.TrimPrefix(ln, " ")})
 			oldLn++
 			newLn++
 		}
@@ -81,19 +82,20 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 	if offset < 0 {
 		offset = 0
 	}
-	// Gutter width grows with the largest line number (was a fixed %4d that misaligned past 9999).
-	// Only NEW-side numbers are ever shown (removed lines get a blank gutter, see below), so removed
-	// rows don't widen the column.
-	digits := 3
+	// Use one stable line-number gutter. Removed rows show their position in the old file; added and
+	// context rows show their position in the resulting file. A two-column OLD/NEW gutter made simple
+	// replacements jump horizontally and rendered unchanged rows as confusing duplicates like "2 2".
+	digits := 1
 	for _, r := range rows {
+		n := r.newNum
 		if r.sign == '-' {
-			continue
+			n = r.oldNum
 		}
-		if d := len(fmt.Sprint(r.num)); d > digits {
+		if d := len(fmt.Sprint(n)); n > 0 && d > digits {
 			digits = d
 		}
 	}
-	gutterCols := digits + 1 // "%*d " — line number + one trailing space
+	gutterCols := digits + 1 // one right-aligned number plus a trailing separator
 	// Claude-Code-style diffs: changed lines get a full-width green/red BACKGROUND (added/removed),
 	// context lines are syntax-highlighted on the default background. The background is the source of
 	// the old "red/green bleeds to column 0" bug — a background-styled line that exceeds the terminal
@@ -122,15 +124,15 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 			fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("  ↓ %d more (PgDn)", len(rows)-offset-shown)))
 			break
 		}
-		num := fmt.Sprintf("%*d ", digits, r.num)
-		// A removed line has no position in the NEW file, so numbering it (with the old-side number)
-		// makes the single gutter jump around and read backwards when the two sides drift apart
-		// (e.g. a full-file overwrite of unrelated content: 1,2,3,3,5,4,4…). Blank its gutter so the
-		// visible numbers stay monotonic — the new file's real line numbers — and the "- " sign alone
-		// marks the removal.
+		n := r.newNum
 		if r.sign == '-' {
-			num = fmt.Sprintf("%*s ", digits, "")
+			n = r.oldNum
 		}
+		numText := ""
+		if n > 0 {
+			numText = fmt.Sprint(n)
+		}
+		gutter := fmt.Sprintf("%*s ", digits, numText)
 		txt := r.text
 		// Truncate + pad by DISPLAY WIDTH, not rune count: prose is full of ambiguous-width glyphs
 		// (curly quotes, em dashes) that count as one rune but can render wider — counting runes let a
@@ -148,14 +150,14 @@ func renderDiffAt(diff string, offset, maxLines, fillWidth int, filename string)
 		var line string
 		switch r.sign {
 		case '+':
-			line = diffAddLine.Foreground(colBright).Bold(true).Render(num) + diffAddLine.Render("+ ") +
+			line = diffAddLine.Foreground(colBright).Bold(true).Render(gutter) + diffAddLine.Render("+ ") +
 				chromaRender(diffAddLine, lexer, txt) + diffAddLine.Render(strings.Repeat(" ", pad))
 		case '-':
-			line = diffDelLine.Foreground(colBright).Bold(true).Render(num) + diffDelLine.Render("- ") +
+			line = diffDelLine.Foreground(colBright).Bold(true).Render(gutter) + diffDelLine.Render("- ") +
 				chromaRender(diffDelLine, lexer, txt) + diffDelLine.Render(strings.Repeat(" ", pad))
 		default:
-			// Context: white+bold line number (diffLineNum) + subtle syntax colours (dim fallback), no bg.
-			line = diffLineNum.Render(num) + " " + chromaRender(dimStyle, lexer, txt)
+			// Context: resulting-file position + subtle syntax colours (dim fallback), no background.
+			line = diffLineNum.Render(gutter) + "  " + chromaRender(dimStyle, lexer, txt)
 		}
 		// Belt-and-suspenders: never let a row exceed its width budget, whatever the content.
 		fmt.Fprintf(&b, "%s\n", ansi.Truncate(line, clampW, ""))

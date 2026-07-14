@@ -3,6 +3,7 @@ import { IGraphStore } from '../graph/models';
 import { summarizeGraph, isCodebase } from '../graph/graph.summary';
 import { isCodememReady } from '../graph/codemem/backend';
 import { getHeadroomSavedTokens } from '../memory/headroom.compress';
+import type { ToolRegistry, ContextMode } from '../tools/tool.registry';
 
 // Footer state that the Ink UI reads directly from engine singletons (getConfig, getGoalManager)
 // rather than from events. An out-of-process front-end can't reach those, so we snapshot them into
@@ -95,6 +96,16 @@ export interface UiSnapshotGit {
   behind: number;
 }
 
+/** Live tool fabric: what the model can call now vs what remains load-on-demand. */
+export interface UiSnapshotTools {
+  registered: number;
+  ready: number;
+  deferred: number;
+  discovered: number;
+  mcp: number;
+  graphReady: boolean;
+}
+
 export interface UiSnapshot {
   models: { coding: string; lite: string };
   goalCount: number;
@@ -122,6 +133,8 @@ export interface UiSnapshot {
   // v2: coarse git state for header pills. Front-ends that can poll git natively (the Electron app)
   // may prefer their own fresher poll; this is for the ones that can't.
   git?: UiSnapshotGit;
+  // v3 additive: live registry posture for desktop/tooling surfaces.
+  tools?: UiSnapshotTools;
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -129,15 +142,17 @@ export interface UiSnapshot {
 let baselineFn: (() => number) | undefined;
 export function setTokensBaseline(fn: () => number): void { baselineFn = fn; }
 
-function snapshot(graphStore?: IGraphStore): UiSnapshot {
+function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnapshot {
   let models = { coding: '', lite: '' };
   let goalCount = 0;
   let contextWindow = 0;
+  let contextMode: ContextMode = 'smart';
   try {
     const { getConfig } = require('../cli/config');
     const c = getConfig();
     models = { coding: c.model, lite: c.liteModel };
     contextWindow = c.contextWindowTokens || 0;
+    contextMode = c.contextMode === 'full' ? 'full' : 'smart';
   } catch { /* config not ready */ }
   if (!contextWindow || contextWindow <= 0) {
     try {
@@ -262,21 +277,36 @@ function snapshot(graphStore?: IGraphStore): UiSnapshot {
     }
   } catch { /* git best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git };
+  let tools: UiSnapshotTools | undefined;
+  try {
+    if (toolRegistry) {
+      const names = toolRegistry.getToolNames();
+      tools = {
+        registered: names.length,
+        ready: names.filter((name) => toolRegistry.isSent(name, contextMode)).length,
+        deferred: names.filter((name) => toolRegistry.isDeferred(name) && !toolRegistry.isDiscovered(name)).length,
+        discovered: names.filter((name) => toolRegistry.isDiscovered(name)).length,
+        mcp: names.filter((name) => name.startsWith('mcp__')).length,
+        graphReady: toolRegistry.isGraphReady(),
+      };
+    }
+  } catch { /* registry posture best-effort */ }
+
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools };
 }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
-export function startUiSnapshot(graphStore?: IGraphStore): void {
+export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): void {
   // First snapshot is synchronous (the front-end needs footer state with the `ready` handshake);
   // afterwards a trailing 80ms debounce coalesces change bursts — a /beast step can fire
   // config+goals+graph+mind together, and each snapshot walks the whole graph summary.
-  cliEvents.emit('ui_snapshot', snapshot(graphStore));
+  cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
   let timer: ReturnType<typeof setTimeout> | null = null;
   const emit = () => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      cliEvents.emit('ui_snapshot', snapshot(graphStore));
+      cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
     }, 80);
     timer.unref?.();
   };
@@ -284,6 +314,7 @@ export function startUiSnapshot(graphStore?: IGraphStore): void {
   cliEvents.on('goals_changed', emit);
   cliEvents.on('graph_changed', emit);
   cliEvents.on('mcp_changed', emit);
+  cliEvents.on('tools_changed', emit);
   // Mind layer: re-snapshot when self-model / drives / habits change so the footer's 🧠 strip
   // stays live.
   cliEvents.on('mind_changed', emit);
@@ -292,4 +323,6 @@ export function startUiSnapshot(graphStore?: IGraphStore): void {
   // v2: checkpoint created / rewound → History strip updates; clear/resume → session list updates.
   cliEvents.on('timemachine_changed', emit);
   cliEvents.on('clear', emit);
+  // Session recorder: thread created / titled / rotated / resumed → sidebar session list updates.
+  cliEvents.on('session_changed', emit);
 }

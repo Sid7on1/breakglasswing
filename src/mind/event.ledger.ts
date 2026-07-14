@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { mindSingletonRoot } from './self.model';
+import { openSqlite } from '../core/sqlite';
 
 /**
  * The Event Ledger (BiMax v2, D1 — minimal variant).
@@ -14,9 +15,9 @@ import { mindSingletonRoot } from './self.model';
  *
  * Deliberately the self-critique-blessed variant: NO daemon. A session writes directly
  * with an IMMEDIATE transaction per append (SQLite handles one writer fine; a second
- * concurrent session just retries past a short busy timeout). Uses node:sqlite —
- * built into Node ≥22, zero new dependencies. Where node:sqlite is unavailable the
- * ledger degrades to a silent no-op: recording must never be able to break the agent.
+ * concurrent session just retries past a short busy timeout). Uses node:sqlite in Node and
+ * bun:sqlite in the compiled desktop engine, both with zero new dependencies. Where neither is
+ * available the ledger degrades to a silent no-op: recording must never break the agent.
  *
  * Append-only is enforced by construction (this module exposes no update/delete) and
  * made TAMPER-EVIDENT by a hash chain: each event's hash covers its content plus the
@@ -41,12 +42,12 @@ export class EventLedger {
 
   constructor(projectRoot: string) {
     try {
-      // Lazy, tolerant require: node:sqlite is experimental — absence or failure must
-      // leave a working (no-op) ledger, never a crashed agent.
-      const { DatabaseSync } = require('node:sqlite');
+      // Tolerant open: node:sqlite (dev/CI) OR bun:sqlite (the packaged bun --compile engine).
+      // Absence of both must leave a working (no-op) ledger, never a crashed agent.
       const dir = path.join(projectRoot, '.bimax');
       fs.mkdirSync(dir, { recursive: true });
-      this.db = new DatabaseSync(path.join(dir, 'ledger.db'));
+      this.db = openSqlite(path.join(dir, 'ledger.db'));
+      if (!this.db) throw new Error('no SQLite backend (node:sqlite / bun:sqlite) on this runtime');
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA busy_timeout = 3000');
       this.db.exec(

@@ -10,12 +10,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// LOGO is the BiMax wordmark, mirroring Ink's WelcomeBanner.tsx.
+// Compact wordmark: the dual-orbit glyph mirrors the desktop icon without taking over the terminal.
 var logoLines = []string{
-	"▗▄▄▄▖ ▗▄▄▄▖ ▗▖  ▗▖  ▗▄▖  ▗▖  ▗▖",
-	"▐▌  █   █   ▐▛▚▞▜▌ ▐▌ ▐▌  ▝▚▞▘ ",
-	"▐▛▀▀▜   █   ▐▌  ▐▌ ▐▛▀▜▌   ▐▌  ",
-	"▐▌▄▄▟ ▗▄█▄▖ ▐▌  ▐▌ ▐▌ ▐▌ ▗▞▘▝▚▖",
+	"  ◜◉◝  BIMAX",
+	"  ◟ ◞  two minds, one workspace",
 }
 
 // gradientLine sweeps the wordmark left → right from the phosphor accent into its lighter shimmer
@@ -38,7 +36,7 @@ func gradientLine(ln string) string {
 		if t > 0.5 {
 			t = 1 - t
 		}
-		c := lerpRGB(baseRGB, rgb{184, 242, 224}, t*2) // colShimmer #B8F2E0
+		c := lerpRGB(baseRGB, rgb{229, 154, 119}, t*2) // colShimmer #E59A77
 		b.WriteString(logoStyle.Foreground(lipgloss.Color(c.hex())).Render(string(r)))
 	}
 	return b.String()
@@ -64,7 +62,7 @@ func (m *model) showWelcome() {
 	for _, ln := range logoLines {
 		fmt.Fprintf(&b, "%s\n", gradientLine(ln))
 	}
-	fmt.Fprintf(&b, "\n%s%s\n\n", brandStyle.Render("BiMax "), tipStyle.Render("v1.0.0 · two minds, one machine"))
+	fmt.Fprintf(&b, "\n%s\n\n", tipStyle.Render("Describe an outcome. Bimax can explore, build, verify, and show its work."))
 
 	model := shortModel(m.fCoding)
 	if model == "" {
@@ -88,8 +86,7 @@ func (m *model) showWelcome() {
 	if m.fMode == "bypass" {
 		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("guard  "), warnStyle.Render("bypassed — no approval prompts"))
 	}
-	fmt.Fprintf(&b, "\n%s\n", tipStyle.Render("Ask anything, or describe a task to run it with tools."))
-	fmt.Fprintf(&b, "%s", tipStyle.Render("/help · Ctrl+G palette · Ctrl+X mind · Ctrl+F search · Ctrl+O logs · Esc stash"))
+	fmt.Fprintf(&b, "\n%s", tipStyle.Render("Ctrl+G actions · Ctrl+F search · Ctrl+O activity · Ctrl+X memory"))
 
 	// Stretch the banner across the terminal instead of hugging its content. width-3 keeps the box one
 	// column short of the edge (border 2 + a spare col) so it never wraps the inline renderer.

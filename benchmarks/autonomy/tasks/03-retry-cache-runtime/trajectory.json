@@ -1,0 +1,39 @@
+[
+  {
+    "tool": "ReadFileTool",
+    "args": { "path": "package.json" }
+  },
+  {
+    "expectLastToolContains": "node test.mjs",
+    "tool": "ReadFileTool",
+    "args": { "path": "test.mjs" }
+  },
+  {
+    "expectLastToolContains": "pending calls for one key",
+    "tool": "ReadFileTool",
+    "args": { "path": "src/retry-cache.mjs" }
+  },
+  {
+    "expectLastToolContains": "queueMicrotask",
+    "tool": "BashTool",
+    "args": { "command": "npm test", "timeout": 30000 }
+  },
+  {
+    "expectLastToolContains": "command exited with code 1",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/retry-cache.mjs",
+      "oldString": "export function createRetryCache({ loader, ttlMs, now }) {\n  const entries = new Map();\n\n  return {\n    get(key, options = {}) {\n      const existing = entries.get(key);\n      if (existing && now() < existing.expiresAt) return existing.promise;\n\n      const promise = Promise.resolve().then(() => loader(key, options));\n      const entry = { promise, expiresAt: now() + ttlMs };\n\n      // Defer the write so cache maintenance stays outside the caller's stack.\n      queueMicrotask(() => entries.set(key, entry));\n      return promise;\n    },\n  };\n}",
+      "newString": "export function createRetryCache({ loader, ttlMs, now }) {\n  const entries = new Map();\n\n  return {\n    get(key, options = {}) {\n      const existing = entries.get(key);\n      if (existing) {\n        if (now() < existing.expiresAt) return existing.promise;\n        entries.delete(key);\n      }\n\n      const promise = Promise.resolve().then(() => loader(key, options));\n      const entry = { promise, expiresAt: Infinity };\n      entries.set(key, entry);\n\n      promise.then(\n        () => {\n          if (entries.get(key) === entry) entry.expiresAt = now() + ttlMs;\n        },\n        () => {\n          if (entries.get(key) === entry) entries.delete(key);\n        },\n      );\n      return promise;\n    },\n  };\n}"
+    }
+  },
+  {
+    "expectLastToolContains": "Edited src/retry-cache.mjs",
+    "tool": "BashTool",
+    "args": { "command": "npm test", "timeout": 30000 }
+  },
+  {
+    "expectLastToolContains": "fixture tests passed",
+    "text": "Fixed in-flight sharing, rejection eviction, and resolution-based TTL handling; the focused test passes."
+  }
+]

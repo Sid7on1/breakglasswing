@@ -1,0 +1,44 @@
+[
+  {
+    "tool": "ReadFileTool",
+    "args": { "path": "package.json" }
+  },
+  {
+    "expectLastToolContains": "\"test\": \"node test.mjs\"",
+    "tool": "ReadFileTool",
+    "args": { "path": "test.mjs" }
+  },
+  {
+    "expectLastToolContains": "summarizeOrders",
+    "tool": "ReadFileTool",
+    "args": { "path": "src/order-summary.mjs" }
+  },
+  {
+    "expectLastToolContains": "current.total += order.subtotal",
+    "tool": "BashTool",
+    "args": { "command": "npm test", "timeout": 30000 }
+  },
+  {
+    "expectLastToolContains": "command exited with code 1",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/order-summary.mjs",
+      "oldString": "export function summarizeOrders(orders) {\n  const summary = new Map();\n\n  for (const order of orders) {\n    const current = summary.get(order.customer) ?? { count: 0, total: 0 };\n    current.count += 1;\n    current.total += order.subtotal;\n    summary.set(order.customer, current);\n  }\n\n  return [...summary.entries()].map(([customer, data]) => ({ customer, ...data }));\n}",
+      "newString": "export function summarizeOrders(orders) {\n  const summary = new Map();\n\n  for (const order of orders) {\n    if (order.status === 'cancelled') continue;\n\n    const orderTotal = order.items.reduce(\n      (total, item) => total + item.quantity * item.unitPrice,\n      0,\n    );\n    const current = summary.get(order.customer) ?? { count: 0, total: 0 };\n    current.count += 1;\n    current.total += orderTotal;\n    summary.set(order.customer, current);\n  }\n\n  return [...summary.entries()]\n    .sort(([left], [right]) => left.localeCompare(right))\n    .map(([customer, data]) => ({\n      customer,\n      count: data.count,\n      total: Number(data.total.toFixed(2)),\n    }));\n}"
+    }
+  },
+  {
+    "expectLastToolContains": "Edited src/order-summary.mjs",
+    "tool": "BashTool",
+    "args": { "command": "npm test", "timeout": 30000 }
+  },
+  {
+    "expectLastToolContains": "fixture tests passed",
+    "tool": "ReadFileTool",
+    "args": { "path": "src/order-summary.mjs" }
+  },
+  {
+    "expectLastToolContains": "Number(data.total.toFixed(2))",
+    "text": "Fixed the aggregation logic and verified the focused fixture test passes."
+  }
+]

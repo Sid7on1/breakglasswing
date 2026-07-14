@@ -42,11 +42,13 @@ func renderDashboard(me MessageEntry) string {
 	case "HelpDashboard":
 		var p HelpPayload
 		_ = json.Unmarshal(me.Payload, &p)
-		fmt.Fprintf(&b, "%s\n", dashTitle.Render("Commands"))
+		fmt.Fprintf(&b, "%s\n", dashTitle.Render("Available actions"))
 		for _, sec := range p.Sections {
 			fmt.Fprintf(&b, "%s\n", dashColor(sec.Color).Render(sec.Title))
 			for _, c := range sec.Commands {
-				fmt.Fprintf(&b, "%s%s\n", dashKey.Render(fmt.Sprintf("  %-14s", c.Cmd)), dashVal.Render(c.Desc))
+				label := strings.TrimPrefix(c.Cmd, "/")
+				label = strings.ReplaceAll(label, "-", " ")
+				fmt.Fprintf(&b, "%s%s\n", dashKey.Render(fmt.Sprintf("  %-14s", label)), dashVal.Render(c.Desc))
 			}
 		}
 	case "StatsDashboard":

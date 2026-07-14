@@ -27,6 +27,7 @@ export function startStdioHost(opts: StdioHostOptions): () => void {
     {
       onInput: opts.onInput, onInterrupt: opts.onInterrupt, onQuery: opts.onQuery,
       onMenuSelect: opts.onMenuSelect, onConfigGet: opts.onConfigGet, onConfigSet: opts.onConfigSet,
+      onResume: opts.onResume, onControls: opts.onControls,
     },
   );
 

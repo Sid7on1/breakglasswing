@@ -7,47 +7,47 @@ import (
 )
 
 // Markdown rendering for assistant output (bold, lists, and syntax-highlighted code blocks),
-// in the low-chrome Graphite & Phosphor look. glamour's built-in "dark" style is loud — a
+// in the low-chrome warm Graphite look. glamour's built-in "dark" style is loud — a
 // yellow-on-purple H1 bar, neon-pink inline code, and rainbow syntax over a solid grey block
-// (the "static" look). We swap it for the BiMax palette: phosphor headings, muted code,
+// (the "static" look). We swap it for the Bimax palette: ember headings, muted code,
 // and NO code-block background fill. The renderer is width-dependent, so we cache it and rebuild
 // only when the viewport width changes. Falls back to raw text if glamour ever errors.
 
-// mdStyle is a glamour StyleConfig JSON tuned to the "Graphite & Phosphor" system: phosphor accent
+// mdStyle is a glamour StyleConfig JSON tuned to the warm Graphite system: ember accent
 // on top-level headings, Mist body text, flush-left margins, and a graphite-ground code block with
 // readable syntax colors so output reads as content, not chrome.
 //
 // WS3-B note — two palettes live here on purpose:
 //   1. CHROME colours (document/heading/quote/hr/link) mirror the styles.go tokens — keep them in
-//      sync: #EDEFF2=colText, #9AA1AC=colInactive, #7EE7C4=colAccent, #444A54=colDim, #57C7C7=colHunk.
+//      sync: #F1EFE9=colText, #B0ADA5=colInactive, #D78562=colAccent, #383734=colDim, #78A9D4=colHunk.
 //   2. The code-block SYNTAX colours (one-dark family: #C678DD, #E06C75, #98C379, …) are a distinct
 //      chroma theme for highlighting, intentionally NOT part of the chrome token set.
 // glamour requires literal hex inside this JSON blob (no Go-value interpolation), so these can't
 // reference the tokens directly; the mapping above is the contract.
 var warmStyle = []byte(`{
-  "document": { "block_prefix": "", "block_suffix": "", "color": "#EDEFF2", "margin": 0 },
-  "block_quote": { "color": "#9AA1AC", "indent": 1, "indent_token": "│ " },
+  "document": { "block_prefix": "", "block_suffix": "", "color": "#F1EFE9", "margin": 0 },
+  "block_quote": { "color": "#B0ADA5", "indent": 1, "indent_token": "│ " },
   "paragraph": {},
   "list": { "level_indent": 2 },
-  "heading": { "block_suffix": "\n", "color": "#7EE7C4", "bold": true },
-  "h1": { "prefix": "", "suffix": "", "color": "#7EE7C4", "bold": true },
-  "h2": { "prefix": "## ", "color": "#7EE7C4", "bold": true },
-  "h3": { "prefix": "### ", "color": "#9AA1AC", "bold": true },
-  "h4": { "prefix": "#### ", "color": "#9AA1AC", "bold": true },
-  "h5": { "prefix": "##### ", "color": "#9AA1AC", "bold": true },
-  "h6": { "prefix": "###### ", "color": "#9AA1AC", "bold": true },
+  "heading": { "block_suffix": "\n", "color": "#D78562", "bold": true },
+  "h1": { "prefix": "", "suffix": "", "color": "#D78562", "bold": true },
+  "h2": { "prefix": "## ", "color": "#D78562", "bold": true },
+  "h3": { "prefix": "### ", "color": "#B0ADA5", "bold": true },
+  "h4": { "prefix": "#### ", "color": "#B0ADA5", "bold": true },
+  "h5": { "prefix": "##### ", "color": "#B0ADA5", "bold": true },
+  "h6": { "prefix": "###### ", "color": "#B0ADA5", "bold": true },
   "text": {},
-  "strong": { "color": "#EDEFF2", "bold": true },
+  "strong": { "color": "#F1EFE9", "bold": true },
   "emph": { "italic": true },
-  "hr": { "color": "#444A54", "format": "\n────────\n" },
+  "hr": { "color": "#383734", "format": "\n────────\n" },
   "item": { "block_prefix": "• " },
   "enumeration": { "block_prefix": ". " },
   "task": { "ticked": "[✓] ", "unticked": "[ ] " },
-  "link": { "color": "#57C7C7", "underline": true },
-  "link_text": { "color": "#57C7C7", "bold": true },
-  "image": { "color": "#57C7C7", "underline": true },
+  "link": { "color": "#78A9D4", "underline": true },
+  "link_text": { "color": "#78A9D4", "bold": true },
+  "image": { "color": "#78A9D4", "underline": true },
   "image_text": { "color": "#787878", "format": "Image: {{.text}}" },
-  "code": { "prefix": " ", "suffix": " ", "color": "#EDEFF2", "background_color": "#23272E" },
+  "code": { "prefix": " ", "suffix": " ", "color": "#F1EFE9", "background_color": "#232321" },
   "code_block": {
     "color": "#ABB2BF",
     "background_color": "#16181C",

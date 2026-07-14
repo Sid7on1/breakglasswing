@@ -90,6 +90,21 @@
         "temperature": 0.7,
         "contextMode": "smart"
       }
+    },
+    {
+      "t": "boot",
+      "phase": "loading_graph",
+      "detail": "sqlite graph store",
+      "pid": 4242
+    },
+    {
+      "t": "health",
+      "uptimeMs": 61234,
+      "rssMb": 312,
+      "heapMb": 148,
+      "eventLoopDelayMs": 4,
+      "activeTurn": true,
+      "phase": "ready"
     }
   ],
   "inbound": [
@@ -130,6 +145,16 @@
         "notificationBell": true,
         "reasoningEffort": "high"
       }
+    },
+    {
+      "t": "resume",
+      "id": "sess-20260712-abc123"
+    },
+    {
+      "t": "controls",
+      "mode": "code",
+      "tier": "heavy",
+      "autonomy": "ask"
     }
   ]
 }

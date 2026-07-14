@@ -23,7 +23,8 @@
     "prepublishOnly": "npm run build",
     "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js",
     "gen:app-protocol": "node scripts/gen-app-protocol.mjs",
-    "check:protocol-mirror": "node scripts/check-protocol-mirror.mjs"
+    "check:protocol-mirror": "node scripts/check-protocol-mirror.mjs",
+    "release:check": "bash scripts/release-gate.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

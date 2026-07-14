@@ -1,10 +1,13 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { exec } from 'child_process';
+import * as crypto from 'crypto';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { Logger } from '../utils';
 
-const execAsync = promisify(exec);
+// Use execFile (no shell) so file paths can never be interpreted as shell
+// syntax. Arguments are passed as an array, eliminating command injection.
+const execFileAsync = promisify(execFile);
 
 export class Validator {
   async validate(code: string, originalFilePath: string): Promise<{ valid: boolean; reason?: string }> {
@@ -16,15 +19,17 @@ export class Validator {
 
     const ext = path.extname(originalFilePath) || '.ts';
     const dir = path.dirname(originalFilePath);
-    const stagingFile = path.join(dir, `evolve_staging_${Date.now()}${ext}`);
+    // Unique per-invocation name (randomUUID) so concurrent validations in the
+    // same millisecond can't clobber or prematurely delete each other's file.
+    const stagingFile = path.join(dir, `evolve_staging_${crypto.randomUUID()}${ext}`);
 
     try {
       await fs.writeFile(stagingFile, code, 'utf-8');
 
       if (ext === '.ts' || ext === '.tsx') {
-        await execAsync(`npx tsc --noEmit --strict --esModuleInterop --skipLibCheck "${stagingFile}"`);
+        await execFileAsync('npx', ['tsc', '--noEmit', '--strict', '--esModuleInterop', '--skipLibCheck', stagingFile]);
       } else if (ext === '.js' || ext === '.jsx') {
-        await execAsync(`node --check "${stagingFile}"`);
+        await execFileAsync('node', ['--check', stagingFile]);
       }
 
       Logger.info(`[Validator] AST Validation Passed.`);

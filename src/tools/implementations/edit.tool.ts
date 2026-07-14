@@ -174,7 +174,14 @@ export function closestRegion(content: string, oldString: string): string | null
       if (toks.length === 0) continue;
       let shared = 0;
       for (const tok of toks) if (olTokens.has(tok)) shared++;
-      const score = shared / Math.max(olTokens.size, toks.length);
+      const symmetricScore = shared / Math.max(olTokens.size, toks.length);
+      // Models sometimes flatten a multiline oldString into one long line. In that case the
+      // symmetric score is tiny even when a short file line is fully contained in the request.
+      // This asymmetric diagnostic score only improves the hint; it never authorizes an edit.
+      const containmentScore = shared >= 2
+        ? shared / Math.min(olTokens.size, toks.length)
+        : 0;
+      const score = Math.max(symmetricScore, containmentScore * 0.8);
       if (score > bestScore) {
         bestScore = score;
         bestIdx = i;
@@ -189,6 +196,16 @@ export function closestRegion(content: string, oldString: string): string | null
     .slice(start, end)
     .map((l, k) => `${String(start + k + 1).padStart(5)}  ${l}`)
     .join('\n');
+}
+
+function lineNumberedMatch(content: string, matched: string, maxLines = 12): string {
+  const offset = content.indexOf(matched);
+  const firstLine = offset >= 0 ? content.slice(0, offset).split('\n').length : 1;
+  const lines = matched.split('\n');
+  const shown = lines.slice(0, maxLines)
+    .map((line, index) => `${String(firstLine + index).padStart(5)}  ${line}`);
+  if (lines.length > maxLines) shown.push(`      … ${lines.length - maxLines} more matched line(s)`);
+  return shown.join('\n');
 }
 
 /** Render a compact unified-style preview of the change for the transcript. */
@@ -321,7 +338,17 @@ export const createEditFileTool = (governor: IGovernor) => buildTool({
     // reaches disk, and the error names the exact lines so the very next attempt can fix it.
     const shield = shieldEdit(fullPath, content, updated);
     if (shield) {
-      return outcomeError('syntax', await fail(`Edit to ${args.path} refused by Edit Shield: ${shield}`, 'edit-shield refused'));
+      const approximateMatchDiagnostic = matchMethod
+        ? `\n\nImportant: oldString was not an exact match. The fuzzy matcher selected this ` +
+          `current region via ${matchMethod}:\n\n${lineNumberedMatch(content, resolvedOld)}\n\n` +
+          `The syntax failure may be caused by replacing the wrong or incomplete region, not by ` +
+          `newString itself. Retry EditFileTool with a smaller oldString copied verbatim from the ` +
+          `region above; do not switch write mechanisms.`
+        : '';
+      return outcomeError('syntax', await fail(
+        `Edit to ${args.path} refused by Edit Shield: ${shield}${approximateMatchDiagnostic}`,
+        'edit-shield refused',
+      ));
     }
 
     // Blast-radius gate (no-op unless enabled + interactive + the file owns a HIGH/CRITICAL symbol).

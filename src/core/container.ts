@@ -17,7 +17,6 @@ import { GraphStore } from '../graph/graph.store';
 import { CodebaseIndexer } from '../graph/indexer';
 import { StaticAnalyzer } from '../graph/static.analyzer';
 import { SemanticAugmenter } from '../graph/semantic.augmenter';
-import { GenomeRepository } from '../genome/genome.repository';
 import { TaskPipeline } from '../task';
 import * as path from 'path';
 
@@ -42,6 +41,9 @@ import { globalMcpManager } from '../mcp/manager';
 import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
+import { createBrowserTool } from '../tools/implementations/browser.tool';
+import { globalBrowserRuntime } from '../browser/browser.runtime';
+import { shutdownTracer } from '../telemetry/trace';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { createSkillInstallTool } from '../tools/implementations/skill.install.tool';
 import { createSkillAuthorTool } from '../tools/implementations/skill.author.tool';
@@ -71,10 +73,13 @@ import { initWorkspace } from './workspace.manager';
 import { initPlanManager } from '../memory/plan.manager';
 import { createPlanTool } from '../tools/implementations/plan.tool';
 import { createScoutTool } from '../tools/implementations/scout.tool';
+import { createOutcomeTool } from '../tools/implementations/outcome.tool';
 
 import { Governor } from '../governor/governor';
 import { CliConfig } from '../cli/config';
 import { buildKeyPool } from '../cli/provider';
+
+let browserShutdownWired = false;
 
 export async function createContainer(config?: Partial<CliConfig>): Promise<{
   governor: Governor;
@@ -125,21 +130,36 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // SQLite-backed when node:sqlite exists (atomic saves, per-file staleness → incremental
   // reindex); legacy JSON store otherwise. Same IGraphStore either way (v2 §3.9).
   const { createGraphStore } = await import('../graph/sqlite.graph.store');
+  const { reportBootPhase } = await import('../protocol/boot.status');
+  reportBootPhase('loading_graph');
   const graphStore = createGraphStore(projectRoot);
   const { isCodebase } = await import('../graph/graph.summary');
   if (isCodebase(projectRoot)) {
-    await graphStore.loadFromDisk();
+    const loadGraph = graphStore.loadFromDisk().then(() => {
+      // A deferred desktop load becomes visible as soon as it settles. The initial snapshot either
+      // sees the populated graph or this event schedules the next one; no polling is required.
+      cliEvents.emit('graph_changed');
+    }).catch((err: any) => {
+      Logger.warn(`[Graph] persisted graph load failed; continuing with an empty graph: ${err?.message || err}`);
+    });
+    // Desktop must become interactive before an iCloud-hosted SQLite graph finishes paging in.
+    // CLI/TUI retain the historical eager behavior unless their launcher opts in explicitly.
+    if (process.env.BIMAX_DEFER_GRAPH_LOAD === '1') void loadGraph;
+    else await loadGraph;
   }
 
   // Tools
+  reportBootPhase('loading_tools');
   const toolRegistry = new ToolRegistry();
   // Index-gated tools (GraphQueryTool/GraphContextTool) stay disabled until the repo is indexed, then
   // are promoted + preferred. The check is lazy so it reflects a graph built mid-session (after /index)
   // OR the baked-in codebase-memory engine coming online (its own 158-language index + semantic search).
   toolRegistry.setGraphReadyCheck(() => graphStore.getGraph().nodes.size > 0 || globalCodemem.isReady());
   // Bring the codebase-memory engine up in the background — it fronts the graph tools when ready and
-  // never blocks boot. Skipped for non-codebase dirs (nothing to index).
-  if (isCodebase(projectRoot)) {
+  // never blocks boot. Skipped for non-codebase dirs (nothing to index), and skippable by a
+  // supervising front-end on memory-constrained machines (BIMAX_DISABLE_CODEMEM=1); the SQLite
+  // graph tools keep working without it.
+  if (isCodebase(projectRoot) && process.env.BIMAX_DISABLE_CODEMEM !== '1') {
     globalCodemem.init(projectRoot).catch(() => {});
   }
   // Bring the real Headroom Kompress proxy up in the background (provision venv + ONNX model on first
@@ -159,6 +179,9 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createGrepTool(governor));
   toolRegistry.register(createGlobTool(governor));
   toolRegistry.register(createTodoWriteTool(governor));
+  // Engine-owned acceptance/evidence contract. Core infrastructure: substantial tasks use this
+  // before implementation and the runtime—not model prose—decides whether verified completion is legal.
+  toolRegistry.register(createOutcomeTool(governor));
   toolRegistry.register(createWebFetchTool(governor));
   toolRegistry.register(createCdTool(governor));
   toolRegistry.register(createGraphQueryTool(governor, graphStore));
@@ -185,7 +208,21 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Agent switches its OWN mode (the same modes the user cycles with Shift+Tab) → self-driving loop.
   toolRegistry.register(createModeTool(governor));
   // Agent Skills: model-invoked capability packs (progressive disclosure via the system prompt).
-  globalSkillService.load(projectRoot);
+  // Discovery may touch cloud-backed home/project files. It is optional and must never hold the
+  // protocol handshake: register the tools immediately, then populate the shared service after the
+  // headless host has had a chance to emit `ready` (Promise continuations run before this timer).
+  // In a compiled Bun desktop engine, an npx-based MCP transport can occasionally do blocking
+  // compatibility work while it starts. Give the protocol host + first heartbeat a head start so
+  // optional integration boot can never masquerade as an engine that never became interactive.
+  const backgroundDelayMs = Number(process.env.BIMAX_MCP_BOOT_DELAY_MS ?? (process.env.BIMAX_HEADLESS === '1' ? 30_000 : 0));
+  setTimeout(() => {
+    try {
+      globalSkillService.load(projectRoot);
+      cliEvents.emit('skills_changed');
+    } catch (e: any) {
+      Logger.warn(`[Skills] background discovery failed: ${e?.message ?? e}`);
+    }
+  }, Math.max(0, backgroundDelayMs)).unref?.();
   toolRegistry.register(createSkillTool(governor, globalSkillService));
   toolRegistry.register(createSkillInstallTool(governor, globalSkillService));
   toolRegistry.register(createSkillAuthorTool(governor, globalSkillService));
@@ -198,38 +235,55 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   // Smart context mode: loader for deferred tool schemas (kept off the wire until needed).
   toolRegistry.register(createToolSearchTool(governor, toolRegistry));
   toolRegistry.register(createWebSearchTool(governor));
+  toolRegistry.register(createBrowserTool(governor));
+  if (!browserShutdownWired) {
+    browserShutdownWired = true;
+    cliEvents.once('shutdown', () => {
+      void globalBrowserRuntime.close();
+      void shutdownTracer();
+    });
+  }
 
   // External MCP servers — best-effort, never blocks boot. Once the initial (parallel) connect
   // settles, the watchdog takes over: a 60s background sweep that probes each live connector and
   // auto-reconnects dead ones (bounded attempts; BIMAX_MCP_WATCHDOG=0 disables).
-  globalMcpManager
-    .connectAll(toolRegistry, governor, projectRoot)
-    .then(() => globalMcpManager.startWatchdog(toolRegistry, governor))
-    .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
+  // Defer the CALL itself, not only its returned promise. Some packaged runtimes do substantial
+  // synchronous transport discovery before connectAll reaches its first await; invoking it here
+  // can therefore hold the container open and prevent the headless host from ever emitting ready.
+  // The next event-loop turn runs after createContainer resolves and the protocol host is attached.
+  setTimeout(() => {
+    globalMcpManager
+      .connectAll(toolRegistry, governor, projectRoot)
+      .then(() => globalMcpManager.startWatchdog(toolRegistry, governor))
+      .catch(e => Logger.warn(`[MCP] background connect failed: ${e?.message || e}`));
+    // Keep optional dynamic module evaluation behind the same ready-path boundary. Bun's compiled
+    // runtime may evaluate an import synchronously even when its promise is not awaited.
+    import('../telemetry/metrics.export').then(m => m.startMetricsExporter()).catch(() => {});
 
-  // OTLP metrics — silent no-op unless OTEL_EXPORTER_OTLP_ENDPOINT/BIMAX_OTLP_ENDPOINT is set.
-  import('../telemetry/metrics.export').then(m => m.startMetricsExporter()).catch(() => {});
-
-  // Crash recovery: if a previous session died mid-swarm, its agent-tree checkpoint names the
-  // sub-agents that were still running. Surface them; '/subagents resume' respawns the tree.
-  import('./agent.checkpoint').then(m => {
-    const n = m.detectCrashedTree();
-    if (n > 0) cliEvents.emit('status', `${n} sub-agent(s) from a crashed session are recoverable — run /subagents resume`);
-  }).catch(() => {});
-
-  // Genome & Evolution — used by /evolve (gated by allowSelfEvolution config, off by default).
-  const genomeRepo = new GenomeRepository(projectRoot);
-  genomeRepo.reload().catch(() => {});
+    // Crash recovery: if a previous session died mid-swarm, its agent-tree checkpoint names the
+    // sub-agents that were still running. Surface them; '/subagents resume' respawns the tree.
+    import('./agent.checkpoint').then(m => {
+      const n = m.detectCrashedTree();
+      if (n > 0) {
+        cliEvents.emit('status', `${n} interrupted assignment(s) found — checking safe recovery…`);
+        cliEvents.emit('agent_recovery_available', { count: n });
+      }
+    }).catch(() => {});
+  }, Math.max(0, backgroundDelayMs));
+  reportBootPhase('loading_tools', 'background services scheduled');
 
   const semanticAugmenter = new SemanticAugmenter(graphStore, llmAdapter, projectRoot);
+  reportBootPhase('loading_tools', 'semantic layer wired');
   if (cfg.skipSemanticMetadata) semanticAugmenter.enabled = false;
 
   const staticAnalyzer = new StaticAnalyzer(projectRoot, graphStore, cfg.excludeFromIndex);
+  reportBootPhase('loading_tools', 'analyzers wired');
   const codebaseIndexer = new CodebaseIndexer(projectRoot, graphStore, staticAnalyzer, semanticAugmenter);
   if (cfg.autoIndex === false) codebaseIndexer.enabled = false;
 
   // Task Pipeline — used by /watch watchers.
   const taskPipeline = new TaskPipeline(eventBus, llmAdapter);
+  reportBootPhase('loading_tools', 'container ready');
 
   return { governor, toolRegistry, graphStore, llmAdapter, codebaseIndexer, taskPipeline };
 }

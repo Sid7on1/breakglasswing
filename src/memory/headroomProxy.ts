@@ -20,7 +20,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as http from 'http';
-import { spawn, spawnSync, ChildProcess } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { Logger } from '../utils/logger';
 
 const PORT = Number(process.env.HEADROOM_PORT_OVERRIDE) || 8788; // 8788 to avoid clashing with a user-run :8787
@@ -61,37 +61,58 @@ export async function awaitHeadroomReady(timeoutMs: number): Promise<boolean> {
   return _ready;
 }
 
+type ProcessResult = { status: number | null; stdout: string; stderr: string };
+
+/** Run provisioning commands without ever blocking the engine's protocol/UI event loop. */
+function runProcess(command: string, args: string[]): Promise<ProcessResult> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      resolve({ status: -1, stdout, stderr: (error as Error).message });
+      return;
+    }
+    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.once('error', (error) => resolve({ status: -1, stdout, stderr: error.message }));
+    child.once('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
 /** Locate a usable system python3 to bootstrap the venv from. Returns null if none. */
-function findSystemPython(): string | null {
+async function findSystemPython(): Promise<string | null> {
   for (const cand of ['python3', 'python']) {
-    const r = spawnSync(cand, ['-c', 'import sys; print(sys.version_info[0])'], { encoding: 'utf8' });
+    const r = await runProcess(cand, ['-c', 'import sys; print(sys.version_info[0])']);
     if (r.status === 0 && (r.stdout || '').trim().startsWith('3')) return cand;
   }
   return null;
 }
 
 /** True once the venv has headroom-ai[proxy] importable. */
-function venvProvisioned(): boolean {
+async function venvProvisioned(): Promise<boolean> {
   const py = venvBin('python');
   if (!fs.existsSync(py)) return false;
-  const r = spawnSync(py, ['-c', 'import headroom, fastapi, onnxruntime'], { encoding: 'utf8' });
+  const r = await runProcess(py, ['-c', 'import headroom, fastapi, onnxruntime']);
   return r.status === 0;
 }
 
 /** Create the venv and pip-install headroom-ai[proxy]. Slow (first run only). Returns success. */
-function provisionVenv(): boolean {
-  const sys = findSystemPython();
+async function provisionVenv(): Promise<boolean> {
+  const sys = await findSystemPython();
   if (!sys) { Logger.warn('[Headroom] no python3 found — cannot provision the Kompress proxy; staying on native compressor.'); return false; }
   fs.mkdirSync(homeDir(), { recursive: true });
   if (!fs.existsSync(venvBin('python'))) {
     Logger.info('[Headroom] creating Python venv for the Kompress proxy (vendor/headroom/venv)…');
-    const v = spawnSync(sys, ['-m', 'venv', venvDir()], { encoding: 'utf8' });
+    const v = await runProcess(sys, ['-m', 'venv', venvDir()]);
     if (v.status !== 0) { Logger.warn(`[Headroom] venv creation failed: ${v.stderr || v.stdout}`); return false; }
   }
   Logger.info(`[Headroom] installing ${PIP_SPEC} (one-time, ~hundreds of MB)…`);
-  const pip = spawnSync(venvBin('python'), ['-m', 'pip', 'install', '-q', '--upgrade', 'pip'], { encoding: 'utf8' });
+  const pip = await runProcess(venvBin('python'), ['-m', 'pip', 'install', '-q', '--upgrade', 'pip']);
   if (pip.status !== 0) Logger.warn(`[Headroom] pip self-upgrade warning: ${pip.stderr}`);
-  const inst = spawnSync(venvBin('python'), ['-m', 'pip', 'install', '-q', PIP_SPEC], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const inst = await runProcess(venvBin('python'), ['-m', 'pip', 'install', '-q', PIP_SPEC]);
   if (inst.status !== 0) { Logger.warn(`[Headroom] pip install failed: ${inst.stderr || inst.stdout}`); return false; }
   Logger.info('[Headroom] proxy dependencies installed.');
   return true;
@@ -163,7 +184,7 @@ export async function ensureHeadroomProxy(): Promise<boolean> {
 
   _starting = (async () => {
     try {
-      if (!venvProvisioned() && !provisionVenv()) return false;
+      if (!(await venvProvisioned()) && !(await provisionVenv())) return false;
 
       // If our port is already serving (a prior session's sidecar), reuse it.
       if (!(await httpGetOk('/readyz', 800))) {

@@ -18,9 +18,11 @@ import { getHabitMiner } from '../mind/habit.compiler';
 import { getEpistemicLedger, isEvidenceCommand } from '../mind/epistemic.ledger';
 import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder';
 import { getTracer } from '../telemetry/trace';
+import { requiresBuildVerification } from '../review/verification.scope';
+import { applyImplicitWriteConstraints } from '../tools/write.constraints';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
-const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
+export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
 
 /**
  * Coerce a model-emitted tool-call arguments string to VALID JSON before it enters the message
@@ -78,6 +80,19 @@ export class AgentLoop {
     return fb && fb !== current ? fb : null;
   }
 
+  /**
+   * Last-resort context reduction: preserve every system instruction and only the newest
+   * non-system turns. If the slice starts inside a tool exchange, discard leading orphaned tool
+   * results until the first user/assistant message so the provider contract remains valid.
+   */
+  private truncateContext(messages: Message[], keepRecentTurns = 4): Message[] {
+    const systemMessages = messages.filter(message => message.role === 'system');
+    const nonSystemMessages = messages.filter(message => message.role !== 'system');
+    let recentMessages = nonSystemMessages.slice(-keepRecentTurns);
+    while (recentMessages[0]?.role === 'tool') recentMessages = recentMessages.slice(1);
+    return [...systemMessages, ...recentMessages];
+  }
+
   async *execute(
     initialMessages: Message[],
     systemPrompt: string,
@@ -113,6 +128,11 @@ export class AgentLoop {
     // spin the loop, while a flaky one still gets a fresh attempt (new key / re-sample).
     let transientRetries = 0;
     const MAX_TRANSIENT_RETRIES = 2;
+    // A context rejection gets one bounded pass through the graded recovery ladder: cheap tool
+    // result draining, existing reactive compaction, then a hard recent-turn truncation. A tier
+    // only earns a retry when it strictly reduces the estimated request size.
+    let contextRecoveries = 0;
+    const MAX_CONTEXT_RECOVERIES = 3;
     // Bounds the auto-continue after an output-token cutoff (finish_reason: length). Long
     // code-writing answers legitimately need several rounds to finish, but a model stuck
     // re-emitting the ceiling forever must not spin the loop. Headless/print runs depend on
@@ -120,6 +140,17 @@ export class AgentLoop {
     let truncationContinues = 0;
     const MAX_TRUNCATION_CONTINUES =
       parseInt(process.env.BIMAX_MAX_CONTINUES || '', 10) || 12;
+    // A per-call override above the active model's own max-output limit can be rejected outright;
+    // keep automatic escalation conservative and let operators lower this ceiling when necessary.
+    const MAX_OUTPUT_TOKENS_CEILING =
+      parseInt(process.env.BIMAX_MAX_OUTPUT_CEILING || '', 10) || 16384;
+    const MAX_REASONING_ESCALATIONS = 3;
+    let nextOutputTokenBudget: number | undefined;
+    let reasoningEscalations = 0;
+    const providerConfiguredBudget = Number((this.llm as LLMProvider & { maxTokens?: number }).maxTokens);
+    const configuredBudget = Number.isFinite(providerConfiguredBudget) && providerConfiguredBudget > 0
+      ? Math.floor(providerConfiguredBudget)
+      : 4096;
     // Bounds the "keep going while todos are open" persistence below, so a model that refuses to
     // finish (or keeps re-opening items) can't spin the loop forever.
     let persistenceNudges = 0;
@@ -150,9 +181,11 @@ export class AgentLoop {
       // In smart mode the registry returns only the core working set + ToolSearch + any tools the
       // model has already surfaced via ToolSearchTool; in full mode it returns every schema. This
       // is recomputed each turn so a tool discovered mid-task becomes available immediately.
+      const callOutputTokenBudget = nextOutputTokenBudget;
       const generator = recordedLlm.chat(this.messages, {
         system: systemPrompt,
         tools: this.tools.getSchemas({ mode: contextMode }) as any,
+        ...(callOutputTokenBudget !== undefined ? { maxTokens: callOutputTokenBudget } : {}),
         // Tier routing: when the turn was routed to the lite model, every step of this loop
         // (incl. tool-call follow-ups) runs on lite. Heavy turns leave this unset → coding model.
         lite: options?.useLite,
@@ -162,6 +195,9 @@ export class AgentLoop {
         // button"). Now an abort cancels the in-flight request at once.
         signal,
       });
+      // The escalation applies to this retry only. A later pure-reasoning overflow may schedule
+      // another bounded override after observing the budget this call consumed.
+      nextOutputTokenBudget = undefined;
 
       const toolCalls: { id: string; name: string; args: string }[] = [];
       let currentContent = '';
@@ -227,19 +263,72 @@ export class AgentLoop {
         } else if (event.type === 'error') {
           chatErrorMsg = event.message;
           if (event.recoverable && event.kind === 'context') {
-            // Internal recovery — never narrated into the answer stream (the reply must read as one
-            // uninterrupted voice). The footer status + log view carry what's happening instead.
-            cliEvents.emit('status', 'Context overflow — compacting and retrying…');
-            cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Context overflow (${event.message}); compacting and re-asking.`, timestamp: new Date() });
             // Tag the error as a context overflow explicitly: the classifier already decided this
             // (kind === 'context' covers HTTP 413 and provider-specific codes whose MESSAGE text
             // doesn't match reactiveCompact's patterns — e.g. a bare "Request Entity Too Large").
             // Without the tag, reactiveCompact would rethrow and the turn would die un-compacted.
             const ctxErr: any = new Error(event.message);
             ctxErr.code = 'context_length_exceeded';
-            this.messages = await this.contextManager.reactiveCompact(this.messages, ctxErr);
-            discardTurn = true;
-            break;
+
+            // A no-op tier falls through immediately in THIS error handler; it never spends an LLM
+            // retry on an identically-sized request. The strict token comparison is the loop-safety
+            // invariant, independent of whether a transform reported that it changed objects.
+            while (contextRecoveries < MAX_CONTEXT_RECOVERIES) {
+              const tier = contextRecoveries;
+              const beforeTokens = this.contextManager.estimateTokens(this.messages);
+              let recoveredMessages = this.messages;
+              let transformChanged = true;
+              let action: string;
+
+              switch (tier) {
+                case 0: {
+                  action = 'draining old tool results';
+                  const drained = this.contextManager.reactiveDrain(this.messages);
+                  recoveredMessages = drained.messages;
+                  transformChanged = drained.changed;
+                  break;
+                }
+                case 1:
+                  action = 'compacting older context';
+                  recoveredMessages = await this.contextManager.reactiveCompact(this.messages, ctxErr);
+                  break;
+                default:
+                  action = 'truncating to recent turns';
+                  recoveredMessages = this.truncateContext(this.messages);
+                  break;
+              }
+
+              const afterTokens = this.contextManager.estimateTokens(recoveredMessages);
+              const strictlyShrank = transformChanged && afterTokens < beforeTokens;
+              contextRecoveries++;
+
+              if (strictlyShrank) {
+                this.messages = recoveredMessages;
+                cliEvents.emit('status', `Context overflow — ${action} and retrying (${contextRecoveries}/${MAX_CONTEXT_RECOVERIES})…`);
+                cliEvents.emit('log', {
+                  id: Date.now(),
+                  level: 'warn',
+                  text: `Context recovery tier ${tier} (${action}) reduced the estimate ${beforeTokens} → ${afterTokens} tokens; re-asking.`,
+                  timestamp: new Date(),
+                });
+                discardTurn = true;
+                break;
+              }
+
+              cliEvents.emit('log', {
+                id: Date.now(),
+                level: 'warn',
+                text: `Context recovery tier ${tier} (${action}) did not shrink the estimate (${beforeTokens} → ${afterTokens} tokens); advancing immediately.`,
+                timestamp: new Date(),
+              });
+            }
+
+            if (discardTurn) break;
+
+            const diagnostic = 'The task context stayed over the model\'s limit after draining, summarizing, and truncating — stopping this turn to avoid a compaction loop.';
+            anyTextYielded = true;
+            yield diagnostic;
+            return;
           } else if (event.recoverable && event.kind === 'transient' && transientRetries < MAX_TRANSIENT_RETRIES) {
             // A stalled stream, rate limit, or a single bad model emission — discard the partial
             // turn and re-ask. A fresh chat() call rotates the API key and re-samples. BACK OFF
@@ -295,21 +384,46 @@ export class AgentLoop {
       // persisted to history, so the message log stays well-formed.
       if (discardTurn) continue;
 
+      // Enforce the output contract: strip leaked tool-meta filler before it can
+      // land in the reply or the history, and learn whether the turn was nothing but.
+      const sanitized = responseSanitizer.sanitize(currentContent);
+      currentContent = sanitized.text;
+      const pureReasoningOverflow = turnTruncated && toolCalls.length === 0 && !currentContent;
+
       // Reached here ⇒ the stream completed cleanly (no transient error broke us out). Reset the
       // transient budget so it means "2 CONSECUTIVE failures", not "2 per entire run". Without this a
       // single early network blip permanently spends the budget, and a later unrelated blip — hours
       // into a long autonomous run — would kill the loop instead of retrying.
       transientRetries = 0;
-
-      // Enforce the output contract: strip leaked tool-meta filler before it can
-      // land in the reply or the history, and learn whether the turn was nothing but.
-      const sanitized = responseSanitizer.sanitize(currentContent);
-      currentContent = sanitized.text;
+      contextRecoveries = 0;
+      // A pure-reasoning cutoff is not a completed turn: retain its escalation state for the retry.
+      // Any content/tool-producing or otherwise clean turn returns subsequent calls to the normal
+      // configured budget and starts a fresh escalation ladder.
+      if (!pureReasoningOverflow) {
+        nextOutputTokenBudget = undefined;
+        reasoningEscalations = 0;
+      }
 
       // Output-token cutoff: the reply (or a tool call) was severed mid-stream. A human can say
       // "continue"; headless/print runs cannot — so the loop continues for them, stitching the
       // answer together across rounds. Bounded by MAX_TRUNCATION_CONTINUES.
       if (turnTruncated) {
+        if (pureReasoningOverflow && reasoningEscalations < MAX_REASONING_ESCALATIONS) {
+          const previousBudget = callOutputTokenBudget ?? configuredBudget;
+          nextOutputTokenBudget = Math.min(previousBudget * 2, MAX_OUTPUT_TOKENS_CEILING);
+          reasoningEscalations++;
+          const message =
+            `Reasoning exceeded output budget — raising to ${nextOutputTokenBudget} and retrying ` +
+            `(${reasoningEscalations}/${MAX_REASONING_ESCALATIONS}).`;
+          cliEvents.emit('status', message);
+          cliEvents.emit('log', {
+            id: Date.now(),
+            level: 'warn',
+            text: message,
+            timestamp: new Date(),
+          });
+          continue;
+        }
         // A trailing tool call whose args were cut mid-JSON is unrunnable — drop it so the model
         // re-issues it whole next round. Earlier calls in the same turn parsed fine and still run.
         while (toolCalls.length > 0) {
@@ -374,6 +488,14 @@ export class AgentLoop {
           toolCalls.length = 0;
           toolCalls.push(...unique);
         }
+      }
+
+      // Exact prose lengths are user constraints, not optional model hints. Enrich Write calls from
+      // the live conversation BEFORE persisting their arguments or executing them: this recognizes
+      // typo-tolerant requests such as "200 wrd" and carries the target through follow-ups like
+      // "make it horror". WriteFileTool then rejects an approximate draft before disk mutation.
+      for (const tc of toolCalls) {
+        if (tc.name === 'WriteFileTool') tc.args = applyImplicitWriteConstraints(tc.args, this.messages);
       }
 
       if (toolCalls.length > 0) {
@@ -478,19 +600,29 @@ export class AgentLoop {
               // the claim's file, green repo-wide runs cover everything in the window.
               if (outcome === 'ok' && CLAIMING_TOOLS.has(tc.name)) {
                 const claimFile = pathOf(tc.args || '{}');
-                const conf = getSelfModel().confidenceFor(tc.name, domain);
-                getEpistemicLedger().openClaim(domain, conf, claimFile);
-                getEventLedger().append('claim', { tool: tc.name, domain, file: claimFile, confidence: conf });
-                // Epistemic confidence lands on the trace span so dashboards can correlate
-                // a claim's confidence with what later happened to it.
-                toolSpan.setAttribute('bimax.claim.confidence', Number(conf.toFixed(4)));
+                // Review records every successful mutation, including prose/media artifacts.
+                cliEvents.emit('review_change', { tool: tc.name, file: claimFile, callId: tc.id });
+                // Build/test verification is meaningful only for code/config-like artifacts. A
+                // story.txt or image still appears in Review, but must not open a claim that ends
+                // the turn with the nonsensical instruction to run a build/test.
+                if (requiresBuildVerification(claimFile)) {
+                  const conf = getSelfModel().confidenceFor(tc.name, domain);
+                  getEpistemicLedger().openClaim(domain, conf, claimFile);
+                  getEventLedger().append('claim', { tool: tc.name, domain, file: claimFile, confidence: conf });
+                  toolSpan.setAttribute('bimax.claim.confidence', Number(conf.toFixed(4)));
+                }
               } else if (tc.name === 'BashTool' && bashCmd && isEvidenceCommand(bashCmd)) {
                 // Exit code (when Bash declared it) beats the regex guess: a red tsc/test run
                 // returns its output with exit≠0 and used to classify 'ok', silently settling
                 // claims as GREEN. Ground truth ends that.
                 const evidenceOk = typed?.exitCode !== undefined ? typed.exitCode === 0 : outcome === 'ok';
-                const settled = getEpistemicLedger().resolve(evidenceOk, { command: bashCmd, output: result });
-                getEventLedger().append('evidence', { command: bashCmd.slice(0, 200), ok: evidenceOk, settled });
+                const resolution = getEpistemicLedger().resolveDetailed(evidenceOk, { command: bashCmd, output: result });
+                const { settled, coveredFiles, repoWide } = resolution;
+                getEventLedger().append('evidence', {
+                  command: bashCmd.slice(0, 200), ok: evidenceOk, settled, coveredFiles, repoWide,
+                });
+                // Review domain: verification truth with the REAL exit code, at the moment it lands.
+                cliEvents.emit('review_evidence', { command: bashCmd, ok: evidenceOk, settled, coveredFiles, repoWide });
               }
             } catch { /* observers are best-effort */ }
             cliEvents.emit('tool_call_result', {
@@ -645,6 +777,21 @@ export class AgentLoop {
               incomplete.map(t => `- ${t.content} (${t.status})`).join('\n') +
               `\nKeep working through them now. Don't hand back until they're all completed — or, if you're genuinely blocked, say exactly what's blocking and why.`,
           });
+          continue;
+        }
+        // Outcome convergence: TodoWrite covers procedural steps; the engine-owned contract covers
+        // the actual user outcome and attributed proof. If this turn actively touched a contract and
+        // its gate is still closed (or open but not formally finished), keep working instead of
+        // allowing a confident prose "done" to terminate the run. A genuine user-required blocker
+        // returns an empty nudge, so the agent can hand control back honestly.
+        let outcomeNudge = '';
+        try {
+          const { getOutcomeManager } = require('../outcome/outcome.manager') as typeof import('../outcome/outcome.manager');
+          outcomeNudge = getOutcomeManager().continuationPrompt();
+        } catch { /* root outcome runtime is optional in workers/tests */ }
+        if (outcomeNudge && persistenceNudges < MAX_PERSISTENCE_NUDGES) {
+          persistenceNudges++;
+          this.messages.push({ role: 'user', content: outcomeNudge });
           continue;
         }
         // A turn that produced nothing the user can see — no streamed text this turn, no

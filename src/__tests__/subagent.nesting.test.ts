@@ -12,7 +12,10 @@ describe('SpawnSubagentTool — agent-tree depth', () => {
   let spawnSpy: jest.SpyInstance;
 
   beforeEach(() => {
-    spawnSpy = jest.spyOn(globalSubAgentManager, 'spawnWorker').mockResolvedValue('done');
+    spawnSpy = jest.spyOn(globalSubAgentManager, 'spawnWorker').mockResolvedValue({
+      version: 1, taskId: 'mock', agentType: 'BiMax', report: 'done', claimedScope: '',
+      observedChangedFiles: [], startedAt: 1, endedAt: 2, toolCalls: 0,
+    });
   });
 
   afterEach(() => {

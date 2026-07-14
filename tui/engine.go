@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -16,27 +17,49 @@ import (
 // build leaves embeddedEngine nil; we also guard against a stray tiny placeholder.
 func hasEmbeddedEngine() bool { return len(embeddedEngine) > 1<<20 }
 
+func engineCacheRoots() []string {
+	roots := make([]string, 0, 3)
+	if override := os.Getenv("BIMAX_CACHE_DIR"); override != "" {
+		roots = append(roots, override)
+	}
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		roots = append(roots, dir)
+	}
+	roots = append(roots, os.TempDir())
+	return roots
+}
+
+func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, error) {
+	var lastErr error
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		dir := filepath.Join(root, "bimax")
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		path := filepath.Join(dir, "bimax-engine-"+suffix)
+		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedEngine)) {
+			return path, nil
+		}
+		if err := os.WriteFile(path, embeddedEngine, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("no writable engine cache directory: %w", lastErr)
+}
+
 // extractEmbeddedEngine writes the baked-in engine to the user cache dir (once, content-addressed)
 // and returns its path. This is what makes the shipped binary self-contained — no Node on the host.
 func extractEmbeddedEngine() (string, error) {
 	sum := sha256.Sum256(embeddedEngine)
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir = os.TempDir()
-	}
-	dir = filepath.Join(dir, "bimax")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "bimax-engine-"+hex.EncodeToString(sum[:6]))
-	// Reuse an already-extracted copy of the same content.
-	if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedEngine)) {
-		return path, nil
-	}
-	if err := os.WriteFile(path, embeddedEngine, 0o755); err != nil {
-		return "", err
-	}
-	return path, nil
+	return extractEmbeddedEngineFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
 }
 
 // ResolveRoot picks the directory the engine subprocess STARTS in. For the shipped binary that's the

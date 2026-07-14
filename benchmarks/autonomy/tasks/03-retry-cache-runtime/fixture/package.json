@@ -1,0 +1,8 @@
+{
+  "name": "autonomy-retry-cache-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs"
+  }
+}

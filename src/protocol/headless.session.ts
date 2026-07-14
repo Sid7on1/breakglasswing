@@ -71,12 +71,24 @@ export class HeadlessSession {
     });
   }
 
+  /** Whether a turn is executing right now — the heartbeat's `activeTurn` signal. */
+  get isBusy(): boolean {
+    return this.busy;
+  }
+
   /** A submitted line: a slash command or a user turn. */
   async dispatch(text: string): Promise<void> {
     const query = (text || '').trim();
     if (!query) return;
     if (query.startsWith('/')) { await this.runCommand(query); return; }
     await this.runTurn(query);
+  }
+
+  /** Engine-owned continuation turn. It uses the coordinator without fabricating user chat. */
+  async dispatchAutonomous(text: string): Promise<'completed' | 'busy' | 'failed' | 'interrupted'> {
+    const query = (text || '').trim();
+    if (!query || query.startsWith('/')) return 'failed';
+    return this.runTurn(query, { autonomous: true });
   }
 
   /**
@@ -89,10 +101,10 @@ export class HeadlessSession {
     cliEvents.emit('status', 'Interrupting…');
   }
 
-  private async runTurn(query: string): Promise<void> {
+  private async runTurn(query: string, opts: { autonomous?: boolean } = {}): Promise<'completed' | 'busy' | 'failed' | 'interrupted'> {
     if (this.busy) {
-      cliEvents.emit('status', 'Busy — finish the current turn before sending another.');
-      return;
+      if (!opts.autonomous) cliEvents.emit('status', 'Busy — finish the current turn before sending another.');
+      return 'busy';
     }
     this.busy = true;
     this.turnAbort = new AbortController();
@@ -101,15 +113,18 @@ export class HeadlessSession {
     // Snapshot the epistemic ledger so we can report THIS turn's verification posture at the end:
     // claims open on edits and resolve when a build/test run names the touched files.
     const beforeLedger = (() => { try { return getEpistemicLedger().stats(); } catch { return null; } })();
-    cliEvents.emit('message', this.msg('user', query));
+    if (!opts.autonomous) cliEvents.emit('message', this.msg('user', query));
     // Show activity IMMEDIATELY — @-mention expansion + decideTier (an LLM classifier call) below can
     // take 10-15s, during which the front-end would otherwise sit silent after the user's message.
     cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
 
-    const active = this.deps.personas[routeQuery(query)] || this.deps.personas.bimax;
+    const active = opts.autonomous
+      ? this.deps.personas.bimax
+      : (this.deps.personas[routeQuery(query)] || this.deps.personas.bimax);
     const before = active.messages.length;
     let totalChars = 0;
 
+    let result: 'completed' | 'failed' | 'interrupted' = 'failed';
     try {
       // Model-tier routing (parity with FullScreen): lite is the default responder; escalate to the
       // heavy coding model only when the turn needs it. A manual pin wins. Kicked off FIRST — it only
@@ -148,6 +163,7 @@ export class HeadlessSession {
           maxIterations: this.deps.options.maxToolIterations,
           planMode: this.deps.options.governor?.mode === 'plan',
           useLite,
+          internalTurn: opts.autonomous,
           signal: this.turnAbort.signal,
         },
       );
@@ -158,6 +174,7 @@ export class HeadlessSession {
       cliEvents.emit('cost_update', totalChars);
       // Whatever partial work streamed before the interrupt is kept; tell the user it stopped early.
       if (this.turnAbort.signal.aborted) cliEvents.emit('message', this.msg('system', '⏹ Turn interrupted.'));
+      result = this.turnAbort.signal.aborted ? 'interrupted' : 'completed';
     } catch (e: any) {
       const detail = e?.message ?? String(e);
       // A governor veto (budget cap, denied permission, plan mode) otherwise looked like a silent
@@ -183,6 +200,7 @@ export class HeadlessSession {
       }
       cliEvents.emit('spinner_state', 'idle', 'Ready');
     }
+    return result;
   }
 
   private async runCommand(query: string): Promise<void> {
@@ -206,12 +224,15 @@ export class HeadlessSession {
         cliEvents.emit('input_prompt', prompt.title, (val: string) => prompt.onResolve?.(val), { masked: !!prompt.isMasked });
       },
       executeCommand: (cmd: string) => { void this.dispatch(cmd); },
-      restoreMessages: (msgs: any[]) => {
+      // Contract: receives LLM-ready Message[] (already through messageEntriesToLLM — raw UI
+      // entries poisoned provider payloads). Returns false when refused so callers can stop.
+      restoreMessages: (msgs: any[]): boolean => {
         // Refuse to swap the history array while a turn is running — the agent loop is mutating it,
         // and replacing it mid-flight corrupts the conversation. Same guard as runTurn().
-        if (this.busy) { cliEvents.emit('status', 'Busy — finish the current turn before loading a session.'); return; }
+        if (this.busy) { cliEvents.emit('status', 'Busy — finish the current turn before loading a session.'); return false; }
         const active = this.deps.personas.bimax;
         if (active && Array.isArray(msgs)) active.messages = msgs.slice() as any;
+        return true;
       },
       // Return the live conversation so /cost, /save, /sessions et al. work (was stubbed to [], which
       // made those commands silently show nothing).

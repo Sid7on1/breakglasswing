@@ -190,6 +190,13 @@ func (m model) subAgentStatus(s SubAgent, budget int) string {
 	}
 	// No tool has run yet (agent still booting / first reasoning pass): a short "starting…" hint plus a
 	// brief task clip — never the full multi-line prompt dumped into the row.
+	if s.OutcomeTaskID != "" {
+		phase := s.Phase
+		if phase == "" {
+			phase = "working"
+		}
+		return saVerb.Render(strings.ToUpper(phase)+" ") + toolArgs.Render(clip(s.OutcomeTaskID, clampInt(budget-len(phase)-1, 8, 60)))
+	}
 	label := firstLine(s.Prompt)
 	if label == "" {
 		label = firstLine(s.Scope)

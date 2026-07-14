@@ -24,4 +24,32 @@ describe('HeadlessSession — set_tier routing parity', () => {
       { tier: 'lite', pinned: null },     // auto clears the pin; footer points at lite by default
     ]);
   });
+
+  it('runs an engine continuation without fabricating a visible user message', async () => {
+    const execute = jest.fn(async (_prompt: string, onToken: (token: string) => void, options: any) => {
+      expect(options.internalTurn).toBe(true);
+      onToken('Coordinator continued the outcome.');
+      return '';
+    });
+    const persona = { messages: [], execute } as any;
+    const llmAdapter = { userModel: 'same-model', liteModel: 'same-model' } as any;
+    const session = new HeadlessSession({
+      personas: { bimax: persona },
+      options: { llmAdapter, maxToolIterations: 5, governor: { mode: 'default' } },
+      graphStore: {} as any,
+    });
+    const messages: any[] = [];
+    const onMessage = (message: any) => messages.push(message);
+    cliEvents.on('message', onMessage);
+    try {
+      await expect(session.dispatchAutonomous('Implement the next outcome step.')).resolves.toBe('completed');
+    } finally {
+      cliEvents.off('message', onMessage);
+    }
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(messages.some(message => message.role === 'user')).toBe(false);
+    expect(messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', content: 'Coordinator continued the outcome.' }),
+    ]));
+  });
 });

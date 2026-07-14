@@ -77,5 +77,6 @@ function loadPolicy() {
   }
 }
 
-// Auto-init on load
-initPolicyEngine();
+// Auto-init in the long-lived application. Jest evaluates this module in many isolated runtimes;
+// one watcher per test file can exhaust the host descriptor limit before teardown.
+if (process.env.NODE_ENV !== 'test') initPolicyEngine();

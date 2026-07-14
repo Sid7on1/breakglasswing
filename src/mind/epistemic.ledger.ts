@@ -34,6 +34,14 @@ export interface OpenClaim {
   at: number;          // epoch ms
 }
 
+/** Engine-authored receipt describing both settlement and the exact verification scope. */
+export interface EvidenceResolution {
+  settled: number;
+  coveredFiles: string[];
+  /** True only for a successful evidence command with no path arguments. */
+  repoWide: boolean;
+}
+
 interface Bucket { n: number; correct: number }
 
 interface DomainStat { n: number; correct: number; confSum: number }
@@ -218,18 +226,19 @@ export class EpistemicLedger {
    * Hard evidence arrived (build/test run). Resolves only the open claims the evidence
    * COVERS (see module docs). Returns how many claims were settled.
    */
-  resolve(evidenceOk: boolean, opts?: { command?: string; output?: string }): number {
+  resolveDetailed(evidenceOk: boolean, opts?: { command?: string; output?: string }): EvidenceResolution {
     this.load();
     const now = Date.now();
     this.expire(now);
+    const cmdPaths = commandPathTokens(opts?.command || '');
+    const repoWide = evidenceOk && cmdPaths.length === 0;
     const inWindow = this.data.open.filter(c => now - c.at <= EVIDENCE_WINDOW_MS);
-    if (inWindow.length === 0) return 0;
+    if (inWindow.length === 0) return { settled: 0, coveredFiles: [], repoWide };
 
     // Opportunistic TDM growth: a path-scoped coverage run just PROVED which files that
     // check executes — remember it for every future attribution (v2 §3.4 tier 1).
     try { this.tdm.ingestCoverageRun(opts?.command || ''); } catch { /* best-effort */ }
 
-    const cmdPaths = commandPathTokens(opts?.command || '');
     let covered: { claim: OpenClaim; w: number }[];
 
     if (evidenceOk) {
@@ -247,7 +256,7 @@ export class EpistemicLedger {
       if (scope.length === 0) {
         this.data.unattributed++;
         this.scheduleSave();
-        return 0;
+        return { settled: 0, coveredFiles: [], repoWide: false };
       }
       covered = inWindow.map(c => ({ claim: c, w: this.coverWeight(c.file, scope) })).filter(x => x.w > 0);
       if (covered.length === 0) this.data.unattributed++;
@@ -259,7 +268,16 @@ export class EpistemicLedger {
       this.settle(covered, evidenceOk);
     }
     this.scheduleSave();
-    return covered.length;
+    return {
+      settled: covered.length,
+      coveredFiles: [...new Set(covered.map(item => item.claim.file).filter((file): file is string => !!file))].sort(),
+      repoWide,
+    };
+  }
+
+  /** Backwards-compatible count-only API used by calibration callers. */
+  resolve(evidenceOk: boolean, opts?: { command?: string; output?: string }): number {
+    return this.resolveDetailed(evidenceOk, opts).settled;
   }
 
   /**

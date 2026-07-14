@@ -1,5 +1,6 @@
 import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
+import * as os from 'os';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
 import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, SUB_READY, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
@@ -15,6 +16,8 @@ import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool, createWriteFileTool, createDeleteTool, createMakeDirTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
+import { createSymbolEditTool } from '../tools/implementations/symboledit.tool';
+import { createRelatedTestsTool } from '../tools/implementations/relatedtests.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -37,6 +40,15 @@ import { GraphStore } from '../graph/graph.store';
 import { cliEvents } from './events';
 import { floorRoot } from '../sandbox/exec.sandbox';
 import { SafetyPolicy } from '../governor/policy.engine';
+import { OutcomeManager, __setOutcomeManager } from '../outcome/outcome.manager';
+import { createOutcomeTool } from '../tools/implementations/outcome.tool';
+import { createTasksTool } from '../tools/implementations/tasks.tool';
+import {
+  CAPACITY_LEASE_ENV,
+  CAPACITY_PATH_ENV,
+  CAPACITY_RUN_ENV,
+  SubAgentCapacityCoordinator,
+} from '../core/subagent.capacity';
 
 // Core sub-agent run, transport-agnostic: build the isolated agent + tools and execute the task,
 // relaying each tool event through `emitEvent`. Shared by BOTH the worker_thread path (runWorker,
@@ -59,8 +71,23 @@ async function runSubAgentCore(
   // so this never leaks to the parent or siblings.
   const depth = Math.max(1, Number(config.depth ?? 1));
   process.env.BIMAX_SUBAGENT_DEPTH = String(depth);
+  let capacity: SubAgentCapacityCoordinator | null = null;
+  let capacityHeartbeat: ReturnType<typeof setInterval> | null = null;
+  if (config.capacityPath && config.capacityRunId) {
+    process.env[CAPACITY_PATH_ENV] = config.capacityPath;
+    process.env[CAPACITY_RUN_ENV] = config.capacityRunId;
+    if (config.capacityLeaseId) process.env[CAPACITY_LEASE_ENV] = config.capacityLeaseId;
+    capacity = new SubAgentCapacityCoordinator(config.capacityPath);
+    if (config.capacityLeaseId) {
+      capacity.heartbeat(config.capacityLeaseId, process.pid);
+      capacityHeartbeat = setInterval(() => {
+        try { capacity?.heartbeat(config.capacityLeaseId!, process.pid); } catch { /* parent TTL is fallback */ }
+      }, 10_000);
+      capacityHeartbeat.unref?.();
+    }
+  }
 
-  {
+  try {
     const pool = buildKeyPool();
     const apiKeyManager = new ApiKeyManager(pool);
     const llmAdapter = new LlmAdapter(apiKeyManager);
@@ -83,6 +110,17 @@ async function runSubAgentCore(
     governor.mode = config.parentMode as any;
 
     const toolRegistry = new ToolRegistry();
+    const workerSessionId = config.outcomeTaskId || `worker-${process.pid}-${Date.now()}`;
+    const workerOutcome = new OutcomeManager({
+      sessionId: () => workerSessionId,
+      directory: () => path.join(os.tmpdir(), 'bimax-worker-outcomes'),
+    });
+    workerOutcome.syncSession();
+    __setOutcomeManager(workerOutcome);
+    const onReviewChange = () => workerOutcome.onMutation();
+    const onReviewEvidence = (event: any) => workerOutcome.onBuildEvidence(event);
+    cliEvents.on('review_change', onReviewChange);
+    cliEvents.on('review_evidence', onReviewEvidence);
     // Must match the parent's graph backend (container.ts uses createGraphStore: SQLite when
     // available, legacy JSON otherwise), keyed off the sub-agent's project cwd — NOT
     // ~/.breakglass/graph.json, which left workers querying an empty/stale store.
@@ -99,11 +137,15 @@ async function runSubAgentCore(
     toolRegistry.register(createWriteFileTool(governor));
     toolRegistry.register(createEditFileTool(governor));
     toolRegistry.register(createMultiEditTool(governor));
+    toolRegistry.register(createSymbolEditTool(governor));
+    toolRegistry.register(createRelatedTestsTool(governor));
     toolRegistry.register(createDeleteTool(governor));
     toolRegistry.register(createMakeDirTool(governor));
     toolRegistry.register(createGrepTool(governor));
     toolRegistry.register(createGlobTool(governor));
     toolRegistry.register(createTodoWriteTool(governor));
+    toolRegistry.register(createOutcomeTool(governor));
+    toolRegistry.register(createTasksTool(governor));
     // Floored episodes are net: none — WebFetch/WebSearch run fetches from the worker thread
     // itself, where the kernel sandbox on Bash children can't reach, so simply don't arm them.
     if (!episodeFloor) toolRegistry.register(createWebFetchTool(governor));
@@ -174,6 +216,15 @@ async function runSubAgentCore(
     } finally {
       cliEvents.off('tool_call', onCall);
       cliEvents.off('tool_call_result', onResult);
+      cliEvents.off('review_change', onReviewChange);
+      cliEvents.off('review_evidence', onReviewEvidence);
+      workerOutcome.shutdown();
+      __setOutcomeManager(null);
+    }
+  } finally {
+    if (capacityHeartbeat) clearInterval(capacityHeartbeat);
+    if (capacity && config.capacityLeaseId) {
+      try { capacity.release(config.capacityLeaseId); } catch { /* TTL reclaims it */ }
     }
   }
 }

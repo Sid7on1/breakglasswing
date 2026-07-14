@@ -301,6 +301,20 @@ export class ContextManager {
   }
 
   /**
+   * Reactive cheap recovery for a provider-reported context overflow. Unlike the proactive
+   * micro-compact pass in checkAndCompact(), this is intentionally not pressure-gated: the
+   * provider has already told us the request is too large. Tool-call/result structure remains
+   * intact because microCompact only replaces old result bodies by message id.
+   */
+  reactiveDrain(messages: Message[]): { messages: Message[]; changed: boolean } {
+    const drained = this.microCompact(messages);
+    return {
+      messages: drained,
+      changed: drained.some((message, index) => message !== messages[index]),
+    };
+  }
+
+  /**
    * Layer 3 — snip: a blunt guard for runaway sessions. When the non-system history grows past
    * SNIP_TRIGGER_MESSAGES, keep only the last SNIP_KEEP_TAIL of it (plus all system messages),
    * never letting the kept window begin on an orphaned tool result.
@@ -347,7 +361,7 @@ export class ContextManager {
     return tokens;
   }
 
-  private estimateTokens(messages: Message[]): number {
+  estimateTokens(messages: Message[]): number {
     // +1 per message ≈ the joining newline the old whole-conversation encode counted.
     let total = 0;
     for (const m of messages) total += this.countMessageTokens(m) + 1;

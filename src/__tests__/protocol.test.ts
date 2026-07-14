@@ -84,6 +84,29 @@ describe('ProtocolHost', () => {
     expect(host.pendingCount()).toBe(0);
   });
 
+  it('announces approval lifecycle exactly once for review observers', () => {
+    const pending: any[] = [];
+    const resolved: any[] = [];
+    emitter.on('request_pending', (event) => pending.push(event));
+    emitter.on('request_resolved', (event) => resolved.push(event));
+    emitter.emit('diff_prompt', 'Edit foo.ts', 'diff body', () => {});
+    const req = sent.find(m => m.t === 'request') as any;
+
+    expect(pending).toEqual([{ id: req.id, kind: 'diff', question: 'Edit foo.ts', isAsk: false }]);
+    host.ingest({ t: 'reply', id: req.id, value: 'Reject' } as Inbound);
+    host.ingest({ t: 'reply', id: req.id, value: 'Approve' } as Inbound); // stale duplicate
+    expect(resolved).toEqual([{ id: req.id, value: 'Reject' }]);
+  });
+
+  it('never re-announces free-form input values that may contain secrets', () => {
+    const resolved: any[] = [];
+    emitter.on('request_resolved', (event) => resolved.push(event));
+    emitter.emit('input_prompt', 'Paste the value:', () => {}, { masked: true });
+    const req = sent.find(m => m.t === 'request') as any;
+    host.ingest({ t: 'reply', id: req.id, value: 'super-secret' } as Inbound);
+    expect(resolved).toEqual([]);
+  });
+
   it('translates a diff_prompt into a diff request carrying the diff body', () => {
     let approved: string | undefined;
     emitter.emit('diff_prompt', 'Edit foo.ts', '@@ -1 +1 @@\n-old\n+new', (a: string) => { approved = a; });
@@ -120,6 +143,17 @@ describe('ProtocolHost', () => {
   it('answers a ping with a pong echoing the id (the TUI heartbeat)', () => {
     host.ingest({ t: 'ping', id: 7 } as Inbound);
     expect(sent).toContainEqual({ t: 'pong', id: 7 });
+  });
+
+  it('routes validated shell controls as one atomic handler call', () => {
+    const controls: any[] = [];
+    const controlHost = new ProtocolHost(() => {}, { onControls: (value) => { controls.push(value); } });
+    controlHost.ingest({ t: 'controls', mode: 'code', tier: 'heavy', autonomy: 'ask' });
+    controlHost.ingest({ t: 'controls', mode: 'invalid' as any, tier: 'lite' });
+    expect(controls).toEqual([
+      { mode: 'code', tier: 'heavy', autonomy: 'ask' },
+      { mode: undefined, tier: 'lite', autonomy: undefined },
+    ]);
   });
 
   it('does not leak listeners after detach', () => {

@@ -9,6 +9,8 @@ interface TrainLaunchArgs {
   dir?: string;
   smoke?: boolean;
   script?: string;
+  wait_for_ready?: boolean;
+  timeout_ms?: number;
 }
 
 /**
@@ -22,7 +24,7 @@ export const createTrainLaunchTool = (governor: IGovernor) => buildTool({
   description: `Launch (and manage) a generated LLM training run from a built Blueprint scaffold. Runs the emitted train.py as a background process and auto-wires monitoring.
 
 # Actions
-- **launch**: Start a run. Pass run (a name, usually the Blueprint slug) and dir (the build dir, e.g. .bimax/builds/<slug>). Optional script — "train.py" (default) to train, or "eval.py" to run the eval harness (perplexity / lm-eval-harness benchmarks → eval_results.json). Set smoke=true for a dependency-free offline dry run that proves the pipeline without torch/data/GPU; omit it for the real run. Training launches auto-register with TrainMonitorTool.
+- **launch**: Start a run. Pass run (a name, usually the Blueprint slug) and dir (the build dir, e.g. .bimax/builds/<slug>). Optional script — "train.py" (default) to train, or "eval.py" to run the eval harness (perplexity / lm-eval-harness benchmarks → eval_results.json). Set smoke=true for a dependency-free offline dry run that proves the pipeline without torch/data/GPU; omit it for the real run. Set wait_for_ready=true to wait for fresh metrics/results from this exact launch (timeout_ms defaults to 30000). Training launches auto-register with TrainMonitorTool.
 - **status**: Process + progress for a run. Pass run. Shows pid, running/stopped, metric steps written (train) or eval_results.json (eval), and the tail of the run log.
 - **stop**: Terminate a running launch (SIGTERM). Pass run.
 - **list**: List launched runs.
@@ -39,6 +41,8 @@ After BlueprintTool build emits an LLM scaffold: launch smoke=true first to conf
       dir: { type: 'string', description: 'Build dir containing the script, e.g. .bimax/builds/<slug> (required for launch).' },
       smoke: { type: 'boolean', description: 'Dependency-free offline dry run (optional; default false = real run).' },
       script: { type: 'string', enum: ['train.py', 'eval.py'], description: 'Which entrypoint to run (optional; default train.py). Use eval.py for the eval harness.' },
+      wait_for_ready: { type: 'boolean', description: 'Wait for fresh metrics/results from this launch before returning (optional; default false).' },
+      timeout_ms: { type: 'number', minimum: 100, maximum: 300000, description: 'Readiness timeout in milliseconds when wait_for_ready=true (default 30000).' },
     },
     required: ['action'],
   },
@@ -56,7 +60,15 @@ After BlueprintTool build emits an LLM scaffold: launch smoke=true first to conf
         let wired = '';
         if (mon && !isEval) { mon.watch(r.run, r.metrics); wired = `\nMonitoring auto-wired → TrainMonitorTool status run="${r.run}".`; }
         const out = isEval ? `eval_results.json (read it via status)` : `metrics: ${r.metrics}`;
-        return `Launched "${r.run}" (${r.script}, pid ${r.pid})${r.smoke ? ' [smoke / dep-free]' : ''}.\n  ${r.cmd}\n  log: ${r.log}\n  ${out}${wired}\nPoll progress: TrainLaunchTool status run="${r.run}".`;
+        let readiness = '';
+        if (args.wait_for_ready) {
+          const result = await launcher.waitUntilReady(r.run, { timeoutMs: args.timeout_ms });
+          if ('error' in result) return `Error: ${result.error}`;
+          readiness = result.ready
+            ? `\nReady: ${result.reason}.`
+            : `\nNot ready: ${result.reason}\n${launcher.format(result.status)}`;
+        }
+        return `Launched "${r.run}" (${r.script}, pid ${r.pid})${r.smoke ? ' [smoke / dep-free]' : ''}.\n  ${r.cmd}\n  log: ${r.log}\n  ${out}${wired}${readiness}\nPoll progress: TrainLaunchTool status run="${r.run}".`;
       }
       case 'status': {
         if (!args.run) return 'Error: run is required for "status".';

@@ -32,6 +32,18 @@ type Outbound struct {
 	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
 	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
 	Config   json.RawMessage   `json:"config,omitempty"`   // configResult (v3) — allowlisted settings subset
+
+	// boot + health (v3 additive) — startup phases and the engine's liveness heartbeat. Emitted for
+	// supervising front-ends (the desktop app); this TUI decodes them for contract coverage and may
+	// surface them later, but safely ignores them today.
+	Phase            string `json:"phase,omitempty"`            // boot: startup phase | health: "ready"
+	Detail           string `json:"detail,omitempty"`           // boot: human-readable step detail
+	PID              int    `json:"pid,omitempty"`              // boot: engine process id
+	UptimeMs         int    `json:"uptimeMs,omitempty"`         // health
+	RssMb            int    `json:"rssMb,omitempty"`            // health
+	HeapMb           int    `json:"heapMb,omitempty"`           // health
+	EventLoopDelayMs int    `json:"eventLoopDelayMs,omitempty"` // health: p99 since last beat
+	ActiveTurn       bool   `json:"activeTurn,omitempty"`       // health: a user turn is executing
 }
 
 // CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.
@@ -115,6 +127,42 @@ type UiSnapshot struct {
 	CompressionSaved int `json:"compressionSaved"`
 	// Multi-repo workspace working set (count <= 1 = single-repo session; chip hidden).
 	Workspace WorkspaceStrip `json:"workspace"`
+}
+
+// OutcomeStrip — the compact engine-owned completion snapshot sent by outcome_update. It is a
+// separate event (rather than ui_snapshot polling) because criteria/tasks can change many times in
+// one turn. Null means the current thread has no substantial outcome contract.
+type OutcomeStrip struct {
+	SessionID           string          `json:"sessionId"`
+	Objective           string          `json:"objective"`
+	Phase               string          `json:"phase"`
+	Iteration           int             `json:"iteration"`
+	ElapsedMs           int64           `json:"elapsedMs"`
+	Passed              int             `json:"passed"`
+	Required            int             `json:"required"`
+	OpenTasks           int             `json:"openTasks"`
+	ActiveTasks         int             `json:"activeTasks"`
+	RecoveringTasks     int             `json:"recoveringTasks"`
+	ContinuationState   string          `json:"continuationState"`
+	ContinuationWakeups int             `json:"continuationWakeups"`
+	OpenGaps            int             `json:"openGaps"`
+	CanComplete         bool            `json:"canComplete"`
+	NextAction          string          `json:"nextAction"`
+	Schedule            OutcomeSchedule `json:"schedule"`
+	UpdatedAt           int64           `json:"updatedAt"`
+}
+
+type OutcomeSchedule struct {
+	MaxParallel       int      `json:"maxParallel"`
+	ActiveAgents      int      `json:"activeAgents"`
+	ReadyTasks        int      `json:"readyTasks"`
+	WaitingTasks      int      `json:"waitingTasks"`
+	BlockedTasks      int      `json:"blockedTasks"`
+	ParallelTasks     int      `json:"parallelTasks"`
+	CriticalTaskID    string   `json:"criticalTaskId"`
+	CriticalTaskTitle string   `json:"criticalTaskTitle"`
+	CriticalPath      []string `json:"criticalPath"`
+	DispatchTaskIDs   []string `json:"dispatchTaskIds"`
 }
 
 // WorkspaceStrip — the multi-repo workspace summary for the status bar: how many repos are in
@@ -229,16 +277,18 @@ type TodoItem struct {
 // SubAgent mirrors the engine's SubAgentClaim (subagent.blackboard.ts) — one row per spawned
 // sub-agent, forwarded live via the subagent_update event and drawn in the sub-agent panel.
 type SubAgent struct {
-	TaskID    string `json:"taskId"`
-	AgentType string `json:"agentType"`
-	Scope     string `json:"scope"`
-	Prompt    string `json:"prompt"`
-	Status    string `json:"status"` // "running" | "done" | "failed"
-	ToolCalls int    `json:"toolCalls"`
-	StartedAt int64  `json:"startedAt"`
-	EndedAt   int64  `json:"endedAt"`
-	Result    string `json:"result"`
-	Error     string `json:"error"`
+	TaskID        string `json:"taskId"`
+	OutcomeTaskID string `json:"outcomeTaskId"`
+	AgentType     string `json:"agentType"`
+	Scope         string `json:"scope"`
+	Prompt        string `json:"prompt"`
+	Status        string `json:"status"` // "running" | "done" | "failed"
+	Phase         string `json:"phase"`
+	ToolCalls     int    `json:"toolCalls"`
+	StartedAt     int64  `json:"startedAt"`
+	EndedAt       int64  `json:"endedAt"`
+	Result        string `json:"result"`
+	Error         string `json:"error"`
 }
 
 // Menu — a command result forwarded as a `message` with uiComponent="menu". InitialIndex is the
@@ -304,6 +354,20 @@ func encodeConfigGet(id int) []byte {
 // encodeConfigSet merges a settings patch into the engine config (v3).
 func encodeConfigSet(id int, patch map[string]any) []byte {
 	b, _ := json.Marshal(map[string]any{"t": "configSet", "id": id, "patch": patch})
+	return append(b, '\n')
+}
+
+// encodeResume asks the engine to restore a saved session by id — the typed equivalent of the
+// user's /resume (recovery front-ends use it so they never synthesize slash-command text).
+func encodeResume(id string) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "resume", "id": id})
+	return append(b, '\n')
+}
+
+// encodeControls atomically applies desktop-style shell controls. The TUI currently uses its
+// native keybindings/commands, but carrying the encoder keeps every protocol variant covered.
+func encodeControls(mode, tier, autonomy string) []byte {
+	b, _ := json.Marshal(map[string]any{"t": "controls", "mode": mode, "tier": tier, "autonomy": autonomy})
 	return append(b, '\n')
 }
 

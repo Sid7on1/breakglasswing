@@ -80,6 +80,34 @@ func TestFooterState(t *testing.T) {
 	}
 }
 
+func TestOutcomeStripUsesEngineCompletionFacts(t *testing.T) {
+	m, _ := newTestModel()
+	m.width = 140
+	m.handleEngine(ev("outcome_update", map[string]any{
+		"sessionId": "s1", "objective": "Implement the verified outcome runtime",
+		"phase": "verifying", "iteration": 7, "elapsedMs": 125000,
+		"passed": 4, "required": 6, "openTasks": 2, "activeTasks": 1, "recoveringTasks": 1,
+		"continuationState": "running", "continuationWakeups": 2,
+		"openGaps": 2, "canComplete": false,
+		"schedule": map[string]any{"activeAgents": 2, "readyTasks": 1, "waitingTasks": 1, "blockedTasks": 1, "parallelTasks": 3, "criticalTaskTitle": "API integration"},
+	}))
+	strip := stripANSI(m.outcomeStripView())
+	for _, want := range []string{"LOOP 7", "VERIFYING", "4/6 PASSED", "2 GAPS", "2 TASKS", "3∥", "RUN 2", "RECOVER 1", "AUTO 2", "READY 1", "WAIT 1", "BLOCK 1", "CRIT API integration"} {
+		if !strings.Contains(strip, want) {
+			t.Errorf("outcome strip missing %q in %q", want, strip)
+		}
+	}
+	if got := lipgloss.Width(m.outcomeStripView()); got > m.width-2 {
+		t.Fatalf("outcome strip width %d exceeds budget %d", got, m.width-2)
+	}
+
+	// Null clears the strip when a new/simple thread has no substantial outcome contract.
+	m.handleEngine(ev("outcome_update", nil))
+	if m.fOutcome != nil || m.outcomeStripView() != "" {
+		t.Fatal("null outcome update should clear the compact strip")
+	}
+}
+
 func TestInterruptWhileBusy(t *testing.T) {
 	m, buf := newTestModel()
 
@@ -1170,7 +1198,7 @@ func TestDashboardRouting(t *testing.T) {
 		}},
 	}))
 	joined := stripANSI(strings.Join(m.lines, "\n"))
-	if !strings.Contains(joined, "/help") || !strings.Contains(joined, "Show help") {
+	if !strings.Contains(joined, "help") || strings.Contains(joined, "/help") || !strings.Contains(joined, "Show help") {
 		t.Fatalf("help dashboard not rendered: %q", joined)
 	}
 }

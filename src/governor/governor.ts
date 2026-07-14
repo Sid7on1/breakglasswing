@@ -23,6 +23,7 @@ export class Governor implements IGovernor {
   public fs: FileSystemVeto;
   private _mode: SessionPermissionMode = 'interactive';
   private bashAnalyzer = new BashStaticAnalyzer();
+  private readonly analyzerWarmup: Promise<void>;
 
   // mode is assigned directly in many places (index.ts, /governor, /plan, …). Route those writes
   // through a setter so disabling the governor (bypass) ALSO lifts the budget veto, which the LLM
@@ -37,11 +38,17 @@ export class Governor implements IGovernor {
   constructor(private eventBus: IEventBus, private yolo?: YoloClassifier) {
     this.budget = new BudgetVeto();
     this.fs = new FileSystemVeto();
-    // Pre-load the tree-sitter-bash grammar so command analysis uses the AST path. Fire-and-forget:
-    // analyze() stays synchronous and falls back to regex until (and if ever) the grammar is ready.
-    void this.bashAnalyzer.warmUp();
+    // Pre-load the grammar in the long-lived application. Unit tests construct many short-lived
+    // governors; their fire-and-forget WASM loads can outlive Jest environments, so those tests use
+    // the deterministic regex path unless they explicitly await BashStaticAnalyzer.warmUp().
+    this.analyzerWarmup = process.env.NODE_ENV === 'test'
+      ? Promise.resolve()
+      : this.bashAnalyzer.warmUp();
     Logger.info('[Governor] Initialized Multi-Layer Permission Engine.');
   }
+
+  /** Lets lifecycle-aware hosts await the optional AST safety-parser warm-up. */
+  public async ready(): Promise<void> { await this.analyzerWarmup; }
 
   public addRule(rule: ToolPermissionRule) {
     this.rules.push(rule);

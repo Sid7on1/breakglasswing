@@ -3,13 +3,14 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   saveCheckpoint, loadCrashedAgents, resumeConfigFor, clearCheckpoint, CheckpointedAgent,
+  planAutomaticRecovery,
 } from '../core/agent.checkpoint';
 
 function agent(status: 'running' | 'done' | 'failed', prompt = 'refactor the auth flow'): CheckpointedAgent {
   return {
     claim: {
       taskId: `subagent-${status}-1`, agentType: 'BiMax', scope: 'src/auth', prompt: prompt.slice(0, 120),
-      status, startedAt: Date.now() - 5000, toolCalls: 7,
+      status, phase: status === 'running' ? 'working' : status, startedAt: Date.now() - 5000, toolCalls: 7,
     },
     config: { agentType: 'BiMax', prompt, cwd: '/tmp/proj', parentMode: 'default', scope: 'src/auth' },
   };
@@ -60,12 +61,61 @@ describe('agent-tree checkpointing', () => {
   });
 
   it('resumeConfigFor prefixes the prompt with crash context and progress', () => {
-    const cfg = resumeConfigFor(agent('running'));
+    const original = agent('running');
+    original.config.capacityPath = '/tmp/old-capacity.json';
+    original.config.capacityRunId = 'dead-run';
+    original.config.capacityLeaseId = 'dead-lease';
+    original.config.capacityParentLeaseId = 'dead-parent';
+    const cfg = resumeConfigFor(original);
     expect(cfg.prompt).toContain('[RESUMED AFTER CRASH]');
     expect(cfg.prompt).toContain('7 tool call(s)');
     expect(cfg.prompt).toContain('refactor the auth flow');
     expect(cfg.agentType).toBe('BiMax');
     expect(cfg.scope).toBe('src/auth');
+    expect(cfg.capacityPath).toBeUndefined();
+    expect(cfg.capacityRunId).toBeUndefined();
+    expect(cfg.capacityLeaseId).toBeUndefined();
+    expect(cfg.capacityParentLeaseId).toBeUndefined();
+    expect(cfg.recoveryOf).toBe(original.claim.taskId);
+  });
+
+  it('allows unattended recovery only for recent, bounded work in one outcome session', () => {
+    const recoverable = agent('running');
+    recoverable.config.outcomeTaskId = 'build';
+    recoverable.config.outcomeSessionId = 'session-1';
+    expect(planAutomaticRecovery([recoverable], { now: Date.now() })).toMatchObject({
+      automatic: true, sessionId: 'session-1', agents: [recoverable],
+    });
+
+    const bypass = agent('running');
+    bypass.config.outcomeTaskId = 'research';
+    bypass.config.outcomeSessionId = 'session-1';
+    bypass.config.parentMode = 'bypass';
+    expect(planAutomaticRecovery([bypass])).toMatchObject({ automatic: false, reason: expect.stringMatching(/bypass/i) });
+
+    const otherSession = agent('running', 'other task');
+    otherSession.claim.taskId = 'subagent-other';
+    otherSession.config.outcomeTaskId = 'other';
+    otherSession.config.outcomeSessionId = 'session-2';
+    expect(planAutomaticRecovery([recoverable, otherSession])).toMatchObject({
+      automatic: false, reason: expect.stringMatching(/multiple outcome sessions/i),
+    });
+
+    const duplicate = agent('running', 'duplicate worker');
+    duplicate.claim.taskId = 'subagent-duplicate';
+    duplicate.config.outcomeTaskId = 'build';
+    duplicate.config.outcomeSessionId = 'session-1';
+    expect(planAutomaticRecovery([recoverable, duplicate])).toMatchObject({
+      automatic: false, reason: expect.stringMatching(/duplicate workers/i),
+    });
+
+    const malformed = agent('running');
+    malformed.config.outcomeTaskId = 'malformed';
+    malformed.config.outcomeSessionId = 'session-1';
+    malformed.claim.startedAt = Number.NaN;
+    expect(planAutomaticRecovery([malformed])).toMatchObject({
+      automatic: false, reason: expect.stringMatching(/too old/i),
+    });
   });
 
   it('clearCheckpoint removes the file', () => {

@@ -30,7 +30,10 @@ globalCommandRegistry.register({
     }
     const label = args.join(' ').trim() || 'manual checkpoint';
     const cp = globalCheckpointManager.create(label, false);
-    if (!cp) return { type: 'message', level: 'error', content: 'Failed to create checkpoint.' };
+    if (!cp) {
+      cliEvents.emit('checkpoint_failed', label); // review domain records the failed attempt
+      return { type: 'message', level: 'error', content: 'Failed to create checkpoint.' };
+    }
     cliEvents.emit('timemachine_changed'); // ui_snapshot.checkpoints → front-end History strips
     return { type: 'message', level: 'success', content: `📸 Checkpoint ${cp.id} saved — "${cp.label}". Use /rewind to restore.` };
   }

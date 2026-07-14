@@ -1,6 +1,7 @@
 import { globalCommandRegistry } from './registry';
 import { perfSnapshot, PerfSnapshot } from '../../telemetry/perf';
 import { guardTimings } from '../../tools/guard.timing';
+import { performanceBudgetReport } from '../../telemetry/performance.budget';
 
 /**
  * /perf — a hidden diagnostics readout of the engine's own performance: cold-start (process load →
@@ -22,6 +23,24 @@ export function renderPerf(s: PerfSnapshot): string {
   if (s.lastTurn) {
     lines.push(`  Last turn:                  first token ${ms(s.lastTurn.firstTokenMs)} · total ${ms(s.lastTurn.totalMs)} · ${s.lastTurn.tokens} chars`);
   }
+
+  lines.push('', '  Performance budgets:');
+  for (const check of performanceBudgetReport(s)) {
+    const state = !check.measured ? '○ unmeasured' : check.pass ? '✓ pass' : '✗ over';
+    lines.push(`    ${check.metric.padEnd(20)} ${state} · ${check.value || '—'} / ${check.budget} ${check.unit}`);
+  }
+
+  try {
+    const snapshot = require('../../outcome/outcome.manager').getOutcomeManager().snapshot();
+    if (snapshot) {
+      const schedule = snapshot.schedule;
+      lines.push('', '  Active outcome:');
+      lines.push(`    elapsed                  ${ms(snapshot.elapsedMs)}`);
+      lines.push(`    time to verified         ${snapshot.timeToVerifiedMs ? ms(snapshot.timeToVerifiedMs) : 'in progress'}`);
+      lines.push(`    estimated parallel save  ${ms(schedule.estimatedParallelSavingsMs)}`);
+      lines.push(`    remaining critical path  ${ms(schedule.estimatedCriticalPathMs)}`);
+    }
+  } catch { /* /perf also works before the outcome runtime starts */ }
 
   // WS5 step 3 — guard pipeline timing. Shows whether tool latency is spent in the guards
   // (governor approval, hooks) or in the tool itself, so a slow guard is caught, not blamed.

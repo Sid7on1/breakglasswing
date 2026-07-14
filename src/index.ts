@@ -121,6 +121,12 @@ async function main() {
     try { process.chdir(process.env.BIMAX_CWD); } catch { /* keep current cwd on failure */ }
   }
 
+  // Supervised launches (the desktop) see real startup phases on stdout instead of silence until
+  // `ready`. No-ops outside headless mode (boot.status gates on BIMAX_HEADLESS).
+  const { reportBootPhase } = await import('./protocol/boot.status');
+  reportBootPhase('booting');
+
+  reportBootPhase('loading_storage');
   const config = await loadConfig();
   if (config.customRoutingRules.length > 0) {
     setCustomRoutingRules(config.customRoutingRules);

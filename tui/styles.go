@@ -2,30 +2,29 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// Lip Gloss palette for the BiMax TUI — the "Graphite & Phosphor" design system (supersedes the old
-// Ink terracotta port). Instrument-grade and content-first: cool graphite neutrals carry the chrome,
-// a SINGLE phosphor accent marks only what is live / focused / active, and functional (Braun-dot)
+// Lip Gloss palette for the Bimax TUI — the same warm Graphite system as the desktop app.
+// Quiet graphite neutrals carry the chrome, one ember accent marks what is live/focused, and functional
 // semantics are reserved strictly for state. Truecolor hex; lipgloss degrades it for 256/16-color
 // terminals automatically. We paint foreground only — the ground is the user's own terminal.
 var (
-	// Graphite & Phosphor core palette.
-	colAccent   = lipgloss.Color("#7EE7C4") // Phosphor — the one signal accent (live / focus / active)
-	colShimmer  = lipgloss.Color("#B8F2E0") // lighter phosphor for the shimmer highlight / logo mid-row
-	colText     = lipgloss.Color("#EDEFF2") // Mist — primary text
-	colInactive = lipgloss.Color("#9AA1AC") // secondary text / summaries (cool graphite)
-	colSubtle   = lipgloss.Color("#626974") // tertiary — dim chrome (gutters, hints)
-	colDim      = lipgloss.Color("#444A54") // faint graphite — DECORATIVE ONLY (panel hairline borders,
+	// Warm Graphite core palette — synchronized with app/src/renderer/src/styles.css.
+	colAccent   = lipgloss.Color("#D78562") // Ember — the one signal accent (live / focus / active)
+	colShimmer  = lipgloss.Color("#E59A77") // lighter ember for subtle live shimmer
+	colText     = lipgloss.Color("#F1EFE9") // warm primary ink
+	colInactive = lipgloss.Color("#B0ADA5") // secondary text / summaries
+	colSubtle   = lipgloss.Color("#77746E") // tertiary — dim chrome (gutters, hints)
+	colDim      = lipgloss.Color("#383734") // faint graphite — DECORATIVE ONLY (panel hairline borders,
 	//                                         empty meter track); 2.2:1, WCAG-exempt. Never use for text.
-	colUser     = lipgloss.Color("#EDEFF2") // user lines: bright, marked by the phosphor caret
-	colAsst     = lipgloss.Color("#EDEFF2")
-	colTool     = lipgloss.Color("#5FD08A") // ok green (Braun dot)
-	colErr      = lipgloss.Color("#E5534B") // signal red
-	colWarn     = lipgloss.Color("#E0B341") // sodium amber (running / in-progress / warn)
-	colOK       = lipgloss.Color("#5FD08A")
-	colInfo     = lipgloss.Color("#6E9BFF") // info blue (agent labels)
-	colDiffAdd  = lipgloss.Color("#7EE7A0") // diff add prefix / word fg
-	colDiffDel  = lipgloss.Color("#F08A82") // diff remove prefix / word fg
-	colHunk     = lipgloss.Color("#57C7C7")
+	colUser    = lipgloss.Color("#F1EFE9")
+	colAsst    = lipgloss.Color("#F1EFE9")
+	colTool    = lipgloss.Color("#82AD89")
+	colErr     = lipgloss.Color("#DF766F")
+	colWarn    = lipgloss.Color("#D4A35F")
+	colOK      = lipgloss.Color("#82AD89")
+	colInfo    = lipgloss.Color("#78A9D4")
+	colDiffAdd = lipgloss.Color("#82AD89")
+	colDiffDel = lipgloss.Color("#DF766F")
+	colHunk    = lipgloss.Color("#78A9D4")
 
 	// Extended semantic tokens (WS3-B) — named so NO style below carries a raw hex; this block is
 	// the single source of truth for every colour in the TUI's chrome. (The code-syntax palette in
@@ -132,13 +131,13 @@ var (
 	searchWarn    = lipgloss.NewStyle().Foreground(colWarn)
 
 	// Structured log view (Ctrl+O): a TIME | LEVEL | MESSAGE table with level-colored rows.
-	logHdr   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
-	logTime  = lipgloss.NewStyle().Foreground(colSubtle)
-	logErr   = lipgloss.NewStyle().Foreground(colErr)
-	logWarn  = lipgloss.NewStyle().Foreground(colWarn)
-	logOK    = lipgloss.NewStyle().Foreground(colOK)
-	logInfo  = lipgloss.NewStyle().Foreground(colText)
-	logDim   = lipgloss.NewStyle().Foreground(colSubtle) // debug level — dimmer than info, but text so it
+	logHdr  = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
+	logTime = lipgloss.NewStyle().Foreground(colSubtle)
+	logErr  = lipgloss.NewStyle().Foreground(colErr)
+	logWarn = lipgloss.NewStyle().Foreground(colWarn)
+	logOK   = lipgloss.NewStyle().Foreground(colOK)
+	logInfo = lipgloss.NewStyle().Foreground(colText)
+	logDim  = lipgloss.NewStyle().Foreground(colSubtle) // debug level — dimmer than info, but text so it
 	//                                                       stays readable (colSubtle 3.5:1, not colDim 2.2:1)
 	logPanel = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colDim).Padding(0, 1)
 

@@ -17,7 +17,7 @@ export class OpenCodePersona extends AgentPersona {
     super({
       name: 'OpenCode',
       roleDescription: 'Deep coding agent. You modify files and read the graph, but you do not run destructive OS commands natively.',
-      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
+      allowedTools: ['ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'SymbolEditTool', 'RelatedTestsTool', 'DeleteTool', 'CreateDirectoryTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'OutcomeTool', 'TasksTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool']
     }, registry, llmAdapter);
   }
 }
@@ -37,7 +37,7 @@ export class BiMaxPersona extends AgentPersona {
     super({
       name: 'BiMax CLI',
       roleDescription: 'The God-Mode Orchestrator. You are BiMax, the primary chat and vibe-coding agent. You have access to every tool and can spawn sub-agents if needed. When a user installs a new CLI tool (via curl | bash, npm install -g, brew install, etc.), use RegisterAgentTool to register it as a new agent persona.',
-      allowedTools: ['BashTool', 'ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool', 'CreateDirectoryTool', 'WebFetchTool', 'WebSearchTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool', 'SkillInstallTool', 'McpManageTool']
+      allowedTools: ['BashTool', 'ReadFileTool', 'GrepTool', 'GlobTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'SymbolEditTool', 'RelatedTestsTool', 'DeleteTool', 'CreateDirectoryTool', 'WebFetchTool', 'WebSearchTool', 'GraphQueryTool', 'GraphContextTool', 'LspQueryTool', 'GitTool', 'TodoWriteTool', 'OutcomeTool', 'TasksTool', 'MemoryQueryTool', 'RememberTool', 'SpawnSubagentTool', 'RegisterAgentTool', 'ChangeDirectoryTool', 'AskUserTool', 'SkillTool', 'SkillInstallTool', 'McpManageTool']
     }, registry, llmAdapter);
   }
 }

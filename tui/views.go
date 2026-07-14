@@ -43,7 +43,7 @@ func (m model) promptView() string {
 			if i == m.reqIdx {
 				cursor = userStyle.Render("❯ ")
 			}
-			
+
 			box := ""
 			if m.reqIsMulti {
 				box = "[ ] "
@@ -60,13 +60,13 @@ func (m model) promptView() string {
 				fmt.Fprintf(&b, "%s%s%s\n", cursor, numStr, op)
 			}
 		}
-		
+
 		// The extra custom type-in option
 		cursor := "  "
 		if m.reqIdx == len(m.reqOpts) {
 			cursor = userStyle.Render("❯ ")
 		}
-		
+
 		fmt.Fprintf(&b, "%s%d) Explain your answer:\n", cursor, len(m.reqOpts)+1)
 		if m.reqIdx == len(m.reqOpts) {
 			// Render the textarea directly inline!
@@ -78,7 +78,7 @@ func (m model) promptView() string {
 			}
 			fmt.Fprintf(&b, "    %s\n", dimStyle.Render(val))
 		}
-		
+
 		hints := "↑/↓ navigate · enter to submit · esc to dismiss"
 		if m.reqIsMulti {
 			hints = "↑/↓ navigate · space select · enter to submit · esc to dismiss"
@@ -342,7 +342,7 @@ func (m model) footerLine() string {
 		modelStyle = footerTier
 	}
 	modelRendered := modelStyle.Render(mstr)
-	hints := footerHint.Render("Ctrl+G palette · Ctrl+F search · Ctrl+O logs · Esc stash")
+	hints := footerHint.Render("Ctrl+G actions · Ctrl+F search · Ctrl+O activity · Esc stash")
 
 	// Build to m.width-5, NOT the full width. A line that fills the last column trips the terminal's
 	// auto-wrap, which slides the cursor to the next row and desyncs Bubble Tea's inline clear — the
@@ -425,8 +425,12 @@ func (c rgb) hex() string {
 }
 
 func lerpRGB(a, b rgb, t float64) rgb {
-	if t < 0 { t = 0 }
-	if t > 1 { t = 1 }
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
 	return rgb{
 		r: a.r + (b.r-a.r)*t,
 		g: a.g + (b.g-a.g)*t,
@@ -435,7 +439,7 @@ func lerpRGB(a, b rgb, t float64) rgb {
 }
 
 var (
-	baseRGB    = rgb{126, 231, 196} // colAccent (#7EE7C4) — phosphor
+	baseRGB    = rgb{215, 133, 98}  // colAccent (#D78562) — ember
 	shimmerRGB = rgb{232, 255, 248} // near-white with a cool phosphor cast for the highlight
 	errorRGB   = rgb{229, 83, 75}   // colErr (#E5534B) — signal red
 )
@@ -567,6 +571,63 @@ func (m model) healthLineView() string {
 	}
 	line := warnStyle.Render("◇ ") + strings.Join(parts, footerSep) + subtleStyle.Render("  ⌃X")
 	// Never reach the last column — a full-width line ghosts on resize (same rule as the map/meter).
+	return lipgloss.NewStyle().MaxWidth(m.width - 2).Render(line)
+}
+
+// outcomeStripView is the single compact, truthful task strip from MASTER_CLI.md. Counts come from
+// the engine's completion gate—not model prose—so "4/6 passed" always means attributed evidence.
+func (m model) outcomeStripView() string {
+	o := m.fOutcome
+	if o == nil || strings.TrimSpace(o.Objective) == "" {
+		return ""
+	}
+	phase := strings.ToUpper(strings.ReplaceAll(o.Phase, "_", " "))
+	parts := []string{fmt.Sprintf("LOOP %d", max(1, o.Iteration)), phase}
+	if o.Required > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d PASSED", o.Passed, o.Required))
+	}
+	if o.OpenGaps > 0 {
+		parts = append(parts, fmt.Sprintf("%d GAPS", o.OpenGaps))
+	}
+	if o.OpenTasks > 0 {
+		parts = append(parts, fmt.Sprintf("%d TASKS", o.OpenTasks))
+	}
+	if o.Schedule.ParallelTasks > 0 {
+		parts = append(parts, fmt.Sprintf("%d∥", o.Schedule.ParallelTasks))
+	}
+	if o.Schedule.ActiveAgents > 0 {
+		parts = append(parts, fmt.Sprintf("RUN %d", o.Schedule.ActiveAgents))
+	}
+	if o.RecoveringTasks > 0 {
+		parts = append(parts, fmt.Sprintf("RECOVER %d", o.RecoveringTasks))
+	}
+	if o.ContinuationState == "running" || o.ContinuationState == "pending" {
+		parts = append(parts, fmt.Sprintf("AUTO %d", o.ContinuationWakeups))
+	} else if o.ContinuationState == "halted" {
+		parts = append(parts, "AUTO PAUSED")
+	}
+	if o.Schedule.ReadyTasks > 0 {
+		parts = append(parts, fmt.Sprintf("READY %d", o.Schedule.ReadyTasks))
+	}
+	if o.Schedule.WaitingTasks > 0 {
+		parts = append(parts, fmt.Sprintf("WAIT %d", o.Schedule.WaitingTasks))
+	}
+	if o.Schedule.BlockedTasks > 0 {
+		parts = append(parts, fmt.Sprintf("BLOCK %d", o.Schedule.BlockedTasks))
+	}
+	if o.Schedule.CriticalTaskTitle != "" {
+		parts = append(parts, "CRIT "+clip(o.Schedule.CriticalTaskTitle, 24))
+	}
+	if o.ElapsedMs >= 60_000 {
+		parts = append(parts, fmt.Sprintf("%dm", o.ElapsedMs/60_000))
+	}
+	style := footerTier
+	if o.Phase == "blocked" || o.Phase == "failed" {
+		style = warnStyle
+	} else if o.CanComplete || o.Phase == "verified" {
+		style = logOK
+	}
+	line := style.Render("◆ "+strings.Join(parts, " · ")) + subtleStyle.Render("  "+clip(o.Objective, 52))
 	return lipgloss.NewStyle().MaxWidth(m.width - 2).Render(line)
 }
 

@@ -1,0 +1,11 @@
+{
+  "id": "02-ledger-contract-refactor",
+  "fixture": "fixture",
+  "promptFile": "prompt.md",
+  "trajectoryFile": "trajectory.json",
+  "successCheck": {
+    "command": "node",
+    "args": ["./check.mjs"],
+    "timeoutMs": 30000
+  }
+}

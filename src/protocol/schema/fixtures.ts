@@ -29,6 +29,8 @@ export const OUTBOUND_FIXTURES: Outbound[] = [
   },
   { t: 'pong', id: 42 },
   { t: 'configResult', id: 5, config: { model: 'stepfun-ai/step-3.7-flash', notificationBell: false, temperature: 0.7, contextMode: 'smart' } },
+  { t: 'boot', phase: 'loading_graph', detail: 'sqlite graph store', pid: 4242 },
+  { t: 'health', uptimeMs: 61234, rssMb: 312, heapMb: 148, eventLoopDelayMs: 4, activeTurn: true, phase: 'ready' },
 ];
 
 export const INBOUND_FIXTURES: Inbound[] = [
@@ -40,12 +42,14 @@ export const INBOUND_FIXTURES: Inbound[] = [
   { t: 'ping', id: 42 },
   { t: 'configGet', id: 5 },
   { t: 'configSet', id: 6, patch: { notificationBell: true, reasoningEffort: 'high' } },
+  { t: 'resume', id: 'sess-20260712-abc123' },
+  { t: 'controls', mode: 'code', tier: 'heavy', autonomy: 'ask' },
 ];
 
 // Compile-time exhaustiveness: adding a new message variant without a fixture makes
 // these records fail to type-check — the contract cannot silently under-cover.
-export const OUTBOUND_KINDS: Record<Outbound['t'], true> = { event: true, request: true, ready: true, queryResult: true, pong: true, configResult: true };
-export const INBOUND_KINDS: Record<Inbound['t'], true> = { reply: true, input: true, interrupt: true, query: true, menuSelect: true, ping: true, configGet: true, configSet: true };
+export const OUTBOUND_KINDS: Record<Outbound['t'], true> = { event: true, request: true, ready: true, queryResult: true, pong: true, configResult: true, boot: true, health: true };
+export const INBOUND_KINDS: Record<Inbound['t'], true> = { reply: true, input: true, interrupt: true, query: true, menuSelect: true, ping: true, configGet: true, configSet: true, resume: true, controls: true };
 
 /** The committed artifact both sides test against. Regenerate with `npm run gen:protocol`. */
 export function fixturesJson(): string {

@@ -21,6 +21,18 @@ const MAX_FILE_BYTES = 100 * 1024;        // 100 KB — read in full
 const OFFLOAD_FILE_BYTES = 1024 * 1024;   // 1 MB — also write to /tmp for reference
 const PREVIEW_LINES = 100;
 
+/** Whitespace-delimited count, matching the familiar `wc -w` behavior. */
+export function countWords(content: string, excludeTitle = false): number {
+  let counted = content;
+  if (excludeTitle) {
+    const lines = content.split(/\r?\n/);
+    const titleLine = lines.findIndex(line => line.trim().length > 0);
+    counted = titleLine >= 0 ? lines.slice(titleLine + 1).join('\n') : '';
+  }
+  const trimmed = counted.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
+}
+
 export const createReadFileTool = (governor: IGovernor) => buildTool({
   name: 'ReadFileTool',
   description: `Reads the contents of a file from the local file system.
@@ -138,6 +150,7 @@ Use this tool to write new code, config files, or artifacts. It is significantly
 - **Do NOT silently clobber:** When the user asks you to CREATE or ADD a *new* document (a story, note, draft, script, etc.) and a file already exists at the path you'd choose, pick a non-colliding name instead (e.g. \`story.txt\` → \`story-2.txt\`) rather than overwriting — an overwrite destroys their existing file. Overwrite an existing file only when the user clearly means to update/replace *that specific* file (e.g. "fix the bug in X", "rewrite X"). When unsure whether a destination exists, list the directory first.
 - **Modifying existing code:** Do NOT rewrite a whole file to change part of it. Use \`EditFileTool\` for a surgical oldString→newString replacement — it is safer and avoids accidentally dropping newlines. A full-file overwrite that collapses a multi-line file to one line will be REFUSED.
 - **Multi-line content:** Always emit real newline characters between lines. Never flatten code onto a single line.
+- **Exact word counts:** When the user requests an exact length for prose, ALWAYS pass \`expectedWords\`. If the document starts with a title that should not count toward the requested story/article length, also pass \`excludeTitleFromWordCount: true\`. The tool validates the draft before touching disk, so revise a rejected draft instead of creating and then overwriting an approximate one.
 - **Validation:** After writing a complex script or TypeScript file, immediately use the \`BashTool\` to run a syntax check (e.g., \`npx tsc --noEmit\`) to verify your write didn't introduce syntax errors.`,
   isDestructive: true,
   schema: {
@@ -145,15 +158,51 @@ Use this tool to write new code, config files, or artifacts. It is significantly
     properties: {
       path: { type: 'string', description: 'Path to the file (supports ~/ for home dir)' },
       content: { type: 'string', description: 'Content to write' },
-      overwrite: { type: 'boolean', description: 'Deprecated/ignored — Write always creates or overwrites.' }
+      overwrite: { type: 'boolean', description: 'Deprecated/ignored — Write always creates or overwrites.' },
+      expectedWords: {
+        type: 'integer',
+        minimum: 0,
+        description: 'Exact required word count for prose. Set whenever the user requests a specific number of words.'
+      },
+      excludeTitleFromWordCount: {
+        type: 'boolean',
+        description: 'When true, excludes the first non-empty line (the title) from expectedWords validation.'
+      }
     },
     required: ['path', 'content']
   },
-  execute: async (args: { path: string, content: string, overwrite?: boolean }, context?: any) => {
+  execute: async (args: {
+    path: string,
+    content: string,
+    overwrite?: boolean,
+    expectedWords?: number,
+    excludeTitleFromWordCount?: boolean,
+  }, context?: any) => {
     const currentCwd = context?.cwd || process.cwd();
     const fullPath = resolvePath(args.path, currentCwd);
     const wsBlock = workspaceWriteBlock(fullPath);
     if (wsBlock) return outcomeError('permission', `Error: ${wsBlock}`);
+
+    // Exact-length prose is easy for a model to estimate but hard for it to count reliably. Reject
+    // an approximate draft before approvals, backups, or disk mutation so the correction is a
+    // retry—not a visible create-then-overwrite sequence that still may miss the requested count.
+    let validatedWordCount: number | undefined;
+    if (args.expectedWords !== undefined) {
+      if (!Number.isInteger(args.expectedWords) || args.expectedWords < 0) {
+        return outcomeError('invalid_args', 'Error: expectedWords must be a non-negative integer. Nothing was written.');
+      }
+      validatedWordCount = countWords(args.content, args.excludeTitleFromWordCount === true);
+      if (validatedWordCount !== args.expectedWords) {
+        const delta = args.expectedWords - validatedWordCount;
+        const adjustment = delta > 0 ? `add ${delta}` : `remove ${Math.abs(delta)}`;
+        const scope = args.excludeTitleFromWordCount ? 'body' : 'document';
+        return outcomeError(
+          'invalid_args',
+          `Word-count validation failed: expected exactly ${args.expectedWords} ${scope} words, ` +
+          `but received ${validatedWordCount}; ${adjustment} word${Math.abs(delta) === 1 ? '' : 's'} and retry. Nothing was written.`
+        );
+      }
+    }
     const exists = await fs.access(fullPath).then(() => true).catch(() => false);
     // Write creates OR overwrites (standard agent behavior — models emit Write expecting it to
     // replace an existing file, and erroring "file already exists" just wedged them into a retry
@@ -205,7 +254,10 @@ Use this tool to write new code, config files, or artifacts. It is significantly
     fileStateCache.invalidate(fullPath);
     const diff = capDiff(compactDiff(prior, args.content, args.path));
     const syntaxWarn = checkEditSyntax(fullPath, args.content) || '';
-    return outcomeOk(`${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}${syntaxWarn}`);
+    const wordCountNote = validatedWordCount === undefined
+      ? ''
+      : `\nWord count verified: ${validatedWordCount}${args.excludeTitleFromWordCount ? ' (title excluded)' : ''}.`;
+    return outcomeOk(`${exists ? 'Updated' : 'Created'} ${args.path}${diff ? `:\n${diff}` : ''}${wordCountNote}${syntaxWarn}`);
   }
 }, governor);
 

@@ -39,6 +39,15 @@ describe('ToolRegistry — smart vs full context modes', () => {
     );
   });
 
+  it('keeps precision editing and targeted verification callable in smart mode', () => {
+    reg.register(fakeTool('SymbolEditTool'));
+    reg.register(fakeTool('RelatedTestsTool'));
+    expect(names(reg.getSchemas({ mode: 'smart' }))).toEqual(
+      expect.arrayContaining(['SymbolEditTool', 'RelatedTestsTool']),
+    );
+    expect(reg.isDeferred('SymbolEditTool')).toBe(false);
+  });
+
   it('classifies deferred tools correctly', () => {
     expect(reg.isDeferred('ScoutTool')).toBe(true);
     expect(reg.isDeferred('mcp__github__create')).toBe(true);

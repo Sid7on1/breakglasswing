@@ -24,8 +24,8 @@ func main() {
 			fmt.Println("bimax", version)
 			return
 		case "--help", "-h":
-			fmt.Println("bimax — autonomous AI agent for your terminal")
-			fmt.Println("usage: bimax            launch the TUI in the current project")
+			fmt.Println("bimax — build software with an agent team")
+			fmt.Println("usage: bimax            open Bimax in the current project")
 			fmt.Println("       bimax --version  print the version and exit")
 			fmt.Println("       bimax --no-anim  reduce motion (freeze spinner/shimmer)")
 			fmt.Println()

@@ -39,6 +39,12 @@ export interface CliConfig {
   excludeFromIndex: string[];
   maxToolIterations: number;
   maxSubAgents: number;
+  // Resume recent, bounded outcome assignments after an engine crash. Bypass-mode and ambiguous
+  // snapshots always require manual recovery regardless of this preference.
+  autoResumeAgents: boolean;
+  // Wake the parent coordinator when background outcome work settles, then keep converging until
+  // verified, waiting on active work, user-blocked, interrupted, or stopped by a circuit breaker.
+  autoContinueOutcome: boolean;
   notificationBell: boolean;
   customRoutingRules: string[][];
   workspaceRoot: string;
@@ -97,7 +103,9 @@ const DEFAULTS: CliConfig = {
   autoIndex: true,
   excludeFromIndex: [],
   maxToolIterations: 50, // deep multi-file work (audits, refactors) needs headroom; 15 forced constant "continue" babysitting. Loop-detection + context compaction guard runaway.
-  maxSubAgents: 5,
+  maxSubAgents: 4, // hard global runtime ceiling; nested agents share the same lease coordinator
+  autoResumeAgents: true,
+  autoContinueOutcome: true,
   notificationBell: false,
   customRoutingRules: [],
   workspaceRoot: process.cwd(),
