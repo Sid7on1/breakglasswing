@@ -2,7 +2,7 @@
 #
 # install.sh — BiMax one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/<org>/bimax/main/install.sh | bash
+#   curl -fsSL https://bimax-liard.vercel.app/install | bash
 #
 # Installs the SINGLE self-contained binary (Go TUI + embedded engine — no Node, no Bun,
 # no node_modules needed on this machine) to ~/.local/bin/bimax.
@@ -13,7 +13,7 @@
 #
 # Overrides:
 #   BIMAX_INSTALL_DIR=/usr/local/bin   install location   (default ~/.local/bin)
-#   BIMAX_REPO=Sid7on1/breakglasswing  GitHub repo for releases
+#   BIMAX_REPO=Sid7on1/bimax-releases  GitHub repo for public releases
 #   BIMAX_VERSION=v1.2.0               release tag         (default: latest)
 #   BIMAX_BASE_URL=https://…           direct artifact base URL (skips GitHub API)
 #   BIMAX_LOCAL_ARTIFACT=/path/bimax   install a prebuilt binary (offline/CI)
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 INSTALL_DIR="${BIMAX_INSTALL_DIR:-$HOME/.local/bin}"
-REPO="${BIMAX_REPO:-Sid7on1/breakglasswing}"
+REPO="${BIMAX_REPO:-Sid7on1/bimax-releases}"
 VERSION="${BIMAX_VERSION:-latest}"
 ACTION="${1:---install}"
 
@@ -129,7 +129,11 @@ fi
 
 # ---- PATH + verify -------------------------------------------------------------------
 if ! command -v bimax >/dev/null 2>&1; then
-  shellrc="$HOME/.zshrc"; [ -n "${BASH_VERSION:-}" ] && shellrc="$HOME/.bashrc"
+  case "${SHELL:-}" in
+    */zsh) shellrc="$HOME/.zshrc" ;;
+    */bash) shellrc="$HOME/.bashrc" ;;
+    *) shellrc="$HOME/.profile" ;;
+  esac
   if ! grep -qs "$INSTALL_DIR" "$shellrc" 2>/dev/null; then
     echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$shellrc"
     say "added $INSTALL_DIR to PATH in $shellrc (restart your shell)"

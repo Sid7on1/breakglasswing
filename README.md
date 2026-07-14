@@ -16,7 +16,7 @@ The machine you run it on needs no Node, no Bun, no `node_modules`.
 macOS (arm64/x64) or Linux (x64/arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<org>/bimax/main/install.sh | bash
+curl -fsSL https://bimax-liard.vercel.app/install | bash
 ```
 
 The installer detects your platform, installs to `~/.local/bin/bimax`, wires `PATH`, and
