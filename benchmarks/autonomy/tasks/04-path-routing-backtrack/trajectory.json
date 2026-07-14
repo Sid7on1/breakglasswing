@@ -1,0 +1,16 @@
+[
+  { "tool": "ReadFileTool", "args": { "path": "package.json" } },
+  { "expectLastToolContains": "node test.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "command exited with code 1", "tool": "ReadFileTool", "args": { "path": "src/path-utils.mjs" } },
+  {
+    "expectLastToolContains": "only the first Windows separator",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/path-utils.mjs",
+      "oldString": "return pathname.replace('\\\\', '/').replace(/\\/{2,}/g, '/').toLowerCase();",
+      "newString": "return pathname.replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/').toLowerCase();"
+    }
+  },
+  { "expectLastToolContains": "Edited src/path-utils.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "fixture tests passed", "text": "Fixed complete Windows-separator normalization while preserving first-match rule precedence; tests pass." }
+]

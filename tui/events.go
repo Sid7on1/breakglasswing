@@ -145,6 +145,12 @@ func (m *model) handleEvent(o Outbound) {
 			m.fWorkspace = s.Workspace
 		}
 
+	case "outcome_update":
+		var outcome *OutcomeStrip
+		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &outcome) == nil {
+			m.fOutcome = outcome
+		}
+
 	case "tool_call", "tool_call_result":
 		var tc ToolCall
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &tc) == nil && tc.ToolName != "" {
@@ -279,7 +285,7 @@ func (m *model) handleEvent(o Outbound) {
 		}
 
 	case "rerun_onboarding":
-		m.append(dimStyle.Render("  ⌁ onboarding is only available in the Ink UI; skipped"))
+		m.append(dimStyle.Render("  ⌁ onboarding reset — map setup will be offered when the engine is ready"))
 
 	case "shutdown":
 		m.status = "shutting down…"

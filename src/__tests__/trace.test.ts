@@ -6,19 +6,19 @@ import { getTracer, resetTracerForTests, toOtlpJson, EndedSpan } from '../teleme
 describe('trace layer (OTel GenAI spans)', () => {
   let dir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-trace-'));
     process.env.BIMAX_TRACE_DIR = dir;
     delete process.env.BIMAX_TRACE;
     delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     delete process.env.BIMAX_OTLP_ENDPOINT;
-    resetTracerForTests();
+    await resetTracerForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await resetTracerForTests();
     delete process.env.BIMAX_TRACE_DIR;
     delete process.env.BIMAX_TRACE;
-    resetTracerForTests();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -62,9 +62,9 @@ describe('trace layer (OTel GenAI spans)', () => {
     expect(line.statusMessage).toBe('exit 1');
   });
 
-  it('BIMAX_TRACE=0 disables everything — no spans, no files', () => {
+  it('BIMAX_TRACE=0 disables everything — no spans, no files', async () => {
     process.env.BIMAX_TRACE = '0';
-    resetTracerForTests();
+    await resetTracerForTests();
     const tracer = getTracer();
     const span = tracer.startSpan('invoke_agent bimax');
     span.setAttribute('x', 1);

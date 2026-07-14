@@ -1,0 +1,164 @@
+/* Bimax desktop — Graphite & Phosphor as Tailwind v4 design tokens. Warm graphite surfaces,
+   terracotta accent (#D77757), low chrome. Matches the TUI identity: never neon. Dark-only by
+   design (the product is a dark instrument, not a themed website). */
+
+@import 'tailwindcss';
+
+@theme {
+  /* Surfaces */
+  --color-bg: #161412;
+  --color-raise: #1e1b18;
+  --color-hover: #262220;
+  --color-well: #12100e; /* code / diff wells, one step below bg */
+  --color-line: #2e2925;
+
+  /* Ink */
+  --color-ink: #e8e2da;
+  --color-dim: #948a7e;
+  --color-faint: #6b6259;
+
+  /* Phosphor */
+  --color-ember: #d77757;
+  --color-ember-bright: #e89b7c;
+  --color-ember-deep: #b85e40;
+  --color-moss: #9cb380;
+  --color-amber: #d9a05b;
+  --color-rust: #c25b4e;
+
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  --animate-soft-blink: soft-blink 1.2s steps(1) infinite;
+  --animate-spin-slow: spin 14s linear infinite;
+
+  @keyframes soft-blink {
+    50% { opacity: 0.15; }
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply overflow-hidden bg-bg font-sans text-[13.5px] text-ink antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-line);
+    border-radius: 5px;
+    border: 2px solid var(--color-bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-hover); }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  /* Generated chat content (markdown.tsx) — element-level styling beats per-node utilities here. */
+  .md {
+    @apply leading-relaxed break-words;
+  }
+  .md a { @apply text-ember underline-offset-2 hover:underline; }
+  .md strong { @apply font-semibold; }
+  .md p { @apply my-1.5 first:mt-0 last:mb-0; }
+  .md .md-h { @apply mt-3 mb-1.5 font-semibold first:mt-0; }
+  .md .md-h1 { @apply text-[17px]; }
+  .md .md-h2 { @apply text-[15px]; }
+  .md .md-h3 { @apply text-[14px]; }
+  .md .md-h4, .md .md-h5, .md .md-h6 { @apply text-[13.5px] text-dim; }
+
+  /* highlight.js — graphite & phosphor code theme (matches the app palette, never neon). */
+  .hljs-comment, .hljs-quote { color: var(--color-faint); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-tag, .hljs-operator { color: var(--color-ember); }
+  .hljs-string, .hljs-regexp, .hljs-addition { color: var(--color-moss); }
+  .hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet, .hljs-link { color: var(--color-amber); }
+  .hljs-title, .hljs-title.function_, .hljs-name, .hljs-section { color: var(--color-ember-bright); }
+  .hljs-type, .hljs-class, .hljs-title.class_, .hljs-built_in { color: #c9a06a; }
+  .hljs-attr, .hljs-attribute, .hljs-property, .hljs-variable, .hljs-template-variable { color: #b8a890; }
+  .hljs-params, .hljs-punctuation, .hljs-subst { color: var(--color-ink); }
+  .hljs-meta, .hljs-selector-id, .hljs-selector-class { color: var(--color-dim); }
+  .hljs-deletion { color: var(--color-rust); }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: 600; }
+}
+
+@utility no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Scrollable strips (tab bars) that must not show a scrollbar track. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility drag-region {
+  -webkit-app-region: drag;
+}
+
+/* --- Motion system — 150–250ms, transform/opacity only, ease-out entries. ------------------- */
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.965); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-in-right {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* Entrance for cards / rows / sections; pair with an inline animation-delay for stagger. */
+@utility anim-fade-up {
+  animation: fade-up 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Dialog / popover entrance. */
+@utility anim-scale-in {
+  animation: scale-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Centered dialog entrance. Tailwind v4's -translate-x/y-1/2 uses the native `translate`
+   property, which composes with `transform` — so these keyframes must ONLY scale; putting a
+   translate() inside transform would stack on top of the property and double the shift. */
+@utility anim-dialog-in {
+  animation: scale-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Overlay fade. */
+@utility anim-fade-in {
+  animation: fade-in 180ms ease-out both;
+}
+
+/* Right-pane entrance (editor / dock). */
+@utility anim-slide-in-right {
+  animation: slide-in-right 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up, .anim-scale-in, .anim-fade-in, .anim-slide-in-right, .anim-dialog-in {
+    animation: none;
+  }
+  .animate-spin-slow {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

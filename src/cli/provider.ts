@@ -48,7 +48,9 @@ function keysForProvider(provider: LlmProvider): KeyConfig[] {
   return envVal.split(',').map(k => k.trim()).filter(Boolean).map((keyStr, i) => ({
     keyStr,
     model: process.env[`${provider.apiKeyEnv}_MODEL_${i + 1}`] || process.env[`${provider.apiKeyEnv}_MODEL`] || provider.defaultModel,
-    baseURL: provider.baseURL,
+    // Escape hatch for local models, proxies, and test harnesses: point the ACTIVE provider's
+    // OpenAI-compatible endpoint elsewhere without editing the provider table.
+    baseURL: process.env.BGW_BASE_URL || provider.baseURL,
     provider: provider.name,
     label: `${provider.name} #${i + 1}`,
   }));

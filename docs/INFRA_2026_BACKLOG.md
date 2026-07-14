@@ -1,5 +1,10 @@
 # BiMax Infrastructure Backlog — 2026 Full-Stack Hardening Pass
 
+> **Superseded for tracking by [`ROADMAP.md`](./ROADMAP.md)** (2026-07-11). Kept for the 2026
+> research baseline and per-mechanism detail. Note: Phases 1–3 shipped; Phase 4 #9 (Terminal-Bench
+> adapter) is now **built** (`benchmarks/terminal_bench_adapter/`) — only the leaderboard run
+> remains. Open items (#9b/#10/#11) are tracked in the roadmap.
+
 Research-first infrastructure audit (2026-07-05), benchmarked against Claude Code, Codex CLI,
 Gemini CLI, Cursor 2.x, and OpenHands. Every gap cites the comparable shipped mechanism.
 Phases 1–2 are **shipped** (this pass); Phase 3 is the open backlog.

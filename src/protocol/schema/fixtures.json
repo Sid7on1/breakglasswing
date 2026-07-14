@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 1,
+  "protocolVersion": 3,
   "outbound": [
     {
       "t": "event",
@@ -49,7 +49,7 @@
     },
     {
       "t": "ready",
-      "protocol": 1
+      "protocol": 3
     },
     {
       "t": "queryResult",
@@ -80,6 +80,31 @@
     {
       "t": "pong",
       "id": 42
+    },
+    {
+      "t": "configResult",
+      "id": 5,
+      "config": {
+        "model": "stepfun-ai/step-3.7-flash",
+        "notificationBell": false,
+        "temperature": 0.7,
+        "contextMode": "smart"
+      }
+    },
+    {
+      "t": "boot",
+      "phase": "loading_graph",
+      "detail": "sqlite graph store",
+      "pid": 4242
+    },
+    {
+      "t": "health",
+      "uptimeMs": 61234,
+      "rssMb": 312,
+      "heapMb": 148,
+      "eventLoopDelayMs": 4,
+      "activeTurn": true,
+      "phase": "ready"
     }
   ],
   "inbound": [
@@ -108,6 +133,28 @@
     {
       "t": "ping",
       "id": 42
+    },
+    {
+      "t": "configGet",
+      "id": 5
+    },
+    {
+      "t": "configSet",
+      "id": 6,
+      "patch": {
+        "notificationBell": true,
+        "reasoningEffort": "high"
+      }
+    },
+    {
+      "t": "resume",
+      "id": "sess-20260712-abc123"
+    },
+    {
+      "t": "controls",
+      "mode": "code",
+      "tier": "heavy",
+      "autonomy": "ask"
     }
   ]
 }

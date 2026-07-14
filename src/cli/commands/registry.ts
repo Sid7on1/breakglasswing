@@ -23,8 +23,11 @@ export interface CommandContext {
   setActiveMenu: (menu: any) => void;
   setActivePrompt: (prompt: any) => void;
   executeCommand: (cmd: string) => void;
-  /** Inject a past session's messages into the current live conversation (session resume). */
-  restoreMessages?: (messages: any[]) => void;
+  /**
+   * Replace the live conversation with LLM-ready messages (session/branch resume — convert UI
+   * entries through messageEntriesToLLM first). Returns false when refused (e.g. mid-turn).
+   */
+  restoreMessages?: (messages: any[]) => boolean | void;
   /** Return the current live conversation messages (for branching). */
   getMessages?: () => any[];
 }
@@ -48,7 +51,7 @@ export interface Command {
 export const PALETTE_HIDDEN = new Set<string>([
   // Mind layer → the Ctrl+X mind HUD (panels, not commands you type).
   'mind', 'self', 'drives', 'habits', 'dogfood', 'claims', 'ledger', 'taint',
-  'exemplars', 'episodes', 'impact', 'replay', 'dream',
+  'exemplars', 'episodes', 'impact', 'replay', 'dream', 'calibration', 'harness', 'journal',
   // Multi-agent variants → /swarm and /beast.
   'speculate', 'evolve', 'council', 'orchestrate', 'heal', 'scout',
   // Time-travel → /rewind.
@@ -64,6 +67,8 @@ export const PALETTE_HIDDEN = new Set<string>([
   'resume', 'output',
   // Niche / advanced — reachable when typed, off the browsable surface.
   'agents', 'ask', 'autocommit', 'branch', 'check', 'keys', 'lint', 'log', 'changelog', 'watch',
+  // Already represented by primary product surfaces: Map panel and Security settings/status.
+  'map', 'governor',
   'pipelines', 'recipe', 'selection', 'shortcuts', 'headroom',
 ]);
 

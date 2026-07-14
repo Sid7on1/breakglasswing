@@ -2,10 +2,35 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEmbeddedEngineFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
+	original := embeddedEngine
+	embeddedEngine = []byte("test embedded engine")
+	t.Cleanup(func() { embeddedEngine = original })
+
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := filepath.Join(root, "fallback")
+	got, err := extractEmbeddedEngineFromRoots([]string{blocked, fallback}, "test")
+	if err != nil {
+		t.Fatalf("fallback extraction failed: %v", err)
+	}
+	if want := filepath.Join(fallback, "bimax", "bimax-engine-test"); got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded engine" {
+		t.Fatalf("extracted engine = %q, err=%v", data, err)
+	}
+}
 
 // Integration test: spawn the real headless engine, drive it the way the Bubble Tea model does,
 // and assert the Go side decodes the handshake and a structured command result. Proves the
@@ -31,8 +56,8 @@ func TestEngineRoundTrip(t *testing.T) {
 			switch {
 			case m.T == "ready":
 				gotReady = true
-				if m.Protocol != 1 {
-					t.Fatalf("unexpected protocol version: %d", m.Protocol)
+				if m.Protocol != supportedProtocol {
+					t.Fatalf("unexpected protocol version: %d (want %d)", m.Protocol, supportedProtocol)
 				}
 				eng.Send(encodeInput("/help")) // ask for the command palette
 			case m.T == "event" && m.Name == "message" && len(m.Args) > 0:

@@ -16,6 +16,7 @@ var toolLabels = map[string]string{
 	"MultiEditTool": "MultiEdit", "DeleteTool": "Delete", "CreateDirectoryTool": "mkdir",
 	"ChangeDirectoryTool": "cd", "GrepTool": "Grep", "GlobTool": "Glob", "WebFetchTool": "Fetch",
 	"TodoWriteTool": "Todo", "GraphQueryTool": "Graph", "MemoryQueryTool": "Memory",
+	"OutcomeTool":       "Outcome",
 	"SpawnSubagentTool": "Subagent", "RegisterAgentTool": "RegisterAgent", "AskUserTool": "Ask",
 	"SkillTool": "Skill", "McpManageTool": "MCP",
 }
@@ -68,6 +69,13 @@ func summarizeToolOutput(tc ToolCall) string {
 	}
 	lines := strings.Split(out, "\n")
 	preview := clip(lines[0], 80)
+	// Edit cards render their actual diff directly below this summary. Reporting the number of
+	// ENGINE-OUTPUT lines here (header + hunk + markers) as "(+18 lines)" looked like a second,
+	// contradictory edit count beside "Added 10 lines". Keep only the action/path; editStats owns
+	// the real added/removed counts.
+	if isMutatingTool(tc.ToolName) && extractDiff(tc.Output) != "" {
+		return strings.TrimSuffix(preview, ":")
+	}
 	if len(lines) > 1 {
 		return fmt.Sprintf("%s (+%d lines)", preview, len(lines)-1)
 	}
@@ -95,9 +103,26 @@ func toolDuration(tc ToolCall) string {
 // output or oldString/newString args, mirroring ToolCallLine.tsx's edit summary.
 func editStats(tc ToolCall) string {
 	switch tc.ToolName {
-	case "EditFileTool", "MultiEditTool", "WriteFileTool":
+	case "EditFileTool", "MultiEditTool", "WriteFileTool", "SymbolEditTool":
 	default:
 		return ""
+	}
+	// The returned unified diff is the source of truth. Counting the WriteFileTool's full `content`
+	// treated every unchanged/context line as newly added and could never report removals, producing
+	// nonsense such as "Added 14 lines, removed 0" above a visibly red four-line replacement.
+	if diff := extractDiff(tc.Output); diff != "" {
+		added, removed := 0, 0
+		for _, row := range parseDiffRows(diff) {
+			switch row.sign {
+			case '+':
+				added++
+			case '-':
+				removed++
+			}
+		}
+		if added > 0 || removed > 0 {
+			return fmt.Sprintf("Added %d lines, removed %d lines", added, removed)
+		}
 	}
 	var p struct {
 		OldString string `json:"oldString"`
@@ -202,7 +227,7 @@ const toolCollapseThreshold = 5
 
 func isMutatingTool(name string) bool {
 	switch name {
-	case "EditFileTool", "MultiEditTool", "WriteFileTool":
+	case "EditFileTool", "MultiEditTool", "WriteFileTool", "SymbolEditTool":
 		return true
 	}
 	return false

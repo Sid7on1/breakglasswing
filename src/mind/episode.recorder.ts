@@ -258,6 +258,11 @@ export class RecordingProvider implements LLMProvider {
 export function startEpisodeRecording(inner: LLMProvider, root?: string): { llm: LLMProvider; id: string | null } {
   // A replayed run must not record a fresh episode of itself.
   if (process.env.BIMAX_RECORDER === '0' || replayActive) return { llm: inner, id: null };
+  // Callers such as the counterfactual lab may provide an explicit recorder so they can own the
+  // episode id and location. Wrapping it again creates two adjacent ledger anchors for one run;
+  // the empty interval between them then makes the recorded-failure census read 0/0. Reuse the
+  // existing recorder instead of nesting flight recorders.
+  if (inner instanceof RecordingProvider) return { llm: inner, id: inner.writer.id };
   try {
     const writer = new EpisodeWriter(root);
     return { llm: new RecordingProvider(inner, writer), id: writer.id };

@@ -6,13 +6,16 @@
 // coordinated map→reduce.
 
 export type SubAgentStatus = 'running' | 'done' | 'failed';
+export type SubAgentPhase = 'booting' | 'working' | 'researching' | 'editing' | 'testing' | 'done' | 'failed';
 
 export interface SubAgentClaim {
   taskId: string;
+  outcomeTaskId?: string;
   agentType: string;
   scope: string;            // what this agent is responsible for (paths/globs/topic) — the claim
   prompt: string;           // first line of the task, for display
   status: SubAgentStatus;
+  phase: SubAgentPhase;
   startedAt: number;
   endedAt?: number;
   toolCalls: number;        // live count of tool activity relayed from the agent
@@ -43,12 +46,17 @@ export function scopesOverlap(a: string, b: string): boolean {
 export class SubAgentBlackboard {
   private claims = new Map<string, SubAgentClaim>();
 
-  register(taskId: string, agentType: string, scope: string, prompt: string): void {
+  register(taskId: string, agentType: string, scope: string, prompt: string, outcomeTaskId?: string): void {
     this.claims.set(taskId, {
-      taskId, agentType, scope: scope || '(unscoped)',
+      taskId, outcomeTaskId, agentType, scope: scope || '(unscoped)',
       prompt: (prompt || '').split('\n')[0].slice(0, 120),
-      status: 'running', startedAt: Date.now(), toolCalls: 0,
+      status: 'running', phase: 'booting', startedAt: Date.now(), toolCalls: 0,
     });
+  }
+
+  setPhase(taskId: string, phase: SubAgentPhase): void {
+    const claim = this.claims.get(taskId);
+    if (claim && claim.status === 'running') claim.phase = phase;
   }
 
   incTool(taskId: string): void {
@@ -58,12 +66,12 @@ export class SubAgentBlackboard {
 
   markDone(taskId: string, result: string): void {
     const c = this.claims.get(taskId);
-    if (c) { c.status = 'done'; c.endedAt = Date.now(); c.result = result; }
+    if (c) { c.status = 'done'; c.phase = 'done'; c.endedAt = Date.now(); c.result = result; }
   }
 
   markFailed(taskId: string, error: string): void {
     const c = this.claims.get(taskId);
-    if (c) { c.status = 'failed'; c.endedAt = Date.now(); c.error = error; }
+    if (c) { c.status = 'failed'; c.phase = 'failed'; c.endedAt = Date.now(); c.error = error; }
   }
 
   /** Running claims whose scope overlaps the candidate — the sibling collisions to avoid. */

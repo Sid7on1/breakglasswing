@@ -1,8 +1,10 @@
 import { globalCommandRegistry } from './registry';
 import { getProviders, setProvider, getCurrentProvider, buildKeyPool } from '../provider';
 import { saveApiKeyToEnv } from '../env.loader';
-import { SessionStore } from '../session';
+import { SessionStore, messageEntriesToLLM } from '../session';
+import { getSessionRecorder } from '../session.recorder';
 import { listSessionMeta } from '../../db/session.meta';
+import { cliEvents } from '../events';
 
 /** "2026-06-17_02-30-15.jsonl" → "2026-06-17 02:30:15" for display. */
 function prettySessionName(file: string): string {
@@ -24,13 +26,18 @@ async function previewSession(file: string, context: any): Promise<void> {
 }
 
 /**
- * Restore a session's messages into the live conversation.
- * The last 40 messages are injected — enough context to resume mid-task
- * without overloading the context window with ancient history.
+ * True resume: restore a saved thread end-to-end.
+ *  - LLM context: entries are converted through messageEntriesToLLM (tool lines folded into
+ *    readable notes, UI shapes stripped) and the last 40 turns become the live history — raw
+ *    MessageEntry injection sent providers malformed payloads.
+ *  - Front-end transcript: a `session_restore` event carries the raw entries so graphical
+ *    front-ends rebuild their scrollback instead of showing an invisible-context one-liner.
+ *  - Thread continuation: the recorder switches to the resumed session's file, so new turns
+ *    append to the SAME thread instead of forking a parallel one.
  */
 async function resumeSession(file: string, context: any, store: SessionStore): Promise<void> {
-  const msgs = await store.loadSession(file);
-  if (msgs.length === 0) {
+  const entries = await store.loadSession(file);
+  if (entries.length === 0) {
     context.addSystemMessage('error', `Session ${prettySessionName(file)} is empty or unreadable.`);
     return;
   }
@@ -38,11 +45,15 @@ async function resumeSession(file: string, context: any, store: SessionStore): P
     context.addSystemMessage('error', 'Session restore is not available in this context. Use /resume from the main terminal.');
     return;
   }
-  // Take the last 40 messages; drop any leading orphaned tool messages.
-  let tail = msgs.slice(-40);
-  while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
-  context.restoreMessages(tail);
-  context.addSystemMessage('success', `Resumed session "${prettySessionName(file)}" · ${tail.length} message(s) injected into context.`);
+  const llm = messageEntriesToLLM(entries).slice(-40);
+  if (context.restoreMessages(llm) === false) return; // busy — the session already surfaced why
+  const id = file.replace(/\.jsonl$/, '');
+  const firstUser = entries.find((m: any) => m.role === 'user' && typeof m.content === 'string') as any;
+  const chatCount = entries.filter((m: any) => m.role === 'user' || m.role === 'assistant').length;
+  try { getSessionRecorder()?.switchTo(id, chatCount, firstUser?.content); } catch { /* recorder optional */ }
+  // Replay the transcript for graphical front-ends (capped: a day-long thread stays renderable).
+  cliEvents.emit('session_restore', { id, entries: entries.slice(-400) });
+  context.addSystemMessage('success', `Resumed "${prettySessionName(file)}" · ${llm.length} turn(s) restored — continuing this thread.`);
 
   // Inject GoalManager continuation prompt so the model picks up the active goal
   try {
@@ -124,15 +135,46 @@ globalCommandRegistry.register({
   category: 'Configuration',
   execute: async (args, context) => {
     const providers = getProviders();
+    if (args[0]) {
+      const requested = providers.find(provider => provider.name === args[0]);
+      if (!requested) return { type: 'message', level: 'error', content: `Unknown provider: ${args[0]}` };
+      promptForKey(requested.name, context);
+      return { type: 'none' };
+    }
+
+    // WS1.5: live pool health from the adapter's key manager (ok/fail counts, cooldowns).
+    // Rendered as an informational category above the provider picker.
+    let poolOptions: any[] = [];
+    try {
+      const states = context.options?.llmAdapter?.getKeyStates?.() ?? [];
+      poolOptions = states.map((s: any) => ({
+        label: `${s.onCooldown ? '⏸' : '●'} ${s.label}`,
+        value: s.label,
+        desc: [
+          s.model !== 'default' ? s.model : null,
+          `${s.ok} ok / ${s.fail} fail`,
+          s.onCooldown ? `cooldown ${Math.ceil(s.cooldownSecs)}s` : null,
+        ].filter(Boolean).join(' · '),
+        category: 'Pool health (this session)',
+      }));
+    } catch { /* adapter optional — key pool UI degrades to provider list only */ }
+
     return {
       type: 'menu',
       title: 'Select a provider to add / replace its API key',
-      options: providers.map(p => ({
-        label: p.name,
-        value: p.name,
-        desc: process.env[p.apiKeyEnv] ? `${p.apiKeyEnv} · configured` : `${p.apiKeyEnv} · missing`,
-      })),
-      onSelect: (opt: any) => promptForKey(opt.value, context),
+      options: [
+        ...providers.map(p => ({
+          label: p.name,
+          value: p.name,
+          desc: process.env[p.apiKeyEnv] ? `${p.apiKeyEnv} · configured` : `${p.apiKeyEnv} · missing`,
+          category: 'Add / replace key',
+        })),
+        ...poolOptions,
+      ],
+      onSelect: (opt: any) => {
+        // Pool-health rows are informational; only provider rows open the key prompt.
+        if (providers.some(p => p.name === opt.value)) promptForKey(opt.value, context);
+      },
     };
   }
 });
@@ -240,10 +282,10 @@ globalCommandRegistry.register({
       if (!context.restoreMessages) {
         return { type: 'message', level: 'error', content: 'Branch restore is not available in this context.' };
       }
-      let tail = msgs.slice(-40);
-      while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
-      context.restoreMessages(tail);
-      return { type: 'message', level: 'success', content: `Switched to branch "${name}" · ${tail.length} message(s) loaded.` };
+      const tail = messageEntriesToLLM(msgs).slice(-40);
+      if (context.restoreMessages(tail) === false) return { type: 'none' };
+      cliEvents.emit('session_restore', { id: `branch:${name}`, entries: msgs.slice(-400) });
+      return { type: 'message', level: 'success', content: `Switched to branch "${name}" · ${tail.length} turn(s) loaded.` };
     }
 
     // List branches
@@ -256,11 +298,11 @@ globalCommandRegistry.register({
       options: branches.map(b => ({ label: b, value: b, desc: `switch to branch "${b}"`, category: 'Branches' })),
       onSelect: async (opt: any) => {
         const msgs = await store.loadBranch(opt.value);
-        let tail = msgs.slice(-40);
-        while (tail.length > 0 && (tail[0] as any).role === 'tool') tail = tail.slice(1);
+        const tail = messageEntriesToLLM(msgs).slice(-40);
         if (context.restoreMessages) {
-          context.restoreMessages(tail);
-          context.addSystemMessage('success', `Switched to branch "${opt.value}" · ${tail.length} message(s) loaded.`);
+          if (context.restoreMessages(tail) === false) return;
+          cliEvents.emit('session_restore', { id: `branch:${opt.value}`, entries: msgs.slice(-400) });
+          context.addSystemMessage('success', `Switched to branch "${opt.value}" · ${tail.length} turn(s) loaded.`);
         } else {
           context.addSystemMessage('error', 'Branch restore not available.');
         }

@@ -1,0 +1,16 @@
+[
+  { "tool": "ReadFileTool", "args": { "path": "package.json" } },
+  { "expectLastToolContains": "node test.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "command exited with code 1", "tool": "ReadFileTool", "args": { "path": "src/scheduler.mjs" } },
+  {
+    "expectLastToolContains": "launches everything immediately",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/scheduler.mjs",
+      "oldString": "export async function runSchedule(graph, { limit, run }) {\n  if (!Number.isInteger(limit) || limit < 1) throw new TypeError('limit must be a positive integer');\n\n  // BUG: this launches everything immediately, ignores dependencies, and returns completion order.\n  const output = [];\n  await Promise.all(graph.map(async node => {\n    output.push(await run(node));\n  }));\n  return output;\n}",
+      "newString": "export async function runSchedule(graph, { limit, run }) {\n  if (!Number.isInteger(limit) || limit < 1) throw new TypeError('limit must be a positive integer');\n  const byId = new Map();\n  for (const node of graph) {\n    if (byId.has(node.id)) throw new Error(`Duplicate node: ${node.id}`);\n    byId.set(node.id, node);\n  }\n  for (const node of graph) for (const dependency of node.deps) {\n    if (!byId.has(dependency)) throw new Error(`Missing dependency: ${dependency}`);\n  }\n  const indegree = new Map(graph.map(node => [node.id, node.deps.length]));\n  const queue = graph.filter(node => indegree.get(node.id) === 0).map(node => node.id);\n  let seen = 0;\n  for (let cursor = 0; cursor < queue.length; cursor += 1) {\n    const id = queue[cursor];\n    seen += 1;\n    for (const node of graph) if (node.deps.includes(id)) {\n      const next = indegree.get(node.id) - 1;\n      indegree.set(node.id, next);\n      if (next === 0) queue.push(node.id);\n    }\n  }\n  if (seen !== graph.length) throw new Error('Dependency cycle detected');\n  const results = new Array(graph.length);\n  const completed = new Set();\n  const remaining = new Set(graph.map(node => node.id));\n  return await new Promise((resolve, reject) => {\n    let active = 0;\n    let settled = false;\n    const launch = () => {\n      if (settled) return;\n      if (completed.size === graph.length) { settled = true; resolve(results); return; }\n      for (let index = 0; index < graph.length && active < limit; index += 1) {\n        const node = graph[index];\n        if (!remaining.has(node.id) || !node.deps.every(id => completed.has(id))) continue;\n        remaining.delete(node.id);\n        active += 1;\n        Promise.resolve().then(() => run(node)).then(value => {\n          if (settled) return;\n          results[index] = value;\n          completed.add(node.id);\n          active -= 1;\n          launch();\n        }, error => { settled = true; reject(error); });\n      }\n    };\n    launch();\n  });\n}"
+    }
+  },
+  { "expectLastToolContains": "Edited src/scheduler.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "fixture tests passed", "text": "Added graph validation, dependency-aware bounded execution, stable output ordering, and failure stop; tests pass." }
+]

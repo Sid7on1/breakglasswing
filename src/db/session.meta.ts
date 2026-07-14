@@ -15,13 +15,15 @@ export interface SessionMeta {
 
 const META_FILE = '.breakglass/sessions/sessions-meta.jsonl';
 
-// Capture cwd once at module load — process.cwd() on every call is redundant
-// and could theoretically return a different value if someone calls chdir().
-const _metaPath = path.join(process.cwd(), META_FILE);
+// Resolved lazily: the engine chdir()s to BIMAX_CWD during boot (after some modules load) and
+// tests chdir to tmpdirs — a captured-at-import path would write meta into the wrong project.
+function metaPath(): string {
+  return path.join(process.cwd(), META_FILE);
+}
 
 function readAllMeta(): SessionMeta[] {
   try {
-    const raw = fs.readFileSync(_metaPath, 'utf8');
+    const raw = fs.readFileSync(metaPath(), 'utf8');
     return raw.trim().split('\n').filter(Boolean).map(l => JSON.parse(l) as SessionMeta);
   } catch {
     return [];
@@ -30,8 +32,9 @@ function readAllMeta(): SessionMeta[] {
 
 function appendMeta(meta: SessionMeta): void {
   try {
-    fs.mkdirSync(path.dirname(_metaPath), { recursive: true });
-    fs.appendFileSync(_metaPath, JSON.stringify(meta) + '\n', 'utf8');
+    const p = metaPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.appendFileSync(p, JSON.stringify(meta) + '\n', 'utf8');
   } catch { /* best-effort */ }
 }
 
@@ -41,7 +44,7 @@ function updateMeta(id: string, updates: Partial<SessionMeta>): void {
     const idx = all.findIndex(m => m.id === id);
     if (idx === -1) return;
     all[idx] = { ...all[idx], ...updates };
-    fs.writeFileSync(_metaPath, all.map(m => JSON.stringify(m)).join('\n') + '\n', 'utf8');
+    fs.writeFileSync(metaPath(), all.map(m => JSON.stringify(m)).join('\n') + '\n', 'utf8');
   } catch { /* best-effort */ }
 }
 
@@ -60,6 +63,15 @@ function scheduleProgressFlush(): void {
     _progressTimer = null;
     if (_current) updateMeta(_current.id, { messageCount: _current.messageCount, tokenEstimate: _current.tokenEstimate });
   }, 10_000);
+  // A pending flush must never hold the engine process open after stdin closes.
+  (_progressTimer as any).unref?.();
+}
+
+/** Flush the debounced progress write immediately (shutdown paths and tests). */
+export function flushSessionMeta(): void {
+  if (!_current) return;
+  if (_progressTimer) { clearTimeout(_progressTimer); _progressTimer = null; }
+  updateMeta(_current.id, { messageCount: _current.messageCount, tokenEstimate: _current.tokenEstimate });
 }
 
 /** Called at session start (in FullScreen after sessionRef.init()). */
@@ -77,11 +89,35 @@ export function startSessionMeta(sessionId: string, cwd: string, goalId?: string
   appendMeta(_current);
 }
 
-/** Called when the first user message arrives — sets the session title. */
-export function recordFirstUserMessage(text: string): void {
-  if (!_current || _current.title !== '(no messages yet)') return;
+/** Called when the first user message arrives — sets the session title. Returns true if it did. */
+export function recordFirstUserMessage(text: string): boolean {
+  if (!_current || _current.title !== '(no messages yet)') return false;
   _current.title = text.replace(/\s+/g, ' ').trim().slice(0, 80);
   updateMeta(_current.id, { title: _current.title });
+  return true;
+}
+
+/**
+ * Point the tracker at an EXISTING session (true resume: the thread continues in its own record).
+ * Reuses the on-disk record when present; a session that predates meta tracking gets a new record
+ * so it appears in lists from now on. Clears endedAt — the thread is live again.
+ */
+export function resumeSessionMeta(id: string, fallbackTitle?: string): void {
+  const existing = readAllMeta().find(m => m.id === id);
+  if (existing) {
+    _current = { ...existing, endedAt: undefined };
+    updateMeta(id, { endedAt: undefined });
+  } else {
+    _current = {
+      id,
+      title: (fallbackTitle || '').replace(/\s+/g, ' ').trim().slice(0, 80) || '(no messages yet)',
+      cwd: process.cwd(),
+      startedAt: new Date().toISOString(),
+      messageCount: 0,
+      tokenEstimate: 0,
+    };
+    appendMeta(_current);
+  }
 }
 
 /** Called on each assistant message — keeps message count and token estimate current. */

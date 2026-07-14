@@ -13,12 +13,6 @@ export class CommandQueue {
   enqueue(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
       Logger.warn(`[CommandQueue] Terminals busy. Pushing task to queue. (Queue depth: ${this.queue.length + 1})`);
-      
-      const timeout = setTimeout(() => {
-        // Remove from queue
-        this.queue = this.queue.filter(q => q.resolve !== resolve);
-        reject(new Error("CommandQueue timeout: Session never became available after 60s"));
-      }, 60000);
 
       const wrappedResolve = (value: string) => {
         clearTimeout(timeout);
@@ -29,6 +23,16 @@ export class CommandQueue {
         clearTimeout(timeout);
         reject(reason);
       };
+
+      const timeout = setTimeout(() => {
+        // Remove the timed-out item from the queue. NOTE: the stored item's
+        // `resolve` is `wrappedResolve` (not the raw `resolve`), so we must
+        // compare against `wrappedResolve` — comparing against `resolve` never
+        // matched, leaving stale entries in the queue that could be dequeued
+        // and silently drop a command's result after it had already rejected.
+        this.queue = this.queue.filter(q => q.resolve !== wrappedResolve);
+        wrappedReject(new Error("CommandQueue timeout: Session never became available after 60s"));
+      }, 60000);
 
       this.queue.push({ command, resolve: wrappedResolve, reject: wrappedReject, timeoutHandle: timeout });
     });

@@ -14,6 +14,14 @@ export interface HostHandlers {
   onQuery?: (text: string) => CompletionItem[] | Promise<CompletionItem[]>;
   /** The front-end picked an option in a menu the engine emitted — run that menu's onSelect. */
   onMenuSelect?: (id: string, value: string) => void;
+  /** Settings page read — return the allowlisted config subset (v3). */
+  onConfigGet?: () => Record<string, any>;
+  /** Settings page write — merge the allowlisted patch, return the post-write subset (v3). */
+  onConfigSet?: (patch: Record<string, any>) => Record<string, any> | Promise<Record<string, any>>;
+  /** Typed session resume (recovery flows) — restore the saved thread with this id. */
+  onResume?: (id: string) => void;
+  /** Atomically apply mode/tier/autonomy controls; the session serializes the underlying actions. */
+  onControls?: (controls: { mode?: string; tier?: string; autonomy?: string }) => void | Promise<void>;
 }
 
 /**
@@ -33,7 +41,19 @@ export class ProtocolHost {
   private emitter: EventEmitter | null = null;
   private listeners: Array<{ event: string; fn: (...a: any[]) => void }> = [];
   private pending = new Map<number, (answer: string) => void>();
+  // Request kind per pending id — resolution announcements skip kind 'input' (may carry secrets).
+  private pendingKind = new Map<number, string>();
   private nextRequestId = 1;
+
+  /** Announce a request's resolution to in-process observers (ReviewManager). Never for inputs. */
+  private announceResolved(id: number, value: string, interrupted?: boolean): void {
+    const kind = this.pendingKind.get(id);
+    this.pendingKind.delete(id);
+    if (!kind || kind === 'input' || !this.emitter) return;
+    try {
+      this.emitter.emit('request_resolved', { id, value, ...(interrupted ? { interrupted: true } : {}) });
+    } catch { /* observers must never break the wire */ }
+  }
 
   constructor(
     private write: (line: Outbound) => void,
@@ -51,10 +71,20 @@ export class ProtocolHost {
       this.listeners.push({ event: name, fn });
     }
 
+    // Review-domain meta-events: the host is the one choke point every approval round-trip passes
+    // through (veto, diff, ask, input — with the wire-visible ids and duplicate-reply dropping),
+    // so it announces request lifecycle on the engine emitter for in-process observers
+    // (ReviewManager). These are internal — deliberately NOT in FORWARDED_EVENTS.
+    const announcePending = (id: number, kind: string, question: string, isAsk?: boolean) => {
+      this.pendingKind.set(id, kind);
+      try { emitter.emit('request_pending', { id, kind, question, isAsk: !!isAsk }); } catch { /* observers must never break the wire */ }
+    };
+
     // veto_prompt(question, options, resolve, isAsk?) — the one event carrying a callback.
     const promptFn = (question: string, options: string[], resolve: (a: string) => void, isAsk?: boolean, isMultiSelect?: boolean) => {
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
+      announcePending(id, 'prompt', question, isAsk);
       this.write({ t: 'request', id, kind: 'prompt', question, options: options || [], isAsk: !!isAsk, isMulti: !!isMultiSelect });
     };
     emitter.on(PROMPT_EVENT, promptFn);
@@ -65,6 +95,7 @@ export class ProtocolHost {
     const diffFn = (summary: string, diff: string, resolve: (a: string) => void) => {
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
+      announcePending(id, 'diff', summary);
       this.write({ t: 'request', id, kind: 'diff', question: summary, options: ['Approve', 'Reject'], body: diff });
     };
     emitter.on(DIFF_PROMPT_EVENT, diffFn);
@@ -72,10 +103,12 @@ export class ProtocolHost {
 
     // input_prompt(title, resolve, opts?) — a free-form text prompt (e.g. /keys asking for an API
     // key). `opts.masked` rides the wire so the front-end masks secrets BY CONTRACT — not by
-    // guessing from the question's wording.
+    // guessing from the question's wording. Announced with kind 'input' so review observers can
+    // ignore it; input replies are never re-announced (they can carry secrets).
     const inputFn = (title: string, resolve: (a: string) => void, opts?: { masked?: boolean }) => {
       const id = this.nextRequestId++;
       this.pending.set(id, resolve);
+      announcePending(id, 'input', title);
       this.write({ t: 'request', id, kind: 'input', question: title, options: [], masked: !!opts?.masked });
     };
     emitter.on(INPUT_PROMPT_EVENT, inputFn);
@@ -91,7 +124,7 @@ export class ProtocolHost {
       case 'reply': {
         const { id, value } = msg as ReplyMsg;
         const resolve = this.pending.get(id);
-        if (resolve) { this.pending.delete(id); resolve(value); }
+        if (resolve) { this.pending.delete(id); this.announceResolved(id, value); resolve(value); }
         return; // a reply with no pending id is a late/duplicate answer — drop it
       }
       case 'input':
@@ -117,6 +150,33 @@ export class ProtocolHost {
           .catch(() => this.write({ t: 'queryResult', id, items: [] }));
         return;
       }
+      case 'configGet': {
+        let config: Record<string, any> = {};
+        try { config = this.handlers.onConfigGet?.() ?? {}; } catch { /* answer empty, never hang */ }
+        this.write({ t: 'configResult', id: msg.id, config });
+        return;
+      }
+      case 'resume': {
+        // Ids come from ui_snapshot session lists, but validate anyway: a session id is a short
+        // slug, never something with newlines/quotes that could smell like command injection.
+        const id = String(msg.id ?? '').trim();
+        if (id && /^[\w.:-]{1,128}$/.test(id)) this.handlers.onResume?.(id);
+        return;
+      }
+      case 'controls': {
+        const mode = ['general', 'explore', 'sketch', 'code', 'beast'].includes(String(msg.mode)) ? msg.mode : undefined;
+        const tier = ['auto', 'lite', 'heavy'].includes(String(msg.tier)) ? msg.tier : undefined;
+        const autonomy = ['ask', 'auto', 'plan', 'full'].includes(String(msg.autonomy)) ? msg.autonomy : undefined;
+        if (mode || tier || autonomy) void this.handlers.onControls?.({ mode, tier, autonomy });
+        return;
+      }
+      case 'configSet': {
+        const { id, patch } = msg;
+        Promise.resolve(this.handlers.onConfigSet?.(patch ?? {}) ?? {})
+          .then(config => this.write({ t: 'configResult', id, config }))
+          .catch(() => this.write({ t: 'configResult', id, config: {} }));
+        return;
+      }
     }
   }
 
@@ -128,11 +188,15 @@ export class ProtocolHost {
     if (this.emitter) {
       for (const { event, fn } of this.listeners) this.emitter.off(event, fn);
     }
+    // Announce interruption BEFORE dropping the emitter so review observers record that these
+    // approvals were never answered (front-end gone / shutdown) — not silently approved or denied.
+    for (const id of this.pending.keys()) this.announceResolved(id, '', true);
     this.listeners = [];
     this.emitter = null;
     for (const resolve of this.pending.values()) {
       try { resolve(''); } catch { /* ignore */ }
     }
     this.pending.clear();
+    this.pendingKind.clear();
   }
 }

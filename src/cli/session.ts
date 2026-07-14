@@ -15,25 +15,51 @@ import { Message } from '../core/llm.provider';
  */
 export function messageEntriesToLLM(entries: MessageEntry[]): Message[] {
   const out: Message[] = [];
-  for (const e of entries) {
-    if (e.role !== 'user' && e.role !== 'assistant') continue; // drop system/UI dividers
+  // The session recorder persists finished tool calls as standalone `role:'tool'` lines between the
+  // user message and the assistant answer. Fold pending tool lines into the NEXT assistant turn
+  // (chronologically: the agent used the tools, then answered), so resumed context keeps what the
+  // agent actually did without sending the provider a role it doesn't accept.
+  let toolNotes: string[] = [];
+  const drainNotes = (): string => { const s = toolNotes.join('\n'); toolNotes = []; return s; };
+  for (const e of entries as any[]) {
+    if (e?.role === 'tool') {
+      toolNotes.push(`[used ${e.toolName ?? 'tool'}(${String(e.input ?? '').slice(0, 200)}) → ${String(e.output ?? '').slice(0, 800)}]`);
+      continue;
+    }
+    if (e?.role !== 'user' && e?.role !== 'assistant') continue; // drop system/UI dividers
     let text = typeof e.content === 'string' ? e.content : '';
     if (e.role === 'assistant' && e.toolCalls && e.toolCalls.length > 0) {
       const note = e.toolCalls
-        .map(tc => `[used ${tc.toolName}(${(tc.input || '').slice(0, 200)}) → ${(tc.output || '').slice(0, 800)}]`)
+        .map((tc: any) => `[used ${tc.toolName}(${(tc.input || '').slice(0, 200)}) → ${(tc.output || '').slice(0, 800)}]`)
         .join('\n');
       text = text ? `${text}\n\n${note}` : note;
+    }
+    if (e.role === 'assistant' && toolNotes.length > 0) {
+      const notes = drainNotes();
+      text = text ? `${notes}\n\n${text}` : notes;
+    } else if (e.role === 'user' && toolNotes.length > 0) {
+      // Tools ran but no assistant answer was persisted (interrupted turn) — close the exchange
+      // with an assistant-side note so user turns never collapse into each other.
+      out.push({ role: 'assistant', content: drainNotes() });
     }
     if (!text.trim()) continue; // skip empty turns the model can't use
     out.push({ role: e.role, content: text });
   }
+  if (toolNotes.length > 0) out.push({ role: 'assistant', content: drainNotes() });
   return out;
 }
 
-const SESSION_DIR = path.join(process.cwd(), '.breakglass', 'sessions');
-const BRANCH_DIR = path.join(SESSION_DIR, 'branches');
+// Lazy (not module-load) cwd resolution: the engine chdir()s to BIMAX_CWD during boot and tests
+// chdir to tmpdirs — a captured-at-import path would point sessions at the wrong project.
+export function sessionDir(): string {
+  return path.join(process.cwd(), '.breakglass', 'sessions');
+}
+function branchDir(): string {
+  return path.join(sessionDir(), 'branches');
+}
 
-function sessionId(): string {
+/** Timestamped session id, e.g. "2026-07-11_14-05-33" — also the JSONL filename stem. */
+export function newSessionId(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}-${String(d.getMinutes()).padStart(2, '0')}-${String(d.getSeconds()).padStart(2, '0')}`;
 }
@@ -43,12 +69,12 @@ export class SessionStore {
   private path: string;
 
   constructor() {
-    this.id = sessionId();
-    this.path = path.join(SESSION_DIR, `${this.id}.jsonl`);
+    this.id = newSessionId();
+    this.path = path.join(sessionDir(), `${this.id}.jsonl`);
   }
 
   async init(): Promise<MessageEntry[]> {
-    await fs.mkdir(SESSION_DIR, { recursive: true });
+    await fs.mkdir(sessionDir(), { recursive: true });
     return [];
   }
 
@@ -62,10 +88,10 @@ export class SessionStore {
   async loadAll(): Promise<MessageEntry[]> {
     const items: MessageEntry[] = [];
     try {
-      const files = await fs.readdir(SESSION_DIR);
+      const files = await fs.readdir(sessionDir());
       const sessionFiles = files.filter(f => f.endsWith('.jsonl')).sort().reverse();
       for (const file of sessionFiles.slice(0, 1)) {
-        const data = await fs.readFile(path.join(SESSION_DIR, file), 'utf-8');
+        const data = await fs.readFile(path.join(sessionDir(), file), 'utf-8');
         const lines = data.split('\n').filter(l => l.trim());
         for (const line of lines) {
           try { items.push(JSON.parse(line)); } catch { /* skip malformed line */ }
@@ -77,7 +103,7 @@ export class SessionStore {
 
   async listSessions(): Promise<string[]> {
     try {
-      const files = await fs.readdir(SESSION_DIR);
+      const files = await fs.readdir(sessionDir());
       return files.filter(f => f.endsWith('.jsonl')).sort().reverse();
     } catch { return []; }
   }
@@ -85,7 +111,7 @@ export class SessionStore {
   async loadSession(file: string): Promise<MessageEntry[]> {
     const items: MessageEntry[] = [];
     try {
-      const data = await fs.readFile(path.join(SESSION_DIR, file), 'utf-8');
+      const data = await fs.readFile(path.join(sessionDir(), file), 'utf-8');
       const lines = data.split('\n').filter(l => l.trim());
       for (const line of lines) {
         try { items.push(JSON.parse(line)); } catch { /* skip malformed line */ }
@@ -98,9 +124,9 @@ export class SessionStore {
 
   /** Fork the current live messages into a named branch for later resumption. */
   async saveBranch(name: string, messages: MessageEntry[]): Promise<void> {
-    await fs.mkdir(BRANCH_DIR, { recursive: true });
+    await fs.mkdir(branchDir(), { recursive: true });
     const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
-    const branchPath = path.join(BRANCH_DIR, `${safeName}.jsonl`);
+    const branchPath = path.join(branchDir(), `${safeName}.jsonl`);
     const lines = messages.map(m => JSON.stringify(m)).join('\n');
     await fs.writeFile(branchPath, lines + '\n', 'utf-8');
   }
@@ -108,7 +134,7 @@ export class SessionStore {
   /** List all saved branch names (without extension). */
   async listBranches(): Promise<string[]> {
     try {
-      const files = await fs.readdir(BRANCH_DIR);
+      const files = await fs.readdir(branchDir());
       return files.filter(f => f.endsWith('.jsonl')).map(f => f.slice(0, -6)).sort();
     } catch { return []; }
   }
@@ -118,7 +144,7 @@ export class SessionStore {
     const items: MessageEntry[] = [];
     const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
     try {
-      const data = await fs.readFile(path.join(BRANCH_DIR, `${safeName}.jsonl`), 'utf-8');
+      const data = await fs.readFile(path.join(branchDir(), `${safeName}.jsonl`), 'utf-8');
       const lines = data.split('\n').filter(l => l.trim());
       for (const line of lines) {
         try { items.push(JSON.parse(line)); } catch { /* skip malformed */ }
@@ -131,7 +157,7 @@ export class SessionStore {
   async deleteBranch(name: string): Promise<boolean> {
     const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
     try {
-      await fs.rm(path.join(BRANCH_DIR, `${safeName}.jsonl`));
+      await fs.rm(path.join(branchDir(), `${safeName}.jsonl`));
       return true;
     } catch { return false; }
   }

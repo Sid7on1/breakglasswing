@@ -7,6 +7,10 @@ import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { BuiltTool } from '../tools/tool.factory';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { OutcomeManager, __setOutcomeManager } from '../outcome/outcome.manager';
 
 // A deferred tool that is in BiMaxPersona's allowedTools (so it reaches the prompt) but NOT in the
 // core working set — exercises the LOAD-ON-DEMAND section. (WebFetchTool used to play this role, but
@@ -51,6 +55,24 @@ describe('Persona system prompt — static/session/turn cache split', () => {
     // Environment (cwd) is per-session/dynamic.
     expect(staticPrefix).not.toContain('### ENVIRONMENT');
     expect(dynamicSuffix).toContain('### ENVIRONMENT');
+  });
+
+  it('injects the active engine outcome contract into refreshed turn context', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-prompt-outcome-'));
+    const manager = new OutcomeManager({ sessionId: () => 'prompt-session', directory: () => dir });
+    try {
+      manager.syncSession();
+      manager.define('DELIVER-EXACT-OUTCOME', [{ id: 'verified', description: 'Result is verified' }]);
+      __setOutcomeManager(manager);
+      const parts = persona().getSystemPromptParts({});
+      expect(parts.turnContext).toContain('DELIVER-EXACT-OUTCOME');
+      expect(parts.staticPrefix).not.toContain('DELIVER-EXACT-OUTCOME');
+      expect(parts.dynamicSuffix).not.toContain('DELIVER-EXACT-OUTCOME');
+    } finally {
+      manager.shutdown();
+      __setOutcomeManager(null);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('the session suffix is byte-stable when only per-turn content changes', () => {

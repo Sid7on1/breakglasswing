@@ -1,0 +1,51 @@
+# Bimax desktop packaging — DMG for macOS, NSIS installer for Windows.
+# The headless engine (bun --compile, standalone — no Node on the host) is bundled as an
+# extraResource; scripts/prepare-engine.sh must have compiled it for the TARGET platform/arch
+# before electron-builder runs (the dist:* npm scripts sequence this).
+appId: ai.bimax.app
+productName: Bimax
+directories:
+  output: release
+  buildResources: buildResources
+
+files:
+  - out/**
+  # @lydell/node-pty is externalized by electron-vite (native N-API prebuilds) and must ship;
+  # its platform binary lives in a @lydell/node-pty-<platform>-<arch> sibling package.
+  - node_modules/@lydell/**
+
+# Native binaries can't load from inside the asar archive.
+asarUnpack:
+  - node_modules/@lydell/**
+
+# engine/ holds exactly one binary: bimax-engine (or bimax-engine.exe), compiled for the
+# same platform+arch this build targets.
+extraResources:
+  - from: engine
+    to: engine
+
+asar: true
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+  # Unsigned for now — local/dev distribution. Set identity + notarize for public release.
+  identity: null
+  darkModeSupport: true
+
+dmg:
+  sign: false
+
+win:
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target:
+    - AppImage
+  category: Development

@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { createWorktree, settleWorktree } from '../core/worktree.manager';
+import { createWorktree, settleWorktree, validateWorktree, worktreeChangedPaths } from '../core/worktree.manager';
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -66,6 +66,22 @@ describe('worktree isolation for sub-agents (core/worktree.manager)', () => {
     const res = settleWorktree(wt!);
     expect(res.changed).toBe(true);
     expect(git(repo, 'branch', '--list', 'bimax/sub-*')).toContain('bimax/sub-commit33');
+  });
+
+  it('produces an engine-observed manifest of committed and uncommitted paths', () => {
+    const wt = createWorktree(repo, 'subagent-manifest1');
+    fs.mkdirSync(path.join(wt!.path, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(wt!.path, 'src', 'committed.ts'), 'export {};\n');
+    git(wt!.path, 'add', '.');
+    git(wt!.path, 'commit', '-m', 'committed path');
+    fs.writeFileSync(path.join(wt!.path, 'uncommitted.txt'), 'dirty\n');
+    expect(worktreeChangedPaths(wt!)).toEqual(['src/committed.ts', 'uncommitted.txt']);
+  });
+
+  it('validates the durable identity of a crash-recoverable worktree', () => {
+    const wt = createWorktree(repo, 'subagent-recover1')!;
+    expect(validateWorktree(wt)).toBe(true);
+    expect(validateWorktree({ ...wt, branch: 'bimax/sub-wrong' })).toBe(false);
   });
 
   it('parallel worktrees are independent — edits never collide', () => {

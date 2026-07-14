@@ -25,6 +25,13 @@ export interface AgentTreeCheckpoint {
   agents: CheckpointedAgent[];
 }
 
+export interface AutomaticRecoveryPlan {
+  automatic: boolean;
+  sessionId?: string;
+  reason: string;
+  agents: CheckpointedAgent[];
+}
+
 function checkpointPath(): string {
   return process.env.BIMAX_AGENT_TREE_PATH
     || path.join(process.cwd(), '.bimax', 'agent-tree.json');
@@ -67,7 +74,12 @@ export function loadCrashedAgents(): CheckpointedAgent[] {
     const snap = JSON.parse(fs.readFileSync(file, 'utf-8')) as AgentTreeCheckpoint;
     if (!snap || !Array.isArray(snap.agents)) return [];
     if (snap.pid === process.pid || pidAlive(snap.pid)) return [];
-    return snap.agents.filter(a => a?.claim?.status === 'running' && a.config?.prompt);
+    return snap.agents
+      .filter(a => a?.claim?.status === 'running' && a.config?.prompt)
+      .map(agent => ({
+        ...agent,
+        claim: { ...agent.claim, phase: agent.claim.phase || 'working' },
+      }));
   } catch { return []; }
 }
 
@@ -85,11 +97,59 @@ export function resumeConfigFor(a: CheckpointedAgent): SubAgentConfig {
   const progress = a.claim.toolCalls > 0
     ? ` The previous attempt made ${a.claim.toolCalls} tool call(s) before dying, so some of its work may already be on disk — check before redoing it.`
     : '';
+  // Lease/run identity belongs to the dead process tree. Reusing it could adopt or release a
+  // stale slot, so the resumed manager must allocate fresh capacity context.
+  const stable = { ...a.config };
+  delete stable.capacityPath;
+  delete stable.capacityRunId;
+  delete stable.capacityLeaseId;
+  delete stable.capacityParentLeaseId;
   return {
-    ...a.config,
+    ...stable,
+    recoveryOf: a.claim.taskId,
     prompt:
       `[RESUMED AFTER CRASH] You are re-running a task whose previous agent was interrupted ` +
       `(its session crashed).${progress}\n\nOriginal task:\n${a.config.prompt}`,
+  };
+}
+
+/**
+ * Decide whether crash recovery may run unattended. Automatic recovery is deliberately narrower
+ * than manual `/subagents resume`: every agent must belong to one outcome session, retain its
+ * bounded assignment, avoid bypass permission mode, and be recent enough to still reflect intent.
+ */
+export function planAutomaticRecovery(
+  agents: CheckpointedAgent[],
+  options: { enabled?: boolean; now?: number; maxAgeMs?: number } = {},
+): AutomaticRecoveryPlan {
+  const list = [...agents];
+  if (list.length === 0) return { automatic: false, reason: 'No crashed agents are recoverable.', agents: [] };
+  if (options.enabled === false) return { automatic: false, reason: 'Automatic agent recovery is disabled.', agents: list };
+  const uncoordinated = list.find(agent => !agent.config.outcomeTaskId || !agent.config.outcomeSessionId);
+  if (uncoordinated) {
+    return { automatic: false, reason: 'A crashed agent is not bound to a durable outcome task and requires manual review.', agents: list };
+  }
+  if (list.some(agent => agent.config.parentMode === 'bypass')) {
+    return { automatic: false, reason: 'A crashed assignment used bypass permissions and requires manual approval before recovery.', agents: list };
+  }
+  const sessions = [...new Set(list.map(agent => agent.config.outcomeSessionId!))];
+  if (sessions.length !== 1) {
+    return { automatic: false, reason: 'The crash snapshot spans multiple outcome sessions and cannot be resumed atomically.', agents: list };
+  }
+  const taskIds = list.map(agent => agent.config.outcomeTaskId!);
+  if (new Set(taskIds).size !== taskIds.length) {
+    return { automatic: false, reason: 'The crash snapshot contains duplicate workers for one outcome task.', agents: list };
+  }
+  const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? Number(process.env.BIMAX_AUTO_RECOVERY_MAX_AGE_MS || 7 * 24 * 60 * 60_000);
+  if (list.some(agent => !Number.isFinite(agent.claim.startedAt) || now - agent.claim.startedAt > maxAgeMs)) {
+    return { automatic: false, reason: 'The interrupted assignment is too old for unattended recovery.', agents: list };
+  }
+  return {
+    automatic: true,
+    sessionId: sessions[0],
+    reason: `${list.length} bounded assignment(s) can resume safely.`,
+    agents: list,
   };
 }
 
@@ -110,6 +170,14 @@ export function detectCrashedTree(): number {
 /** The crashed agents found at boot (empty until detectCrashedTree ran). */
 export function crashedAgents(): CheckpointedAgent[] {
   return crashedCache ?? [];
+}
+
+/** Consume the OLD crash snapshot before respawning, so new live checkpoints are never deleted. */
+export function consumeCrashedAgents(): CheckpointedAgent[] {
+  const agents = [...(crashedCache ?? [])];
+  crashedCache = [];
+  clearCheckpoint();
+  return agents;
 }
 
 /** Forget the crash state (after resume/dismiss). */

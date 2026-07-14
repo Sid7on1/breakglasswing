@@ -8,7 +8,7 @@ baked in. The target machine needs **no Node, no Bun, no node_modules**.
 On any macOS (arm64/x64) or Linux (x64/arm64) machine:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<org>/bimax/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Sid7on1/breakglasswing/main/install.sh | bash
 ```
 
 The installer detects the platform, downloads the matching release tarball, installs to
@@ -22,11 +22,18 @@ git clone <repo> && cd bimax && ./install.sh
 ```
 
 Overrides: `BIMAX_INSTALL_DIR`, `BIMAX_REPO`, `BIMAX_VERSION`, `BIMAX_BASE_URL` — see the
-header of `install.sh`.
+header of `install.sh`. Downloads are verified against the release's `SHA256SUMS` before extraction.
+
+Update or uninstall using the same script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Sid7on1/breakglasswing/main/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/Sid7on1/breakglasswing/main/install.sh | bash -s -- --uninstall
+```
 
 ## Cutting a release
 
-On a build machine with bun ≥ 1.1 and go ≥ 1.22:
+On a build machine with bun ≥ 1.1 and go ≥ 1.26:
 
 ```sh
 BIMAX_VERSION=1.2.0 ./release.sh          # darwin-arm64 darwin-x64 linux-x64 linux-arm64
@@ -38,6 +45,29 @@ Each target compiles the engine with `bun build --compile --target=bun-<os>-<arc
 binary (`-tags embedengine`), and produces `build/bimax-<os>-<arch>.tar.gz` plus
 `build/SHA256SUMS`. Attach all of it to the GitHub release; `install.sh` pulls from
 `releases/latest/download/`.
+
+### Apple signing and notarization
+
+Tagged releases are built and published by `.github/workflows/release.yml`. The macOS binaries
+are signed with hardened runtime and a secure timestamp, submitted to Apple's notary service, and
+then repackaged before `SHA256SUMS` is generated.
+
+The repository must define these GitHub Actions secrets:
+
+- `APPLE_DEVELOPER_ID_P12_BASE64` — base64 of a Developer ID Application certificate plus private
+  key exported from Keychain Access as `.p12`.
+- `APPLE_DEVELOPER_ID_P12_PASSWORD` — password used when exporting that `.p12`.
+- `APPLE_NOTARY_PRIVATE_KEY` — contents of an App Store Connect API key (`AuthKey_*.p8`).
+- `APPLE_NOTARY_KEY_ID` — the API key ID.
+- `APPLE_NOTARY_ISSUER_ID` — the App Store Connect issuer ID.
+
+Only the Apple Developer Account Holder can create the Developer ID certificate. Add credentials
+through **GitHub → Settings → Secrets and variables → Actions**; never commit them or paste them
+into an issue or chat. Push a version-matching tag such as `v1.0.0` only after CI is green.
+
+Apple's notary service issues an online ticket for a standalone executable, but `stapler` cannot
+attach that ticket directly to the executable. Gatekeeper therefore retrieves the notarization
+ticket online when it assesses the downloaded CLI.
 
 `./build-release.sh` remains the single-file build for the current platform only
 (`build/bimax`).

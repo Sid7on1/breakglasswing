@@ -1,0 +1,6 @@
+{
+  "name": "path-routing-backtrack-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node test.mjs" }
+}

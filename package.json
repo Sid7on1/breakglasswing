@@ -6,6 +6,9 @@
     "bimax": "bin/bimax.js"
   },
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "start": "node bin/bimax.js",
     "dev": "tsx src/index.ts",
@@ -14,11 +17,17 @@
     "test": "jest --coverage",
     "test:ci": "jest --coverage=false",
     "doctor": "bash scripts/doctor.sh",
+    "app:dev": "npm --prefix app run dev",
+    "app:dist:mac": "npm --prefix app run dist:mac",
+    "app:dist:win": "npm --prefix app run dist:win",
     "test:leaks": "jest --coverage=false --detectOpenHandles",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",
-    "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js"
+    "gen:protocol": "tsc && node dist/protocol/schema/write.fixtures.js",
+    "gen:app-protocol": "node scripts/gen-app-protocol.mjs",
+    "check:protocol-mirror": "node scripts/check-protocol-mirror.mjs",
+    "release:check": "bash scripts/release-gate.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

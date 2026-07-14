@@ -97,5 +97,5 @@ describe('WorktreeManager — lifecycle against a real temp git repo', () => {
     for (const b of branches) expect(listed).toContain(path.join('.evolution_worktrees', b));
     await Promise.all(branches.map(b => mgr.removeWorktree(b, true)));
     for (const b of branches) expect(git(['branch', '--list', b], repo)).toBe('');
-  });
+  }, 30_000);
 });

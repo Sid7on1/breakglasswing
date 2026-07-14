@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 // B3 — optional OS isolation for BashTool. We wrap commands in the platform's OS sandbox with a
 // profile that allows reads/exec/network but restricts file WRITES to the workspace + temp dirs —
@@ -14,7 +14,7 @@ export function setSandboxEnabled(v: boolean): void { enabled = v; }
 export function isSandboxEnabled(): boolean { return enabled; }
 
 let availableCache: boolean | null = null;
-/** The OS sandbox backend for this platform, or null if none is installed. Cached after first probe. */
+/** The usable OS sandbox backend for this platform, or null. Cached after the first real probe. */
 export function sandboxBackend(): 'seatbelt' | 'bwrap' | null {
   if (availableCache === false) return null;
   const bin = process.platform === 'darwin' ? 'sandbox-exec'
@@ -23,7 +23,12 @@ export function sandboxBackend(): 'seatbelt' | 'bwrap' | null {
   if (!bin) { availableCache = false; return null; }
   if (availableCache === true) return bin === 'sandbox-exec' ? 'seatbelt' : 'bwrap';
   try {
-    execSync(`command -v ${bin}`, { stdio: 'ignore' });
+    // Merely finding the executable is insufficient: Ubuntu 24.04 can install bwrap while
+    // AppArmor forbids the user namespace it needs. Probe the same kernel primitive commands use.
+    const probeArgs = bin === 'sandbox-exec'
+      ? ['-p', '(version 1) (allow default)', '/usr/bin/true']
+      : ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--die-with-parent', '/bin/true'];
+    execFileSync(bin, probeArgs, { stdio: 'ignore', timeout: 5_000 });
     availableCache = true;
     return bin === 'sandbox-exec' ? 'seatbelt' : 'bwrap';
   } catch {

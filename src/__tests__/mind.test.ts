@@ -217,6 +217,19 @@ describe('EpistemicLedger', () => {
     expect(bucket.observed).toBeCloseTo(0.5); // one refuted, one confirmed — not two false
   });
 
+  test('returns an auditable file-scope receipt for green verification', () => {
+    const root = tmpRoot();
+    const led = new EpistemicLedger(root);
+    led.openClaim('ts', 0.9, 'src/a.ts');
+    led.openClaim('ts', 0.9, 'src/b.ts');
+    expect(led.resolveDetailed(true, { command: 'npx tsc src/a.ts' })).toEqual({
+      settled: 1, coveredFiles: ['src/a.ts'], repoWide: false,
+    });
+    expect(led.resolveDetailed(true, { command: 'npm test' })).toEqual({
+      settled: 1, coveredFiles: ['src/b.ts'], repoWide: true,
+    });
+  });
+
   test('unattributable red evidence resolves nothing instead of poisoning labels', () => {
     const root = tmpRoot();
     const led = new EpistemicLedger(root);

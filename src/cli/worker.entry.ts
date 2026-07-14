@@ -1,8 +1,9 @@
 import { workerData, parentPort } from 'worker_threads';
 import * as path from 'path';
+import * as os from 'os';
 import { EventBus } from '../core/event.bus';
 import { buildKeyPool } from './provider';
-import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
+import { SubAgentConfig, SUB_RESULT, SUB_ERROR, SUB_EVENT, SUB_READY, MAX_SUBAGENT_DEPTH } from '../core/subagent.manager';
 import { loadConfig } from './config';
 import { SkillLoader, DynamicPersona } from './skills.loader';
 import { ToolRegistry } from '../tools/tool.registry';
@@ -15,6 +16,8 @@ import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool, createWriteFileTool, createDeleteTool, createMakeDirTool } from '../tools/implementations/file.tool';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
 import { createMultiEditTool } from '../tools/implementations/multiedit.tool';
+import { createSymbolEditTool } from '../tools/implementations/symboledit.tool';
+import { createRelatedTestsTool } from '../tools/implementations/relatedtests.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool } from '../tools/implementations/todo.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -37,6 +40,15 @@ import { GraphStore } from '../graph/graph.store';
 import { cliEvents } from './events';
 import { floorRoot } from '../sandbox/exec.sandbox';
 import { SafetyPolicy } from '../governor/policy.engine';
+import { OutcomeManager, __setOutcomeManager } from '../outcome/outcome.manager';
+import { createOutcomeTool } from '../tools/implementations/outcome.tool';
+import { createTasksTool } from '../tools/implementations/tasks.tool';
+import {
+  CAPACITY_LEASE_ENV,
+  CAPACITY_PATH_ENV,
+  CAPACITY_RUN_ENV,
+  SubAgentCapacityCoordinator,
+} from '../core/subagent.capacity';
 
 // Core sub-agent run, transport-agnostic: build the isolated agent + tools and execute the task,
 // relaying each tool event through `emitEvent`. Shared by BOTH the worker_thread path (runWorker,
@@ -45,6 +57,7 @@ import { SafetyPolicy } from '../governor/policy.engine';
 async function runSubAgentCore(
   config: SubAgentConfig,
   emitEvent: (subtype: 'tool_call' | 'tool_call_result', call: any) => void,
+  signalReady?: () => void,
 ): Promise<string> {
   // Sandbox floor (BiMax v2): this worker is an isolated autonomous episode. Bash enforcement
   // lives in bash.tool.ts (kernel sandbox via the thread-local FLOOR_ENV), but the Node-side
@@ -58,8 +71,23 @@ async function runSubAgentCore(
   // so this never leaks to the parent or siblings.
   const depth = Math.max(1, Number(config.depth ?? 1));
   process.env.BIMAX_SUBAGENT_DEPTH = String(depth);
+  let capacity: SubAgentCapacityCoordinator | null = null;
+  let capacityHeartbeat: ReturnType<typeof setInterval> | null = null;
+  if (config.capacityPath && config.capacityRunId) {
+    process.env[CAPACITY_PATH_ENV] = config.capacityPath;
+    process.env[CAPACITY_RUN_ENV] = config.capacityRunId;
+    if (config.capacityLeaseId) process.env[CAPACITY_LEASE_ENV] = config.capacityLeaseId;
+    capacity = new SubAgentCapacityCoordinator(config.capacityPath);
+    if (config.capacityLeaseId) {
+      capacity.heartbeat(config.capacityLeaseId, process.pid);
+      capacityHeartbeat = setInterval(() => {
+        try { capacity?.heartbeat(config.capacityLeaseId!, process.pid); } catch { /* parent TTL is fallback */ }
+      }, 10_000);
+      capacityHeartbeat.unref?.();
+    }
+  }
 
-  {
+  try {
     const pool = buildKeyPool();
     const apiKeyManager = new ApiKeyManager(pool);
     const llmAdapter = new LlmAdapter(apiKeyManager);
@@ -82,6 +110,17 @@ async function runSubAgentCore(
     governor.mode = config.parentMode as any;
 
     const toolRegistry = new ToolRegistry();
+    const workerSessionId = config.outcomeTaskId || `worker-${process.pid}-${Date.now()}`;
+    const workerOutcome = new OutcomeManager({
+      sessionId: () => workerSessionId,
+      directory: () => path.join(os.tmpdir(), 'bimax-worker-outcomes'),
+    });
+    workerOutcome.syncSession();
+    __setOutcomeManager(workerOutcome);
+    const onReviewChange = () => workerOutcome.onMutation();
+    const onReviewEvidence = (event: any) => workerOutcome.onBuildEvidence(event);
+    cliEvents.on('review_change', onReviewChange);
+    cliEvents.on('review_evidence', onReviewEvidence);
     // Must match the parent's graph backend (container.ts uses createGraphStore: SQLite when
     // available, legacy JSON otherwise), keyed off the sub-agent's project cwd — NOT
     // ~/.breakglass/graph.json, which left workers querying an empty/stale store.
@@ -98,11 +137,15 @@ async function runSubAgentCore(
     toolRegistry.register(createWriteFileTool(governor));
     toolRegistry.register(createEditFileTool(governor));
     toolRegistry.register(createMultiEditTool(governor));
+    toolRegistry.register(createSymbolEditTool(governor));
+    toolRegistry.register(createRelatedTestsTool(governor));
     toolRegistry.register(createDeleteTool(governor));
     toolRegistry.register(createMakeDirTool(governor));
     toolRegistry.register(createGrepTool(governor));
     toolRegistry.register(createGlobTool(governor));
     toolRegistry.register(createTodoWriteTool(governor));
+    toolRegistry.register(createOutcomeTool(governor));
+    toolRegistry.register(createTasksTool(governor));
     // Floored episodes are net: none — WebFetch/WebSearch run fetches from the worker thread
     // itself, where the kernel sandbox on Bash children can't reach, so simply don't arm them.
     if (!episodeFloor) toolRegistry.register(createWebFetchTool(governor));
@@ -162,12 +205,26 @@ async function runSubAgentCore(
     cliEvents.on('tool_call', onCall);
     cliEvents.on('tool_call_result', onResult);
 
+    // Boot done — everything above (key pool, config, graph store, ~18 tools, persona/system-prompt)
+    // is the fixable per-spawn overhead WS2 measures. Signal it NOW, before the first llm call, so
+    // the parent can split boot time from the model's time-to-first-action.
+    signalReady?.();
+
     // 3. Execute
     try {
       return await agent.execute(config.prompt, () => { /* streaming ignored in sub-agents */ });
     } finally {
       cliEvents.off('tool_call', onCall);
       cliEvents.off('tool_call_result', onResult);
+      cliEvents.off('review_change', onReviewChange);
+      cliEvents.off('review_evidence', onReviewEvidence);
+      workerOutcome.shutdown();
+      __setOutcomeManager(null);
+    }
+  } finally {
+    if (capacityHeartbeat) clearInterval(capacityHeartbeat);
+    if (capacity && config.capacityLeaseId) {
+      try { capacity.release(config.capacityLeaseId); } catch { /* TTL reclaims it */ }
     }
   }
 }
@@ -177,7 +234,11 @@ async function runWorker(): Promise<void> {
   if (!parentPort) return;
   const config = workerData as SubAgentConfig;
   try {
-    const result = await runSubAgentCore(config, (subtype, call) => parentPort!.postMessage({ type: 'tool_event', subtype, call }));
+    const result = await runSubAgentCore(
+      config,
+      (subtype, call) => parentPort!.postMessage({ type: 'tool_event', subtype, call }),
+      () => parentPort!.postMessage({ type: 'ready' }),
+    );
     parentPort.postMessage({ type: 'success', result });
   } catch (err: any) {
     parentPort.postMessage({ type: 'error', error: err?.message || String(err) });
@@ -193,7 +254,11 @@ export async function runAsSubprocess(): Promise<void> {
   try { config = JSON.parse(process.env.BIMAX_SUBAGENT_CONFIG || '{}') as SubAgentConfig; }
   catch { write(SUB_ERROR + JSON.stringify({ error: 'invalid BIMAX_SUBAGENT_CONFIG' })); process.exit(1); return; }
   try {
-    const result = await runSubAgentCore(config, (subtype, call) => write(SUB_EVENT + JSON.stringify({ subtype, call })));
+    const result = await runSubAgentCore(
+      config,
+      (subtype, call) => write(SUB_EVENT + JSON.stringify({ subtype, call })),
+      () => write(SUB_READY),
+    );
     write(SUB_RESULT + JSON.stringify({ result }));
     process.exit(0);
   } catch (err: any) {

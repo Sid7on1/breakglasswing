@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
 import { spawn, exec } from 'child_process';
 import { globalProjectMemory } from '../memory/project.memory';
 import { mindSingletonRoot } from './self.model';
@@ -60,14 +61,28 @@ export class DogfoodEngine {
     const persona = 'first-time user opening the TUI';
     return new Promise(resolve => {
       const bin = path.join(this.projectRoot, binRel);
-      // `script` gives the app a real pty without a node-pty dep — but its CLI differs:
-      // BSD/macOS: script -q /dev/null <cmd>   ·   util-linux: script -q -c "<cmd>" /dev/null
+      // BSD `script` calls tcgetattr on its own stdin and fails when the release gate itself is
+      // non-interactive. macOS ships `expect`, which allocates a child PTY even from CI. Linux's
+      // util-linux `script -c` supports the pipe-based invocation directly.
+      const expectProgram = [
+        'set timeout 15',
+        'log_user 1',
+        'spawn -noecho $env(BIMAX_DOGFOOD_BIN)',
+        'after 6000 { send "\\003" }',
+        'expect { eof {} timeout { send "\\003"; after 800; catch { close }; catch { wait } } }',
+      ].join('\n');
+      const executable = process.platform === 'darwin' ? '/usr/bin/expect' : 'script';
       const scriptArgs = process.platform === 'darwin'
-        ? ['-q', '/dev/null', bin]
+        ? ['-c', expectProgram]
         : ['-q', '-c', bin, '/dev/null'];
-      const child = spawn('script', scriptArgs, {
+      const child = spawn(executable, scriptArgs, {
         cwd: path.dirname(bin),
-        env: { ...process.env, TERM: 'xterm-256color', COLUMNS: '120', LINES: '35' },
+        env: {
+          ...process.env,
+          BIMAX_DOGFOOD_BIN: bin,
+          TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: '15;0',
+          COLUMNS: '120', LINES: '35',
+        },
       });
       let out = '';
       let settled = false;
@@ -80,19 +95,24 @@ export class DogfoodEngine {
       child.stdout?.on('data', (d: Buffer) => { out += d.toString('utf-8'); });
       child.stderr?.on('data', (d: Buffer) => { out += d.toString('utf-8'); });
       child.on('error', (e) => finish(false, `could not launch: ${e.message}`));
-      // Let it boot + render, then quit like a user would (Ctrl+C twice covers confirm prompts).
-      setTimeout(() => { try { child.stdin?.write('\x03'); } catch { /* closed */ } }, 6000);
-      setTimeout(() => { try { child.stdin?.write('\x03'); } catch { /* closed */ } }, 6800);
+      const rendered = () => /\bBIMAX\b|Starting engine|● Ready/.test(out);
+      // Linux `script` receives quit keys from here; macOS expect sends them inside its PTY.
+      if (process.platform !== 'darwin') {
+        setTimeout(() => { try { child.stdin?.write('\x03'); } catch { /* closed */ } }, 6000);
+        setTimeout(() => { try { child.stdin?.write('\x03'); } catch { /* closed */ } }, 6800);
+      }
       const deadline = setTimeout(() => finish(
-        out.length > 200 && !/panic:|fatal error:/i.test(out),
-        out.length > 200 ? 'rendered, but had to be killed (quit did not exit it)' : 'no meaningful render before timeout'
+        rendered() && !/panic:|fatal error:/i.test(out),
+        rendered() ? 'rendered, but had to be killed (quit did not exit it)' : 'no meaningful render before timeout'
       ), 15000);
       deadline.unref?.();
-      child.on('exit', () => {
+      child.on('exit', (code, signal) => {
         const panicked = /panic:|fatal error:/i.test(out);
-        const rendered = out.length > 200; // a real TUI frame is far bigger than an error line
         if (panicked) finish(false, 'TUI panicked on launch');
-        else if (!rendered) finish(false, 'TUI exited without rendering a frame');
+        else if (!rendered()) {
+          out += `\n[harness] PTY wrapper exited code=${code ?? 'null'} signal=${signal ?? 'none'}`;
+          finish(false, 'TUI exited without rendering a frame');
+        }
         else finish(true, 'TUI launched, rendered, and quit cleanly');
       });
     });
@@ -101,7 +121,8 @@ export class DogfoodEngine {
   /** CLI probe: does the built binary answer --help like a sane tool? */
   private async probeCli(): Promise<ProbeResult | null> {
     const persona = 'new user running --help';
-    const entry = this.has('dist/index.js') ? 'node dist/index.js --help'
+    const entry = this.has('build/bimax') ? './build/bimax --help'
+      : this.has('dist/index.js') ? 'node dist/index.js --help'
       : this.has('package.json') && !!this.pkg()?.bin ? 'npx --no-install . --help'
       : null;
     if (!entry) return null;
@@ -120,21 +141,53 @@ export class DogfoodEngine {
     const distIndex = ['site/dist/index.html', 'dist/index.html', 'build/index.html']
       .find(p => this.has(p));
     if (!distIndex) return null;
+    let server: http.Server | null = null;
+    let browser: Awaited<ReturnType<(typeof import('puppeteer'))['launch']>> | null = null;
     try {
       const puppeteer = await import('puppeteer');
       const chrome = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome']
         .find(p => { try { return fs.existsSync(p); } catch { return false; } });
-      const browser = await puppeteer.launch({
-        headless: true,
+      const siteRoot = path.dirname(path.join(this.projectRoot, distIndex));
+      server = http.createServer((req, res) => {
+        try {
+          const pathname = decodeURIComponent(new URL(req.url || '/', 'http://localhost').pathname);
+          const requested = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+          const file = path.resolve(siteRoot, requested);
+          if (file !== siteRoot && !file.startsWith(siteRoot + path.sep)) {
+            res.writeHead(403).end('Forbidden');
+            return;
+          }
+          const ext = path.extname(file).toLowerCase();
+          const mime: Record<string, string> = {
+            '.html': 'text/html; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+            '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp', '.woff': 'font/woff', '.woff2': 'font/woff2',
+          };
+          const body = fs.readFileSync(file);
+          res.writeHead(200, { 'Content-Type': mime[ext] || 'application/octet-stream' }).end(body);
+        } catch {
+          res.writeHead(404).end('Not found');
+        }
+      });
+      await new Promise<void>((resolve, reject) => {
+        server!.once('error', reject);
+        server!.listen(0, '127.0.0.1', resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('static preview server did not bind');
+
+      browser = await puppeteer.launch({
+        headless: 'new',
         ...(chrome ? { executablePath: chrome } : {}),
         args: ['--no-sandbox', '--disable-gpu'],
       });
-      try {
+      {
         const page = await browser.newPage();
         const errors: string[] = [];
         page.on('console', (m: any) => { if (m.type() === 'error') errors.push(m.text()); });
         page.on('pageerror', (e: any) => errors.push(String(e?.message || e)));
-        await page.goto(`file://${path.join(this.projectRoot, distIndex)}`, { waitUntil: 'networkidle0', timeout: 45_000 });
+        await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'networkidle0', timeout: 45_000 });
         await new Promise(r => setTimeout(r, 2500)); // let animations/3D mount
         fs.mkdirSync(this.outDir, { recursive: true });
         const shot = path.join(this.outDir, `site-${Date.now()}.png`);
@@ -147,19 +200,20 @@ export class DogfoodEngine {
             : errors.length ? `${errors.length} console error(s) on load` : 'page rendered no visible content',
           evidence: errors.slice(0, 5).join('\n') || undefined,
         };
-      } finally {
-        await browser.close();
       }
     } catch (e: any) {
       return { id: 'site-load', persona, ran: false, summary: `browser unavailable: ${e?.message}` };
+    } finally {
+      if (browser) await browser.close().catch(() => undefined);
+      if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
     }
   }
 
   /** Which probes apply here — used by /dogfood to explain itself before running. */
   applicableProbes(): string[] {
     const probes: string[] = [];
-    if (this.has('tui/bimax-tui')) probes.push('tui-smoke');
-    if (this.has('dist/index.js') || !!this.pkg()?.bin) probes.push('cli-help');
+    if (this.has('build/bimax') || this.has('tui/bimax-tui')) probes.push('tui-smoke');
+    if (this.has('build/bimax') || this.has('dist/index.js') || !!this.pkg()?.bin) probes.push('cli-help');
     if (['site/dist/index.html', 'dist/index.html', 'build/index.html'].some(p => this.has(p))) probes.push('site-load');
     return probes;
   }
@@ -168,9 +222,10 @@ export class DogfoodEngine {
   async run(log: Log = () => {}): Promise<{ results: ProbeResult[]; reportPath?: string }> {
     const results: ProbeResult[] = [];
 
-    if (this.has('tui/bimax-tui') && process.platform !== 'win32') {
+    const tuiBinary = this.has('build/bimax') ? 'build/bimax' : 'tui/bimax-tui';
+    if (this.has(tuiBinary) && process.platform !== 'win32') {
       log('info', 'Dogfood: opening the TUI as a first-time user…');
-      results.push(await this.probeTuiBinary('tui/bimax-tui'));
+      results.push(await this.probeTuiBinary(tuiBinary));
     }
     const cli = await this.probeCli();
     if (cli) { log('info', 'Dogfood: running --help as a new user…'); results.push(cli); }

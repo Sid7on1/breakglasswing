@@ -1,19 +1,20 @@
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { GraphStore } from '../../graph/graph.store';
-import { GraphNode } from '../../graph/models';
+import { GraphNode, IGraphStore } from '../../graph/models';
 import { ImpactEngine } from '../../graph/impact.engine';
 import { fmtNode, searchNodes, resolveNodeId } from '../../graph/node.search';
 import { readSymbolSource } from '../../graph/symbol.source';
 import { planContext } from '../../graph/context.planner';
 import { getTopNodes } from '../../graph/pagerank';
 import { globalCodemem } from '../../graph/codemem/backend';
+import { parseRepoQualifier, resolveRepoStores, pickRepoStore } from '../../graph/cross.repo';
 
 // When a lookup misses, ORIENT the model instead of dead-ending: tell it what the graph actually
 // holds — node-type counts + the most central REAL symbols — so it searches actual names rather than
 // guessing conceptual ones (the "assumed an Architecture node exists" problem). No hardcoded
 // workflow; just enough signal for the model to self-correct its next call.
-function graphOrientation(store: GraphStore): string {
+function graphOrientation(store: IGraphStore): string {
   const nodes = [...store.getGraph().nodes.values()];
   if (nodes.length === 0) return '';
   // Count only the searchable definition types — STATEMENT/BLOCK/VARIABLE are graph internals the
@@ -43,7 +44,10 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
 - \`ARCHITECTURE [path]\` — high-level structural overview: packages, services, and de-facto module clusters (community detection). Use to grasp how an unfamiliar codebase is organized.
 - \`<node>\` (bare) — the node plus its direct edges.
 
-\`<node>\` may be an exact node id or a unique keyword; ambiguous keywords return candidates to disambiguate.`,
+\`<node>\` may be an exact node id or a unique keyword; ambiguous keywords return candidates to disambiguate.
+
+# Cross-repo (multi-repo workspaces)
+Prefix any query with \`repo:<name>\` to run it against another registered repo's graph — e.g. \`repo:libfoo SEARCH_NODES parse\` or \`repo:libfoo GET_DEPENDENTS Encoder\`. Without a prefix the query runs on the primary repo. The RepoMap already lists each repo's central symbols.`,
   isDestructive: false,
   isConcurrencySafe: true,
   schema: {
@@ -54,8 +58,26 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     required: ['query']
   },
   execute: async (args: { query: string }, context?: any) => {
-    const raw = (args.query || '').trim();
-    if (!raw) return 'Error: empty query.';
+    const rawFull = (args.query || '').trim();
+    if (!rawFull) return 'Error: empty query.';
+
+    // Cross-repo (PR3): `repo:<name> <verb> <target>` scopes the query to another registered repo's
+    // graph; without the prefix, everything runs on the primary store exactly as before.
+    const { repo, rest: raw } = parseRepoQualifier(rawFull);
+    let store: IGraphStore = graphStore;
+    let scopedToSecondary = false;
+    let scopedCwd = context?.cwd || process.cwd();
+    if (repo) {
+      const repos = await resolveRepoStores(graphStore);
+      const pick = pickRepoStore(repos, repo);
+      if (!pick) {
+        return `No repo named "${repo}" in this workspace. Available: ${repos.map(r => r.name).join(', ')}. ` +
+          `Register it with WorkspaceTool and index it with /index inside that repo.`;
+      }
+      store = pick.store;
+      scopedToSecondary = !pick.primary;
+      if (scopedToSecondary) scopedCwd = pick.root; // READ_SYMBOL reads source from ITS repo
+    }
 
     const verbs = ['SEARCH_NODES', 'GET_DEPENDENTS', 'GET_DEPENDENCIES', 'BLAST_RADIUS', 'READ_SYMBOL', 'SEMANTIC', 'ARCHITECTURE'];
     const firstSpace = raw.indexOf(' ');
@@ -64,8 +86,10 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     const target = verb ? raw.slice(firstSpace + 1).trim() : raw;
 
     // codebase-memory engine: when connected + indexed, it fronts these verbs with a richer,
-    // 158-language graph + local semantic search. Any miss returns null → native graph below.
-    if (globalCodemem.isReady()) {
+    // 158-language graph + local semantic search. It indexes the PRIMARY repo only, so a query
+    // scoped to another repo skips it and goes straight to that repo's native graph. Any miss
+    // returns null → native graph below.
+    if (!scopedToSecondary && globalCodemem.isReady()) {
       let r: string | null = null;
       if (verb === 'SEMANTIC') r = await globalCodemem.search(target, true);
       else if (verb === 'SEARCH_NODES' && target && target !== '*') r = await globalCodemem.search(target, false);
@@ -80,7 +104,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     if (verb === 'SEMANTIC') return 'Semantic search needs the codebase-memory engine, which is still indexing or unavailable. Use SEARCH_NODES <keyword> for now.';
     if (verb === 'ARCHITECTURE') return 'The architecture overview needs the codebase-memory engine, which is still indexing or unavailable. Explore with SEARCH_NODES * and ls for now.';
 
-    const graph = graphStore.getGraph();
+    const graph = store.getGraph();
     if (graph.nodes.size === 0) {
       return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
     }
@@ -89,20 +113,20 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
       // Discovery: `SEARCH_NODES *` (or no keyword) lists the most central nodes so the model can see
       // what's actually in the graph and pick real names — instead of guessing concepts.
       if (!target || target === '*') {
-        const top = getTopNodes(graphStore, 30);
+        const top = getTopNodes(store, 30);
         if (top.length === 0) return 'The graph is empty.';
         return `Most central ${top.length} nodes (use these names with READ_SYMBOL / GET_DEPENDENTS / BLAST_RADIUS):\n` +
           top.map(r => `- ${r.type} ${r.label}${r.filePath ? ` (${r.filePath})` : ''}`).join('\n');
       }
-      const hits = searchNodes(graphStore, target);
-      if (hits.length === 0) return `No nodes match "${target}".` + graphOrientation(graphStore);
+      const hits = searchNodes(store, target);
+      if (hits.length === 0) return `No nodes match "${target}".` + graphOrientation(store);
       return `Found ${hits.length} node(s) for "${target}":\n` + hits.map(n => '- ' + fmtNode(n)).join('\n');
     }
 
-    const engine = new ImpactEngine(graphStore);
+    const engine = new ImpactEngine(store);
 
     if (verb === 'GET_DEPENDENTS' || verb === 'GET_DEPENDENCIES') {
-      const resolved = resolveNodeId(graphStore, target);
+      const resolved = resolveNodeId(store, target);
       if (resolved.ambiguous) {
         return `"${target}" is ambiguous. Candidates:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
       }
@@ -130,7 +154,7 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     }
 
     if (verb === 'BLAST_RADIUS') {
-      const resolved = resolveNodeId(graphStore, target);
+      const resolved = resolveNodeId(store, target);
       if (resolved.ambiguous) {
         return `"${target}" is ambiguous. Candidates:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
       }
@@ -147,13 +171,13 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     }
 
     if (verb === 'READ_SYMBOL') {
-      const resolved = resolveNodeId(graphStore, target);
+      const resolved = resolveNodeId(store, target);
       if (resolved.ambiguous) {
         return `"${target}" is ambiguous. Candidates:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
       }
       if (!resolved.id) return `No node found for "${target}". Try SEARCH_NODES ${target}.`;
-      const node = graphStore.getNode(resolved.id)!;
-      const { text, error } = await readSymbolSource(node, context?.cwd || process.cwd());
+      const node = store.getNode(resolved.id)!;
+      const { text, error } = await readSymbolSource(node, scopedCwd);
       if (error) return `Error reading ${node.id}: ${error}`;
       const header = [
         `// ${node.type} ${node.name}${node.criticality ? ` [${node.criticality}${node.riskScore != null ? ` risk=${node.riskScore}` : ''}]` : ''}`,
@@ -164,12 +188,12 @@ export const createGraphQueryTool = (governor: IGovernor, graphStore: GraphStore
     }
 
     // Bare node id / keyword.
-    const resolved = resolveNodeId(graphStore, target);
+    const resolved = resolveNodeId(store, target);
     if (resolved.ambiguous) {
       return `"${target}" matches several nodes — pick one or use SEARCH_NODES:\n` + resolved.ambiguous.map(n => '- ' + fmtNode(n)).join('\n');
     }
     if (!resolved.id) return `No node found for "${target}". Try: SEARCH_NODES ${target}`;
-    const node = graphStore.getNode(resolved.id)!;
+    const node = store.getNode(resolved.id)!;
     const edges = graph.edges.filter(e => e.sourceId === resolved.id || e.targetId === resolved.id);
     return JSON.stringify({ node, edges }, null, 2);
   }
@@ -182,7 +206,10 @@ export const createGraphContextTool = (governor: IGovernor, graphStore: GraphSto
 # Usage
 - \`PLAN_CONTEXT <node|keyword>\` (or just \`<node|keyword>\`) — returns the target symbol's FULL source plus the SIGNATURES of its direct callers (who depends on it) and callees/types (what it uses).
 
-Prefer this over ReadFileTool whenever you are about to modify an existing function/class: it shows you the call-site contract you must preserve and the things that break, at a fraction of the tokens.`,
+Prefer this over ReadFileTool whenever you are about to modify an existing function/class: it shows you the call-site contract you must preserve and the things that break, at a fraction of the tokens.
+
+# Cross-repo
+Prefix with \`repo:<name>\` to pack context from another registered repo — e.g. \`repo:libfoo PLAN_CONTEXT Encoder\` when adapting that repo's pattern into this one.`,
   isDestructive: false,
   isConcurrencySafe: true,
   schema: {
@@ -196,25 +223,43 @@ Prefer this over ReadFileTool whenever you are about to modify an existing funct
     const raw = (args.query || '').trim();
     if (!raw) return 'Error: empty query.';
 
-    const firstSpace = raw.indexOf(' ');
-    const maybeVerb = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toUpperCase();
-    const target = maybeVerb === 'PLAN_CONTEXT' ? raw.slice(firstSpace + 1).trim() : raw;
-    if (!target) return 'Error: PLAN_CONTEXT needs a target symbol (e.g. PLAN_CONTEXT handlePayment).';
+    // Cross-repo (PR3): a leading `repo:<name>` scopes the pack to another registered repo's graph.
+    const { repo, rest } = parseRepoQualifier(raw);
+    const firstSpace = rest.indexOf(' ');
+    const maybeVerb = (firstSpace === -1 ? rest : rest.slice(0, firstSpace)).toUpperCase();
+    const target = maybeVerb === 'PLAN_CONTEXT' ? rest.slice(firstSpace + 1).trim() : rest;
+    if (!target) return 'Error: PLAN_CONTEXT needs a target symbol (e.g. PLAN_CONTEXT handlePayment, or repo:libfoo PLAN_CONTEXT parse).';
 
-    // Prefer the codebase-memory engine when ready; fall back to the native context planner.
-    if (globalCodemem.isReady()) {
+    let store: IGraphStore = graphStore;
+    let cwd = context?.cwd || process.cwd();
+    let scopedToSecondary = false;
+    if (repo) {
+      const repos = await resolveRepoStores(graphStore);
+      const pick = pickRepoStore(repos, repo);
+      if (!pick) {
+        return `No repo named "${repo}" in this workspace. Available: ${repos.map(r => r.name).join(', ')}. ` +
+          `Register it with WorkspaceTool and index it with /index inside that repo.`;
+      }
+      store = pick.store;
+      scopedToSecondary = !pick.primary;
+      if (scopedToSecondary) cwd = pick.root; // read the target's source from ITS repo, not the primary
+    }
+
+    // The codebase-memory engine indexes the PRIMARY repo only — use it only when not scoped elsewhere.
+    if (!scopedToSecondary && globalCodemem.isReady()) {
       const r = await globalCodemem.planContext(target);
       if (r) return r;
     }
 
-    if (graphStore.getGraph().nodes.size === 0) {
-      return 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
+    if (store.getGraph().nodes.size === 0) {
+      return repo
+        ? `Repo "${repo}" has no index yet — run /index inside it (${cwd}).`
+        : 'The dependency graph is empty. Run /index (local AST) or /index-ai (semantic) first.';
     }
 
-    const cwd = context?.cwd || process.cwd();
-    const pack = await planContext(graphStore, target, { cwd });
+    const pack = await planContext(store, target, { cwd });
     if ('error' in pack) {
-      return `${pack.error} Try GraphQueryTool SEARCH_NODES ${target}.`;
+      return `${pack.error} Try GraphQueryTool ${repo ? `repo:${repo} ` : ''}SEARCH_NODES ${target}.`;
     }
     return pack.text;
   }

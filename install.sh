@@ -13,19 +13,42 @@
 #
 # Overrides:
 #   BIMAX_INSTALL_DIR=/usr/local/bin   install location   (default ~/.local/bin)
-#   BIMAX_REPO=org/bimax               GitHub repo for releases
+#   BIMAX_REPO=Sid7on1/breakglasswing  GitHub repo for releases
 #   BIMAX_VERSION=v1.2.0               release tag         (default: latest)
 #   BIMAX_BASE_URL=https://…           direct artifact base URL (skips GitHub API)
+#   BIMAX_LOCAL_ARTIFACT=/path/bimax   install a prebuilt binary (offline/CI)
+#
+#   install.sh --update                install/replace with the requested or latest version
+#   install.sh --uninstall             remove the installed binary
 set -euo pipefail
 
 INSTALL_DIR="${BIMAX_INSTALL_DIR:-$HOME/.local/bin}"
-REPO="${BIMAX_REPO:-bimax/bimax}"
+REPO="${BIMAX_REPO:-Sid7on1/breakglasswing}"
 VERSION="${BIMAX_VERSION:-latest}"
+ACTION="${1:---install}"
 
 BOLD='\033[1m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
 say()  { echo -e "${CYAN}→ $*${NC}"; }
 ok()   { echo -e "${GREEN}✓ $*${NC}"; }
 die()  { echo -e "${RED}error: $*${NC}" >&2; exit 1; }
+
+case "$ACTION" in
+  --install|--update) ;;
+  --uninstall)
+    if [ -e "$INSTALL_DIR/bimax" ]; then
+      rm -f "$INSTALL_DIR/bimax"
+      ok "uninstalled $INSTALL_DIR/bimax"
+    else
+      say "BiMax is not installed at $INSTALL_DIR/bimax"
+    fi
+    exit 0
+    ;;
+  --help|-h)
+    echo "Usage: install.sh [--install|--update|--uninstall]"
+    exit 0
+    ;;
+  *) die "unknown action: $ACTION (use --help)" ;;
+esac
 
 echo ""
 echo -e "${BOLD}BiMax — autonomous AI agent for your terminal${NC}"
@@ -57,9 +80,21 @@ install_bin() { # $1 = path to built/downloaded binary
   ok "installed → $INSTALL_DIR/bimax"
 }
 
-# ---- Mode 1: from-source (running inside a checkout with the toolchain) -------------
+sha256_file() {
+  if command -v shasum >/dev/null; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'
+  else die "shasum or sha256sum is required to verify the release"
+  fi
+}
+
+# ---- Mode 0: explicit local artifact (offline installs and clean-machine CI) --------
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-if [ -f "$script_dir/build-release.sh" ] && [ -f "$script_dir/src/index.ts" ] \
+if [ -n "${BIMAX_LOCAL_ARTIFACT:-}" ]; then
+  [ -f "$BIMAX_LOCAL_ARTIFACT" ] || die "local artifact not found: $BIMAX_LOCAL_ARTIFACT"
+  cp "$BIMAX_LOCAL_ARTIFACT" "$tmp/bimax"
+  install_bin "$tmp/bimax"
+# ---- Mode 1: from-source (running inside a checkout with the toolchain) -------------
+elif [ -f "$script_dir/build-release.sh" ] && [ -f "$script_dir/src/index.ts" ] \
    && command -v bun >/dev/null && command -v go >/dev/null; then
   say "BiMax checkout + toolchain detected — building locally"
   ( cd "$script_dir" && ./build-release.sh )
@@ -69,15 +104,25 @@ else
   command -v curl >/dev/null || die "curl is required"
   if [ -n "${BIMAX_BASE_URL:-}" ]; then
     url="${BIMAX_BASE_URL%/}/${artifact}.tar.gz"
+    sums_url="${BIMAX_BASE_URL%/}/SHA256SUMS"
   elif [ "$VERSION" = "latest" ]; then
     url="https://github.com/${REPO}/releases/latest/download/${artifact}.tar.gz"
+    sums_url="https://github.com/${REPO}/releases/latest/download/SHA256SUMS"
   else
     url="https://github.com/${REPO}/releases/download/${VERSION}/${artifact}.tar.gz"
+    sums_url="https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"
   fi
   say "downloading ${url}"
   curl -fL --progress-bar -o "$tmp/${artifact}.tar.gz" "$url" \
     || die "download failed — no release artifact for ${os}-${arch}? Build from source instead:
   git clone https://github.com/${REPO} && cd bimax && ./install.sh"
+  say "verifying SHA-256 checksum"
+  curl -fsSL -o "$tmp/SHA256SUMS" "$sums_url" || die "could not download SHA256SUMS"
+  expected="$(awk -v file="${artifact}.tar.gz" '$2 == file || $2 == "*" file { print $1; exit }' "$tmp/SHA256SUMS")"
+  [ -n "$expected" ] || die "SHA256SUMS has no entry for ${artifact}.tar.gz"
+  actual="$(sha256_file "$tmp/${artifact}.tar.gz")"
+  [ "$actual" = "$expected" ] || die "checksum mismatch for ${artifact}.tar.gz"
+  ok "checksum verified"
   tar -C "$tmp" -xzf "$tmp/${artifact}.tar.gz"
   install_bin "$tmp/${artifact}"
 fi

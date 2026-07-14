@@ -41,3 +41,4 @@ import './mind';
 import './calibration';
 import './perf';
 import './subagents';
+import './journal';

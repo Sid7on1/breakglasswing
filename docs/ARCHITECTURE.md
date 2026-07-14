@@ -52,43 +52,126 @@ Source layout (`src/`): `core` `cli` `tools` `governor` `memory` `graph` `genome
 ## 3. Tools (`src/tools`)
 
 `tool.registry.ts` (`ToolRegistry`) holds tools; `tool.factory.ts` builds them with
-governor gating, destructive/concurrency flags, and schema. Every tool the model can call:
+governor gating, destructive/concurrency flags, and schema. The full surface (41 tools across
+`src/tools/implementations/`, grouped by domain — this is the WS6 inventory):
 
-| Tool | What it does |
-|---|---|
-| **BashTool** | Run shell commands (installs, builds, git, processes); risk-classified. |
-| **ReadFileTool** | Read a file. |
-| **WriteFileTool** | Create/overwrite a file (auto-backed-up via the undo system). |
-| **EditFileTool** | Exact search/replace edit in a file. |
-| **MultiEditTool** | Multiple edits in one file atomically. |
-| **DeleteTool** | Delete a file (governed `FILE_DELETE`). |
-| **GrepTool** | Content search across files. |
-| **GlobTool** | Filename/pattern search. |
-| **ChangeDirectoryTool** | Change the working directory (not `cd` in Bash). |
-| **WebFetchTool** | Fetch a URL → text, with SSRF protection (blocks localhost/internal IPs) and a 30s timeout. |
-| **GraphQueryTool** | Query the live code graph. |
-| **MemoryQueryTool** | Semantic search over long-term memory. |
-| **RememberTool** | Save a durable project memory (convention/decision/gotcha). |
-| **TodoWriteTool** | Maintain a live task checklist rendered in the UI. |
-| **SpawnSubagentTool** | Spawn a sub-agent worker for a sub-task. |
-| **RegisterAgentTool** | Register a newly-installed CLI as a new agent persona. |
-| **AskUserTool** | Ask the user a real decision (only when genuinely blocked). |
+**Editing & files** — **ReadFileTool**, **WriteFileTool** (auto-backed-up), **EditFileTool** (exact
+search/replace), **MultiEditTool** (atomic multi-file batch), **SymbolEditTool** (AST-addressed edit
+by symbol name), **DeleteTool** (`FILE_DELETE`), **CreateDirectoryTool**, **NotebookEditTool** (edit
+`.ipynb` cells).
 
-## 4. Governor & security (`src/governor`, `src/security`)
+**Search & navigation** — **GrepTool** (content), **GlobTool** (filename), **ChangeDirectoryTool**,
+**GraphQueryTool** / **GraphContextTool** (live code graph; index-gated), **LspQueryTool** (built-in
+LSP subset), **ScoutTool** (fast read-only recon), **ToolSearchTool** (fuzzy tool discovery).
 
-Multi-layer permission engine; every risky tool call passes through it.
-- **`governor.ts` — `Governor`**: orchestrates the layers and modes — `interactive`,
-  `auto`, `strict`, `plan` (read-only), `bypass` (YOLO). Emits `veto_prompt` to the UI.
-- **`bash.analyzer.ts` — `BashStaticAnalyzer`**: classifies command risk (e.g. `rm -rf`,
-  `curl | bash` → high; `npm install` → medium; `ls` → none).
-- **`security/yolo.classifier.ts` — `YoloClassifier`**: ML-style risk classification for
-  ambiguous cases in `auto` mode (LLM-backed).
-- **`budget.veto.ts` — `BudgetVeto`**: **hard daily spend cap** (default $5, `MAX_DAILY_SPEND`),
-  mutex-guarded reserve→record→release accounting, persisted to `.breakglass/credits/spend.json`,
-  auto-reset per day.
-- **`fs.veto.ts` — `FileSystemVeto`**: confines edits to the workspace root, blocks
-  forbidden paths/extensions.
-- **`policy.engine.ts` — `SafetyPolicy`**: central policy constants (limits, caps).
+**Execution & VCS** — **BashTool** (risk-classified shell), **GitTool** (status/diff/log/add/commit,
+no push), **RelatedTestsTool** (jest/vitest/go related-tests).
+
+**Web** — **WebFetchTool** (URL→text, SSRF-guarded, 30s), **WebSearchTool**.
+
+**Memory & context** — **RememberTool** (durable project memory), **MemoryQueryTool** (semantic
+recall), **FreeContextTool** (drop stale context under pressure), **GoalsTool** (session goals).
+
+**Sub-agents & planning** — **SpawnSubagentTool** (worker for a sub-task), **TasksTool** (manage/kill
+live sub-agents), **PlanTool** (structured plan), **AskUserTool** (real decision when blocked).
+
+**Tasks & extensions** — **TodoWriteTool** (live checklist), **SkillTool** / **SkillInstallTool** /
+**SkillAuthorTool** (use/install/author skills), **McpManageTool** (discover/add MCP servers),
+**RegisterAgentTool** (register a CLI as a persona), **ModeTool**, **ModelManageTool**,
+**WorkspaceTool** (multi-repo).
+
+**Blueprints & training** — **BlueprintTool**, **TrainLaunchTool**, **TrainMonitorTool**.
+
+### 3.1 WS6 tool-quality assessment (2026-07-11)
+
+Audited for schema quality, description quality, error behavior, and streaming. **Verdict: the
+surface is solid** — the founder's "some tools improperly built / used below capability" predated
+the hardening + surgical-precision-tools work that has since landed.
+
+- **Schemas**: typed JSON schema with per-parameter `description` and `required` arrays throughout.
+- **Descriptions**: the model-facing tools (Bash, Edit family, Git, Graph, Spawn) carry rich
+  multi-line usage docs (actions, addressing, when-to-use). No thin one-liners on load-bearing tools.
+- **Error behavior**: mutating/executing tools whose outcomes the mind layer *attributes* (Bash,
+  Write, Edit, MultiEdit, SymbolEdit) all return **typed outcomes** (`outcomeOk`/`outcomeError` with
+  a class). Meta/read tools (mode, model, goals, memory, search, git-read) return plain strings by
+  design — the typed-outcome contract is intentionally scoped to attributed actions, not universal.
+- **No worst-first emergencies** were found; the earlier `SymbolEdit` permission gap (see §4.4) was
+  the one real defect and is fixed. Remaining polish (e.g. broaden typed outcomes to more tools) is
+  optional, tracked in `ROADMAP.md`, not blocking.
+
+## 4. Governor & security — the guard pipeline (`src/governor`, `src/security`, `src/tools`)
+
+There is **one ordered guard pipeline**, not a scattering of ad-hoc checks. Every tool the model
+calls is wrapped by `tool.factory.ts` `buildTool`, so the sequence below is fixed and centralized;
+the write-path tools add a few integrity guards *inside* their own `execute`. This is the WS5 audit
+(the count the founder asked for): **enumerated, ordered, and classified.**
+
+### 4.1 Per-LLM-request guards (before a model call)
+
+| # | Guard | File | Purpose | Class |
+|---|---|---|---|---|
+| R1 | **Capability shaping** | `core/capabilities.ts` → `llm.adapter.ts` | Strip params the target provider/model doesn't serve (`reasoning_effort`, `parallel_tool_calls`, fixed-sampling `temperature`) before send, instead of 400ing. | load-bearing (WS1) |
+| R2 | **BudgetVeto** | `governor/budget.veto.ts` (held by the adapter via `setBudgetVeto`) | Hard daily spend cap (`MAX_DAILY_SPEND`, default $5), mutex reserve→record→release, persisted, per-day reset. Lifted with `bypass`. | load-bearing |
+| R3 | **Headroom compression** | `memory/headroom.compress.ts` | Gated under token pressure only; code-guarded (`looksLikeCode` restores code verbatim). | load-bearing (optional) |
+
+### 4.2 Per-tool-call guards (every tool, via `buildTool`)
+
+Fixed order. `governor.approveTaskExecution` is itself a layered engine (`governor.ts`):
+
+| # | Guard / layer | File:sym | Applies to | Class |
+|---|---|---|---|---|
+| T1 | **bypass short-circuit** | `governor.ts` | all (mode=`bypass`) | load-bearing |
+| T2 | **plan-mode block** | `governor.ts` | mutating tasks when mode=`plan` | load-bearing |
+| T3 | **taint restriction** | `mind/taint.ts` `taintRestriction` | `OS_COMMAND` after untrusted content entered context | load-bearing |
+| T4 | **persistent rules** | `governor.ts` `rules[]` | allow/deny by taskType (taint can't waive) | load-bearing |
+| T5 | **fs veto** | `governor/fs.veto.ts` | `FILE_WRITE`/`FILE_DELETE` — workspace confinement, forbidden paths/exts | load-bearing |
+| T6 | **bash static analysis** | `governor/bash.analyzer.ts` | `OS_COMMAND` — tree-sitter risk classify; read-safe auto-approves | load-bearing |
+| T7 | **ML classifier** | `security/yolo.classifier.ts` | `OS_COMMAND`, mode=`auto`, ambiguous | load-bearing — **but wired only in the main session** (see 4.4) |
+| T8 | **interactive prompt** | `governor.ts` → `GlobalPrompter` | destructive tasks / mode=`strict` | load-bearing |
+| T9 | **PreToolUse hooks** | `tools/hooks.ts` | all — user hooks may block | load-bearing |
+| … | *(tool executes)* | | | |
+| T10 | **PostToolUse hooks** | `tools/hooks.ts` | all — may append (e.g. verify-loop typecheck feedback) | load-bearing |
+
+### 4.3 Write-path integrity guards (inside `file`/`edit`/`multiedit`/`symboledit` tools)
+
+These run *after* T1–T9, in each write tool's `execute`. Purposes are distinct (permission ≠
+integrity ≠ approval ≠ rollback), so none is redundant with the governor:
+
+| # | Guard | File:sym | Purpose |
+|---|---|---|---|
+| W1 | **blast-radius gate** | `cli/blastGate.ts` `checkBlastRadius` | Confirm before overwriting a graph-critical symbol. **Opt-in** (`enabled=false` default). |
+| W2 | **diff approval** | `requestDiffApproval` | Inline diff confirm; no-op unless enabled + approver registered. |
+| W3 | **corrupt-write guard** | `tools/write-guard.ts` `detectCorruptWrite` | Refuse a flattened/newline-stripped full-file overwrite. |
+| W4 | **Edit Shield** | `tools/syntax.check.ts` `shieldEdit` | Refuse a write that adds NEW syntax errors vs. disk. |
+| W5 | **transaction + backup** | `sandbox` rollback / `backupFile` | Snapshot pre-write state for `/undo`, `/diff-file`, `/tx` rollback. |
+
+Also cross-cutting: **`policy.engine.ts` `SafetyPolicy.allowedWorkspace`** (narrowed for floored
+sub-agents), **`ask-guard.ts` `detectDegenerateAsk`** (AskUser quality gate, wired in `ask_user.tool.ts`),
+**`sandbox/exec.sandbox.ts`** (kernel sandbox for Bash under a floor), **`plugins/plugin.sandbox.ts`**.
+
+### 4.4 Findings (WS5 step 2 — classify: load-bearing / redundant / dead)
+
+- **All guards above are load-bearing** — none dead, none a duplicate of another's purpose. The
+  founder's "hell of guards, idk how many" resolves to **one ordered pipeline of ~13 checks + 5
+  write-path integrity guards**, most short-circuiting for read-only work.
+- **✅ Fixed (WS5 step 3): SymbolEdit permission gap.** `SymbolEditTool` wrote files but called the
+  governor nowhere (it relied on its own `workspaceWriteBlock` + opt-in diff approval), so in
+  interactive mode it wrote WITHOUT the permission prompt `EditFileTool` gets. It's now mapped to
+  `FILE_WRITE` in `tool.factory.ts` `TASK_TYPE_MAP`, so `buildTool` runs T5+T8 on it like any write.
+- **✅ Done (WS5 step 3): per-guard timing.** `tools/guard.timing.ts` accumulates wall-time for
+  `governor:approve` / `hooks:pre` / `hooks:post` per session; `/perf` renders it so a slow guard is
+  visible before it's blamed. (In-memory, best-effort, off the LLM hot path.)
+- **Decision (kept as-is): sub-agents have no `YoloClassifier`.** Workers build `new Governor(eventBus)`
+  without it (`worker.entry.ts`), so T7 is a no-op for them. Left unchanged deliberately — the ML
+  classifier is LLM-backed (adds a token-costing call per ambiguous bash command), so arming it in
+  every worker would tax autonomous swarms; workers run in worktrees under the parent's mode. Now
+  documented rather than accidental.
+- **Deferred (low value): W3+W4 factoring.** `detectCorruptWrite` (W3, write-only) + `shieldEdit`
+  (W4) are called inline per write tool, but the real logic already lives in one place each
+  (`write-guard.ts`, `syntax.check.ts`); the call sites only format tool-specific error text. A
+  `guardWrite()` wrapper would unify ~3 lines apiece at the cost of flattening those messages — not
+  worth the churn now. `MultiEditTool` stays out of `TASK_TYPE_MAP` by design (multi-file; gates
+  per-file internally) — now commented in the map.
 
 ## 5. Memory stack (`src/memory`)
 

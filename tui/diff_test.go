@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -66,7 +64,7 @@ func TestParseDiffRowsDropsNoNewlineMarker(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("expected 2 content rows, got %d: %+v", len(rows), rows)
 	}
-	if rows[0].num != 1 || rows[0].text != "The House at the End of Stillwater Lane" {
+	if rows[0].oldNum != 0 || rows[0].newNum != 1 || rows[0].text != "The House at the End of Stillwater Lane" {
 		t.Fatalf("first row should be the real first line at num 1, got %+v", rows[0])
 	}
 	if out := ansi.Strip(renderDiff(diff, 20, 80, "")); strings.Contains(out, "No newline") {
@@ -98,30 +96,66 @@ func TestWrapPathParityNoBleed(t *testing.T) {
 	}
 }
 
-// An overwrite of unrelated content drifts the old/new line counters apart. Removed lines must NOT
-// show a number (they have no position in the new file) — otherwise the single gutter reads
-// backwards (1,2,3,3,5,4,4…). Visible numbers must stay monotonic: the new file's real line numbers.
-func TestOverwriteGutterStaysMonotonic(t *testing.T) {
+// A replacement uses one visually stable gutter: red rows name their old-file position, while green
+// and context rows name their resulting-file position. There must be no duplicated context gutter
+// such as "2 2", and +/- markers must begin in the same column on every changed row.
+func TestOverwriteGutterUsesOneStableLineNumberColumn(t *testing.T) {
 	diff := "@@ -1,5 +1,5 @@\n Title\n \n-old paragraph one\n+new paragraph one\n \n-old paragraph two\n+new paragraph two"
+	rows := parseDiffRows(diff)
+	if len(rows) != 7 {
+		t.Fatalf("expected 7 rows, got %d: %+v", len(rows), rows)
+	}
+	if rows[2].sign != '-' || rows[2].oldNum != 3 || rows[2].newNum != 0 {
+		t.Fatalf("removed row needs old=3/new=blank, got %+v", rows[2])
+	}
+	if rows[3].sign != '+' || rows[3].oldNum != 0 || rows[3].newNum != 3 {
+		t.Fatalf("added row needs old=blank/new=3, got %+v", rows[3])
+	}
+
 	out := ansi.Strip(renderDiff(diff, 40, 100, "story.txt"))
-	re := regexp.MustCompile(`^\s*(\d+)\s`)
-	last := 0
+	var removed, added string
 	for _, ln := range strings.Split(out, "\n") {
-		m := re.FindStringSubmatch(ln)
-		if m == nil {
-			if strings.Contains(ln, "-") { // removed rows carry no gutter number
-				continue
-			}
+		if strings.Contains(ln, "- old paragraph one") {
+			removed = ln
+		}
+		if strings.Contains(ln, "+ new paragraph one") {
+			added = ln
+		}
+	}
+	if removed == "" || !strings.Contains(strings.Split(removed, "-")[0], "3") {
+		t.Fatalf("rendered removal has no old line number:\n%s", out)
+	}
+	if added == "" || !strings.Contains(strings.Split(added, "+")[0], "3") {
+		t.Fatalf("rendered addition has no new line number:\n%s", out)
+	}
+	if strings.Contains(out, "1 1") || strings.Contains(out, "2 2") {
+		t.Fatalf("rendered context duplicated old/new line numbers:\n%s", out)
+	}
+	if strings.Index(removed, "-") != strings.Index(added, "+") {
+		t.Fatalf("replacement markers do not share one stable column:\nremoved=%q\nadded=%q", removed, added)
+	}
+}
+
+// Regression fixture matching a long prose replacement: alternating removals/additions plus context
+// must stay visually aligned even when line numbers grow from one to two digits.
+func TestLongOverwriteKeepsGutterAligned(t *testing.T) {
+	diff := "@@ -1,7 +1,14 @@\n" +
+		"-old title\n+new title\n \n-old paragraph one\n+new line one\n+new line two\n+new line three\n \n-old paragraph two\n+new line four\n+new line five\n+new line six\n \n-old ending\n+new line seven\n+new line eight\n+new line nine"
+	out := ansi.Strip(renderDiff(diff, 40, 120, "story.txt"))
+	markerCol := -1
+	for _, ln := range strings.Split(out, "\n") {
+		idx := strings.IndexAny(ln, "+-")
+		if idx < 0 {
 			continue
 		}
-		n, _ := strconv.Atoi(m[1])
-		if n < last {
-			t.Fatalf("gutter went backwards: %d after %d in %q", n, last, ln)
+		if markerCol < 0 {
+			markerCol = idx
+		} else if idx != markerCol {
+			t.Fatalf("diff marker shifted columns (%d != %d):\n%s", idx, markerCol, out)
 		}
-		last = n
 	}
-	if last == 0 {
-		t.Fatal("expected some numbered rows")
+	if markerCol < 0 {
+		t.Fatalf("fixture rendered no changed rows:\n%s", out)
 	}
 }
 

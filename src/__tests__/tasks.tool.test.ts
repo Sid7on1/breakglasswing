@@ -41,6 +41,15 @@ describe('TasksTool — sub-agent management', () => {
     expect(await run({ action: 'get', taskId: 'f' })).toContain('boom');
   });
 
+  it('waits efficiently until a running agent settles', async () => {
+    globalSubAgentBlackboard.register('waited', 'BiMax', 'src', 'finish work');
+    setTimeout(() => globalSubAgentBlackboard.markDone('waited', 'verified report'), 20);
+    const out = await run({ action: 'wait', timeout_seconds: 1 });
+    expect(out).toContain('Agent update');
+    expect(out).toContain('waited');
+    expect(out).toContain('[done]');
+  });
+
   it('errors clearly on a missing taskId or unknown id', async () => {
     expect(await run({ action: 'get' })).toContain('requires a `taskId`');
     expect(await run({ action: 'get', taskId: 'nope' })).toContain('no sub-agent with id nope');

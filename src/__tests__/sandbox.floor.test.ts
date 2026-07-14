@@ -50,7 +50,16 @@ describe('sandbox floor (v2) — pure', () => {
     expect(floorArgv('ls')).toBeNull();
     process.env[FLOOR_ENV] = '/work/episode';
     _setSandboxAvailableForTests(true);
-    expect(floorArgv('ls')).toEqual(['-p', expect.stringContaining('(deny network*)'), '/bin/sh', '-c', 'ls']);
+    const argv = floorArgv('ls');
+    if (process.platform === 'darwin') {
+      expect(argv).toEqual(['-p', expect.stringContaining('(deny network*)'), '/bin/sh', '-c', 'ls']);
+    } else if (process.platform === 'linux') {
+      expect(argv?.slice(0, 3)).toEqual(['--ro-bind', '/', '/']);
+      expect(argv).toContain('--unshare-net');
+      expect(argv?.slice(-3)).toEqual(['/bin/sh', '-c', 'ls']);
+    } else {
+      expect(argv).toBeNull();
+    }
   });
 
   it('an unenforceable floor BLOCKS (never silently lowers), unless explicitly soft-bypassed', () => {

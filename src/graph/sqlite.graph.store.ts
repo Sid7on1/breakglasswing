@@ -4,6 +4,7 @@ import * as crypto from 'crypto';
 import { GraphStore } from './graph.store';
 import { GraphNode, GraphEdge, IGraphStore } from './models';
 import { Logger } from '../utils';
+import { openSqlite } from '../core/sqlite';
 
 /**
  * SQLite-backed graph store (v2 §3.9, honest-minimal tier).
@@ -36,9 +37,11 @@ export class SqliteGraphStore extends GraphStore implements IGraphStore {
     super(':memory:'); // the JSON path is never used; SQLite owns persistence
     this.dbPath = dbPath;
     try {
-      const { DatabaseSync } = require('node:sqlite');
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-      this.db = new DatabaseSync(dbPath);
+      // openSqlite → node:sqlite (dev/CI) or bun:sqlite (the packaged bun --compile engine). Both
+      // expose the same exec/prepare surface used below; null means no SQLite on this runtime.
+      this.db = openSqlite(dbPath);
+      if (!this.db) throw new Error('no SQLite backend (node:sqlite / bun:sqlite) on this runtime');
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA busy_timeout = 3000');
       this.db.exec('CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, json TEXT NOT NULL)');
@@ -48,7 +51,7 @@ export class SqliteGraphStore extends GraphStore implements IGraphStore {
       this.db.exec('CREATE TABLE IF NOT EXISTS file_hashes (path TEXT PRIMARY KEY, hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL)');
       this.available = true;
     } catch (e: any) {
-      Logger.warn(`[SqliteGraphStore] node:sqlite unavailable (${e?.message}); persistence disabled.`);
+      Logger.warn(`[SqliteGraphStore] no compatible SQLite backend (${e?.message}); persistence disabled.`);
       this.db = null;
       this.available = false;
     }
@@ -204,8 +207,8 @@ export class SqliteGraphStore extends GraphStore implements IGraphStore {
 }
 
 /**
- * The factory every boot path uses: SQLite store when node:sqlite exists, legacy JSON
- * store otherwise. Same directory family, same IGraphStore, zero caller changes.
+ * The factory every boot path uses: SQLite store when node:sqlite or bun:sqlite exists, legacy
+ * JSON store otherwise. Same directory family, same IGraphStore, zero caller changes.
  */
 export function createGraphStore(projectRoot: string): GraphStore {
   const dir = path.join(projectRoot, '.breakglass/graph');

@@ -1,6 +1,8 @@
 import { SubAgentManager } from '../core/subagent.manager';
 import { globalSubAgentBlackboard } from '../core/subagent.blackboard';
 import { cliEvents, ToolCallEntry } from '../cli/events';
+import { createWorktree } from '../core/worktree.manager';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -46,7 +48,9 @@ describe('SubAgentManager — worker watchdog timeout', () => {
 
   it('resolves a healthy worker and clears the watchdog (no late rejection)', async () => {
     const mgr = new SubAgentManager({ workerScriptPath: quickScript, timeoutMs: 5000 });
-    await expect(mgr.spawnWorker('t-ok', cfg)).resolves.toBe('ok');
+    await expect(mgr.spawnWorker('t-ok', cfg)).resolves.toMatchObject({
+      version: 1, taskId: 't-ok', report: 'ok', observedChangedFiles: [],
+    });
     expect(mgr.activeCount()).toBe(0);
     // Give any (incorrectly uncleared) timer a chance to fire — it must not.
     await new Promise(r => setTimeout(r, 50));
@@ -106,5 +110,37 @@ describe('SubAgentManager — T3 sub-agent tool-event relay', () => {
     expect(tagged!.parentId).toBe('t-relay');
     expect(tagged!.agentLabel).toBe('Hermes');
     expect(results.find(c => c.id === 'c1')?.status).toBe('success');
+  });
+});
+
+describe('SubAgentManager — crash-surviving worktree recovery', () => {
+  it('reopens the exact checkpointed worktree and preserves its partial edits', async () => {
+    const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-recovery-wt-')));
+    const workerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-recovery-worker-'));
+    try {
+      execFileSync('git', ['init', '-b', 'main'], { cwd: repo, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@bimax'], { cwd: repo });
+      execFileSync('git', ['config', 'user.name', 'test'], { cwd: repo });
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+      execFileSync('git', ['add', '.'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'base'], { cwd: repo, stdio: 'ignore' });
+      const wt = createWorktree(repo, 'subagent-recovery1')!;
+      fs.writeFileSync(path.join(wt.path, 'a.txt'), 'partial work survived\n');
+      const worker = path.join(workerDir, 'success.js');
+      fs.writeFileSync(worker, "const { parentPort } = require('worker_threads'); parentPort.postMessage({ type: 'success', result: 'continued' });\n");
+
+      const manager = new SubAgentManager({ workerScriptPath: worker, timeoutMs: 5000 });
+      const result = await manager.spawnWorker('subagent-replacement', {
+        agentType: 'BiMax', prompt: 'continue', cwd: wt.path, parentMode: 'default',
+        scope: 'a.txt', outcomeTaskId: 'build', outcomeSessionId: 'session-1',
+        isolation: 'worktree', isolationRequired: true, recoveryWorktree: wt, recoveryOf: 'subagent-recovery1',
+      });
+      expect(result.observedChangedFiles).toEqual(['a.txt']);
+      expect(result.isolation).toMatchObject({ path: wt.path, branch: wt.branch, baseCommit: wt.baseCommit });
+      expect(fs.readFileSync(path.join(wt.path, 'a.txt'), 'utf8')).toBe('partial work survived\n');
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(workerDir, { recursive: true, force: true });
+    }
   });
 });

@@ -19,8 +19,10 @@ export interface PageRankResult {
 // over a large graph × up to 130 iterations per task = seconds of pure waste — yet the graph only
 // changes on /index. Memoize by a cheap node+edge signature; a re-index changes those counts and
 // invalidates the cache. Rare same-count re-index → a slightly stale orientation map, which is
-// harmless. One cache entry is enough (single active graph).
-let _prCache: { sig: string; scores: Map<string, number> } | null = null;
+// harmless. A SMALL capped map (not one entry) so a cross-repo workspace, which ranks several
+// distinct stores per turn, doesn't thrash the cache down to zero hits (PR3).
+const PR_CACHE_MAX = 8;
+const _prCache = new Map<string, Map<string, number>>();
 
 export function computePageRank(
   store: IGraphStore,
@@ -34,7 +36,8 @@ export function computePageRank(
   // Include first/last node id (Map preserves insertion order → stable per graph) so two DIFFERENT
   // graphs that happen to share node/edge counts don't collide on the cache.
   const sig = `${nodes.length}:${graph.edges.length}:${nodes[0].id}:${nodes[nodes.length - 1].id}:${iterations}:${damping}`;
-  if (_prCache && _prCache.sig === sig) return _prCache.scores;
+  const cached = _prCache.get(sig);
+  if (cached) return cached;
 
   const N = nodes.length;
   const scores = new Map<string, number>();
@@ -63,7 +66,8 @@ export function computePageRank(
     for (const [id, s] of next) scores.set(id, s);
   }
 
-  _prCache = { sig, scores };
+  _prCache.set(sig, scores);
+  if (_prCache.size > PR_CACHE_MAX) _prCache.delete(_prCache.keys().next().value as string);
   return scores;
 }
 
@@ -105,18 +109,29 @@ const estTokens = (s: string) => Math.ceil(s.length / 4);
  * ordered by source line so the outline reads top-to-bottom. Falls back to `type name` when a node
  * has no captured signature (older graphs). Empty string when the graph isn't indexed.
  */
-let _mapCache: { key: string; out: string } | null = null;
+const MAP_CACHE_MAX = 8;
+const _mapCache = new Map<string, string>();
 
-export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focusTerms: string[] = []): string {
+/**
+ * `headerLabel` (PR3): override the standalone `[RepoMap] …` header with a compact repo-scoped line
+ * when this outline is one SECTION of a larger cross-repo map (see graph/cross.repo.ts). Omit it for
+ * the normal single-repo outline — behavior is then unchanged.
+ */
+export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focusTerms: string[] = [], headerLabel?: string): string {
   const graph = store.getGraph();
   // ponytail: re-injected every loop iteration, but within a task the graph and the focus terms (from
   // the same user message) are stable — cache the rendered outline keyed by graph size + budget +
   // focus, so we render once per task instead of sorting 19k nodes 130×. (PageRank itself is cached
-  // separately in computePageRank.)
+  // separately in computePageRank.) Small capped map so a cross-repo turn (several stores) still hits.
   const firstId = graph.nodes.keys().next().value || ''; // O(1) graph identity, avoids count-collisions
-  const cacheKey = `${graph.nodes.size}:${graph.edges.length}:${firstId}:${maxTokens}:${focusTerms.join(',')}`;
-  if (_mapCache && _mapCache.key === cacheKey) return _mapCache.out;
-  const done = (out: string): string => { _mapCache = { key: cacheKey, out }; return out; };
+  const cacheKey = `${graph.nodes.size}:${graph.edges.length}:${firstId}:${maxTokens}:${focusTerms.join(',')}:${headerLabel || ''}`;
+  const hit = _mapCache.get(cacheKey);
+  if (hit !== undefined) return hit;
+  const done = (out: string): string => {
+    _mapCache.set(cacheKey, out);
+    if (_mapCache.size > MAP_CACHE_MAX) _mapCache.delete(_mapCache.keys().next().value as string);
+    return out;
+  };
 
   const scores = computePageRank(store);
 
@@ -140,7 +155,7 @@ export function formatRepoMapOutline(store: IGraphStore, maxTokens = 1500, focus
     .sort((a, b) => (a.focus !== b.focus ? (a.focus ? -1 : 1) : b.score - a.score));
   if (ranked.length === 0) return done('');
 
-  const header =
+  const header = headerLabel ??
     '[RepoMap] PageRank-ranked outline of the most load-bearing symbols in this repository ' +
     '(signatures only — NOT the full source). Use it to navigate: jump straight to the relevant ' +
     'file/symbol with ReadFileTool (startLine/endLine) or GraphContextTool instead of exploring blindly.';

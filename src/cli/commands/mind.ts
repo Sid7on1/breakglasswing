@@ -547,20 +547,96 @@ globalCommandRegistry.register({
 globalCommandRegistry.register({
   name: '/harness',
   category: 'Code & Intelligence',
-  description: 'Self-tuned harness patches — steering mined from recurring failures. `retire <id>` drops one, `mine` forces a pass.',
+  description: 'Self-tuned harness patches + counterfactual lab. `mine`, `retire|approve|reject|rollback <id>`, `lab [show|run|explain <exp>]`.',
   execute: async (args) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getHarnessTuner } = require('../../mind/harness.tuner') as typeof import('../../mind/harness.tuner');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { labEnabled } = require('../../mind/harness.lab') as typeof import('../../mind/harness.lab');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { explainExperiment } = require('../../mind/harness.lab.eval') as typeof import('../../mind/harness.lab.eval');
     const tuner = getHarnessTuner();
+    const sub = (args[0] || '').toLowerCase();
 
-    if ((args[0] || '').toLowerCase() === 'mine') {
+    if (sub === 'mine') {
       const r = tuner.mine();
-      return { type: 'message', level: 'info', content: `Mining pass done — ${r.created} patch(es) created, ${r.retired} retired.` };
+      const lab = await tuner.labPass();
+      const labNote = labEnabled()
+        ? ` Lab: ${lab.evaluated} evaluated, ${lab.activated} activated, ${lab.rejected} rejected, ${lab.skipped} unchanged.`
+        : ' Lab disabled (BIMAX_HARNESS_LAB=0) — patches activate immediately.';
+      return { type: 'message', level: 'info', content: `Mining pass done — ${r.created} patch(es) created, ${r.retired} retired.${labNote}` };
     }
-    if ((args[0] || '').toLowerCase() === 'retire' && args[1]) {
+    if (sub === 'retire' && args[1]) {
       return tuner.retire(args[1])
         ? { type: 'message', level: 'success', content: `Patch ${args[1]} retired.` }
         : { type: 'message', level: 'error', content: `No active patch with id ${args[1]}.` };
+    }
+    if (sub === 'approve' && args[1]) {
+      return tuner.approve(args[1])
+        ? { type: 'message', level: 'success', content: `Patch ${args[1]} approved manually — it is LIVE in the prompt from the next turn. Its experiment records the manual override; live effectiveness accounting still applies.` }
+        : { type: 'message', level: 'error', content: `No staged patch with id ${args[1]} (only staged patches can be approved).` };
+    }
+    if (sub === 'reject' && args[1]) {
+      return tuner.rejectStaged(args[1])
+        ? { type: 'message', level: 'success', content: `Staged patch ${args[1]} rejected — it will not be re-mined for this signature.` }
+        : { type: 'message', level: 'error', content: `No staged patch with id ${args[1]}.` };
+    }
+    if (sub === 'rollback' && args[1]) {
+      return tuner.rollback(args[1])
+        ? { type: 'message', level: 'success', content: `Patch ${args[1]} rolled back — removed from the live prompt; its experiment is closed as rolled_back.` }
+        : { type: 'message', level: 'error', content: `No active patch with id ${args[1]}.` };
+    }
+
+    if (sub === 'lab') {
+      const store = tuner.labStore();
+      const verb = (args[1] || '').toLowerCase();
+      const findExp = (key: string) => store.get(key)
+        || store.list().find(e => e.candidate.patchId === key) || null;
+
+      if (verb === 'run' && args[2]) {
+        // Force = the user explicitly asked — re-evaluate even on an unchanged cohort.
+        const key = args[2];
+        const exp = findExp(key);
+        const patchId = exp?.candidate.patchId || key;
+        const r = await tuner.labPass({ force: true, only: patchId });
+        if (r.evaluated === 0 && r.activated === 0 && r.rejected === 0) {
+          return { type: 'message', level: 'error', content: `Nothing evaluated for "${key}" — it must reference a STAGED patch (or its experiment). ${r.skipped ? 'A concurrent evaluation holds the lab lock.' : 'Terminal/active experiments are not re-run.'}` };
+        }
+        const after = findExp(key);
+        return { type: 'message', level: 'success', content: `Evaluation complete — verdict: **${after?.evaluations[after.evaluations.length - 1]?.verdict || 'unknown'}** (experiment ${after?.id}, status ${after?.status}). \`/harness lab explain ${after?.id}\` for the evidence.` };
+      }
+      if ((verb === 'show' || verb === 'explain') && args[2]) {
+        const exp = findExp(args[2]);
+        if (!exp) return { type: 'message', level: 'error', content: `No experiment "${args[2]}" (try /harness lab for the list).` };
+        if (verb === 'explain') return { type: 'message', level: 'info', content: explainExperiment(exp) };
+        const ev = exp.evaluations[exp.evaluations.length - 1];
+        const lines = [
+          `## Experiment \`${exp.id}\``,
+          `- candidate: **${exp.candidate.tool} × ${exp.candidate.errorClass}** (patch \`${exp.candidate.patchId}\`, block ${exp.candidate.promptBlock.length} chars, hash ${exp.candidate.blockHash.slice(0, 12)})`,
+          `- baseline: ${exp.baseline.description}`,
+          `- status: **${exp.status}**${exp.statusReason ? ` — ${exp.statusReason}` : ''}`,
+          `- evaluations: ${exp.evaluations.length}${ev ? ` · latest \`${ev.id}\` → ${ev.verdict} (${ev.confidence}) on cohort \`${ev.cohort.cohortHash.slice(0, 12)}\` (${ev.aggregate.episodesUsable}/${ev.aggregate.episodesSelected} usable)` : ''}`,
+          `- transitions: ${exp.transitions.map(t => `${t.from ?? '·'}→${t.to}(${t.by})`).join(' ')}`,
+        ];
+        if (ev) {
+          lines.push(`- gates: ${ev.gates.map(g => `${g.pass ? '✓' : '✗'}${g.gate}`).join(' ')}`);
+          if (ev.cohort.skipped.length) lines.push(`- skipped episodes: ${ev.cohort.skipped.map(s => `${s.id}(${s.reason})`).slice(0, 8).join(', ')}${ev.cohort.skipped.length > 8 ? '…' : ''}`);
+        }
+        lines.push('', `_\`/harness lab explain ${exp.id}\` renders the full measured-vs-inferred verdict._`);
+        return { type: 'message', level: 'info', content: lines.join('\n') };
+      }
+
+      const exps = store.list();
+      if (exps.length === 0) {
+        return { type: 'message', level: 'info', content: '## Counterfactual lab\n\nNo experiments yet — they appear when the tuner stages a freshly mined patch. `/harness mine` forces the full pipeline.' };
+      }
+      const lines = ['## Counterfactual lab — offline A/B validation of harness patches', ''];
+      for (const e of exps) {
+        const ev = e.evaluations[e.evaluations.length - 1];
+        lines.push(`- \`${e.id}\` **${e.candidate.tool} × ${e.candidate.errorClass}** · ${e.status}${ev ? ` · ${ev.verdict} (${ev.confidence}, ${ev.aggregate.episodesUsable} usable ep)` : ' · not evaluated'} · patch \`${e.candidate.patchId}\``);
+      }
+      lines.push('', '_`/harness lab show|explain <exp>` · `/harness lab run <exp|patch>` re-evaluates · `/harness approve|reject|rollback <patch>`_');
+      return { type: 'message', level: 'info', content: lines.join('\n') };
     }
 
     const patches = tuner.all();
@@ -569,14 +645,19 @@ globalCommandRegistry.register({
     }
     const lines = ['## Harness patches — self-tuned steering (Self-Harness pattern)', ''];
     for (const p of patches) {
-      const glyph = p.status === 'active' ? '◍' : '✗';
+      const glyph = p.status === 'active' ? '◍' : p.status === 'staged' ? '◌' : '✗';
       const eff = p.samplesSince > 0
         ? ` · since: ${p.failuresSince}/${p.samplesSince} failures (baseline ${(p.baselineRate * 100).toFixed(0)}%)`
         : '';
-      lines.push(`${glyph} \`${p.id}\` **${p.tool} × ${p.errorClass}** — ${p.evidenceCount} failures mined${eff}${p.status === 'retired' ? ` · retired: ${p.retiredReason}` : ''}`);
+      const lab = p.status === 'staged'
+        ? ` · STAGED awaiting lab verdict${p.labExperimentId ? ` (\`${p.labExperimentId}\`)` : ''}`
+        : p.activatedBy ? ` · live via ${p.activatedBy}` : '';
+      lines.push(`${glyph} \`${p.id}\` **${p.tool} × ${p.errorClass}** — ${p.evidenceCount} failures mined${eff}${lab}${p.status === 'retired' ? ` · retired: ${p.retiredReason}` : ''}`);
       lines.push(`   ${p.rule}`);
     }
-    lines.push('', '_`/harness retire <id>` to drop one · `/harness mine` to re-mine now_');
+    const staged = patches.filter(p => p.status === 'staged').length;
+    if (staged > 0 && !labEnabled()) lines.push('', `_⚠ ${staged} staged patch(es) while the lab is disabled — the next mining pass activates them (legacy mode)._`);
+    lines.push('', '_`/harness retire|approve|reject|rollback <id>` · `/harness mine` re-mines + runs the lab · `/harness lab` for experiments_');
     return { type: 'message', level: 'info', content: lines.join('\n') };
   },
 });

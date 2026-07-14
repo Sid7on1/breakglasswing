@@ -4,7 +4,7 @@ import { encode } from 'gpt-tokenizer';
 import { Logger } from '../utils/logger';
 import { fileStateCache } from './file-state-cache';
 import { IGraphStore } from '../graph/models';
-import { formatRepoMapOutline } from '../graph/pagerank';
+import { crossRepoMapSync } from '../graph/cross.repo';
 import { compressBacklog, proxyCompress, recordCompression } from './headroom.compress';
 import { cliEvents } from '../cli/events';
 
@@ -215,7 +215,9 @@ export class ContextManager {
     if (_graphStore) {
       try {
         msgs = msgs.filter(m => !(m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[RepoMap]')));
-        const outline = formatRepoMapOutline(_graphStore, 1500, focusTermsFromMessages(msgs));
+        // Cross-repo (PR3): merges every indexed repo in a multi-repo workspace into one map; with a
+        // single repo it returns exactly the old single-repo outline. Sync — never blocks on disk.
+        const outline = crossRepoMapSync(_graphStore, 1500, focusTermsFromMessages(msgs));
         if (outline) {
           const mapMsg = { role: 'system' as const, content: outline };
           let lastUser = -1;
@@ -299,6 +301,20 @@ export class ContextManager {
   }
 
   /**
+   * Reactive cheap recovery for a provider-reported context overflow. Unlike the proactive
+   * micro-compact pass in checkAndCompact(), this is intentionally not pressure-gated: the
+   * provider has already told us the request is too large. Tool-call/result structure remains
+   * intact because microCompact only replaces old result bodies by message id.
+   */
+  reactiveDrain(messages: Message[]): { messages: Message[]; changed: boolean } {
+    const drained = this.microCompact(messages);
+    return {
+      messages: drained,
+      changed: drained.some((message, index) => message !== messages[index]),
+    };
+  }
+
+  /**
    * Layer 3 — snip: a blunt guard for runaway sessions. When the non-system history grows past
    * SNIP_TRIGGER_MESSAGES, keep only the last SNIP_KEEP_TAIL of it (plus all system messages),
    * never letting the kept window begin on an orphaned tool result.
@@ -345,7 +361,7 @@ export class ContextManager {
     return tokens;
   }
 
-  private estimateTokens(messages: Message[]): number {
+  estimateTokens(messages: Message[]): number {
     // +1 per message ≈ the joining newline the old whole-conversation encode counted.
     let total = 0;
     for (const m of messages) total += this.countMessageTokens(m) + 1;

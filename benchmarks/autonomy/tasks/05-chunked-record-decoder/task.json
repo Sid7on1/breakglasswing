@@ -1,0 +1,11 @@
+{
+  "id": "05-chunked-record-decoder",
+  "fixture": "fixture",
+  "promptFile": "prompt.md",
+  "trajectoryFile": "trajectory.json",
+  "successCheck": {
+    "command": "node",
+    "args": ["./check.mjs"],
+    "timeoutMs": 30000
+  }
+}

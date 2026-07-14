@@ -23,7 +23,7 @@ import { getEventLedger, EventLedger } from './event.ledger';
  * loop until the estimator has history behind it.
  */
 
-export const ARM_IDS = ['self-knowledge', 'habits', 'user-model', 'drives', 'calibration', 'exemplars'] as const;
+export const ARM_IDS = ['self-knowledge', 'habits', 'user-model', 'drives', 'calibration', 'exemplars', 'journal'] as const;
 export type ArmId = typeof ARM_IDS[number];
 
 const DEFAULT_HOLDOUT = 0.1;   // active arms hide their block this often — the counterfactual budget

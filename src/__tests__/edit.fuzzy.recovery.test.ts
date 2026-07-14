@@ -65,6 +65,82 @@ describe('edit fuzzy recovery + actionable miss hint', () => {
     expect(res).toMatch(/verdicts\.push/); // shows the real nearby text with a line number
   });
 
+  it('shows a multiline near-miss when the requested oldString was flattened to one line', async () => {
+    const file = path.join(dir, 'ledger.mjs');
+    const content = [
+      'export function buildBalances(transactions) {',
+      '  const balances = new Map();',
+      '',
+      '  for (const transaction of transactions) {',
+      '    balances.set(transaction.account, transaction.cents);',
+      '  }',
+      '',
+      '  return balances;',
+      '}',
+      '',
+    ].join('\n');
+    await fs.writeFile(file, content, 'utf8');
+
+    const res = String(await createEditFileTool(governor).execute(
+      {
+        path: file,
+        oldString: content.replace(/\s+/g, ' ').trim(),
+        newString: 'replacement',
+      } as any,
+      { cwd: dir },
+    ));
+
+    expect(res).toMatch(/not found/i);
+    expect(res).toMatch(/closest region/i);
+    expect(res).toContain('export function buildBalances(transactions) {');
+    expect(res).toMatch(/Copy oldString VERBATIM/);
+  });
+
+  it('explains the approximate region when Edit Shield rejects a fuzzy block match', async () => {
+    const file = path.join(dir, 'ledger.mjs');
+    const content = [
+      'export function buildBalances(transactions) {',
+      '  const balances = new Map();',
+      '',
+      '  for (const transaction of transactions) {',
+      '    balances.set(',
+      '      transaction.account,',
+      '      (balances.get(transaction.account) ?? 0) + transaction.cents,',
+      '    );',
+      '  }',
+      '',
+      '  return balances;',
+      '}',
+      '',
+    ].join('\n');
+    const oldString = content.split('\n').filter(line => line !== '').join('\n').trimEnd();
+    const newString = [
+      'export function buildBalances(transactions) {',
+      '  const balances = new Map();',
+      '  const seen = new Set();',
+      '  for (const transaction of transactions) {',
+      '    if (seen.has(transaction.id)) continue;',
+      '    seen.add(transaction.id);',
+      '    balances.set(transaction.account, transaction.cents);',
+      '  }',
+      '  return balances;',
+      '}',
+    ].join('\n');
+    await fs.writeFile(file, content, 'utf8');
+
+    const res = String(await createEditFileTool(governor).execute(
+      { path: file, oldString, newString } as any,
+      { cwd: dir },
+    ));
+
+    expect(res).toContain('Edit Shield');
+    expect(res).toContain('oldString was not an exact match');
+    expect(res).toContain('via BlockAnchor');
+    expect(res).toContain('wrong or incomplete region');
+    expect(res).toContain('do not switch write mechanisms');
+    expect(await fs.readFile(file, 'utf8')).toBe(content);
+  });
+
   it('closestRegion returns null when nothing in the file resembles oldString', () => {
     expect(closestRegion('const a = 1;\nconst b = 2;\n', 'completely unrelated zzzzz qqqqq')).toBeNull();
   });

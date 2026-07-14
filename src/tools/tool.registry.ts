@@ -15,11 +15,17 @@ export type ContextMode = 'smart' | 'full';
 const CORE_TOOLS = new Set<string>([
   'ReadFileTool', 'WriteFileTool', 'EditFileTool', 'MultiEditTool', 'DeleteTool',
   'CreateDirectoryTool', 'BashTool', 'GrepTool', 'GlobTool', 'TodoWriteTool',
-  'ChangeDirectoryTool', 'AskUserTool', 'GitTool',
+  'ChangeDirectoryTool', 'AskUserTool', 'GitTool', 'OutcomeTool', 'TasksTool',
+  // Precision editing and targeted verification are everyday coding primitives. Keeping them in
+  // the working set prevents broad text edits and full-suite tests from winning by default.
+  'SymbolEditTool', 'RelatedTestsTool',
   // Web lookup is a common, lightweight capability the model reaches for constantly (current facts,
   // docs, errors). Deferring it behind ToolSearch made the model flail — call ToolSearch, then guess
   // at a fetch with no URL — instead of just searching. Keep them in the working set (like Claude Code).
   'WebSearchTool', 'WebFetchTool',
+  // BrowserTool is the native convergence/verification instrument. Keeping its schema available
+  // avoids a ToolSearch detour when a task explicitly asks the agent to inspect a real UI.
+  'BrowserTool',
   // SkillTool is itself the progressive-disclosure entry point (the prompt's AVAILABLE SKILLS
   // section tells the model to call it), so it must always be loaded — never deferred.
   'SkillTool',

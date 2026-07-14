@@ -109,12 +109,30 @@ globalCommandRegistry.register({
   category: 'Configuration',
   execute: async (args, context) => {
     // Two slots: CODING (the main agent loop) and LITE (cheap aux calls — summaries, self-critic).
+    // WS1.2 (MASTER_REBUILD_PLAN): validate the id against the ACTIVE provider's live /models list
+    // the moment it is set — fail at config time, not mid-task with a 400. Fire-and-forget so the
+    // command stays instant; providers without a /models endpoint (empty list) skip the check.
+    // Picker selections already come from the live list, so they pass from cache at zero cost.
+    const warnIfUnserved = (model: string) => {
+      void (async () => {
+        try {
+          const live = await context.options.llmAdapter?.listProviderModels();
+          if (live && live.length > 0 && !live.includes(model)) {
+            const provider = getCurrentProvider().name;
+            context.addSystemMessage('error',
+              `"${model}" is not in ${provider}'s /models list (${live.length} ids served) — requests will 400. ` +
+              `Run /model to pick a served id, or /provider to switch to the provider that has it.`);
+          }
+        } catch { /* offline / no endpoint — nothing to validate against */ }
+      })();
+    };
     const applyCoding = (model: string) => {
       try { context.options.llmAdapter?.applyConfig({ model }); } catch { /* adapter optional */ }
       context.options.model = model;
       context.saveConfig({ model });
       cliEvents.emit('config_changed'); // refresh the live UI (token meter + model display)
       context.addSystemMessage('success', `Coding model → ${model}`);
+      warnIfUnserved(model);
     };
     const applyLite = (model: string) => {
       try { context.options.llmAdapter?.applyConfig({ liteModel: model }); } catch { /* adapter optional */ }
@@ -122,6 +140,7 @@ globalCommandRegistry.register({
       context.saveConfig({ liteModel: model });
       cliEvents.emit('config_changed');
       context.addSystemMessage('success', `Lite model → ${model}`);
+      warnIfUnserved(model);
     };
     const promptCustom = (apply: (m: string) => void) => {
       context.setActivePrompt({
@@ -137,6 +156,7 @@ globalCommandRegistry.register({
       context.saveConfig({ subagentModel: val });
       cliEvents.emit('config_changed');
       context.addSystemMessage('success', val ? `Sub-agent model → ${val}` : 'Sub-agent model → (inherits main model)');
+      if (val) warnIfUnserved(val);
     };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
     const subagentOf = () => { try { return getConfig().subagentModel; } catch { return ''; } };

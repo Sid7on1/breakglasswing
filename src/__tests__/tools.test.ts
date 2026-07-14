@@ -2,7 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { createEditFileTool } from '../tools/implementations/edit.tool';
-import { createWriteFileTool } from '../tools/implementations/file.tool';
+import { countWords, createWriteFileTool } from '../tools/implementations/file.tool';
 import { createGrepTool, createGlobTool } from '../tools/implementations/search.tool';
 import { createTodoWriteTool, getActiveTodos, todosTouchedThisTurn, beginTodoTurn, clearActiveTodos, getTodoPromptBlock } from '../tools/implementations/todo.tool';
 import { createBashTool } from '../tools/implementations/bash.tool';
@@ -212,6 +212,43 @@ describe('BashTool — timeout coercion', () => {
   ])('runs the command when timeout is a %s value', async (_label, timeout) => {
     const res: any = await tool.execute({ command: 'echo coerced_ok', timeout }, { cwd: dir });
     expect(String(res)).toContain('coerced_ok');
+  });
+});
+
+describe('WriteFileTool — exact word counts', () => {
+  const tool = createWriteFileTool(governor);
+
+  it('counts a titled document with or without its title', () => {
+    const content = 'A Short Title\n\none two\nthree four five';
+    expect(countWords(content)).toBe(8);
+    expect(countWords(content, true)).toBe(5);
+  });
+
+  it('rejects an approximate draft before creating the file', async () => {
+    const file = path.join(dir, 'story.txt');
+    const res = await tool.execute({
+      path: file,
+      content: 'The Story\n\none two three four',
+      expectedWords: 5,
+      excludeTitleFromWordCount: true,
+    }, { cwd: dir });
+
+    expect(String(res)).toContain('expected exactly 5 body words, but received 4');
+    await expect(fs.access(file)).rejects.toThrow();
+  });
+
+  it('writes once the body has the exact requested length', async () => {
+    const file = path.join(dir, 'story.txt');
+    const content = 'The Story\n\none two three four five';
+    const res = await tool.execute({
+      path: file,
+      content,
+      expectedWords: 5,
+      excludeTitleFromWordCount: true,
+    }, { cwd: dir });
+
+    expect(String(res)).toContain('Word count verified: 5 (title excluded)');
+    expect(await fs.readFile(file, 'utf8')).toBe(content);
   });
 });
 

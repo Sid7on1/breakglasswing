@@ -133,10 +133,10 @@ type model struct {
 	histIdx   int
 	histStash string
 
-	lines    []string // bounded in-memory copy of the transcript (kept only for Ctrl+F search)
-	printQueue []string // committed lines to flush into the terminal's native scrollback (tea.Println)
-	pendingClear bool   // /clear requested: wipe the physical screen + scrollback before re-banner
-	started  bool     // true once any transcript line has been emitted (for inter-turn spacing)
+	lines        []string // bounded in-memory copy of the transcript (kept only for Ctrl+F search)
+	printQueue   []string // committed lines to flush into the terminal's native scrollback (tea.Println)
+	pendingClear bool     // /clear requested: wipe the physical screen + scrollback before re-banner
+	started      bool     // true once any transcript line has been emitted (for inter-turn spacing)
 	// Tool calls for the current consecutive run, in START order, each updated IN PLACE by id as its
 	// result arrives (pending → running → done/error). One ordered list — not two groups — so a tool
 	// occupies a single fixed slot for its whole lifecycle and never jumps position when it resolves;
@@ -145,17 +145,17 @@ type model struct {
 	// a long boring burst collapses to category counts ("⏺ 7 tools · 4 reads"). Ctrl+B toggles collapse.
 	turnTools     []ToolCall
 	collapseTools bool
-	flushing      bool // guard: flushToolRun appends via m.append, which must not re-enter the flush
-	stream   string   // in-flight assistant tokens for the current turn (full accumulation)
+	flushing      bool   // guard: flushToolRun appends via m.append, which must not re-enter the flush
+	stream        string // in-flight assistant tokens for the current turn (full accumulation)
 	// Progressive streaming: closed markdown blocks are committed to native scrollback as they
 	// complete (formatted once, never to reflow), leaving only the trailing OPEN block live in
 	// View. streamCommitted is the byte offset into stream already committed; turnAnswerStarted
 	// tracks whether the turn's leading ⏺ marker + "Thought" line have been emitted yet.
 	streamCommitted   int
 	turnAnswerStarted bool
-	status        string
-	ready         bool
-	terminalSized bool
+	status            string
+	ready             bool
+	terminalSized     bool
 	// engine heartbeat — pingSeq numbers the probes; pingOutstanding is when the unanswered probe
 	// went out (zero = none in flight); engineGone stops probing once the pipe closes; engineStalled
 	// makes the "not responding" alarm fire once instead of every 50ms tick.
@@ -164,12 +164,12 @@ type model struct {
 	pingOutstanding time.Time
 	engineGone      bool
 	engineStalled   bool
-	busy          bool   // a turn is executing — Ctrl+C cancels it instead of quitting
-	resizeAt time.Time // last WindowSizeMsg; non-zero = a resize is settling (repaint on the tick after 250ms)
-	quitting bool   // engine asked us to shut down — quit after this message
-	cwd      string // working directory, updated by cwd_changed
-	width    int
-	height   int
+	busy            bool      // a turn is executing — Ctrl+C cancels it instead of quitting
+	resizeAt        time.Time // last WindowSizeMsg; non-zero = a resize is settling (repaint on the tick after 250ms)
+	quitting        bool      // engine asked us to shut down — quit after this message
+	cwd             string    // working directory, updated by cwd_changed
+	width           int
+	height          int
 
 	// live task list (todo_update). Rendered as a checklist panel; deduped so repeated identical
 	// updates don't spam the transcript.
@@ -231,7 +231,7 @@ type model struct {
 	searchSaved string
 
 	// structured log view (Ctrl+O toggles it in place of the transcript).
-	showLogs bool
+	showLogs    bool
 	showFullMap bool
 	// mind HUD overlay (Ctrl+X): the ◇ chip's explainable panel — weak spots with posterior
 	// stats, drives with sparklines, compiled habits (v2 §3.11).
@@ -272,16 +272,17 @@ type model struct {
 	welcomed bool // the low-chrome welcome banner has been shown once at the top of the transcript
 
 	// footer state (mirrors Ink's Footer.tsx)
-	fTier   string // "lite" | "heavy"
-	fPinned string // pinned tier, if any
-	fMode   string // governor / agent mode
-	fTokens int    // running session token estimate
-	fCoding string // coding model id
-	fLite   string // lite model id
-	fGoals  int    // active goal count
-	fMcp    int    // connected (non-disabled) MCP server count
-	fMind   MindStrip // mind layer: weak spots / drive deviations / compiled habits
+	fTier      string         // "lite" | "heavy"
+	fPinned    string         // pinned tier, if any
+	fMode      string         // governor / agent mode
+	fTokens    int            // running session token estimate
+	fCoding    string         // coding model id
+	fLite      string         // lite model id
+	fGoals     int            // active goal count
+	fMcp       int            // connected (non-disabled) MCP server count
+	fMind      MindStrip      // mind layer: weak spots / drive deviations / compiled habits
 	fWorkspace WorkspaceStrip // multi-repo workspace: repo count/names for the status chip
+	fOutcome   *OutcomeStrip  // active engine-owned outcome contract; nil for chat/simple questions
 
 	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used
 	// for ephemeral one-liners (e.g. mode switches) that shouldn't linger or clutter the transcript.
@@ -323,18 +324,18 @@ func initialModel(e *Engine) model {
 	hist := loadHistory()
 	vp := viewport.New(80, 20) // kept only for render-width math (renderMarkdown etc.)
 	return model{
-		engine:   e,
-		input:    ta,
-		spin:     sp,
-		history:  hist,
-		histIdx:  len(hist),
+		engine:        e,
+		input:         ta,
+		spin:          sp,
+		history:       hist,
+		histIdx:       len(hist),
 		vp:            vp,
 		collapseTools: true,
 		subAgentTools: map[string][]ToolCall{},
 		saExpanded:    map[string]bool{},
-		status:       "Starting engine…",
-		sessionVerb:  spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))],
-		bell:         os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
+		status:        "Starting engine…",
+		sessionVerb:   spinnerVerbs[time.Now().UnixNano()%int64(len(spinnerVerbs))],
+		bell:          os.Getenv("BIMAX_ENABLE_NOTIFICATIONS") != "0",
 		// Seed the default mode so the footer chip shows "GENERAL" from the first frame (a fresh
 		// terminal starts in general mode — it just wasn't displayed before).
 		fMode: "general",
@@ -440,16 +441,16 @@ func indentAwareWrap(text string, width int) string {
 				}
 			}
 		}
-		
+
 		if indentStr == "" || len(indentStr) >= width/2 {
 			out = append(out, wordwrap.String(line, width))
 			continue
 		}
-		
+
 		// Wrap at a slightly narrower width to leave room for the injected indent on wrapped lines.
 		wrapped := wordwrap.String(line, width-len(indentStr))
 		parts := strings.Split(wrapped, "\n")
-		
+
 		// The first line natively has the original indent (e.g. "⏺ " or "  ").
 		// We manually inject the matching indent into all subsequent lines created by the wrap.
 		for i := 1; i < len(parts); i++ {
@@ -467,7 +468,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width // kept only for render-width math (renderMarkdown etc.)
 		m.input.SetWidth(msg.Width - 6)
-		
+
 		if m.width == 0 || m.height == 0 {
 			return m, nil
 		}
@@ -789,19 +790,28 @@ func (m model) belowSections() []string {
 	overlay := m.menuOpen || m.compOpen || m.searchMode || m.showLogs || m.reqOpen || m.showFullMap || m.showMind
 	if !overlay {
 		td := m.activeTodoPanel()
+		oc := m.outcomeStripView()
+		// The outcome strip is the compact authoritative task surface. Keep TodoWrite as its backing
+		// compatibility feed, but do not render a second tall checklist when a contract is active.
+		if oc != "" {
+			td = ""
+		}
 		sa := m.subAgentPanel()
 		cm := m.compactMapView()
 		hl := m.healthLineView() // ambient repo-health: only non-empty when a drive is off setpoint
 
 		// Add a blank spacer above the pinned panels so they don't stick directly to the transcript
 		// or working indicators.
-		if td != "" || sa != "" || cm != "" || hl != "" {
+		if td != "" || oc != "" || sa != "" || cm != "" || hl != "" {
 			s = append(s, "")
 		}
 
 		// Pin the live sub-agent coverage panel while any sub-agent is running, above the task list.
 		if sa != "" {
 			s = append(s, sa)
+		}
+		if oc != "" {
+			s = append(s, oc)
 		}
 
 		// Pin the task list above the prompt while any task is unfinished (Claude-Code-style live

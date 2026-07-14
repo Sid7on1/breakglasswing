@@ -133,3 +133,4 @@ export interface MessageEntry {
 // - shutdown: () => Graceful shutdown
 // - loop_detected: (signal: LoopSignal) => Agent loop detected a repetition pattern (Footer flash)
 // - goals_changed: () => Active goals changed (Footer goal counter refresh)
+// - outcome_update: (snapshot|null) => Active outcome contract + completion-gate progress

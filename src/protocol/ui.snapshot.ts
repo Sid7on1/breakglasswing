@@ -3,6 +3,7 @@ import { IGraphStore } from '../graph/models';
 import { summarizeGraph, isCodebase } from '../graph/graph.summary';
 import { isCodememReady } from '../graph/codemem/backend';
 import { getHeadroomSavedTokens } from '../memory/headroom.compress';
+import type { ToolRegistry, ContextMode } from '../tools/tool.registry';
 
 // Footer state that the Ink UI reads directly from engine singletons (getConfig, getGoalManager)
 // rather than from events. An out-of-process front-end can't reach those, so we snapshot them into
@@ -67,6 +68,44 @@ export interface UiSnapshotMind {
   ledger?: UiSnapshotMindLedger;
 }
 
+// --- Protocol v2 additive fields ------------------------------------------------------------
+// All optional: a v1 front-end ignores them, a v2 front-end hides the matching panel when absent.
+
+/** One saved session for the front-end's session list (sidebar) — from db/session.meta. */
+export interface UiSnapshotSession {
+  id: string;
+  title: string;
+  startedAt: string; // ISO
+  messageCount: number;
+  cwd: string;
+  current: boolean;  // the live session this engine process is writing
+}
+
+/** One Time Machine checkpoint (sandbox/checkpoint.manager) for the History strip. */
+export interface UiSnapshotCheckpoint {
+  id: string;
+  label: string;
+  ts: number;   // epoch ms
+  auto: boolean;
+}
+
+export interface UiSnapshotGit {
+  branch: string;
+  dirty: number; // changed files (index + worktree + untracked)
+  ahead: number;
+  behind: number;
+}
+
+/** Live tool fabric: what the model can call now vs what remains load-on-demand. */
+export interface UiSnapshotTools {
+  registered: number;
+  ready: number;
+  deferred: number;
+  discovered: number;
+  mcp: number;
+  graphReady: boolean;
+}
+
 export interface UiSnapshot {
   models: { coding: string; lite: string };
   goalCount: number;
@@ -87,6 +126,15 @@ export interface UiSnapshot {
   // Multi-repo workspace: how many repos are in context and their names, so the TUI status bar
   // always shows the working set (workspace.manager.ts). count <= 1 = single-repo session.
   workspace: { count: number; names: string[]; writable: number };
+  // v2: recent sessions (newest first, capped) for the front-end sidebar; resume via `/resume <id>`.
+  sessions?: UiSnapshotSession[];
+  // v2: Time Machine checkpoints (newest first, capped) for the History strip; restore via `/rewind <id>`.
+  checkpoints?: UiSnapshotCheckpoint[];
+  // v2: coarse git state for header pills. Front-ends that can poll git natively (the Electron app)
+  // may prefer their own fresher poll; this is for the ones that can't.
+  git?: UiSnapshotGit;
+  // v3 additive: live registry posture for desktop/tooling surfaces.
+  tools?: UiSnapshotTools;
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -94,15 +142,17 @@ export interface UiSnapshot {
 let baselineFn: (() => number) | undefined;
 export function setTokensBaseline(fn: () => number): void { baselineFn = fn; }
 
-function snapshot(graphStore?: IGraphStore): UiSnapshot {
+function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnapshot {
   let models = { coding: '', lite: '' };
   let goalCount = 0;
   let contextWindow = 0;
+  let contextMode: ContextMode = 'smart';
   try {
     const { getConfig } = require('../cli/config');
     const c = getConfig();
     models = { coding: c.model, lite: c.liteModel };
     contextWindow = c.contextWindowTokens || 0;
+    contextMode = c.contextMode === 'full' ? 'full' : 'smart';
   } catch { /* config not ready */ }
   if (!contextWindow || contextWindow <= 0) {
     try {
@@ -188,21 +238,75 @@ function snapshot(graphStore?: IGraphStore): UiSnapshot {
     if (ws) workspace = ws.snapshot();
   } catch { /* workspace best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace };
+  // v2 fields — each independently best-effort so one broken subsystem never blanks the others.
+  let sessions: UiSnapshotSession[] | undefined;
+  try {
+    const { listSessionMeta, getCurrentSessionId } = require('../db/session.meta');
+    const current = getCurrentSessionId();
+    sessions = (listSessionMeta(20) as any[]).map((m) => ({
+      id: m.id,
+      title: m.title || '(no messages yet)',
+      startedAt: m.startedAt || '',
+      messageCount: m.messageCount || 0,
+      cwd: m.cwd || '',
+      current: m.id === current,
+    }));
+  } catch { /* session meta best-effort */ }
+
+  let checkpoints: UiSnapshotCheckpoint[] | undefined;
+  try {
+    const { globalCheckpointManager } = require('../sandbox/checkpoint.manager');
+    if (globalCheckpointManager.isGitRepo()) {
+      checkpoints = (globalCheckpointManager.list() as any[]).slice(0, 15).map((c) => ({
+        id: c.id, label: c.label, ts: c.timestamp, auto: !!c.auto,
+      }));
+    }
+  } catch { /* checkpoints best-effort */ }
+
+  let git: UiSnapshotGit | undefined;
+  try {
+    const { getGitStatus } = require('../cli/git');
+    const s = getGitStatus(process.cwd());
+    if (s) {
+      git = {
+        branch: s.branch,
+        dirty: s.added.length + s.modified.length + s.deleted.length + s.unstaged.length,
+        ahead: s.ahead,
+        behind: s.behind,
+      };
+    }
+  } catch { /* git best-effort */ }
+
+  let tools: UiSnapshotTools | undefined;
+  try {
+    if (toolRegistry) {
+      const names = toolRegistry.getToolNames();
+      tools = {
+        registered: names.length,
+        ready: names.filter((name) => toolRegistry.isSent(name, contextMode)).length,
+        deferred: names.filter((name) => toolRegistry.isDeferred(name) && !toolRegistry.isDiscovered(name)).length,
+        discovered: names.filter((name) => toolRegistry.isDiscovered(name)).length,
+        mcp: names.filter((name) => name.startsWith('mcp__')).length,
+        graphReady: toolRegistry.isGraphReady(),
+      };
+    }
+  } catch { /* registry posture best-effort */ }
+
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools };
 }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
-export function startUiSnapshot(graphStore?: IGraphStore): void {
+export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): void {
   // First snapshot is synchronous (the front-end needs footer state with the `ready` handshake);
   // afterwards a trailing 80ms debounce coalesces change bursts — a /beast step can fire
   // config+goals+graph+mind together, and each snapshot walks the whole graph summary.
-  cliEvents.emit('ui_snapshot', snapshot(graphStore));
+  cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
   let timer: ReturnType<typeof setTimeout> | null = null;
   const emit = () => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      cliEvents.emit('ui_snapshot', snapshot(graphStore));
+      cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
     }, 80);
     timer.unref?.();
   };
@@ -210,9 +314,15 @@ export function startUiSnapshot(graphStore?: IGraphStore): void {
   cliEvents.on('goals_changed', emit);
   cliEvents.on('graph_changed', emit);
   cliEvents.on('mcp_changed', emit);
+  cliEvents.on('tools_changed', emit);
   // Mind layer: re-snapshot when self-model / drives / habits change so the footer's 🧠 strip
   // stays live.
   cliEvents.on('mind_changed', emit);
   // Workspace: repo registered / scoped / ignored → status-bar repo chip updates.
   cliEvents.on('workspace_changed', emit);
+  // v2: checkpoint created / rewound → History strip updates; clear/resume → session list updates.
+  cliEvents.on('timemachine_changed', emit);
+  cliEvents.on('clear', emit);
+  // Session recorder: thread created / titled / rotated / resumed → sidebar session list updates.
+  cliEvents.on('session_changed', emit);
 }

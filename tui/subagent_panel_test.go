@@ -71,13 +71,26 @@ func TestSubAgentPanelRetiresWhenIdle(t *testing.T) {
 	}
 }
 
+func TestSubAgentPanelShowsOutcomeAssignmentPhase(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("subagent_update", []map[string]any{
+		{"taskId": "agent-1", "outcomeTaskId": "api-integration", "agentType": "BiMax", "phase": "testing", "status": "running", "startedAt": 1},
+	}))
+	panel := stripANSI(m.subAgentPanel())
+	for _, want := range []string{"TESTING", "api-integration"} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("assignment panel missing %q in:\n%s", want, panel)
+		}
+	}
+}
+
 // pathTail renders "base parent/" like the GUI's "main.go tui/", and passes bare names through.
 func TestPathTail(t *testing.T) {
 	cases := map[string]string{
-		"tui/main.go":                 "main.go tui/",
+		"tui/main.go":                  "main.go tui/",
 		"src/core/subagent.manager.ts": "subagent.manager.ts core/",
-		"main.go":                     "main.go",
-		"":                            "",
+		"main.go":                      "main.go",
+		"":                             "",
 	}
 	for in, want := range cases {
 		if got := pathTail(in); got != want {

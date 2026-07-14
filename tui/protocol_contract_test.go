@@ -89,6 +89,14 @@ func TestInboundEncodersMatchFixtures(t *testing.T) {
 			encoded = encodeMenuSelect(fx["id"].(string), fx["value"].(string))
 		case "ping":
 			encoded = encodePing(int(fx["id"].(float64)))
+		case "configGet":
+			encoded = encodeConfigGet(int(fx["id"].(float64)))
+		case "configSet":
+			encoded = encodeConfigSet(int(fx["id"].(float64)), fx["patch"].(map[string]any))
+		case "resume":
+			encoded = encodeResume(fx["id"].(string))
+		case "controls":
+			encoded = encodeControls(fx["mode"].(string), fx["tier"].(string), fx["autonomy"].(string))
 		default:
 			t.Errorf("inbound fixture %d: no TUI encoder for t=%v — the engine expects a message this TUI cannot send", i, fx["t"])
 			continue

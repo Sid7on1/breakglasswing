@@ -160,13 +160,15 @@ export class ApiKeyManager {
   }
 
   public getStates() {
+    const now = Date.now() / 1000;
     return this.keyStates.map(s => ({
       label: s.label || s.provider || 'key',
       model: s.model || 'default',
       baseURL: s.baseURL || 'default',
       ok: s.total_ok,
       fail: s.total_fail,
-      onCooldown: s.cooldown_until > Date.now() / 1000,
+      onCooldown: s.cooldown_until > now,
+      cooldownSecs: Math.max(0, s.cooldown_until - now),
     }));
   }
 }

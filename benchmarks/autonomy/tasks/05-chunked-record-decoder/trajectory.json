@@ -1,0 +1,33 @@
+[
+  { "tool": "ReadFileTool", "args": { "path": "package.json" } },
+  { "expectLastToolContains": "node test.mjs", "tool": "ReadFileTool", "args": { "path": "src/decoder.mjs" } },
+  {
+    "expectLastToolContains": "Buffer.from(chunk).toString",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/decoder.mjs",
+      "oldString": "export function createRecordDecoder() {\n  let pending = '';\n  let line = 1;\n  let flushed = false;",
+      "newString": "export function createRecordDecoder() {\n  const textDecoder = new TextDecoder('utf-8', { fatal: true });\n  let pending = '';\n  let line = 1;\n  let flushed = false;"
+    }
+  },
+  {
+    "expectLastToolContains": "Edited src/decoder.mjs",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/decoder.mjs",
+      "oldString": "pending += Buffer.from(chunk).toString('utf8');",
+      "newString": "pending += textDecoder.decode(chunk, { stream: true });"
+    }
+  },
+  {
+    "expectLastToolContains": "Edited src/decoder.mjs",
+    "tool": "EditFileTool",
+    "args": {
+      "path": "src/decoder.mjs",
+      "oldString": "flushed = true;\n      return parse(pending);",
+      "newString": "flushed = true;\n      pending += textDecoder.decode();\n      return parse(pending.endsWith('\\r') ? pending.slice(0, -1) : pending);"
+    }
+  },
+  { "expectLastToolContains": "Edited src/decoder.mjs", "tool": "BashTool", "args": { "command": "npm test", "timeout": 30000 } },
+  { "expectLastToolContains": "fixture tests passed", "text": "Repaired streaming UTF-8 decoding and final flush behavior; focused tests pass." }
+]

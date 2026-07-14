@@ -207,6 +207,9 @@ export class WorkspaceManager {
     return this.repos.filter(r => r.scope !== 'ignored');
   }
 
+  /** Absolute path of the primary project repo (the always-writable one this session opened in). */
+  public primaryPath(): string { return this.primaryRoot; }
+
   /** Fresh clones awaiting the one-time registration ask. */
   public pending(): string[] { return [...this.candidates]; }
 
