@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Bimax CLI installer — https://bimax-liard.vercel.app/install
+set -euo pipefail
+
+INSTALL_DIR="${BIMAX_INSTALL_DIR:-$HOME/.local/bin}"
+REPO="${BIMAX_REPO:-Sid7on1/bimax-releases}"
+VERSION="${BIMAX_VERSION:-latest}"
+ACTION="${1:---install}"
+
+BOLD='\033[1m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
+say() { printf "${CYAN}→ %s${NC}\n" "$*"; }
+ok()  { printf "${GREEN}✓ %s${NC}\n" "$*"; }
+die() { printf "${RED}error: %s${NC}\n" "$*" >&2; exit 1; }
+
+case "$ACTION" in
+  --install|--update) ;;
+  --uninstall)
+    if [ -e "$INSTALL_DIR/bimax" ]; then
+      rm -f "$INSTALL_DIR/bimax"
+      ok "uninstalled $INSTALL_DIR/bimax"
+    else
+      say "Bimax is not installed at $INSTALL_DIR/bimax"
+    fi
+    exit 0
+    ;;
+  --help|-h)
+    echo "Usage: install [--install|--update|--uninstall]"
+    exit 0
+    ;;
+  *) die "unknown action: $ACTION (use --help)" ;;
+esac
+
+printf "\n${BOLD}Bimax — autonomous AI agent for your terminal${NC}\n\n"
+
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$os" in
+  darwin) os=darwin ;;
+  linux) os=linux ;;
+  *) die "unsupported OS: $os (macOS and Linux are supported)" ;;
+esac
+
+arch="$(uname -m)"
+case "$arch" in
+  arm64|aarch64) arch=arm64 ;;
+  x86_64|amd64) arch=x64 ;;
+  *) die "unsupported architecture: $arch" ;;
+esac
+
+artifact="bimax-${os}-${arch}"
+say "platform: ${os}-${arch}"
+
+if [ "$VERSION" = latest ]; then
+  base_url="https://github.com/${REPO}/releases/latest/download"
+else
+  base_url="https://github.com/${REPO}/releases/download/${VERSION}"
+fi
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+archive="$tmp/${artifact}.tar.gz"
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v tar >/dev/null 2>&1 || die "tar is required"
+
+say "downloading Bimax ${VERSION}"
+curl -fL --progress-bar -o "$archive" "${base_url}/${artifact}.tar.gz" \
+  || die "download failed — the requested Bimax release is unavailable"
+curl -fsSL -o "$tmp/SHA256SUMS" "${base_url}/SHA256SUMS" \
+  || die "could not download release checksums"
+
+expected="$(awk -v file="${artifact}.tar.gz" '$2 == file || $2 == "*" file { print $1; exit }' "$tmp/SHA256SUMS")"
+[ -n "$expected" ] || die "release checksums have no entry for ${artifact}.tar.gz"
+
+if command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$archive" | awk '{print $1}')"
+else
+  die "shasum or sha256sum is required to verify the release"
+fi
+[ "$actual" = "$expected" ] || die "checksum mismatch for ${artifact}.tar.gz"
+ok "checksum verified"
+
+tar -C "$tmp" -xzf "$archive"
+[ -f "$tmp/$artifact" ] || die "release archive is missing $artifact"
+mkdir -p "$INSTALL_DIR"
+chmod +x "$tmp/$artifact"
+mv "$tmp/$artifact" "$INSTALL_DIR/bimax"
+ok "installed → $INSTALL_DIR/bimax"
+
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *)
+    case "${SHELL:-}" in
+      */zsh) shellrc="$HOME/.zshrc" ;;
+      */bash) shellrc="$HOME/.bashrc" ;;
+      *) shellrc="$HOME/.profile" ;;
+    esac
+    if ! grep -Fqs "$INSTALL_DIR" "$shellrc" 2>/dev/null; then
+      printf '\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "$shellrc"
+      say "added $INSTALL_DIR to PATH in $shellrc"
+    fi
+    export PATH="$INSTALL_DIR:$PATH"
+    ;;
+esac
+
+version="$($INSTALL_DIR/bimax --version 2>/dev/null || true)"
+[ -n "$version" ] || die "installed binary failed to run"
+ok "$version"
+printf "\nRun ${BOLD}bimax${NC} inside any project directory to start.\n\n"
