@@ -38,7 +38,7 @@ const program = new Command();
 program
   .name('bimax')
   .description('BiMax — Autonomous AI agent for your terminal')
-  .version('1.0.0')
+  .version('1.0.1')
   .argument('[prompt]', 'Prompt to run in non-interactive mode')
   .option('-p, --print', 'Non-interactive mode: print response and exit')
   .option('-m, --model <model>', 'Model override (e.g. gpt-4, claude-opus)')
@@ -199,4 +199,3 @@ main().catch((e) => {
   console.error('Fatal error:', e);
   process.exit(1);
 });
-
