@@ -46,6 +46,29 @@ binary (`-tags embedengine`), and produces `build/bimax-<os>-<arch>.tar.gz` plus
 `build/SHA256SUMS`. Attach all of it to the GitHub release; `install.sh` pulls from
 `releases/latest/download/`.
 
+### Apple signing and notarization
+
+Tagged releases are built and published by `.github/workflows/release.yml`. The macOS binaries
+are signed with hardened runtime and a secure timestamp, submitted to Apple's notary service, and
+then repackaged before `SHA256SUMS` is generated.
+
+The repository must define these GitHub Actions secrets:
+
+- `APPLE_DEVELOPER_ID_P12_BASE64` — base64 of a Developer ID Application certificate plus private
+  key exported from Keychain Access as `.p12`.
+- `APPLE_DEVELOPER_ID_P12_PASSWORD` — password used when exporting that `.p12`.
+- `APPLE_NOTARY_PRIVATE_KEY` — contents of an App Store Connect API key (`AuthKey_*.p8`).
+- `APPLE_NOTARY_KEY_ID` — the API key ID.
+- `APPLE_NOTARY_ISSUER_ID` — the App Store Connect issuer ID.
+
+Only the Apple Developer Account Holder can create the Developer ID certificate. Add credentials
+through **GitHub → Settings → Secrets and variables → Actions**; never commit them or paste them
+into an issue or chat. Push a version-matching tag such as `v1.0.0` only after CI is green.
+
+Apple's notary service issues an online ticket for a standalone executable, but `stapler` cannot
+attach that ticket directly to the executable. Gatekeeper therefore retrieves the notarization
+ticket online when it assesses the downloaded CLI.
+
 `./build-release.sh` remains the single-file build for the current platform only
 (`build/bimax`).
 
