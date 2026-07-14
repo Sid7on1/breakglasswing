@@ -1,4 +1,4 @@
-# Bimax CLI v1.0.0 release candidate
+# Bimax CLI v1.0.0 public beta
 
 Date: 2026-07-14
 
@@ -19,9 +19,10 @@ Date: 2026-07-14
 
 ## Release artifacts
 
-The four unsigned release-candidate archives and `SHA256SUMS` are in `build/`. The tagged
-release workflow signs and repackages the two macOS binaries, so the final public macOS checksums
-will intentionally differ; the attached `SHA256SUMS` is authoritative for the published release.
+The release contains four self-contained archives and `SHA256SUMS`. Every published asset receives
+a GitHub artifact attestation backed by Sigstore. When Apple credentials are configured, the tagged
+release workflow also signs, notarizes, and repackages the two macOS binaries; the attached
+`SHA256SUMS` is always authoritative for the published release.
 
 | Platform | Archive | Pre-sign RC SHA-256 |
 |---|---|---|
@@ -34,15 +35,16 @@ will intentionally differ; the attached `SHA256SUMS` is authoritative for the pu
 
 - Commit the verified CLI/TUI source and this evidence on the release branch.
 - Merge or select that commit as the release target.
-- Add the five Apple credential secrets documented in `docs/INSTALL.md`.
-- Create tag `v1.0.0`; the release workflow builds, signs, notarizes, checksums, and uploads all
-  five release assets.
+- Optionally add the five Apple credential secrets documented in `docs/INSTALL.md`.
+- Create tag `v1.0.0`; the release workflow builds, checksums, attests, and uploads all five release
+  assets. With Apple credentials it also signs and notarizes the macOS binaries; without them it
+  clearly labels the macOS release as an unsigned beta.
 - Confirm the one-line installer on one clean macOS host and one clean Linux host.
 
 ## Honest scope
 
-This is a technically verified public-beta release candidate. It is not evidence of a completed
+This is a technically verified public beta. It is not evidence of a completed
 multi-hour private beta. The expanded live autonomy suite subsequently passed 7/7 in one
 production-provider run with no retries or result selection. Sustained fault injection, external
-no-help beta feedback, Apple credential provisioning, and the hosted release remain visible in
+no-help beta feedback, optional Apple credential provisioning, and post-launch feedback remain visible in
 `docs/MASTER_CLI.md`.
