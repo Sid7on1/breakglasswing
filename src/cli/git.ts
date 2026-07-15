@@ -24,9 +24,15 @@ export interface GitStatus {
 }
 
 export function getGitStatus(cwd: string): GitStatus | null {
+  // Repo detection first: a non-repo directory is a supported, QUIET state. Without this guard the
+  // status calls below spill `fatal: not a git repository` to the engine's stderr on every snapshot
+  // build (the non-repo launch noise). isGitRepo already silences its own stderr.
+  if (!isGitRepo(cwd)) return null;
   try {
-    const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd, encoding: 'utf-8' }).trim();
-    const statusOut = execSync('git status --porcelain', { cwd, encoding: 'utf-8' });
+    // stderr is silenced ('ignore') so a transient git error (detached HEAD mid-rebase, unborn HEAD)
+    // never leaks a `fatal:` line to the terminal — we handle failure via the null return instead.
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    const statusOut = execSync('git status --porcelain', { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
     const modified: string[] = [];
     const added: string[] = [];
     const deleted: string[] = [];
@@ -54,7 +60,7 @@ export function gitLog(cwd: string, count = 10): string {
   try {
     // execFile (argv array, no shell): a non-integer `count` can't inject shell metacharacters.
     const n = Math.max(1, Math.floor(Number(count) || 10));
-    return execFileSync('git', ['log', '--oneline', `-${n}`], { cwd, encoding: 'utf-8' });
+    return execFileSync('git', ['log', '--oneline', `-${n}`], { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
   } catch { return '(not a git repo)'; }
 }
 
@@ -64,6 +70,6 @@ export function gitDiff(cwd: string, file?: string): string {
     // `paths` arg) can't break out of the quoting and inject a command (`x"; rm -rf ~ #`). The
     // pathspec is passed as a discrete argv element, shell-metacharacter-safe by construction.
     const args = file ? ['diff', '--', file] : ['diff'];
-    return execFileSync('git', args, { cwd, encoding: 'utf-8' });
+    return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] });
   } catch { return '(diff failed)'; }
 }

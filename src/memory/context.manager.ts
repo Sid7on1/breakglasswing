@@ -142,6 +142,13 @@ export class ContextManager {
     let msgs: Message[] = messages;
     const pressureRatio = this.effectiveTokens(messages) / this.MAX_TOKENS;
     if (process.env.BIMAX_DISABLE_COMPRESSION !== '1' && pressureRatio >= this.COMPACT_THRESHOLD) {
+      // Lazy sidecar: bring the Kompress proxy up the FIRST time a turn is actually under pressure —
+      // never at boot. A greeting must not provision a Python venv + spawn a sidecar (the "compression
+      // warmed during a greeting" defect). Fire-and-forget and idempotent: this turn uses the native
+      // fallback if the proxy isn't ready yet; the proxy catches subsequent pressured turns.
+      if (process.env.BIMAX_DISABLE_HEADROOM !== '1') {
+        import('./headroomProxy').then(m => m.ensureHeadroomProxy().catch(() => {})).catch(() => {});
+      }
       // Which model the saving is attributed to (for the per-model /headroom report).
       let model = 'unknown';
       try { const c = require('../cli/config').getConfig(); model = c.model || c.liteModel || 'unknown'; } catch { /* config optional */ }

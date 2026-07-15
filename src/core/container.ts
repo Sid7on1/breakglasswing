@@ -162,10 +162,11 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   if (isCodebase(projectRoot) && process.env.BIMAX_DISABLE_CODEMEM !== '1') {
     globalCodemem.init(projectRoot).catch(() => {});
   }
-  // Bring the real Headroom Kompress proxy up in the background (provision venv + ONNX model on first
-  // run, spawn the localhost sidecar, wire HEADROOM_PROXY_URL). Never blocks boot; the engine only
-  // calls it under token pressure. Opt out with BIMAX_DISABLE_HEADROOM=1.
-  import('../memory/headroomProxy').then(m => m.ensureHeadroomProxy().catch(() => {})).catch(() => {});
+  // NOTE: the Headroom Kompress proxy is NO LONGER started here. Provisioning a Python venv + spawning
+  // a localhost sidecar at boot meant a trivial "hi" paid for ML-compression startup it never used
+  // (and two engines raced for :8788). It is now brought up LAZILY on the first turn that is actually
+  // under token pressure — see context.manager.ts (guarded by a cross-process singleton lock). Opt out
+  // entirely with BIMAX_DISABLE_HEADROOM=1 / BIMAX_DISABLE_COMPRESSION=1.
   toolRegistry.register(createReadFileTool(governor));
   toolRegistry.register(createWriteFileTool(governor));
   toolRegistry.register(createEditFileTool(governor));

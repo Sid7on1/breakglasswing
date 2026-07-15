@@ -20,10 +20,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as http from 'http';
+import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
 import { Logger } from '../utils/logger';
 
-const PORT = Number(process.env.HEADROOM_PORT_OVERRIDE) || 8788; // 8788 to avoid clashing with a user-run :8787
+const DEFAULT_PORT = Number(process.env.HEADROOM_PORT_OVERRIDE) || 8788; // 8788 avoids a user-run :8787
+// The live port for THIS engine's proxy. Starts at the default but a cross-process singleton may
+// bind an ephemeral port instead when 8788 is already taken — so two engines never race for 8788
+// (the "address already in use" bug).
+let _port = DEFAULT_PORT;
 const PIP_SPEC = 'headroom-ai[proxy]';
 
 /** Repo/package root (where vendor/ lives). Works from both dist/ and src (tsx). */
@@ -40,8 +45,104 @@ function venvBin(name: string): string {
 let _child: ChildProcess | null = null;
 let _starting: Promise<boolean> | null = null;
 let _ready = false;
+let _ownsLock = false;
 
 export function isHeadroomReady(): boolean { return _ready; }
+
+// ---- Cross-process singleton ownership -------------------------------------------------------
+// A lockfile records the pid + port of whichever engine owns the sidecar. A second engine reads it,
+// health-probes that port, and REUSES the live proxy instead of spawning its own on the same fixed
+// port. Stale locks (owner died, proxy unhealthy) are cleaned. This is the deterministic answer to
+// two simultaneous starts colliding on :8788.
+
+interface ProxyLock { pid: number; port: number; startedAt: number; }
+
+function lockFile(): string { return path.join(homeDir(), 'proxy.lock'); }
+
+export function readProxyLock(file = lockFile()): ProxyLock | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    if (typeof raw?.pid === 'number' && typeof raw?.port === 'number') return raw as ProxyLock;
+  } catch { /* missing or corrupt */ }
+  return null;
+}
+
+/** Atomically claim the lock (fails if another live owner holds it). Returns true on success. */
+export function acquireProxyLock(port: number, file = lockFile()): boolean {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, port, startedAt: Date.now() } as ProxyLock), { flag: 'wx' });
+    return true;
+  } catch {
+    return false; // exists — someone else owns it
+  }
+}
+
+/** Overwrite the lock unconditionally (used after we confirm the prior owner is stale). */
+function writeProxyLock(port: number, file = lockFile()): void {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, port, startedAt: Date.now() } as ProxyLock));
+  } catch { /* best-effort */ }
+}
+
+/** Remove the lockfile only if THIS process owns it — never yank a sibling engine's lock. */
+export function releaseProxyLock(file = lockFile()): void {
+  try {
+    const lock = readProxyLock(file);
+    if (lock && lock.pid === process.pid) fs.rmSync(file, { force: true });
+  } catch { /* best-effort */ }
+}
+
+/** True when nothing is listening on `port` (safe to bind). */
+export function isPortFree(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.once('listening', () => srv.close(() => resolve(true)));
+    srv.listen(port, '127.0.0.1');
+  });
+}
+
+/** An OS-assigned free ephemeral port. */
+export function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : DEFAULT_PORT;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+export interface ProxyPlan { action: 'reuse' | 'spawn' | 'external'; port: number; }
+
+/**
+ * Decide what a starting engine should do, WITHOUT any side effects — the singleton's brain, kept
+ * pure so the race logic is unit-testable with fake probes. Order:
+ *   1. A user-provided external proxy (not on our port) → use it as-is.
+ *   2. A lockfile whose recorded port is actually healthy → reuse that live sidecar.
+ *   3. Otherwise spawn — on the default port if free, else on an OS-assigned ephemeral port so we
+ *      never collide with whatever already holds 8788.
+ */
+export async function planProxyStartup(opts: {
+  lockFile: string;
+  defaultPort: number;
+  externalUrl?: string;
+  healthy: (port: number) => Promise<boolean>;
+  portFree: (port: number) => Promise<boolean>;
+  freePort: () => Promise<number>;
+}): Promise<ProxyPlan> {
+  if (opts.externalUrl && !opts.externalUrl.includes(`:${opts.defaultPort}`)) {
+    return { action: 'external', port: opts.defaultPort };
+  }
+  const lock = readProxyLock(opts.lockFile);
+  if (lock && await opts.healthy(lock.port)) return { action: 'reuse', port: lock.port };
+  const port = (await opts.portFree(opts.defaultPort)) ? opts.defaultPort : await opts.freePort();
+  return { action: 'spawn', port };
+}
 
 /**
  * Wait (bounded) for the proxy to become ready. ensureHeadroomProxy() is already racing to bring it up
@@ -118,9 +219,9 @@ async function provisionVenv(): Promise<boolean> {
   return true;
 }
 
-function httpGetOk(pathname: string, timeoutMs: number): Promise<boolean> {
+function httpGetOk(pathname: string, timeoutMs: number, port: number = _port): Promise<boolean> {
   return new Promise(resolve => {
-    const req = http.get({ host: '127.0.0.1', port: PORT, path: pathname, timeout: timeoutMs }, res => {
+    const req = http.get({ host: '127.0.0.1', port, path: pathname, timeout: timeoutMs }, res => {
       res.resume();
       resolve((res.statusCode || 500) < 400);
     });
@@ -155,7 +256,7 @@ function spawnProxy(): ChildProcess {
     HEADROOM_DISABLE_KOMPRESS: '0',
     HEADROOM_MODE: 'token',                            // prioritize compression
   };
-  const child = spawn(venvBin('headroom'), ['proxy', '--port', String(PORT), '--no-cache', '--no-rate-limit', '--no-ccr-inject-tool'], {
+  const child = spawn(venvBin('headroom'), ['proxy', '--port', String(_port), '--no-cache', '--no-rate-limit', '--no-ccr-inject-tool'], {
     env, stdio: ['ignore', 'ignore', 'pipe'], detached: false,
   });
   child.stderr?.on('data', (b: Buffer) => {
@@ -178,20 +279,59 @@ export async function ensureHeadroomProxy(): Promise<boolean> {
   // hundreds of MB of pip installs for nothing (this bit hard in benchmark containers).
   if (process.env.BIMAX_DISABLE_COMPRESSION === '1') return false;
   // Respect a user-provided external proxy — don't spawn our own.
-  if (process.env.HEADROOM_PROXY_URL && !process.env.HEADROOM_PROXY_URL.includes(`:${PORT}`)) { _ready = true; return true; }
+  if (process.env.HEADROOM_PROXY_URL && !process.env.HEADROOM_PROXY_URL.includes(`:${DEFAULT_PORT}`)) { _ready = true; return true; }
   if (_ready) return true;
   if (_starting) return _starting;
 
   _starting = (async () => {
     try {
-      if (!(await venvProvisioned()) && !(await provisionVenv())) return false;
+      const plan = await planProxyStartup({
+        lockFile: lockFile(),
+        defaultPort: DEFAULT_PORT,
+        externalUrl: process.env.HEADROOM_PROXY_URL,
+        healthy: (port) => httpGetOk('/readyz', 800, port),
+        portFree: isPortFree,
+        freePort: findFreePort,
+      });
 
-      // If our port is already serving (a prior session's sidecar), reuse it.
+      if (plan.action === 'external') { _ready = true; return true; }
+
+      if (plan.action === 'reuse') {
+        // Another engine already owns a healthy sidecar — wire to it, spawn nothing.
+        _port = plan.port;
+        process.env.HEADROOM_PROXY_URL = `http://127.0.0.1:${_port}`;
+        _ready = true;
+        Logger.info(`[Headroom] reusing existing Kompress proxy at ${process.env.HEADROOM_PROXY_URL} (singleton).`);
+        return true;
+      }
+
+      // plan.action === 'spawn'. Claim ownership atomically BEFORE spawning so two engines can't both
+      // start on the same port. If the claim loses the race, a sibling is coming up — reuse it.
+      _port = plan.port;
+      if (!acquireProxyLock(_port)) {
+        const other = readProxyLock();
+        if (other && await waitReady(15_000)) { // sibling on our default port came up
+          _port = other.port; process.env.HEADROOM_PROXY_URL = `http://127.0.0.1:${_port}`; _ready = true;
+          Logger.info(`[Headroom] reusing sibling Kompress proxy at ${process.env.HEADROOM_PROXY_URL}.`);
+          return true;
+        }
+        // Sibling never came up (stale claim) — take over the port ourselves.
+        writeProxyLock(_port);
+      }
+      _ownsLock = true;
+
+      if (!(await venvProvisioned()) && !(await provisionVenv())) { releaseProxyLock(); _ownsLock = false; return false; }
+
       if (!(await httpGetOk('/readyz', 800))) {
         _child = spawnProxy();
-        if (!(await waitReady(60_000))) { Logger.warn('[Headroom] proxy did not become ready in time.'); return false; }
+        if (!(await waitReady(60_000))) {
+          Logger.warn('[Headroom] proxy did not become ready in time.');
+          releaseProxyLock(); _ownsLock = false;
+          return false;
+        }
       }
-      process.env.HEADROOM_PROXY_URL = `http://127.0.0.1:${PORT}`;
+      writeProxyLock(_port); // record the confirmed-live port for the next engine to reuse
+      process.env.HEADROOM_PROXY_URL = `http://127.0.0.1:${_port}`;
       _ready = true;
       Logger.info(`[Headroom] Kompress proxy live at ${process.env.HEADROOM_PROXY_URL} — real ML context compression enabled.`);
       warmModel(); // load/download the Kompress model now so the first under-pressure compaction is warm
@@ -232,7 +372,7 @@ function warmModel(): void {
     config: { protect_recent: 2, target_ratio: 0.5 },
   });
   const req = http.request(
-    { host: '127.0.0.1', port: PORT, path: '/v1/compress', method: 'POST', timeout: 120_000, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+    { host: '127.0.0.1', port: _port, path: '/v1/compress', method: 'POST', timeout: 120_000, headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
     res => { res.resume(); res.on('end', () => Logger.info('[Headroom] Kompress model warmed.')); },
   );
   req.on('error', () => { /* warmup is best-effort */ });
@@ -240,10 +380,11 @@ function warmModel(): void {
   req.write(body); req.end();
 }
 
-/** Best-effort shutdown of the spawned sidecar. */
+/** Best-effort, deterministic shutdown of the spawned sidecar. Releases the singleton lock we own. */
 export function stopHeadroomProxy(): void {
   if (_child && !_child.killed) { try { _child.kill('SIGTERM'); } catch { /* ignore */ } }
   _child = null; _ready = false;
+  if (_ownsLock) { releaseProxyLock(); _ownsLock = false; }
 }
 
 process.once('exit', stopHeadroomProxy);
