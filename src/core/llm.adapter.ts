@@ -11,12 +11,13 @@ import { globalTelemetry } from '../telemetry/telemetry';
 // and tests (which import these from ./llm.adapter) keep working unchanged.
 import {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
-  ThinkTagFilter, stripThink, extractJson,
+  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy,
 } from './llm.stream';
 import type { ToolCallSlot } from './llm.stream';
+import { markProviderRequest, markFirstRawChunk } from '../telemetry/perf';
 export {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
-  ThinkTagFilter, stripThink, extractJson,
+  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy,
 };
 export type { ToolCallSlot };
 
@@ -588,6 +589,11 @@ export class LlmAdapter implements LLMProvider {
       const betaHeaders = anthropicBetaHeaders(kr.baseURL);
       if (betaHeaders) requestInit.headers = betaHeaders;
 
+      // Perf: mark the exact instant the provider request leaves the engine. Everything before this
+      // point is Bimax overhead (routing, context assembly); everything between here and the first
+      // raw chunk is provider wait. No-op when no turn timeline is active (classifier/critic/sub-agent
+      // calls, tests) and idempotent within a turn (only the first streaming call of a turn counts).
+      markProviderRequest();
       const stream: any = await client.chat.completions.create(requestOptions, requestInit);
 
       // Accumulate streamed tool calls keyed by their delta `index` — the OpenAI streaming contract:
@@ -620,15 +626,18 @@ export class LlmAdapter implements LLMProvider {
       // implicit mode the filter would hold the leading content tentatively (up to the preamble cap)
       // before releasing it — a visible head-of-reply stall that read as "minimax is very very slow".
       // Streaming from token 1 cannot leak reasoning for these models (they don't reason inline).
-      const useImplicitThink = this.implicitThink && !caps.nativeThinking && !caps.plainContent;
-      // Lift the preamble cap ONLY for models we've LEARNED reason inline (this session) or that the
-      // capability table seeds as such — they emit long CoT then close it with `</think>`, so capping
-      // early would leak it. Everything else stays capped, so a plain model's answer streams instead
-      // of buffering into one end-of-stream burst (the minimax bug). Detection is automatic at runtime
-      // below, so a model NOT in the table is handled correctly the moment it reveals its behaviour.
-      if (caps.inlineReasoning || caps.nativeThinking) this.detectedReasoners.add(model); // table seed
+      // Seed the runtime reasoner set from the table so the preamble cap is placed correctly on the
+      // FIRST turn (openerless models emit long CoT then a `</think>`; capping early would slice it).
+      // Detection also runs at runtime below, so a model NOT in the table self-corrects the moment it
+      // reveals its behaviour.
+      if (caps.inlineReasoning || caps.nativeThinking) this.detectedReasoners.add(model);
       const knownReasoner = this.detectedReasoners.has(model);
-      const thinkFilter = new ThinkTagFilter(useImplicitThink, /* capPreamble */ !knownReasoner);
+      // chooseThinkStrategy is the single source of truth (see llm.stream.ts). OPENER-based inline
+      // reasoners (step-3.7, the default) get implicit=false → a tag-free answer streams from token 1
+      // while `<think>…</think>` reasoning is still hidden by the explicit filter path. Only genuinely
+      // OPENER-LESS reasoners (step-3.5) and UNKNOWN models buffer the ambiguous leading region.
+      const strategy = chooseThinkStrategy(caps, this.implicitThink, knownReasoner);
+      const thinkFilter = new ThinkTagFilter(strategy.implicit, /* capPreamble */ strategy.capBounded);
 
       // Raw-stream capture. Records the exact `content`/`reasoning_content` bytes plus every delta
       // field key the provider sent, then writes them to a dedicated debug file at stream end. This
@@ -671,6 +680,7 @@ export class LlmAdapter implements LLMProvider {
           clearTimeout(timeoutHandle!);
         }
         if (result.done) break;
+        if (!receivedFirstChunk) markFirstRawChunk(); // perf: provider's first byte → separates provider wait from render
         receivedFirstChunk = true;
 
         const chunk = result.value;

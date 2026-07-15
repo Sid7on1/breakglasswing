@@ -1,4 +1,34 @@
 import OpenAI from 'openai';
+import type { ModelCapabilities } from './capabilities';
+
+/**
+ * Decide how the streaming `ThinkTagFilter` should treat this model's content channel. Pure so the
+ * routing logic (the fix for "short replies don't stream") is unit-testable without a live stream.
+ *
+ *  - `implicit: false` — stream visible text from the first token. Correct for:
+ *      • plainContent models (never reason inline), and
+ *      • native out-of-band reasoners (reasoning arrives on `reasoning_content`; content is answer), and
+ *      • OPENER-based inline reasoners (step-3.7): their reasoning is always wrapped `<think>…</think>`,
+ *        which the explicit filter path hides, so a tag-free answer can stream immediately.
+ *  - `implicit: true` — buffer the leading region until a `</think>` closer (or the bounded cap, or a
+ *      tool call) resolves it. Required ONLY for OPENER-LESS reasoners and for UNKNOWN models, where
+ *      un-tagged leading text is genuinely ambiguous between reasoning and answer.
+ *
+ * `capBounded` says whether the implicit buffer is bounded (the "bounded hybrid"): true until the
+ * model is a CONFIRMED reasoner (table-seeded or runtime-detected), after which the cap lifts so long
+ * opener-less CoT isn't sliced and leaked before its closer. Ignored when `implicit` is false.
+ */
+export function chooseThinkStrategy(
+  caps: Pick<ModelCapabilities, 'plainContent' | 'nativeThinking' | 'inlineReasoning' | 'openerlessReasoning'>,
+  implicitThinkEnabled: boolean,
+  knownReasoner: boolean,
+): { implicit: boolean; capBounded: boolean } {
+  const needsImplicit =
+    !caps.plainContent &&
+    !caps.nativeThinking &&
+    (caps.openerlessReasoning || !caps.inlineReasoning);
+  return { implicit: implicitThinkEnabled && needsImplicit, capBounded: !knownReasoner };
+}
 
 // Streaming & response-parsing helpers for the LLM adapter, extracted from llm.adapter.ts to keep
 // that file focused on the adapter class. Pure/self-contained (only depends on the OpenAI error

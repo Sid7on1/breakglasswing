@@ -35,6 +35,18 @@ export interface ModelCapabilities {
    * on NIM emit inline CoT even while also exposing a reasoning channel.
    */
   inlineReasoning: boolean;
+  /**
+   * The model's inline reasoning is OPENER-LESS — it streams raw chain-of-thought first and
+   * terminates it with only a `</think>` closer, no leading `<think>` opener (step-3.5, some
+   * minimax variants). This is the ONE case where the streaming filter cannot tell reasoning from a
+   * direct answer at stream start (both are un-tagged leading text), so it must buffer the leading
+   * region until the closer proves the intent — a bounded hold (see MAX_PREAMBLE). FLOOR is false
+   * because an OPENER-based reasoner (step-3.7 `<thinking>…</thinking>`) needs no such buffering: the
+   * opener itself hides the reasoning while a tag-free answer streams from the first token. Only set
+   * this for a model CONFIRMED to emit opener-less reasoning; setting it on an opener-based model
+   * re-introduces the "short answer buffers to one end-of-stream burst" latency bug.
+   */
+  openerlessReasoning: boolean;
   /** Tool arguments stream as partial-JSON deltas (can render live) vs arriving in one blob at block end. */
   partialJsonTools: boolean;
   /** Model reliably emits more than one tool call per turn (some backends, e.g. NVIDIA NIM, reject it). */
@@ -75,6 +87,7 @@ export const FLOOR: ModelCapabilities = {
   promptCaching: false,
   nativeThinking: false,
   inlineReasoning: false,
+  openerlessReasoning: false,
   partialJsonTools: false,
   parallelToolCalls: false,
   structuredOutputs: false,
@@ -176,13 +189,26 @@ const RULES: CapabilityRule[] = [
       contextWindow: 128_000,
     },
   },
-  // --- StepFun step-3.x: MoE reasoning models on NIM. step-3.5 emits opener-less </think>,
-  //     step-3.7 uses <thinking>/<\/thinking> (normalized to <think> by the streaming filter). ---
+  // --- StepFun step-3.5: OPENER-LESS reasoner — emits raw CoT then only a `</think>` closer. The
+  //     filter can't distinguish that from a direct answer at stream start, so it must buffer the
+  //     leading region (bounded) until the closer. Matched BEFORE the general step rule below. ---
+  {
+    match: ['step-3.5', 'step-3.6'],
+    caps: {
+      inlineReasoning: true,
+      openerlessReasoning: true,
+      contextWindow: 32_000,
+    },
+  },
+  // --- StepFun step-3.7 (THE DEFAULT) and other step-3.x: OPENER-based reasoners — reasoning is
+  //     always wrapped `<thinking>…</thinking>` (normalized to `<think>` by the filter). Because the
+  //     opener hides the reasoning, a tag-free answer streams from the first token with NO buffering:
+  //     openerlessReasoning stays false so the filter runs in explicit (non-buffering) mode. This is
+  //     the fix for "short replies don't stream" — the old inlineReasoning+infinite-cap held a short
+  //     tag-free answer until stream end and released it in one burst. ---
   {
     match: ['stepfun', 'step-3'],
     caps: {
-      // step-3.5 emits opener-less `</think>`, step-3.7 uses `<thinking>`; both stream inline CoT
-      // before tool calls, so wait for the closer instead of leaking it past the preamble cap.
       inlineReasoning: true,
       contextWindow: 32_000,
     },
@@ -228,6 +254,7 @@ function applyOverrides(caps: ModelCapabilities): ModelCapabilities {
   const pc = envFlag('BGW_CAP_PROMPT_CACHING');         if (pc !== undefined) out.promptCaching = pc;
   const nt = envFlag('BGW_CAP_NATIVE_THINKING');        if (nt !== undefined) out.nativeThinking = nt;
   const ir = envFlag('BGW_CAP_INLINE_REASONING');       if (ir !== undefined) out.inlineReasoning = ir;
+  const ol = envFlag('BGW_CAP_OPENERLESS_REASONING');   if (ol !== undefined) out.openerlessReasoning = ol;
   const pj = envFlag('BGW_CAP_PARTIAL_JSON_TOOLS');     if (pj !== undefined) out.partialJsonTools = pj;
   const pt = envFlag('BGW_CAP_PARALLEL_TOOL_CALLS');    if (pt !== undefined) out.parallelToolCalls = pt;
   const so = envFlag('BGW_CAP_STRUCTURED_OUTPUTS');     if (so !== undefined) out.structuredOutputs = so;
