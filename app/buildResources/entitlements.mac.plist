@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened-runtime entitlements for the BiMax desktop app. Notarization REQUIRES the hardened
+       runtime, and Electron needs these two JIT allowances or the renderer crashes under it. Kept
+       deliberately minimal — no network-server, no device, no disabled-library-validation beyond
+       what Electron requires — so the signed app requests the least privilege that still runs. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>

@@ -35,16 +35,31 @@ die()  { echo -e "${RED}error: $*${NC}" >&2; exit 1; }
 case "$ACTION" in
   --install|--update) ;;
   --uninstall)
+    # Tiered removal: the EXECUTABLE always; CONFIG (~/.breakglass — holds your API key) only with
+    # --purge; PROJECT DATA (per-repo .bimax/ directories) is NEVER touched by the installer — it is
+    # yours and may be under version control. We print exactly what each tier covers so nothing is
+    # deleted by surprise.
     if [ -e "$INSTALL_DIR/bimax" ]; then
       rm -f "$INSTALL_DIR/bimax"
-      ok "uninstalled $INSTALL_DIR/bimax"
+      ok "removed executable  → $INSTALL_DIR/bimax"
     else
-      say "BiMax is not installed at $INSTALL_DIR/bimax"
+      say "no executable at $INSTALL_DIR/bimax"
     fi
+    if [ "${2:-}" = "--purge" ]; then
+      if [ -e "$HOME/.breakglass" ]; then
+        rm -rf "$HOME/.breakglass"
+        ok "removed config      → ~/.breakglass (API keys)"
+      fi
+    else
+      say "kept config         → ~/.breakglass (re-run with '--uninstall --purge' to remove your API key)"
+    fi
+    say "kept project data   → per-repo .bimax/ directories are left untouched (yours to keep or delete)"
     exit 0
     ;;
   --help|-h)
-    echo "Usage: install.sh [--install|--update|--uninstall]"
+    echo "Usage: install.sh [--install|--update|--uninstall [--purge]]"
+    echo "  --uninstall           remove the executable only"
+    echo "  --uninstall --purge   also remove ~/.breakglass (your API keys)"
     exit 0
     ;;
   *) die "unknown action: $ACTION (use --help)" ;;
@@ -74,10 +89,33 @@ mkdir -p "$INSTALL_DIR"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-install_bin() { # $1 = path to built/downloaded binary
+dest="$INSTALL_DIR/bimax"
+
+install_bin() { # $1 = path to a FULLY VERIFIED binary
   chmod +x "$1"
-  mv "$1" "$INSTALL_DIR/bimax"
-  ok "installed → $INSTALL_DIR/bimax"
+  # Transactional install: preserve the currently-installed binary, atomically swap the new one into
+  # place (mv within the same dir is atomic — a reader sees either the old or the new file, never a
+  # half-written one), then smoke-test it. If the new binary can't run, roll back to the saved one so
+  # a failed update never leaves the user with a broken/half-installed `bimax`.
+  local backup=""
+  if [ -e "$dest" ]; then
+    backup="${dest}.prev-$$"
+    cp -p "$dest" "$backup"
+  fi
+  # Stage into the destination directory so the final mv stays on one filesystem (keeps it atomic).
+  local staged="${dest}.new-$$"
+  mv "$1" "$staged"
+  mv "$staged" "$dest"
+  if ! "$dest" --version >/dev/null 2>&1; then
+    if [ -n "$backup" ]; then
+      mv "$backup" "$dest"
+      die "new binary failed to run — rolled back to the previous version ($("$dest" --version 2>/dev/null || echo unknown))"
+    fi
+    rm -f "$dest"
+    die "installed binary failed to run (no previous version to roll back to)"
+  fi
+  [ -n "$backup" ] && rm -f "$backup"
+  ok "installed → $dest"
 }
 
 sha256_file() {
@@ -85,6 +123,27 @@ sha256_file() {
   elif command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'
   else die "shasum or sha256sum is required to verify the release"
   fi
+}
+
+# BiMax's release-signing public key (minisign / Ed25519). Trust is rooted HERE, in the installer
+# script itself, NOT in a file fetched next to the artifacts — so a compromised release host that can
+# swap the tarball AND its adjacent SHA256SUMS still cannot forge a valid signature. Empty until the
+# signing key is published with v1.0.1; override for testing with BIMAX_MINISIGN_PUBKEY.
+MINISIGN_PUBKEY="${BIMAX_MINISIGN_PUBKEY:-}"
+
+# Verify a detached minisign signature over $1 using $2 (the .minisig). Fail-closed semantics:
+#  - signature file present  → it MUST verify (a bad/forged signature aborts the install), and
+#  - signature file absent AND no pinned key → checksum-only (transitional, pre-v1.0.1 signing).
+# Never executes a partially verified download: callers verify BEFORE install_bin.
+verify_signature() { # $1 = signed file, $2 = .minisig path (may be missing)
+  if [ ! -f "$2" ]; then
+    [ -n "$MINISIGN_PUBKEY" ] && die "release signature missing but a signing key is pinned — refusing to install"
+    return 0
+  fi
+  command -v minisign >/dev/null || die "release is signed but 'minisign' is not installed — install it (brew install minisign) to verify, or set BIMAX_ALLOW_UNVERIFIED=1 to skip (NOT recommended)"
+  [ -n "$MINISIGN_PUBKEY" ] || die "a signature was provided but no trusted public key is pinned in this installer"
+  minisign -Vm "$1" -x "$2" -P "$MINISIGN_PUBKEY" >/dev/null 2>&1 || die "SIGNATURE VERIFICATION FAILED for $(basename "$1") — refusing to install"
+  ok "signature verified (minisign)"
 }
 
 # ---- Mode 0: explicit local artifact (offline installs and clean-machine CI) --------
@@ -116,15 +175,26 @@ else
   curl -fL --progress-bar -o "$tmp/${artifact}.tar.gz" "$url" \
     || die "download failed — no release artifact for ${os}-${arch}? Build from source instead:
   git clone https://github.com/${REPO} && cd bimax && ./install.sh"
-  say "verifying SHA-256 checksum"
+  say "verifying release integrity"
   curl -fsSL -o "$tmp/SHA256SUMS" "$sums_url" || die "could not download SHA256SUMS"
+  # Independent signature over the checksum manifest. Verifying the SIGNATURE of SHA256SUMS (rather
+  # than trusting the file because it sits next to the artifact) is what makes the checksums
+  # meaningful: forging the tarball now also requires forging a signature over the manifest.
+  curl -fsSL -o "$tmp/SHA256SUMS.minisig" "${sums_url}.minisig" 2>/dev/null || true
+  if [ "${BIMAX_ALLOW_UNVERIFIED:-0}" != "1" ]; then
+    verify_signature "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig"
+  fi
   expected="$(awk -v file="${artifact}.tar.gz" '$2 == file || $2 == "*" file { print $1; exit }' "$tmp/SHA256SUMS")"
   [ -n "$expected" ] || die "SHA256SUMS has no entry for ${artifact}.tar.gz"
   actual="$(sha256_file "$tmp/${artifact}.tar.gz")"
-  [ "$actual" = "$expected" ] || die "checksum mismatch for ${artifact}.tar.gz"
+  [ "$actual" = "$expected" ] || die "checksum mismatch for ${artifact}.tar.gz — refusing to install"
   ok "checksum verified"
-  tar -C "$tmp" -xzf "$tmp/${artifact}.tar.gz"
-  install_bin "$tmp/${artifact}"
+  # Extract into a scratch subdir so a malicious tarball can't overwrite anything outside $tmp, and
+  # only ever install the exact expected artifact filename.
+  mkdir -p "$tmp/extract"
+  tar -C "$tmp/extract" -xzf "$tmp/${artifact}.tar.gz"
+  [ -f "$tmp/extract/${artifact}" ] || die "release tarball did not contain the expected binary '${artifact}'"
+  install_bin "$tmp/extract/${artifact}"
 fi
 
 # ---- PATH + verify -------------------------------------------------------------------
@@ -141,9 +211,10 @@ if ! command -v bimax >/dev/null 2>&1; then
   export PATH="$INSTALL_DIR:$PATH"
 fi
 
-ver="$("$INSTALL_DIR/bimax" --version 2>/dev/null || true)"
-[ -n "$ver" ] || die "installed binary failed to run"
-ok "$ver"
+# install_bin already smoke-tested the binary (and rolled back on failure), so this is just the
+# friendly final version echo.
+ver="$("$dest" --version 2>/dev/null || true)"
+ok "${ver:-installed}"
 
 echo ""
 echo -e "Run ${BOLD}bimax${NC} inside any project directory to start."

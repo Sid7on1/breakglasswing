@@ -33,13 +33,39 @@ for target in "$@"; do
   echo "── ${target} ──────────────────────────────────────"
   build_bimax "$os" "$goarch" "$out" release "bun-${os}-${arch}"
 
+  # macOS code signing + hardened runtime for the CLI binary. Requires a Developer ID Application
+  # cert in the keychain and MACOS_SIGN_IDENTITY set (e.g. "Developer ID Application: Name (TEAMID)").
+  # Skipped with a clear warning when unset, so a keyless CI build still produces (unsigned) artifacts.
+  if [ "$os" = "darwin" ]; then
+    if [ -n "${MACOS_SIGN_IDENTITY:-}" ] && command -v codesign >/dev/null; then
+      echo "   signing ${out} (Developer ID + hardened runtime)…"
+      codesign --force --options runtime --timestamp \
+        --sign "$MACOS_SIGN_IDENTITY" "$out"
+      codesign --verify --strict --verbose=2 "$out" || { echo "error: codesign verification failed"; exit 1; }
+    else
+      echo "   ⚠ MACOS_SIGN_IDENTITY unset — shipping UNSIGNED darwin binary (see docs/SECURITY_INSTALL.md)."
+    fi
+  fi
+
   tar -C build -czf "${out}.tar.gz" "$(basename "$out")"
   ( cd build && shasum -a 256 "$(basename "$out").tar.gz" >> SHA256SUMS )
   echo "   → ${out}.tar.gz ($(du -h "${out}.tar.gz" | cut -f1))"
 done
 
+# Independent signature over the checksum manifest. The installer pins the PUBLIC key (see
+# install.sh#MINISIGN_PUBKEY), so this signature — not the manifest's mere co-location with the
+# artifacts — is the trust root. Requires the minisign SECRET key; skipped (with a warning) otherwise.
+if [ -n "${BIMAX_MINISIGN_SECKEY:-}" ] && command -v minisign >/dev/null; then
+  echo "signing SHA256SUMS with minisign…"
+  minisign -Sm build/SHA256SUMS -s "$BIMAX_MINISIGN_SECKEY" -x build/SHA256SUMS.minisig
+  echo "   → build/SHA256SUMS.minisig"
+else
+  echo "⚠ BIMAX_MINISIGN_SECKEY unset — SHA256SUMS is NOT signed (checksum-only trust). See docs/SECURITY_INSTALL.md."
+fi
+
 echo ""
 echo "Release ${VERSION} built:"
 cat build/SHA256SUMS
 echo ""
-echo "Attach build/*.tar.gz + build/SHA256SUMS to the GitHub release; install.sh downloads them."
+echo "Attach build/*.tar.gz + build/SHA256SUMS (+ SHA256SUMS.minisig if present) to the GitHub release."
+echo "For notarization of the darwin binaries/DMG, see docs/SECURITY_INSTALL.md."

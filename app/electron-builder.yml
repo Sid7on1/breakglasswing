@@ -30,11 +30,24 @@ mac:
   category: public.app-category.developer-tools
   target:
     - dmg
-  # Unsigned for now — local/dev distribution. Set identity + notarize for public release.
-  identity: null
   darkModeSupport: true
+  # Release signing (see docs/SECURITY_INSTALL.md). Hardened runtime + entitlements are always
+  # declared so that WHEN a Developer ID cert is present (CSC_LINK/CSC_KEY_PASSWORD, or one in the
+  # keychain with CSC_IDENTITY_AUTO_DISCOVERY=true) electron-builder produces a correctly hardened,
+  # signable app. With NO cert available, `identity: null` keeps local/dev builds unsigned instead of
+  # failing. For a PUBLIC release, remove `identity: null` (or set MACOS via CSC_*) and set
+  # `notarize` below, then verify on a clean Mac per the doc — do NOT claim notarization from a local
+  # `codesign` pass alone.
+  identity: null
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: buildResources/entitlements.mac.plist
+  entitlementsInherit: buildResources/entitlements.mac.plist
+  # notarize: { teamId: "YOUR_TEAM_ID" }   # uncomment for release; needs APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD
 
 dmg:
+  # DMG signing follows the app identity. Left off for unsigned dev builds; a signed release signs the
+  # app inside the DMG (what Gatekeeper checks) via the mac.identity above.
   sign: false
 
 win:
