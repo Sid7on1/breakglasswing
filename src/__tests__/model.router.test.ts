@@ -1,4 +1,4 @@
-import { heuristicTier, decideTier, applyBrief, clearClassifierCache } from '../cli/model.router';
+import { heuristicTier, decideTier, applyBrief, clearClassifierCache, isConversational } from '../cli/model.router';
 
 describe('model.router — heuristicTier', () => {
   it('short-circuits obvious chat/acks to lite (no LLM)', () => {
@@ -123,6 +123,39 @@ describe('model.router — classifier cache', () => {
     expect(a.via).toBe('fallback');
     expect(b.via).toBe('fallback');
     expect(llm.chatCompletion).toHaveBeenCalledTimes(2); // retried, not served stale from cache
+  });
+});
+
+describe('model.router — isConversational (lite conversation lane gate)', () => {
+  it('routes greetings, acks, and simple meta questions to the lite lane', () => {
+    for (const p of ['hi', 'hey', 'thanks!', 'ok', 'cool', 'who are you', 'what can you do', 'how are you?']) {
+      expect(isConversational(p)).toBe(true);
+    }
+  });
+
+  it('NEVER routes real work to the lite lane (protects coding turns)', () => {
+    for (const p of [
+      'fix the bug in session loading',
+      'refactor the parser',
+      'what does this function do',        // needs to read code → full harness
+      'read src/index.ts',                 // file path
+      'look at @App.tsx',                  // @mention
+      'summarize https://example.com',     // URL
+      'why does this fail?\n```js\nx()\n```', // code context
+      'ok now implement retry logic',      // starts chatty but is work
+    ]) {
+      expect(isConversational(p)).toBe(false);
+    }
+  });
+
+  it('no hidden classifier call for a locally obvious greeting (the P0-3 gate)', async () => {
+    // Distinct slot models so decideTier would normally reach the classifier — the greeting must
+    // still resolve locally with zero chatCompletion calls.
+    const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn() } as any;
+    expect(isConversational('hi')).toBe(true);
+    const d = await decideTier(llm, 'hi', null);
+    expect(d.via).toBe('heuristic');
+    expect(llm.chatCompletion).not.toHaveBeenCalled();
   });
 });
 

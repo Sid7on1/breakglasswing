@@ -124,6 +124,28 @@ export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier 
   }
 }
 
+// Obvious no-tool conversational messages beyond bare acks: identity/capability/meta questions the
+// agent answers in one plain sentence. Anchored to the whole (short) message so real work never
+// matches ("what does this function do" needs tools; "what can you do" does not).
+const CONVO_META = /^(who\s+(are|r)\s+(you|u)|what\s+(are|r)\s+(you|u)|what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+(are|r)\s+(you|u)|who\s+made\s+you|are\s+you\s+(there|real|alive|human|an?\s+ai))[\s?!.…]*$/i;
+
+/**
+ * Local, LLM-free gate for the lightweight CONVERSATION lane (P0-3). Returns true only for messages
+ * that unambiguously need no tools, graph, memory, or verification — greetings, acknowledgements,
+ * and a small set of identity/meta questions. Deliberately CONSERVATIVE: a false positive would send
+ * real work down the no-tool lane, so anything with a coding verb, code/stack-trace context, an
+ * @mention or file path, a URL, or non-trivial length is rejected and stays on the full harness.
+ */
+export function isConversational(prompt: string): boolean {
+  const p = (prompt || '').trim();
+  if (!p || p.length > 160) return false;
+  if (/[@`]|https?:\/\/|[/\\]\w|\.[a-z]{1,4}\b/i.test(p)) return false; // file paths, code, URLs, extensions
+  if (HEAVY_VERB.test(p) || CODE_CONTEXT.test(p)) return false;
+  if (p.length <= 40 && CHATTY.test(p)) return true;
+  if (CONVO_META.test(p)) return true;
+  return false;
+}
+
 /** Prepend the brief as context for the heavy model without altering the user's own words. */
 export function applyBrief(prompt: string, brief?: string): string {
   if (!brief) return prompt;

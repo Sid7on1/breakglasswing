@@ -19,9 +19,18 @@ export function renderPerf(s: PerfSnapshot): string {
     '',
     `  Turns measured:             ${s.turns}`,
     `  Time-to-first-token:        p50 ${ms(s.firstTokenP50)} · p95 ${ms(s.firstTokenP95)}`,
+    '',
+    `  Bimax overhead (ours):      p50 ${ms(s.overheadP50)} · p95 ${ms(s.overheadP95)}`,
+    `  Provider wait (theirs):     p50 ${ms(s.providerWaitP50)} · p95 ${ms(s.providerWaitP95)}`,
+    `  Render (raw→visible):       p95 ${ms(s.renderP95)}`,
+    `  Greeting-lane overhead:     p95 ${ms(s.liteOverheadP95)}`,
   ];
   if (s.lastTurn) {
     lines.push(`  Last turn:                  first token ${ms(s.lastTurn.firstTokenMs)} · total ${ms(s.lastTurn.totalMs)} · ${s.lastTurn.tokens} chars`);
+  }
+  if (s.lastBreakdown) {
+    const b = s.lastBreakdown;
+    lines.push(`  Last turn split:            ${b.lane} lane · overhead ${ms(b.overheadMs)} · provider ${ms(b.providerWaitMs)} · render ${ms(b.renderMs)}`);
   }
 
   lines.push('', '  Performance budgets:');

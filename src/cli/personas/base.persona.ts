@@ -480,6 +480,56 @@ export abstract class AgentPersona {
     return executionLog;
   }
 
+  /**
+   * The lightweight CONVERSATION lane (P0-3). For messages the caller has already confirmed are
+   * trivially conversational (greetings, acks, identity/meta questions — see `isConversational`),
+   * this streams a single plain completion and DELIBERATELY skips the full harness: no graph search,
+   * no vector-memory recall, no exemplar retrieval, no outcome/verification machinery, no tool
+   * schemas, no self-critic/adversarial passes, no compression startup. Those exist for real work and
+   * are pure latency on a "hi". Reasoning privacy is preserved: `chat()` runs the same ThinkTagFilter,
+   * so a `<thinking>` block from the default model is still diverted, never shown.
+   *
+   * History is bounded (last N messages) so a long session's context can't bloat a chit-chat reply.
+   */
+  public async converse(
+    prompt: string,
+    onToken?: (token: string) => void,
+    options?: { useLite?: boolean; signal?: AbortSignal },
+  ): Promise<string> {
+    this.messages.push({ role: 'user', content: prompt });
+    const HISTORY = parseInt(process.env.BIMAX_CONVO_HISTORY || '20', 10);
+    const window = this.messages.slice(-HISTORY);
+    let out = '';
+    try {
+      for await (const ev of this.llmAdapter.chat(window, {
+        system: AgentPersona.CONVERSATION_SYSTEM,
+        lite: options?.useLite,
+        signal: options?.signal,
+        // No tools: the model can only answer, never act — that IS the lane's contract.
+      })) {
+        if (ev.type === 'token' && ev.text) { out += ev.text; if (onToken) onToken(ev.text); }
+        else if (ev.type === 'error' && !ev.recoverable) throw new Error(ev.message);
+        // 'thinking' is dropped (privacy); tool events can't occur (no tools sent).
+      }
+    } catch (e) {
+      // On any failure, remove the dangling user turn we appended so history isn't left half-open,
+      // and rethrow so the caller can fall back to the full harness.
+      if (this.messages[this.messages.length - 1]?.content === prompt) this.messages.pop();
+      throw e;
+    }
+    const clean = out.trim();
+    if (clean) this.messages.push({ role: 'assistant', content: clean });
+    return clean;
+  }
+
+  /** Minimal system prompt for the conversation lane — identity guard + one-sentence brevity. */
+  private static readonly CONVERSATION_SYSTEM =
+    `You are BiMax, an autonomous coding agent that runs in the BiMax terminal CLI. Right now you are ` +
+    `making brief conversation — a greeting, acknowledgement, or simple question that needs no tools ` +
+    `and no code changes. Reply in one or two natural sentences. Do not mention tools, do not narrate ` +
+    `steps, and do not claim to be Claude, ChatGPT, Gemini, or any other assistant. If the user then ` +
+    `asks you to build, edit, run, fix, or analyze something, just start — you have a full toolset.`;
+
   // One agent-loop pass: stream its tokens out, return what it produced, and adopt its updated
   // history. The main turn, the self-critic revision, and the adversarial revision were three
   // verbatim copies of this — keep it in one place.

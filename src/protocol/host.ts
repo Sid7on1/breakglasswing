@@ -3,7 +3,7 @@ import {
   Outbound, Inbound, ReplyMsg, MenuSelectMsg, CompletionItem,
   FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, INPUT_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
-import { markReady } from '../telemetry/perf';
+import { markReady, loadPersistedTimelines } from '../telemetry/perf';
 
 export interface HostHandlers {
   /** A submitted prompt line (user turn or slash command) arrived from the front-end. */
@@ -115,6 +115,7 @@ export class ProtocolHost {
     this.listeners.push({ event: INPUT_PROMPT_EVENT, fn: inputFn });
 
     markReady(); // engine wired + handshake sent — the cold-start clock stops here (/perf)
+    loadPersistedTimelines(); // seed /perf so it can explain prior turns after a restart/crash
     this.write({ t: 'ready', protocol: PROTOCOL_VERSION });
   }
 

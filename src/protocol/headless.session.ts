@@ -3,9 +3,11 @@ import { AgentPersona } from '../cli/personas/base.persona';
 import { routeQuery } from '../cli/agentRouter';
 import { expandAtMentions, expandFileAtMentions } from '../cli/atMention';
 import { globalCommandRegistry } from '../cli/commands/registry';
-import { decideTier, applyBrief, Tier } from '../cli/model.router';
+import { decideTier, applyBrief, Tier, isConversational } from '../cli/model.router';
 import { getEpistemicLedger } from '../mind/epistemic.ledger';
-import { recordTurn } from '../telemetry/perf';
+import {
+  recordTurn, beginTurnTimeline, markRouted, markAssembled, markFirstVisibleToken, endTurnTimeline,
+} from '../telemetry/perf';
 import { IGraphStore } from '../graph/models';
 
 /**
@@ -110,6 +112,12 @@ export class HeadlessSession {
     this.turnAbort = new AbortController();
     const turnStart = Date.now();
     let firstTokenMs = 0; // set on the first streamed token (perf: time-to-first-token)
+    // Lightweight conversation lane (P0-3): greetings/acks/simple meta questions bypass the full
+    // harness entirely. A manual heavy pin or an engine wake keeps the full path. The decision is
+    // local (no model call), so a "hi" never pays for routing, graph, memory, or verification.
+    const conversational = !opts.autonomous && this.pinnedTier !== 'heavy' && isConversational(query);
+    const model = this.deps.options.llmAdapter?.userModel || this.deps.options.llmAdapter?.defaultModel;
+    beginTurnTimeline(conversational ? 'lite' : 'full', model);
     // Snapshot the epistemic ledger so we can report THIS turn's verification posture at the end:
     // claims open on edits and resolve when a build/test run names the touched files.
     const beforeLedger = (() => { try { return getEpistemicLedger().stats(); } catch { return null; } })();
@@ -118,55 +126,34 @@ export class HeadlessSession {
     // take 10-15s, during which the front-end would otherwise sit silent after the user's message.
     cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
 
-    const active = opts.autonomous
+    const active = (conversational || opts.autonomous)
       ? this.deps.personas.bimax
       : (this.deps.personas[routeQuery(query)] || this.deps.personas.bimax);
     const before = active.messages.length;
     let totalChars = 0;
+    let streamed = '';
+    const onToken = (token: string) => {
+      if (firstTokenMs === 0) { firstTokenMs = Date.now() - turnStart; markFirstVisibleToken(); }
+      totalChars += token.length; streamed += token; cliEvents.emit('stream_token', token);
+    };
 
     let result: 'completed' | 'failed' | 'interrupted' = 'failed';
     try {
-      // Model-tier routing (parity with FullScreen): lite is the default responder; escalate to the
-      // heavy coding model only when the turn needs it. A manual pin wins. Kicked off FIRST — it only
-      // needs the raw query — so the classifier (when the local heuristic can't decide) overlaps with
-      // the @-mention expansion below instead of stacking another serial round-trip on turn start.
-      const tierPromise = decideTier(this.deps.options.llmAdapter, query, this.pinnedTier)
-        .catch(() => ({ tier: 'lite' as const, via: 'fallback' as const, brief: undefined }));
-
-      // @-mention / @file expansion is best-effort, same as the Ink path.
-      let agentQuery = query;
-      try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
-      try { agentQuery = (await expandAtMentions(agentQuery, this.deps.graphStore, process.cwd())).text; } catch { /* best-effort */ }
-
-      // The footer pointer flips to whichever model will actually receive this request.
-      let useLite = true;
-      try {
-        const decision = await tierPromise;
-        useLite = decision.tier === 'lite';
-        cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
-        if (!useLite) agentQuery = applyBrief(agentQuery, decision.brief);
-      } catch { /* routing is best-effort; fall back to lite */ }
-
-      cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
-      // Accumulate this turn's streamed tokens directly — that IS this turn's answer, so it never
-      // bleeds in a prior turn's text. (collectTurnText sliced persona.messages by a `before` index,
-      // but the agent loop replaces & reindexes that array each run, so the slice could re-include the
-      // previous turn's assistant message — the "first answer shown again" bug.)
-      let streamed = '';
-      await active.execute(
-        agentQuery,
-        (token: string) => {
-          if (firstTokenMs === 0) firstTokenMs = Date.now() - turnStart;
-          totalChars += token.length; streamed += token; cliEvents.emit('stream_token', token);
-        },
-        {
-          maxIterations: this.deps.options.maxToolIterations,
-          planMode: this.deps.options.governor?.mode === 'plan',
-          useLite,
-          internalTurn: opts.autonomous,
-          signal: this.turnAbort.signal,
-        },
-      );
+      if (conversational) {
+        // The lite lane: no routing, no @-mention expansion, no tools. Fall back to the full harness
+        // if the conversational completion errors (a keyless/cold provider shouldn't lose the turn).
+        cliEvents.emit('model_tier', { tier: 'lite', pinned: this.pinnedTier });
+        markRouted();
+        markAssembled();
+        try {
+          await active.converse(query, onToken, { useLite: true, signal: this.turnAbort.signal });
+        } catch {
+          streamed = ''; // discard any partial lite output; the full harness re-runs the turn cleanly
+          await this.runFullHarness(active, query, !!opts.autonomous, onToken);
+        }
+      } else {
+        await this.runFullHarness(active, query, !!opts.autonomous, onToken);
+      }
 
       // Prefer the streamed text; fall back to the message-slice only if nothing streamed.
       const content = this.cleanTurnText(streamed) || this.collectTurnText(active, before);
@@ -187,6 +174,7 @@ export class HeadlessSession {
       this.busy = false;
       this.turnAbort = null;
       recordTurn({ firstTokenMs, totalMs: Date.now() - turnStart, tokens: totalChars });
+      endTurnTimeline(); // close the phase timeline (persists the secret-free record for /perf)
       cliEvents.emit('thinking_clear');
       // Confidence-in-margin (turn-end form): report whether this turn's edits were checked. The
       // ledger delta tells us how many claims opened (edits) vs resolved (a build/test run named the
@@ -201,6 +189,42 @@ export class HeadlessSession {
       cliEvents.emit('spinner_state', 'idle', 'Ready');
     }
     return result;
+  }
+
+  /**
+   * The full agent harness: model-tier routing, @-mention expansion, then the agent loop with tools,
+   * memory, graph, outcome, and the self-critic/adversarial passes. Extracted so runTurn can pick
+   * between this and the lightweight `converse` lane. Streams tokens through `onToken` (which also
+   * feeds the perf timeline and the wire) and marks the routing/assembly phase boundaries.
+   */
+  private async runFullHarness(active: AgentPersona, query: string, autonomous: boolean, onToken: (t: string) => void): Promise<void> {
+    // Kick routing off FIRST — it only needs the raw query — so the classifier (when the local
+    // heuristic can't decide) overlaps with @-mention expansion instead of stacking a serial round-trip.
+    const tierPromise = decideTier(this.deps.options.llmAdapter, query, this.pinnedTier)
+      .catch(() => ({ tier: 'lite' as const, via: 'fallback' as const, brief: undefined }));
+
+    let agentQuery = query;
+    try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
+    try { agentQuery = (await expandAtMentions(agentQuery, this.deps.graphStore, process.cwd())).text; } catch { /* best-effort */ }
+
+    let useLite = true;
+    try {
+      const decision = await tierPromise;
+      useLite = decision.tier === 'lite';
+      cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
+      if (!useLite) agentQuery = applyBrief(agentQuery, decision.brief);
+    } catch { /* routing is best-effort; fall back to lite */ }
+    markRouted();
+
+    cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
+    markAssembled();
+    await active.execute(agentQuery, onToken, {
+      maxIterations: this.deps.options.maxToolIterations,
+      planMode: this.deps.options.governor?.mode === 'plan',
+      useLite,
+      internalTurn: autonomous,
+      signal: this.turnAbort?.signal,
+    });
   }
 
   private async runCommand(query: string): Promise<void> {
