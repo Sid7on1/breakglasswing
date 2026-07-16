@@ -166,6 +166,8 @@ type model struct {
 	engineStalled   bool
 	busy            bool      // a turn is executing — Ctrl+C cancels it instead of quitting
 	resizeAt        time.Time // last WindowSizeMsg; non-zero = a resize is settling (repaint on the tick after 250ms)
+	resizeNarrowed  bool      // the settling gesture narrowed at some point → ghosts possible → repair on settle
+	interrupting    bool      // interrupt sent, turn not yet ended → indicator shows "Stopping…" (truthful state)
 	quitting        bool      // engine asked us to shut down — quit after this message
 	cwd             string    // working directory, updated by cwd_changed
 	width           int
@@ -465,6 +467,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.WindowSizeMsg:
+		prevWidth := m.width
 		m.width, m.height = msg.Width, msg.Height
 		m.vp.Width = msg.Width // kept only for render-width math (renderMarkdown etc.)
 		m.input.SetWidth(msg.Width - 6)
@@ -478,12 +481,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// In inline mode, resizing narrower makes previously painted live-region rows wrap, breaking
+		// In inline mode, resizing NARROWER makes previously painted live-region rows wrap, breaking
 		// the renderer's cursor math and leaving ghost overlay frames. The old fix wiped the ENTIRE
 		// scrollback (\033[3J) and reprinted the whole transcript — destroying the user's pre-BiMax
 		// terminal history on every resize. Instead: debounce until the drag settles (see tickMsg),
 		// then clear only the visible screen and reprint just the last screenful. The user's
 		// scrollback — theirs and ours — is never touched.
+		//
+		// Only a narrowing needs this: on a widen (or a height-only change) no painted row re-wraps,
+		// so there are no ghosts to clear — repainting there only added a duplicate screenful to the
+		// scrollback per gesture. A drag that dips narrower at ANY point still repairs (the flag
+		// latches until the debounce fires).
+		if msg.Width < prevWidth {
+			m.resizeNarrowed = true
+		}
 		m.resizeAt = time.Now()
 		return m, nil
 
@@ -510,16 +521,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Resize settled (no WindowSizeMsg for 250ms): clear the visible screen once to remove any
 		// ghost frames from the drag, and reprint only the last screenful of transcript so the view
 		// isn't left blank. Never wipes scrollback — bounded duplication (≤1 screenful per gesture)
-		// beats destroying the user's terminal history.
+		// beats destroying the user's terminal history. Skipped entirely when the gesture never
+		// narrowed (widen / height-only): nothing re-wrapped, so there are no ghosts to repair.
 		if !m.resizeAt.IsZero() && time.Since(m.resizeAt) > 250*time.Millisecond {
 			m.resizeAt = time.Time{}
-			m.pendingClear = true
-			if n := len(m.lines); n > 0 && m.height > 1 {
-				keep := m.height - 1
-				if keep > n {
-					keep = n
+			if m.resizeNarrowed {
+				m.resizeNarrowed = false
+				m.pendingClear = true
+				if n := len(m.lines); n > 0 && m.height > 1 {
+					keep := m.height - 1
+					if keep > n {
+						keep = n
+					}
+					m.printQueue = append(m.printQueue, m.lines[n-keep:]...)
 				}
-				m.printQueue = append(m.printQueue, m.lines[n-keep:]...)
 			}
 		}
 		// 50ms animation chrome: elapsed clock + smooth shimmer/pulse animation.

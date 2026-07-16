@@ -54,12 +54,17 @@ func main() {
 	// the history — smooth, native, no custom scrollbar.
 	p := tea.NewProgram(initialModel(eng))
 
-	// Graceful SIGTERM/SIGHUP (kill, closed terminal tab, system shutdown): quit through Bubble Tea
-	// so it restores the terminal (cursor, raw mode) and Run returns — which reaches eng.Close() and
-	// reaps the Node engine child. Without this, a SIGTERM leaves a wrecked terminal AND an orphaned
-	// engine process still holding the pipes. Ctrl+C stays a KeyMsg handled inside the model.
+	// Graceful SIGHUP (closed terminal tab / hangup): quit through Bubble Tea so it restores the
+	// terminal and Run returns — which reaches eng.Close() and reaps the Node engine child.
+	//
+	// SIGTERM is deliberately NOT handled here: Bubble Tea ≥1.3 installs its own SIGINT/SIGTERM
+	// handler that feeds QuitMsg through the normal message loop. Handling it here too created a
+	// deadlock — our p.Quit() stopped the event loop while bubbletea's own signal goroutine was
+	// still blocked sending its QuitMsg into p.msgs (tea.go:303 is an unguarded channel send), so
+	// Program.shutdown waited on that goroutine forever and `kill` left a raw, cursor-less terminal
+	// with an orphaned engine. One owner per signal. (Regression-tested by the PTY lifecycle suite.)
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(sigs, syscall.SIGHUP)
 	go func() {
 		<-sigs
 		p.Quit()

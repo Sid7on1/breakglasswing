@@ -285,6 +285,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// first cancels, second (now idle) quits.
 		if m.working() {
 			m.engine.Send(encodeInterrupt())
+			m.interrupting = true
 			return m, nil
 		}
 		m.engine.Close()
@@ -388,6 +389,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// While a turn is running (incl. the tool-call phase), esc cancels it.
 		if m.working() {
 			m.engine.Send(encodeInterrupt())
+			m.interrupting = true
 			m.status = "Interrupting…"
 			return m, nil
 		}
@@ -439,6 +441,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		raw := m.input.Value()
 		text := strings.TrimSpace(m.expandPastes(raw))
+		if text == "/exit" || text == "/quit" {
+			// Handled Go-side: the engine has no exit command, so this used to be forwarded and
+			// silently swallowed — the one command every terminal user tries first must just work.
+			m.engine.Close()
+			return m, tea.Quit
+		}
 		if text == "/shortcuts" {
 			// Handled Go-side — the headless engine has no keybindings registry.
 			m.append(renderShortcuts())

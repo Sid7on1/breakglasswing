@@ -370,7 +370,20 @@ func (m model) footerLine() string {
 
 // --- working / thinking indicators ---------------------------------------------------------
 
+// stoppingView is the single truthful indicator once an interrupt has been sent: the old verb kept
+// animating ("Thinking…") for the second or two the engine needed to unwind, which read as "my esc
+// was ignored". One calm line, no "esc to stop" hint (it already happened), until the turn ends.
+func (m model) stoppingView() string {
+	if reducedMotion {
+		return workLabel.Render("● Stopping… " + fmtElapsed(m.elapsed))
+	}
+	return m.spin.View() + " " + workLabel.Render("● Stopping… "+fmtElapsed(m.elapsed))
+}
+
 func (m model) thinkingView() string {
+	if m.interrupting {
+		return m.stoppingView()
+	}
 	stalledIntensity := 0.0
 	if !m.lastTokenAt.IsZero() {
 		stallSecs := time.Since(m.lastTokenAt).Seconds()
@@ -464,6 +477,9 @@ func renderShimmerVerb(verb string, tickIdx int, stalledIntensity float64, isToo
 
 // workingView: braille spinner + a bold "⏺ Generating… Ns" clock + cancel hint while the answer streams.
 func (m model) workingView() string {
+	if m.interrupting {
+		return m.stoppingView()
+	}
 	if reducedMotion {
 		return workLabel.Render("● Generating… "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
 	}
@@ -473,6 +489,9 @@ func (m model) workingView() string {
 // toolingView: the same persistent indicator while the model is running tools, so "still working,
 // Ns elapsed, esc to stop" stays visible through the tool-call phase (not just text generation).
 func (m model) toolingView() string {
+	if m.interrupting {
+		return m.stoppingView()
+	}
 	n := m.runningToolCount()
 	label := "▚ Running tool… "
 	if n > 1 {

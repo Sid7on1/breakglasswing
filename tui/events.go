@@ -66,6 +66,7 @@ func (m *model) handleEvent(o Outbound) {
 			m.elapsed = 0
 		}
 		if wasBusy && !m.busy {
+			m.interrupting = false // the turn is over — the "Stopping…" state resolved
 			// Turn ended (or was interrupted): commit tools that returned a result, and drop any that
 			// never did — so working() clears and the indicator goes idle. Filter to finished (in
 			// order), then flush the lot to scrollback.

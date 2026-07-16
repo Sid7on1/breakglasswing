@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1367,5 +1368,86 @@ func TestIndentAwareWrapNoDiffBleed(t *testing.T) {
 	// Genuinely over-wide prose must still wrap.
 	if !strings.Contains(indentAwareWrap("  ● "+strings.Repeat("word ", 80), 80), "\n") {
 		t.Fatal("long prose line should still wrap")
+	}
+}
+
+// Narrowing is the only resize direction that can leave ghost frames (painted rows re-wrap), so it
+// is the only one allowed to pay the clear-and-reprint (which costs one duplicated screenful in
+// scrollback). Widen / height-only changes must be free.
+func TestResizeRepairOnlyOnNarrow(t *testing.T) {
+	m, _ := newTestModel()
+	m.terminalSized = true
+	m.lines = []string{"committed line one", "committed line two"}
+
+	// Widen: no repair scheduled.
+	res, _ := m.update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = res.(model)
+	if m.resizeNarrowed {
+		t.Fatal("widening must not schedule a ghost repair")
+	}
+	m.resizeAt = time.Now().Add(-time.Second) // debounce elapsed
+	res, _ = m.update(tickMsg(time.Now()))
+	m = res.(model)
+	if m.pendingClear || len(m.printQueue) != 0 {
+		t.Fatalf("widen settle must not clear/reprint (pendingClear=%v queue=%d)", m.pendingClear, len(m.printQueue))
+	}
+
+	// Narrow: repair scheduled and fires on settle.
+	res, _ = m.update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = res.(model)
+	if !m.resizeNarrowed {
+		t.Fatal("narrowing must schedule the ghost repair")
+	}
+	m.resizeAt = time.Now().Add(-time.Second)
+	res, _ = m.update(tickMsg(time.Now()))
+	m = res.(model)
+	if !m.pendingClear || len(m.printQueue) == 0 {
+		t.Fatalf("narrow settle must clear + reprint the last screenful (pendingClear=%v queue=%d)", m.pendingClear, len(m.printQueue))
+	}
+}
+
+// Once an interrupt is sent, every working indicator must read "Stopping…" (not keep animating
+// "Thinking…", which read as the Esc being ignored), and the state must resolve when the turn ends.
+func TestInterruptShowsStoppingUntilIdle(t *testing.T) {
+	m, _ := newTestModel()
+	m.handleEngine(ev("spinner_state", "thinking", "Thinking…"))
+
+	res, _ := m.update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = res.(model)
+	if !m.interrupting {
+		t.Fatal("esc while busy must set interrupting")
+	}
+	for name, view := range map[string]string{
+		"thinkingView": m.thinkingView(),
+		"workingView":  m.workingView(),
+		"toolingView":  m.toolingView(),
+	} {
+		if !strings.Contains(stripANSI(view), "Stopping…") {
+			t.Fatalf("%s must show Stopping… while interrupting; got %q", name, stripANSI(view))
+		}
+		if strings.Contains(stripANSI(view), "esc to stop") {
+			t.Fatalf("%s must drop the esc hint while interrupting", name)
+		}
+	}
+
+	m.handleEngine(ev("spinner_state", "idle", "Ready"))
+	if m.interrupting {
+		t.Fatal("interrupting must clear when the turn ends")
+	}
+}
+
+// /exit and /quit are handled Go-side and quit immediately — they must never be forwarded to the
+// engine (which has no such command and used to swallow them silently).
+func TestSlashExitQuitsLocally(t *testing.T) {
+	for _, cmdText := range []string{"/exit", "/quit"} {
+		m, buf := newTestModel()
+		m.input.SetValue(cmdText)
+		_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		if cmd == nil {
+			t.Fatalf("%s must quit (non-nil cmd)", cmdText)
+		}
+		if strings.Contains(buf.String(), `"t":"input"`) {
+			t.Fatalf("%s must not be forwarded to the engine; wire=%q", cmdText, buf.String())
+		}
 	}
 }
