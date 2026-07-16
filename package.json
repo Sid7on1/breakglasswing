@@ -18,6 +18,7 @@
     "app:dist:mac": "npm --prefix app run dist:mac",
     "app:dist:win": "npm --prefix app run dist:win",
     "test:leaks": "jest --coverage=false --detectOpenHandles",
+    "test:tui": "python3 scripts/tui-regression.py",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",
