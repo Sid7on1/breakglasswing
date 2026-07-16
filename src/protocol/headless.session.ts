@@ -168,6 +168,13 @@ export class HeadlessSession {
       // "no response" — only a dim log line. Surface it as a visible system message with the fix.
       if (e?.name === 'GovernorVetoError' || /budget|veto|plan mode/i.test(detail)) {
         cliEvents.emit('message', this.msg('system', `⚠ ${detail}`, 'error'));
+      } else if (/No API keys configured/i.test(detail)) {
+        // First-run / dismissed onboarding: a keyless turn must say so in the transcript, not die
+        // into the hidden log view. Name the exact next step.
+        cliEvents.emit('message', this.msg('system', '⚠ No API key configured — run /keys to add one (or set NVIDIA_API_KEY in ~/.breakglass/.env).', 'error'));
+      } else if (/rejected the API key|unauthorized/i.test(detail)) {
+        // Auth-dead pool (expired key): the adapter fails fast now; make the failure actionable.
+        cliEvents.emit('message', this.msg('system', `⚠ ${detail}`, 'error'));
       }
       cliEvents.emit('log', { id: Date.now(), level: 'error', text: `Agent error: ${detail}`, timestamp: new Date() });
     } finally {

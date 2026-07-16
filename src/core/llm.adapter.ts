@@ -218,7 +218,17 @@ export class LlmAdapter implements LLMProvider {
     const kr = await this.apiKeyManager.getNextKey();
     if (!kr.keyStr || kr.idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
     if (kr.waitTimeSecs > 0) {
-      Logger.warn(`[LlmAdapter] All keys exhausted! Sleeping ${kr.waitTimeSecs.toFixed(1)}s...`);
+      // Auth-dead pool: every key's last failure was 401/403. That is permanent for these key
+      // strings — sleeping through the cooldown and re-sending the same key can never succeed, it
+      // just made every turn feel hung (5s of silence per attempt). Fail fast and tell the user
+      // exactly how to fix it. (A key repaired mid-session recovers via reportKeyResult on success.)
+      if (this.apiKeyManager.allKeysAuthDead()) {
+        throw new Error(
+          `Provider rejected the API key (${kr.provider || 'active provider'}: unauthorized). ` +
+          `The key is expired or invalid — update it with /keys or in ~/.breakglass/.env, then retry.`,
+        );
+      }
+      Logger.warn(`[LlmAdapter] All keys cooling down (rate limit / transient). Sleeping ${kr.waitTimeSecs.toFixed(1)}s...`);
       await new Promise(resolve => setTimeout(resolve, kr.waitTimeSecs * 1000));
     }
     return kr;

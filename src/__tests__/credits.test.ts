@@ -77,3 +77,37 @@ describe('ApiKeyManager', () => {
     expect(k.idx).toBeNull();
   });
 });
+
+describe('ApiKeyManager — auth-dead fail-fast', () => {
+  it('reports allKeysAuthDead only when EVERY key has failed auth', () => {
+    const m = new ApiKeyManager([{ keyStr: 'k1' }, { keyStr: 'k2' }]);
+    expect(m.allKeysAuthDead()).toBe(false);
+    m.reportKeyResult(0, 401);
+    expect(m.allKeysAuthDead()).toBe(false); // k2 still healthy
+    m.reportKeyResult(1, 401);
+    expect(m.allKeysAuthDead()).toBe(true);
+  });
+
+  it('a success resets the auth-dead state (key fixed mid-session)', () => {
+    const m = new ApiKeyManager([{ keyStr: 'k1' }]);
+    m.reportKeyResult(0, 401);
+    expect(m.allKeysAuthDead()).toBe(true);
+    m.reportKeyResult(0, 200);
+    expect(m.allKeysAuthDead()).toBe(false);
+  });
+
+  it('one 403 alone is not auth-dead (can be transient), two are', () => {
+    const m = new ApiKeyManager([{ keyStr: 'k1' }]);
+    m.reportKeyResult(0, 403);
+    expect(m.allKeysAuthDead()).toBe(false);
+    m.reportKeyResult(0, 403);
+    expect(m.allKeysAuthDead()).toBe(true);
+  });
+
+  it('429 rate limiting never counts as auth-dead', () => {
+    const m = new ApiKeyManager([{ keyStr: 'k1' }]);
+    m.reportKeyResult(0, 429);
+    m.reportKeyResult(0, 429);
+    expect(m.allKeysAuthDead()).toBe(false);
+  });
+});

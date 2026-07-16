@@ -159,6 +159,18 @@ export class ApiKeyManager {
     }
   }
 
+  /**
+   * True when EVERY key in the pool has most recently failed auth (401/403). Auth failures are
+   * permanent for a given key string — sleeping through a cooldown and retrying the same key can
+   * never succeed, it just adds dead seconds to every turn. Callers should fail fast with an
+   * actionable "fix your key" error instead of waiting. A success resets the counters (see
+   * reportKeyResult), so a key fixed mid-session recovers on its next use.
+   */
+  public allKeysAuthDead(): boolean {
+    return this.keyStates.length > 0 &&
+      this.keyStates.every(s => s.consecutive_401 > 0 || s.consecutive_403 > 1);
+  }
+
   public getStates() {
     const now = Date.now() / 1000;
     return this.keyStates.map(s => ({
