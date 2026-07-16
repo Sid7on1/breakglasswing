@@ -110,3 +110,50 @@ describe('streaming contract — opener-less + tool-call regressions', () => {
     expect(r.thinking).toContain('search the codebase');
   });
 });
+
+describe('streaming contract — time-bounded implicit buffering (unknown models)', () => {
+  // A greeting-length reply is SHORTER than the char cap, so the size bound alone never fires and
+  // the whole reply used to burst at stream end. The time bound releases it after ~250ms instead.
+  it('releases a short tag-free reply from an UNKNOWN model within the time cap, mid-stream', () => {
+    jest.useFakeTimers();
+    try {
+      const f = new ThinkTagFilter(/* implicit */ true, /* capPreamble */ true);
+      let visible = '';
+      visible += f.process('Hey! ').text;           // starts the hold clock
+      jest.advanceTimersByTime(300);                // > BGW_IMPLICIT_THINK_TIME_CAP_MS (250)
+      visible += f.process('What are we ').text;    // next token trips the time cap
+      expect(visible).toContain('Hey!');            // released BEFORE stream end
+      visible += f.process('building today?').text; // and keeps streaming live
+      expect(visible).toBe('Hey! What are we building today?');
+      expect(f.flush().text).toBe('');              // nothing left to burst at stream end
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // The time cap must NOT leak opener-less reasoning from a KNOWN reasoner (cap lifted entirely).
+  it('never time-releases a known opener-less reasoner\'s buffered CoT', () => {
+    jest.useFakeTimers();
+    try {
+      const f = new ThinkTagFilter(/* implicit */ true, /* capPreamble */ false);
+      let visible = f.process('Deliberating about the user question at length').text;
+      jest.advanceTimersByTime(10_000);
+      visible += f.process(' still reasoning...').text;
+      expect(visible).toBe('');                     // held — no leak, no matter how long
+      const r = f.process('</think>The answer.');
+      expect(r.thinking).toContain('Deliberating');
+      expect(r.text).toBe('The answer.');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // Explicit tags still win over the clock: an opener that arrives late is still hidden.
+  it('a <think> opener arriving within the window still hides reasoning for unknown models', () => {
+    const f = new ThinkTagFilter(true, true);
+    const r1 = f.process('<think>secret plan</think>');
+    expect(r1.text).toBe('');
+    expect(r1.thinking).toBe('secret plan');
+    expect(f.process('The visible answer.').text).toBe('The visible answer.');
+  });
+});

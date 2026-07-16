@@ -187,14 +187,25 @@ export class ThinkTagFilter {
   // would buffer its ENTIRE reply and only reveal it in one burst at stream end, which looks
   // like a hang ("spinner rolls forever, no text"). Override with BGW_IMPLICIT_THINK_CAP.
   private static readonly MAX_PREAMBLE = parseInt(process.env.BGW_IMPLICIT_THINK_CAP || '240', 10);
+  // Time bound on the same tentative buffer. The char cap alone still bursts every reply SHORTER
+  // than the cap (a greeting is ~50 chars — it sat buffered until stream end, the exact symptom the
+  // cap exists to prevent). Reasoning tags arrive in the first token or two, so if we have been
+  // holding visible-channel content this long with no tag in sight, it is the answer: release it
+  // and stream. Same leak tradeoff the char cap already accepts for unknown opener-less reasoners
+  // (runtime detection then lifts the cap from the next turn). Override with
+  // BGW_IMPLICIT_THINK_TIME_CAP_MS; known reasoners are exempt (capPreamble=false → no bounds).
+  private static readonly MAX_PREAMBLE_MS = parseInt(process.env.BGW_IMPLICIT_THINK_TIME_CAP_MS || '250', 10);
+  private firstHeldAt = 0; // wall-clock ms when the tentative preamble first became non-empty
   // Effective cap for THIS filter. Inline-reasoning models (caps.inlineReasoning) stream long CoT
   // before a tool call and reliably close it with `</think>`, so the cap is lifted (Infinity): we
   // wait for the closer instead of leaking the reasoning as the reply. A tool call (drainPending)
   // or the stream-end flush still bounds the wait, so there's no plain-model "hang" regression.
   private readonly maxPreamble: number;
+  private readonly maxPreambleMs: number;
 
   constructor(private implicit: boolean = true, capPreamble: boolean = true) {
     this.maxPreamble = capPreamble ? ThinkTagFilter.MAX_PREAMBLE : Number.POSITIVE_INFINITY;
+    this.maxPreambleMs = capPreamble ? ThinkTagFilter.MAX_PREAMBLE_MS : Number.POSITIVE_INFINITY;
   }
 
   /**
@@ -296,10 +307,15 @@ export class ThinkTagFilter {
         );
         this.preamble += this.pending.slice(0, this.pending.length - hold);
         this.pending = this.pending.slice(this.pending.length - hold);
-        // Cap reached without any closer: this is the answer, not opener-less reasoning.
-        // Resolve the tentative region now and emit what we held so the reply streams live
-        // instead of arriving in one burst at stream end (which reads as a hang).
-        if (this.preamble.length >= this.maxPreamble) {
+        if (this.preamble.length > 0 && this.firstHeldAt === 0) this.firstHeldAt = Date.now();
+        // Cap reached without any closer — by SIZE or by TIME: this is the answer, not
+        // opener-less reasoning. Resolve the tentative region now and emit what we held so the
+        // reply streams live instead of arriving in one burst at stream end (reads as a hang).
+        // The time cap is what lets replies SHORTER than the char cap (greetings) stream too.
+        if (
+          this.preamble.length >= this.maxPreamble ||
+          (this.firstHeldAt !== 0 && Date.now() - this.firstHeldAt >= this.maxPreambleMs)
+        ) {
           text += this.preamble;
           this.preamble = '';
           this.decided = true;
