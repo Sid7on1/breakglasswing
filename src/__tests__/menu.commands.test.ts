@@ -68,6 +68,24 @@ describe('/model (menu fix)', () => {
     expect(ctx._spies.applyConfig).toHaveBeenCalledWith({ model: 'claude-3-5-sonnet-20241022' });
     expect(ctx.options.model).toBe('claude-3-5-sonnet-20241022');
   });
+
+  it('`/model work` and `/model quick` are first-class spellings of the slot pickers', async () => {
+    // The UI says Work/Quick — typing those words must open the matching picker, never set the
+    // literal model id "work". (Regression: vocabulary drift between labels and arguments.)
+    const ctx = mockCtx();
+    const workRes = await getCmd('/model').execute(['work'], ctx);
+    expect(workRes.type).toBe('menu');
+    expect(ctx.options.model).toBe('old/model'); // untouched — a picker opened, nothing was set
+
+    const quickRes = await getCmd('/model').execute(['quick'], ctx);
+    expect(quickRes.type).toBe('menu');
+    expect(quickRes.title).toContain('Quick');
+
+    await getCmd('/model').execute(['work', 'gpt-4o'], ctx);
+    expect(ctx._spies.applyConfig).toHaveBeenCalledWith({ model: 'gpt-4o' });
+    await getCmd('/model').execute(['quick', 'gpt-4o'], ctx);
+    expect(ctx._spies.applyConfig).toHaveBeenCalledWith({ liteModel: 'gpt-4o' });
+  });
 });
 
 describe('/config (hub fix)', () => {

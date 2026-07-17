@@ -398,19 +398,19 @@ func TestWorkspaceChipInFooter(t *testing.T) {
 	}
 }
 
-// The working indicator names which mind is handling the turn — "fast" (lite) or "deep" (heavy) —
-// so BiMax's two-tier routing is visible live, not just in the footer pointer.
+// The working indicator names which slot is handling the turn in the product's one vocabulary —
+// "quick" or "work" — so routing is visible live, not just in the footer pointer.
 func TestTierTagVisibleWhileWorking(t *testing.T) {
 	m, _ := newTestModel()
 	m.busy = true
 
 	m.fTier = "lite"
-	if !strings.Contains(stripANSI(m.thinkingView()), "· fast") {
-		t.Fatalf("lite tier should show '· fast':\n%s", stripANSI(m.thinkingView()))
+	if !strings.Contains(stripANSI(m.thinkingView()), "· quick") {
+		t.Fatalf("quick routing should show '· quick':\n%s", stripANSI(m.thinkingView()))
 	}
 	m.fTier = "heavy"
-	if !strings.Contains(stripANSI(m.workingView()), "· deep") {
-		t.Fatalf("heavy tier should show '· deep':\n%s", stripANSI(m.workingView()))
+	if !strings.Contains(stripANSI(m.workingView()), "· work") {
+		t.Fatalf("work routing should show '· work':\n%s", stripANSI(m.workingView()))
 	}
 }
 

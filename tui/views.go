@@ -550,14 +550,13 @@ func (m model) thinkBlock() string {
 	return strings.Join(wrapped, "\n")
 }
 
-// tierTag names which of the two minds is handling this turn — the fast intuition (the lite model)
-// or the deep reasoner (the heavy coding model). Rides the live working indicator so BiMax's
-// "two minds, one machine" routing is visible in the moment it decides how hard to think.
+// tierTag names which slot is handling this turn, in the product's one vocabulary (Work · Quick ·
+// Vision). Rides the live working indicator so the routing decision is visible as it happens.
 func (m model) tierTag() string {
 	if m.fTier == "heavy" {
-		return footerTier.Render(" · deep")
+		return footerTier.Render(" · work")
 	}
-	return subtleStyle.Render(" · fast")
+	return subtleStyle.Render(" · quick")
 }
 
 // --- shimmer / pulse animation math --------------------------------------------------------

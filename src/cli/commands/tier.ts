@@ -12,7 +12,7 @@ globalCommandRegistry.register({
   name: '/tier',
   aliases: ['/model-tier', '/route'],
   category: 'Configuration',
-  description: 'Pin the model tier — auto (default) · lite · heavy (also: Ctrl+T)',
+  description: 'Pin turn routing — auto (default) · Quick · Work (also: Ctrl+T)',
   execute: async (args, context) => {
     const sub = (args[0] || '').toLowerCase();
 
@@ -26,11 +26,11 @@ globalCommandRegistry.register({
 
     return {
       type: 'menu',
-      title: 'Model tier — which model handles your turns',
+      title: 'Turn routing — which model handles your turns',
       options: [
-        { label: 'Auto', value: '/tier auto', desc: 'Lite answers; escalates to the coding model when a turn needs it (default)' },
-        { label: 'Lite', value: '/tier lite', desc: 'Pin the fast lite model for every turn' },
-        { label: 'Heavy', value: '/tier heavy', desc: 'Pin the coding model for every turn' },
+        { label: 'Auto', value: '/tier auto', desc: 'Quick answers; escalates to the Work model when a turn needs it (default)' },
+        { label: 'Quick', value: '/tier lite', desc: 'Pin the Quick model for every turn' },
+        { label: 'Work', value: '/tier heavy', desc: 'Pin the Work model for every turn' },
       ],
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };

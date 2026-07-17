@@ -105,7 +105,7 @@ globalCommandRegistry.register({
 
 globalCommandRegistry.register({
   name: '/model',
-  description: 'Model & routing — id · lite · coding · tier · provider',
+  description: 'Models — Work · Quick · Vision slots, provider, routing',
   category: 'Configuration',
   execute: async (args, context) => {
     // Two slots: CODING (the main agent loop) and LITE (cheap aux calls — summaries, self-critic).
@@ -242,21 +242,28 @@ globalCommandRegistry.register({
         type: 'menu',
         title: 'Vision model',
         subtitle: curVision
-          ? `Now: ${curVision} · screenshots/images go here · coding model untouched`
-          : 'Screenshots/images go here · coding model untouched',
+          ? `Now: ${curVision} · screenshots/images go here · work model untouched`
+          : 'Screenshots/images go here · work model untouched',
         options: [
           ...rows,
           { label: '✎ Custom id…', value: '__custom__', desc: 'Type any vision model id', category: 'More' },
-          { label: '⊘ None', value: '__none__', desc: 'Drop images unless the coding model sees them', category: 'More' },
+          { label: '⊘ None', value: '__none__', desc: 'Drop images unless the work model can see them', category: 'More' },
         ],
         onSelect: (opt: any) => opt.value === '__custom__' ? promptCustom(applyVision) : applyVision(opt.value),
       };
     }
 
-    // /model browse [coding|lite|subagent|one] — the full provider catalog, flat + searchable.
-    const slot = (args[0] || '').toLowerCase();
+    // The UI speaks Work/Quick/Vision, so the arguments must too: `/model work` and `/model quick`
+    // are first-class spellings of the internal slot keys. Without this, `/model work` fell through
+    // to "set the model id to the literal string 'work'".
+    const SLOT_ALIASES: Record<string, string> = { work: 'coding', quick: 'lite' };
+    const slotRaw = (args[0] || '').toLowerCase();
+    const slot = SLOT_ALIASES[slotRaw] || slotRaw;
+
+    // /model browse [work|quick|subagent|one] — the full provider catalog, flat + searchable.
     if (slot === 'browse') {
-      const target = (args[1] || 'one').toLowerCase();
+      const target0 = (args[1] || 'one').toLowerCase();
+      const target = SLOT_ALIASES[target0] || target0;
       const apply = SLOT_APPLY[target] || applyEverywhere;
       const live = await liveIds();
       const options = live ? liveModelMenuOptions(live, context.options.model) : modelMenuOptions(context.options.model);
