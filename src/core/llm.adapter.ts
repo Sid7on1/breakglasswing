@@ -356,7 +356,7 @@ export class LlmAdapter implements LLMProvider {
 
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
       // Models often wrap the plan in a markdown fence or prose; extract the raw JSON before parsing.
-      const content = extractJson(stripThink(response.choices[0].message.content || ""));
+      const content = extractJson(stripThink(response.choices?.[0]?.message?.content || ""));
       return { status: 200, data: JSON.parse(content || "{}"), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) {
@@ -396,7 +396,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
+      return { status: 200, content: stripThink(response.choices?.[0]?.message?.content || ""), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
@@ -434,7 +434,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return { status: 200, content: stripThink(response.choices[0].message.content || ""), retryAfter: null };
+      return { status: 200, content: stripThink(response.choices?.[0]?.message?.content || ""), retryAfter: null };
     } catch (error: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       Logger.error(`[LlmAdapter] Network Error: ${error.message}`);
@@ -479,7 +479,7 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return JSON.parse(extractJson(stripThink(response.choices[0].message.content || "")) || "{}");
+      return JSON.parse(extractJson(stripThink(response.choices?.[0]?.message?.content || "")) || "{}");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
@@ -495,6 +495,12 @@ export class LlmAdapter implements LLMProvider {
     const estimatedCostUsd = this.estCost(estimatedTokens);
     if (this.budgetVeto) await this.budgetVeto.checkVeto(estimatedCostUsd);
 
+    // Once the provider has ANSWERED, the key did its job — a later client-side failure (response
+    // parsing, budget bookkeeping) must never re-bill the key as a server error. Without this flag
+    // a malformed-but-200 response threw at `.choices[0]`, the catch reported 500, and the sole
+    // key went on a 5s cooldown the NEXT call slept out ("All keys cooling down… Sleeping 2.8s"):
+    // ~4s of self-inflicted first-token latency per turn, measured live against a 120ms mock.
+    let keySettled = false;
     try {
       const finalMessages = systemContext
         ? [{ role: 'system', content: systemContext }, ...messages]
@@ -507,6 +513,7 @@ export class LlmAdapter implements LLMProvider {
         max_tokens: this.maxTokens,
       }, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
+      keySettled = true;
       const usage = response.usage;
       if (this.budgetVeto && usage) {
         const actualCostUsd = this.estCost(usage.prompt_tokens + usage.completion_tokens);
@@ -514,12 +521,12 @@ export class LlmAdapter implements LLMProvider {
       } else if (this.budgetVeto) {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd);
       }
-      return stripThink(response.choices[0].message.content || "");
+      return stripThink(response.choices?.[0]?.message?.content || "");
     } catch (e: any) {
       if (this.budgetVeto) await this.budgetVeto.releaseReservation(estimatedCostUsd);
       // Report the REAL status (429/408/…), not a blanket 500 — the key manager's rotation
       // and backoff decisions depend on it (a 429 key should cool down, not be marked broken).
-      this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
+      if (!keySettled) this.apiKeyManager.reportKeyResult(kr.idx!, this.errorStatus(e));
       this.enrichModelNotFound(e, kr, opts?.lite);
       throw e;
     }
