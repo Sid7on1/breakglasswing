@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -101,3 +102,15 @@ func fmtElapsed(secs int) string {
 var sgrRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripAnsi(s string) string { return sgrRE.ReplaceAllString(s, "") }
+
+// urlHost extracts the display host from a URL ("https://app.example.com/x?y" → "app.example.com")
+// for the live-browser footer chip. Falls back to a clipped raw string on unparseable input.
+func urlHost(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u.Host
+	}
+	if len(raw) > 24 {
+		return raw[:24] + "…"
+	}
+	return raw
+}

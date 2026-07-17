@@ -398,6 +398,36 @@ func TestWorkspaceChipInFooter(t *testing.T) {
 	}
 }
 
+// A live automated browser page shows as a host-only chip in the footer (◍), fed by the engine's
+// ui_snapshot computer posture — a running browser session must never be invisible.
+func TestBrowserSessionChipInFooter(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 100, 40
+
+	// No computer posture (older engine) or no live page: no chip.
+	if strings.Contains(stripANSI(m.footerLine()), "◍") {
+		t.Fatalf("browser chip must be hidden with no live session: %q", stripANSI(m.footerLine()))
+	}
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"computer": map[string]any{"browserUrl": "", "desktop": "connected", "tainted": false},
+	}))
+	if strings.Contains(stripANSI(m.footerLine()), "◍") {
+		t.Fatalf("browser chip must be hidden when browserUrl is empty: %q", stripANSI(m.footerLine()))
+	}
+
+	// Live page → host-only chip.
+	m.handleEngine(ev("ui_snapshot", map[string]any{
+		"computer": map[string]any{"browserUrl": "https://app.example.com/checkout?step=2", "desktop": "connected", "tainted": true},
+	}))
+	foot := stripANSI(m.footerLine())
+	if !strings.Contains(foot, "◍ app.example.com") {
+		t.Fatalf("expected host-only browser chip, got: %q", foot)
+	}
+	if strings.Contains(foot, "checkout") {
+		t.Fatalf("chip must not leak the URL path: %q", foot)
+	}
+}
+
 // The working indicator names which slot is handling the turn in the product's one vocabulary —
 // "quick" or "work" — so routing is visible live, not just in the footer pointer.
 func TestTierTagVisibleWhileWorking(t *testing.T) {

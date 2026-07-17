@@ -65,6 +65,7 @@ Rules:
 | `◉` | slot rows in the model hub |
 | `⌕` `✎` `⊘` `↩` | browse · custom entry · none/off · inherit |
 | `⌂` | workspace / repo chip |
+| `◍` | live browser session (host only; warn-tinted when tainted) |
 | `🤖` | live sub-agent |
 | `🧠` | mind layer chip |
 | braille spinner | the only spinner; ember-tinted; frozen under reduced motion |

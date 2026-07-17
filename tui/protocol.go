@@ -128,6 +128,18 @@ type UiSnapshot struct {
 	CompressionSaved int `json:"compressionSaved"`
 	// Multi-repo workspace working set (count <= 1 = single-repo session; chip hidden).
 	Workspace WorkspaceStrip `json:"workspace"`
+	// Computer-use posture (v3 additive): live browser session + desktop driver + taint state.
+	// nil on older engines — every consumer must nil-check.
+	Computer *ComputerStrip `json:"computer"`
+}
+
+// ComputerStrip mirrors UiSnapshotComputer (src/protocol/ui.snapshot.ts): the live automated
+// page (empty when no browser session is open), desktop driver posture, and whether untrusted
+// web content has entered the conversation window.
+type ComputerStrip struct {
+	BrowserURL string `json:"browserUrl"`
+	Desktop    string `json:"desktop"` // "connected" | "configured" | "not-installed"
+	Tainted    bool   `json:"tainted"`
 }
 
 // OutcomeStrip — the compact engine-owned completion snapshot sent by outcome_update. It is a

@@ -153,6 +153,7 @@ func (m *model) handleEvent(o Outbound) {
 			m.ctxBaseline = s.TokensBaseline
 			m.ctxSaved = s.CompressionSaved
 			m.fWorkspace = s.Workspace
+			m.fComputer = s.Computer
 			// First snapshot after `ready`: the model slots are now known — render the banner with
 			// them (idempotent; no-op once welcomed).
 			if !m.welcomeBy.IsZero() {

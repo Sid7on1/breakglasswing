@@ -295,6 +295,7 @@ type model struct {
 	fMcp       int            // connected (non-disabled) MCP server count
 	fMind      MindStrip      // mind layer: weak spots / drive deviations / compiled habits
 	fWorkspace WorkspaceStrip // multi-repo workspace: repo count/names for the status chip
+	fComputer  *ComputerStrip // computer-use posture: live browser page / desktop driver / taint
 	fOutcome   *OutcomeStrip  // active engine-owned outcome contract; nil for chat/simple questions
 
 	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used

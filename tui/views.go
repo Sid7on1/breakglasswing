@@ -406,6 +406,17 @@ func (m model) footerLine() string {
 		}
 		core = append(core, footerHint.Render(label))
 	}
+	// Live browser session chip: a real automated page is open right now. Host only — details
+	// live in /computer. Warn-tinted when untrusted web content has entered the conversation
+	// window (taint), so the risk posture rides with the session indicator.
+	if m.fComputer != nil && m.fComputer.BrowserURL != "" {
+		chip := "◍ " + urlHost(m.fComputer.BrowserURL)
+		if m.fComputer.Tainted {
+			core = append(core, warnStyle.Render(chip))
+		} else {
+			core = append(core, footerHint.Render(chip))
+		}
+	}
 	if m.busy {
 		// Only numbers that are TRUE go on screen: streamed characters (counted) and elapsed time
 		// (measured). The old "tok/s" was chars/4/elapsed — an estimate dressed up as telemetry.
