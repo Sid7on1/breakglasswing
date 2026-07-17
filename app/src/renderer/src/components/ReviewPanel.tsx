@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
   GitBranch, GitCompareArrows, ArrowLeft, RefreshCw, ChevronDown, Check, Plus,
-  ArrowUp, ArrowDown, History, Camera, Undo2, Star, Dot,
+  ArrowUp, ArrowDown, History, Camera, Undo2, Star, Dot, Clock3, CircleCheck,
+  CircleX, Wrench, ListChecks, AlertTriangle, ChevronRight,
 } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { DiffView } from './DiffView';
 import { Dropdown, DropdownItem } from './ui/dropdown';
 import type { GitStatusResult, GitCommitEntry } from '../global';
-import type { UiSnapshotCheckpoint } from '../protocol';
+import type { ReviewSnapshot, ReviewStateName, UiSnapshotCheckpoint } from '../protocol';
 
 function relTs(ts: number): string {
   const s = Math.round((Date.now() - ts) / 1000);
@@ -17,15 +18,110 @@ function relTs(ts: number): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
+const STATE_LABEL: Record<ReviewStateName, string> = {
+  idle: 'No task changes',
+  planning: 'Planning',
+  awaiting_approval: 'Awaiting approval',
+  applying: 'Applying changes',
+  unverified: 'Needs verification',
+  verification_failed: 'Verification failed',
+  verified: 'Verified',
+  checkpointed: 'Verified & checkpointed',
+};
+
+function ReviewStateIcon({ state }: { state: ReviewStateName }): React.ReactElement {
+  if (state === 'awaiting_approval') return <Clock3 size={14} className="text-amber" />;
+  if (state === 'verification_failed') return <CircleX size={14} className="text-rust" />;
+  if (state === 'verified' || state === 'checkpointed') return <CircleCheck size={14} className="text-moss" />;
+  if (state === 'planning') return <ListChecks size={14} className="text-ember" />;
+  return <Wrench size={14} className="text-dim" />;
+}
+
+function TaskReviewSummary({ review }: { review: ReviewSnapshot }): React.ReactElement {
+  const pending = review.approvals.filter((a) => !a.resolution);
+  const recentApprovals = review.approvals.slice(-3).reverse();
+  const recentVerification = review.verifications.slice(-3).reverse();
+  const latestCheckpointAttempt = review.checkpoints[review.checkpoints.length - 1];
+  const completedTodos = review.todos.filter((t) => t.status === 'completed').length;
+
+  return (
+    <section className="mb-3 shrink-0 rounded-lg border border-line bg-raise/70 p-2.5">
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5"><ReviewStateIcon state={review.state} /></span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-ink">{STATE_LABEL[review.state]}</span>
+            {pending.length > 0 && <span className="rounded-full bg-amber/12 px-1.5 py-0.5 text-[9.5px] font-medium text-amber">{pending.length} pending</span>}
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-dim">{review.nextAction}</p>
+        </div>
+      </div>
+
+      {review.interrupted && (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-amber/25 bg-amber/8 px-2 py-1.5 text-[10.5px] leading-relaxed text-amber">
+          <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+          A previous approval was interrupted. It was closed safely and was not treated as consent.
+        </div>
+      )}
+
+      {review.todos.length > 0 && (
+        <div className="mt-2 flex items-center gap-2 border-t border-line pt-2 text-[10.5px] text-faint">
+          <ListChecks size={11} />
+          <span>Plan</span>
+          <span className="ml-auto tabular-nums">{completedTodos}/{review.todos.length} complete</span>
+        </div>
+      )}
+
+      {recentApprovals.length > 0 && (
+        <div className="mt-2 border-t border-line pt-2">
+          <div className="mb-1 text-[9.5px] font-medium tracking-[0.08em] text-faint uppercase">Approvals</div>
+          {recentApprovals.map((approval) => (
+            <div key={`${approval.id}-${approval.requestedAt}`} className="flex items-start gap-1.5 py-0.5 text-[10.5px]">
+              {!approval.resolution ? <Clock3 size={10} className="mt-0.5 shrink-0 text-amber" />
+                : approval.resolution.approved ? <CircleCheck size={10} className="mt-0.5 shrink-0 text-moss" />
+                  : <CircleX size={10} className="mt-0.5 shrink-0 text-rust" />}
+              <span className="min-w-0 flex-1 truncate text-dim" title={approval.question}>{approval.question}</span>
+              <span className="shrink-0 capitalize text-faint">{approval.kind}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {recentVerification.length > 0 && (
+        <div className="mt-2 border-t border-line pt-2">
+          <div className="mb-1 text-[9.5px] font-medium tracking-[0.08em] text-faint uppercase">Verification</div>
+          {recentVerification.map((verification) => (
+            <div key={`${verification.at}-${verification.command}`} className="flex items-center gap-1.5 py-0.5 text-[10.5px]">
+              {verification.ok ? <CircleCheck size={10} className="shrink-0 text-moss" /> : <CircleX size={10} className="shrink-0 text-rust" />}
+              <span className="min-w-0 flex-1 truncate font-mono text-dim" title={verification.command}>{verification.command}</span>
+              <span className="shrink-0 text-faint">
+                {verification.repoWide ? 'repo-wide' : `${verification.coveredFiles.length} file${verification.coveredFiles.length === 1 ? '' : 's'}`}
+              </span>
+              <span className="shrink-0 text-faint">{relTs(verification.at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {latestCheckpointAttempt && !latestCheckpointAttempt.ok && (
+        <div className="mt-2 flex items-center gap-1.5 border-t border-line pt-2 text-[10.5px] text-rust">
+          <CircleX size={10} /> Checkpoint failed: {latestCheckpointAttempt.label}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /**
  * Review panel — Electron-native git READS (status/diff/branches/log via the main process);
  * WRITES (commit, branch switch) route through the engine's /git command so the ledger and
  * attribution pipeline observe them. Narrow-pane layout: file list ⇄ full-pane diff.
  */
 export function ReviewPanel({
-  status, refresh, onCommand, checkpoints,
+  status, review, refresh, onCommand, checkpoints,
 }: {
   status: GitStatusResult | null;
+  review: ReviewSnapshot | null;
   refresh: () => void;
   onCommand: (cmd: string) => void;
   checkpoints?: UiSnapshotCheckpoint[];
@@ -37,6 +133,7 @@ export function ReviewPanel({
   const [branches, setBranches] = useState<string[]>([]);
   const [newBranch, setNewBranch] = useState<string | null>(null); // null = not editing
   const [rewindArm, setRewindArm] = useState<string | null>(null); // checkpoint id awaiting confirm
+  const [otherOpen, setOtherOpen] = useState(false);
 
   useEffect(() => {
     void window.bimax.git.log(8).then(setLog).catch(() => setLog([]));
@@ -89,6 +186,35 @@ export function ReviewPanel({
   }
 
   const dirty = status.files.length;
+  const attributedPaths = new Set((review?.changes ?? []).map((change) => change.file).filter((file) => file && file !== '(unattributed)'));
+  const taskFiles = review ? status.files.filter((file) => attributedPaths.has(file.path)) : status.files;
+  const otherFiles = review ? status.files.filter((file) => !attributedPaths.has(file.path)) : [];
+  const canCheckpoint = review?.state === 'verified';
+
+  const fileButton = (f: GitStatusResult['files'][number]) => (
+    <button
+      key={f.path}
+      onClick={() => setSelected(f.path)}
+      className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-hover"
+      title={f.path}
+    >
+      <span
+        className={cn(
+          'w-3 shrink-0 text-center font-mono text-[11px] font-semibold',
+          f.status === '?' || f.status === 'A' ? 'text-moss' : f.status === 'D' ? 'text-rust' : 'text-amber',
+        )}
+      >
+        {f.status === '?' ? 'U' : f.status}
+      </span>
+      <span className="min-w-0 flex-1 truncate font-mono text-xs text-dim">{f.path}</span>
+      {(f.insertions > 0 || f.deletions > 0) && (
+        <span className="shrink-0 font-mono text-[10px] tabular-nums">
+          <span className="text-moss">+{f.insertions}</span>{' '}
+          <span className="text-rust">−{f.deletions}</span>
+        </span>
+      )}
+    </button>
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -168,38 +294,40 @@ export function ReviewPanel({
         </form>
       )}
 
-      {/* Changed files */}
+      {review && <TaskReviewSummary review={review} />}
+
+      {/* Files attributed to this thread are primary. Pre-existing/manual changes stay visible but
+          separate, so the task never claims ownership of the whole dirty working tree. */}
       <div className="mb-1.5 shrink-0 text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase">
-        Changes{dirty ? ` · ${dirty}` : ''}
+        {review ? 'Task changes' : 'Changes'}{taskFiles.length ? ` · ${taskFiles.length}` : ''}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {dirty === 0 ? (
-          <div className="py-2 text-xs text-faint">Working tree clean.</div>
+        {taskFiles.length === 0 ? (
+          <div className="py-2 text-xs text-faint">
+            {dirty === 0 ? 'Working tree clean.' : review ? 'No current working-tree files are attributed to this task.' : 'Working tree clean.'}
+          </div>
         ) : (
-          status.files.map((f) => (
+          taskFiles.map(fileButton)
+        )}
+
+        {otherFiles.length > 0 && (
+          <div className="mt-3 border-t border-line pt-2">
             <button
-              key={f.path}
-              onClick={() => setSelected(f.path)}
-              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-hover"
-              title={f.path}
+              onClick={() => setOtherOpen((open) => !open)}
+              className="flex w-full cursor-pointer items-center gap-1.5 py-1 text-[10.5px] font-medium tracking-[0.06em] text-faint uppercase hover:text-dim"
             >
-              <span
-                className={cn(
-                  'w-3 shrink-0 text-center font-mono text-[11px] font-semibold',
-                  f.status === '?' || f.status === 'A' ? 'text-moss' : f.status === 'D' ? 'text-rust' : 'text-amber',
-                )}
-              >
-                {f.status === '?' ? 'U' : f.status}
-              </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-dim">{f.path}</span>
-              {(f.insertions > 0 || f.deletions > 0) && (
-                <span className="shrink-0 font-mono text-[10px] tabular-nums">
-                  <span className="text-moss">+{f.insertions}</span>{' '}
-                  <span className="text-rust">−{f.deletions}</span>
-                </span>
-              )}
+              {otherOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              Other workspace changes · {otherFiles.length}
             </button>
-          ))
+            {otherOpen && (
+              <div className="mt-1 rounded-md border border-line/70 bg-well/45 p-1">
+                <div className="px-1.5 py-1 text-[10px] leading-relaxed text-faint">
+                  These files were already changed or were edited outside this task.
+                </div>
+                {otherFiles.map(fileButton)}
+              </div>
+            )}
+          </div>
         )}
 
         {/* Time Machine — checkpoints from ui_snapshot (protocol v2; section hidden on v1 engines).
@@ -209,9 +337,10 @@ export function ReviewPanel({
             <div className="mb-1.5 flex items-center gap-1 text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase">
               <Camera size={11} /> History
               <button
-                onClick={() => onCommand('/checkpoint from Review panel')}
-                title="Snapshot the working tree now (/checkpoint)"
-                className="ml-auto flex cursor-pointer items-center gap-1 rounded-md border border-line bg-raise px-1.5 py-0.5 text-[10.5px] font-normal tracking-normal text-dim normal-case hover:bg-hover hover:text-ink"
+                onClick={() => { if (canCheckpoint) onCommand('/checkpoint verified task'); }}
+                disabled={!canCheckpoint}
+                title={canCheckpoint ? 'Snapshot the verified working tree now' : 'Verify this task after its latest edit before checkpointing'}
+                className="ml-auto flex cursor-pointer items-center gap-1 rounded-md border border-line bg-raise px-1.5 py-0.5 text-[10.5px] font-normal tracking-normal text-dim normal-case hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-35 disabled:hover:bg-raise disabled:hover:text-dim"
               >
                 <Camera size={10} className="text-ember" /> Checkpoint now
               </button>
@@ -296,12 +425,17 @@ export function ReviewPanel({
           disabled={dirty === 0}
           className="w-full resize-none rounded-md border border-line bg-well px-2 py-1.5 text-xs text-ink outline-none placeholder:text-faint focus:border-ember/55 disabled:opacity-50"
         />
+        {otherFiles.length > 0 && (
+          <div className="mt-1 text-[10px] leading-relaxed text-amber/85">
+            Repository commit includes all {dirty} dirty files — {otherFiles.length} {otherFiles.length === 1 ? 'is' : 'are'} outside this task.
+          </div>
+        )}
         <button
           type="submit"
           disabled={dirty === 0 || !message.trim()}
           className="mt-1.5 w-full cursor-pointer rounded-md bg-ember/90 py-1.5 text-xs font-medium text-bg hover:bg-ember disabled:cursor-default disabled:opacity-40"
         >
-          Commit {dirty > 0 ? `${dirty} file${dirty === 1 ? '' : 's'}` : ''}
+          {otherFiles.length > 0 ? 'Commit entire working tree' : `Commit ${dirty > 0 ? `${dirty} file${dirty === 1 ? '' : 's'}` : ''}`}
         </button>
       </form>
     </div>

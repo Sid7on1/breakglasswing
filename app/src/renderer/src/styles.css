@@ -1,31 +1,35 @@
-/* Bimax desktop — Graphite & Phosphor as Tailwind v4 design tokens. Warm graphite surfaces,
-   terracotta accent (#D77757), low chrome. Matches the TUI identity: never neon. Dark-only by
-   design (the product is a dark instrument, not a themed website). */
+/* Bimax desktop — a quiet macOS workspace built around conversation and visible capabilities. */
 
-@import 'tailwindcss';
+/* Keep Tailwind's scanner inside the renderer. The desktop build also contains packaged apps,
+   compiled engines and an optional Python venv; auto-detecting across those binary trees can make
+   a rebuild appear frozen for minutes after the first package/provisioning run. */
+@import 'tailwindcss' source(none);
+@source './**/*.{ts,tsx,html}';
 
 @theme {
   /* Surfaces */
-  --color-bg: #161412;
-  --color-raise: #1e1b18;
-  --color-hover: #262220;
-  --color-well: #12100e; /* code / diff wells, one step below bg */
-  --color-line: #2e2925;
+  --color-bg: #181817;
+  --color-raise: #232321;
+  --color-hover: #2b2b29;
+  --color-selected: #343330;
+  --color-well: #141413;
+  --color-line: #383734;
 
   /* Ink */
-  --color-ink: #e8e2da;
-  --color-dim: #948a7e;
-  --color-faint: #6b6259;
+  --color-ink: #f1efe9;
+  --color-dim: #b0ada5;
+  --color-faint: #77746e;
 
   /* Phosphor */
-  --color-ember: #d77757;
-  --color-ember-bright: #e89b7c;
-  --color-ember-deep: #b85e40;
-  --color-moss: #9cb380;
-  --color-amber: #d9a05b;
-  --color-rust: #c25b4e;
+  --color-ember: #d78562;
+  --color-ember-bright: #e59a77;
+  --color-ember-deep: #b66749;
+  --color-moss: #82ad89;
+  --color-amber: #d4a35f;
+  --color-rust: #df766f;
 
   --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-display: ui-rounded, 'SF Pro Rounded', 'Inter Variable', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 
   --animate-soft-blink: soft-blink 1.2s steps(1) infinite;
@@ -34,6 +38,63 @@
   @keyframes soft-blink {
     50% { opacity: 0.15; }
   }
+}
+
+.theme-graphite {
+  color-scheme: dark;
+  --color-bg: #181817;
+  --color-raise: #232321;
+  --color-hover: #2b2b29;
+  --color-selected: #343330;
+  --color-well: #141413;
+  --color-line: #383734;
+  --color-ink: #f1efe9;
+  --color-dim: #b0ada5;
+  --color-faint: #77746e;
+  --color-ember: #d78562;
+  --color-ember-bright: #e59a77;
+  --color-ember-deep: #b66749;
+  --color-moss: #82ad89;
+  --color-amber: #d4a35f;
+  --color-rust: #df766f;
+}
+
+.theme-linen {
+  color-scheme: light;
+  --color-bg: #f5f3ee;
+  --color-raise: #fcfbf8;
+  --color-hover: #ece9e2;
+  --color-selected: #e4e0d8;
+  --color-well: #efede7;
+  --color-line: #d8d3c9;
+  --color-ink: #292824;
+  --color-dim: #68655f;
+  --color-faint: #918d84;
+  --color-ember: #bd6849;
+  --color-ember-bright: #ce7959;
+  --color-ember-deep: #994d35;
+  --color-moss: #5f8f69;
+  --color-amber: #a87832;
+  --color-rust: #c85c58;
+}
+
+.theme-ink {
+  color-scheme: dark;
+  --color-bg: #12161b;
+  --color-raise: #1b2026;
+  --color-hover: #252b32;
+  --color-selected: #2d343d;
+  --color-well: #0e1216;
+  --color-line: #303740;
+  --color-ink: #eef2f5;
+  --color-dim: #a5adb5;
+  --color-faint: #6e7883;
+  --color-ember: #78a9d4;
+  --color-ember-bright: #91bee4;
+  --color-ember-deep: #5889b4;
+  --color-moss: #72b89a;
+  --color-amber: #d2a25f;
+  --color-rust: #dc7474;
 }
 
 @layer base {
@@ -55,6 +116,28 @@
   }
   ::-webkit-scrollbar-thumb:hover { background: var(--color-hover); }
   ::-webkit-scrollbar-track { background: transparent; }
+}
+
+.titlebar-shell {
+  background: color-mix(in srgb, var(--color-well) 88%, transparent);
+  backdrop-filter: blur(22px) saturate(1.15);
+}
+
+.sidebar-shell {
+  background: color-mix(in srgb, var(--color-well) 92%, var(--color-bg));
+}
+
+.sidebar-primary {
+  color: var(--color-ink);
+  background: var(--color-selected);
+  border: 1px solid color-mix(in srgb, var(--color-line) 80%, var(--color-ink));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035);
+}
+
+.sidebar-primary:hover { background: var(--color-hover); }
+
+.workspace-panel {
+  box-shadow: -18px 0 45px rgb(0 0 0 / 0.08);
 }
 
 @layer components {
@@ -124,6 +207,102 @@
   to { opacity: 1; transform: translateX(0); }
 }
 
+@keyframes signal-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-moss) 34%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
+@keyframes graph-flow {
+  to { stroke-dashoffset: -8; }
+}
+
+@keyframes graph-orbit {
+  from { transform: rotate(0deg); transform-origin: center; }
+  to { transform: rotate(360deg); transform-origin: center; }
+}
+
+@keyframes graph-node-breathe {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.75; }
+}
+
+.signal-beacon {
+  animation: signal-breathe 2.4s ease-in-out infinite;
+}
+
+.graph-observatory::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 0 44%, rgb(232 155 124 / 0.035) 50%, transparent 56%);
+}
+
+.graph-link {
+  animation: graph-flow 2.8s linear infinite;
+}
+
+.graph-core-ring {
+  animation: graph-orbit 16s linear infinite;
+  transform-box: fill-box;
+}
+
+.graph-node-ring {
+  animation: graph-node-breathe 1.8s ease-in-out infinite;
+}
+
+.launch-console {
+  position: relative;
+}
+
+.launch-console::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(115deg, color-mix(in srgb, var(--color-ember) 5%, transparent), transparent 28% 72%, color-mix(in srgb, var(--color-moss) 4%, transparent));
+}
+
+.launch-console > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Bimax's signature: two offset minds converging on one shared point. */
+.bimax-mark {
+  position: relative;
+  border-radius: 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--color-ember) 16%, var(--color-raise)), color-mix(in srgb, var(--color-moss) 8%, var(--color-raise)));
+  border: 1px solid color-mix(in srgb, var(--color-ember) 24%, var(--color-line));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 10px 28px rgb(43 38 110 / 0.12);
+}
+
+.bimax-mark-orbit {
+  position: absolute;
+  width: 42%;
+  height: 58%;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+}
+
+.bimax-mark-orbit-a { transform: translateX(-16%) rotate(-24deg); color: var(--color-ember); }
+.bimax-mark-orbit-b { transform: translateX(16%) rotate(24deg); color: var(--color-moss); }
+.bimax-mark-core { width: 10%; aspect-ratio: 1; border-radius: 999px; background: var(--color-ink); box-shadow: 0 0 0 3px rgb(240 238 233 / 0.08); }
+
+.home-canvas {
+  background:
+    radial-gradient(circle at 57% 24%, color-mix(in srgb, var(--color-ember) 10%, transparent), transparent 34%),
+    radial-gradient(circle at 30% 55%, color-mix(in srgb, var(--color-moss) 7%, transparent), transparent 30%),
+    linear-gradient(180deg, color-mix(in srgb, var(--color-raise) 72%, transparent), transparent 35%);
+}
+
+.font-display { font-family: var(--font-display); }
+
+.theme-linen .launch-console {
+  box-shadow: 0 18px 50px rgb(55 48 39 / 0.12), 0 2px 8px rgb(55 48 39 / 0.06);
+}
+
 /* Entrance for cards / rows / sections; pair with an inline animation-delay for stagger. */
 @utility anim-fade-up {
   animation: fade-up 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -152,7 +331,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .anim-fade-up, .anim-scale-in, .anim-fade-in, .anim-slide-in-right, .anim-dialog-in {
+  .anim-fade-up, .anim-scale-in, .anim-fade-in, .anim-slide-in-right, .anim-dialog-in,
+  .signal-beacon, .graph-link, .graph-core-ring, .graph-node-ring {
     animation: none;
   }
   .animate-spin-slow {

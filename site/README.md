@@ -1,34 +1,37 @@
-# Bimax — landing site
+# Bimax launch site
 
-A single-page, cinematic landing site for Bimax. Two full-height sections (Hero + Capabilities) with
-looping background videos (custom rAF crossfade), a liquid-glass design system, Framer Motion
-entrance animations, and a React Three Fiber glass orb in the hero.
+A Vite + React landing page for the unshipped Bimax desktop app and CLI. The page presents both as
+coming soon, shows the real product UI, and collects early-access emails through a Supabase Edge
+Function backed by a protected Postgres table.
 
-## Stack
-- **Vite + React + TypeScript**
-- **Tailwind CSS** — pill border-radius default, Instrument Serif (headings) + Barlow (body)
-- **Framer Motion** — blur/opacity/y entrances + the word-by-word `BlurText` headline
-- **React Three Fiber + drei** — the hero glass orb (`HeroOrb`), with a WebGL capability guard
-- Self-hosted, web-optimized videos in `public/videos/` (h264, faststart, + poster frames)
+## Local development
 
-## Develop
 ```bash
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # type-check + production build to dist/
-npm run preview  # serve the build
+npm run dev
+npm run build
 ```
 
-## Design system
-- `.liquid-glass` / `.liquid-glass-strong` live in `src/index.css` (the exact spec).
-- `FadingVideo` does the manual loop + crossfade (no CSS transitions); `loop` is off by design.
-- `prefers-reduced-motion` hides the videos (posters remain) and the orb is skipped without WebGL.
+The waitlist form talks to the deployed Supabase Edge Function, so local submissions use the same
+guarded endpoint as production.
 
-## Deploy
-Any static host. `vercel.json` is set for Vercel (build → `dist`). For Netlify/Cloudflare Pages:
-build command `npm run build`, output dir `dist`.
+## Connect Supabase
 
-## Notes
-- Copy/stats reflect Bimax (terminal agent · Sketch Mode · Blueprint builders · Beast pipeline).
-- Videos were sourced from the original template and re-encoded for the web; swap them in
-  `public/videos/` (keep the same filenames) to rebrand the footage.
+The production project is `ougqqtvmmwqxlrnxncvf` in Supabase region `ap-south-1`.
+
+1. Apply `supabase/migrations/202607130001_create_waitlist.sql`.
+2. Deploy `supabase/functions/waitlist/index.ts` with JWT verification enabled.
+3. Submit a test email and confirm the row appears in `public.waitlist`.
+
+The service-role key stays inside Supabase's Edge Function runtime and is never bundled into the
+browser or copied into Vercel. The table has row-level security enabled, grants no browser role
+access, normalizes emails in the function, ignores duplicate signups, uses a honeypot, checks browser
+origins, and applies a lightweight per-instance request limit.
+
+## Vercel
+
+Keep this directory inside the Bimax repository for the first launch. Create the Vercel project with
+`site` as its Root Directory. Vercel will use `vercel.json`, run `npm run build`, and publish `dist`.
+
+Before production, confirm the custom domain is `bimax.app`; the canonical URL, Open Graph URL,
+robots file, and sitemap currently use that domain.

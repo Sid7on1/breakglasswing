@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-13T11-23-08-904Z",
+  "mode": "remeasured",
+  "sourceRunId": "run-2026-07-13T10-56-11-786Z",
+  "sourceEpisodeDirectory": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z",
+  "sourceReportFound": true,
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "provider-reported-usage-from-recorded-response",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens",
+    "passStatus": "carried-forward-from-source-report"
+  },
+  "startedAt": "2026-07-13T11:23:08.904Z",
+  "finishedAt": "2026-07-13T11:23:08.904Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "taskId": "01-order-summary",
+      "passed": true,
+      "passStatus": "carried-forward-from-source-report",
+      "contextRecoveryFired": false,
+      "totalPromptTokens": 39158,
+      "totalCompletionTokens": 1224,
+      "reasoningTokens": 1408,
+      "totalTokens": 41790,
+      "turnCount": 12,
+      "toolCallCount": 12,
+      "usageComplete": true,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "episode": {
+        "id": "e-mrj3x2ao-7031",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/01-order-summary/e-mrj3x2ao-7031.jsonl"
+      }
+    },
+    {
+      "id": "02-ledger-contract-refactor",
+      "taskId": "02-ledger-contract-refactor",
+      "passed": true,
+      "passStatus": "carried-forward-from-source-report",
+      "contextRecoveryFired": false,
+      "totalPromptTokens": 75613,
+      "totalCompletionTokens": 2106,
+      "reasoningTokens": 8120,
+      "totalTokens": 85839,
+      "turnCount": 17,
+      "toolCallCount": 22,
+      "usageComplete": true,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "episode": {
+        "id": "e-mrj3y537-da5b",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/02-ledger-contract-refactor/e-mrj3y537-da5b.jsonl"
+      }
+    },
+    {
+      "id": "03-retry-cache-runtime",
+      "taskId": "03-retry-cache-runtime",
+      "passed": true,
+      "passStatus": "carried-forward-from-source-report",
+      "contextRecoveryFired": false,
+      "totalPromptTokens": 57289,
+      "totalCompletionTokens": 1107,
+      "reasoningTokens": 26527,
+      "totalTokens": 84923,
+      "turnCount": 16,
+      "toolCallCount": 11,
+      "usageComplete": true,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "episode": {
+        "id": "e-mrj41mxs-6778",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/03-retry-cache-runtime/e-mrj41mxs-6778.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 3,
+    "passed": 3,
+    "completionRateEligibleTasks": 3,
+    "completionRate": 1,
+    "excludedFromCompletionRate": [],
+    "medianTotalTokens": 84923,
+    "medianTurns": 16,
+    "sumPromptTokens": 172060,
+    "sumCompletionTokens": 4437,
+    "sumReasoningTokens": 36055,
+    "sumTotalTokens": 212552,
+    "contextRecoveryRate": 0,
+    "contextRecoveryEligibleTasks": 3
+  }
+}

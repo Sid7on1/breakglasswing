@@ -18,6 +18,20 @@ fatal-crash.log
 vendor/*/bin/
 vendor/*/cache/
 vendor/*/venv/
+vendor/
+
+# macOS Finder litter
+.DS_Store
+
+# Raw master footage for the site (hundreds of MB — compressed derivatives live in site/public/media)
+media-masters/
+
+# Sub-agent runtime state (worktrees + capacity leases are per-machine, recreated on demand)
+.bimax/worktrees/
+.bimax/subagent-capacity.json
+
+# Third-party CLI local config
+.grok/
 
 # Bun --compile scratch blobs (60MB each) that bun leaves at cwd on a crash/interrupt
 *.bun-build
@@ -55,3 +69,17 @@ __pycache__/
 
 # Local Claude Code workspace settings/agents (machine-local)
 .claude/
+
+# Locally-installed agent skills collection (machine-local, not part of the repo)
+.agents/
+
+# October (generated — context bus / browser MCP)
+.claude/settings.local.json
+.mcp.json
+.codex/config.toml
+.codex/hooks.json
+.opencode/plugins/october-bus.js
+opencode.json
+.cursor/mcp.json
+.cursor/cli.json
+.gemini/settings.json

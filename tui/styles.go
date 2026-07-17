@@ -103,6 +103,12 @@ var (
 	// Autocomplete dropdown / menu selection — accent text + arrow, no heavy inverse bar.
 	compSel = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 
+	// Grouped-menu chrome: category tab bar, section headers, and inline hyperlinks.
+	menuTabActive = lipgloss.NewStyle().Background(colAccent).Foreground(colInk).Bold(true)
+	menuTabIdle   = lipgloss.NewStyle().Foreground(colSubtle)
+	menuSection   = lipgloss.NewStyle().Foreground(colInactive).Bold(true)
+	linkStyle     = lipgloss.NewStyle().Foreground(colInfo).Underline(true)
+
 	// Diff rendering in the approval overlay.
 	diffAdd  = lipgloss.NewStyle().Foreground(colDiffAdd)
 	diffDel  = lipgloss.NewStyle().Foreground(colDiffDel)

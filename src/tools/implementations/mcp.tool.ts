@@ -55,7 +55,9 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
 # CRITICAL — adding from a pasted config
 - If the user PASTES an MCP config and says "add this" — a JSON like {"mcpServers":{"<name>":{"command":"npx","args":[...]}}}, or {command,args}, or a bare URL — read the name/command/args/url OUT of it and call THIS tool with action="add". For the example above: name="<name>", command="npx", args=[...].
 - NEVER write that config to a file (do NOT use WriteFileTool / create mcpServers.json). bimax stores MCP config itself in .bimax/mcp.json — your only job is to call McpManageTool add.`,
-    isDestructive: true, // Governor confirms before an external process is started
+    // Discovery/list/health are read-only. Lifecycle mutations are action-gated below; tools
+    // registered by an MCP server remain individually destructive/fail-closed.
+    isDestructive: false,
     isConcurrencySafe: false,
     schema: {
       type: 'object',
@@ -73,6 +75,11 @@ export function createMcpManageTool(governor: IGovernor, registry: ToolRegistry,
       required: ['action'],
     },
     execute: async (args: { action: string; query?: string; id?: string; name?: string; command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }) => {
+      if (['add', 'remove', 'remove-all', 'enable', 'disable', 'reconnect'].includes(args.action)) {
+        await governor.approveTaskExecution('TOOL_EXECUTION', {
+          tool: 'McpManageTool', action: args.action, name: args.name || args.id, isDestructive: true,
+        });
+      }
       if (args.action === 'discover') {
         const matches = discoverServers(args.query || '', 6);
         if (matches.length === 0) {

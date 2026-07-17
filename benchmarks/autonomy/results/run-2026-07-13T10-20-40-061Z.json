@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-13T10-20-40-061Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "startedAt": "2026-07-13T10:20:40.061Z",
+  "finishedAt": "2026-07-13T10:20:40.686Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "prompt": "The order-summary fixture has a failing focused test. Diagnose and fix `summarizeOrders` while\npreserving its exported API. The summary must follow the behavior encoded by the tests. Inspect the\nfixture before editing, run the focused test to reproduce the failure, make the smallest correct\nchange, rerun the test, and verify the final source before finishing.",
+      "passed": true,
+      "totalPromptTokens": 18016,
+      "totalCompletionTokens": 567,
+      "totalTokens": 18583,
+      "turnCount": 8,
+      "toolCallCount": 7,
+      "wallClockMs": 623,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj2ndgi-68fb",
+        "chainOk": true
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 18583,
+    "medianTurns": 8,
+    "sumTotalTokens": 18583,
+    "contextRecoveryRate": 0
+  }
+}

@@ -20,6 +20,7 @@ import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder'
 import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
+import { screenshotFromToolResult, buildScreenshotObservation, pruneScreenshotObservations } from './multimodal';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -690,6 +691,7 @@ export class AgentLoop {
         // that didn't match the tool_calls order — order-sensitive servers reject that, and weaker
         // models misread which result belongs to which call.
         const loopSignals: LoopSignal[] = [];
+        const screenshotPaths: string[] = [];
         for (const tc of toolCalls) {
           const ran = resultById.get(tc.id);
           const result = ran ? ran.result : 'Tool call interrupted before it ran.';
@@ -697,11 +699,31 @@ export class AgentLoop {
           if (ran) {
             const sig = loopDetector.record(tc.name, tc.args, result, ran.isError);
             if (sig) loopSignals.push(sig);
+            const shot = screenshotFromToolResult(tc.name, result);
+            if (shot) screenshotPaths.push(shot);
           }
         }
         // History is now well-formed (every tool_call answered) even on interrupt — so stop here
         // instead of leaving a dangling turn, and the next user message appends to a valid log.
         if (interrupted) return;
+
+        // Vision observation loop: a browser screenshot this batch produced becomes an image the
+        // model actually SEES on its next turn — but only when the active model advertises vision
+        // (text-only models keep the plain JSON result). Old observations are pruned so image
+        // bytes never pile up in history. Best-effort end to end: no vision, no file, or an
+        // adapter without capability introspection simply attaches nothing.
+        if (screenshotPaths.length > 0) {
+          try {
+            const caps = await (this.llm as any).activeCapabilities?.();
+            if (caps?.visionInput) {
+              const observation = buildScreenshotObservation(screenshotPaths[screenshotPaths.length - 1]);
+              if (observation) {
+                this.messages.push(observation);
+                pruneScreenshotObservations(this.messages);
+              }
+            }
+          } catch { /* vision attachment must never break the loop */ }
+        }
 
         // One mind-strip refresh per tool batch (not per call): the footer's 🧠 counters
         // (weak spots / drive deviations / habits) re-snapshot after the batch lands.

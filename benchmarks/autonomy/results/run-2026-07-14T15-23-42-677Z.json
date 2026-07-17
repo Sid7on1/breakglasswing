@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-23-42-677Z",
+  "mode": "live",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "provider-reported-usage",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:23:42.677Z",
+  "finishedAt": "2026-07-14T15:55:01.682Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "prompt": "The order-summary fixture has a failing focused test. Diagnose and fix `summarizeOrders` while\npreserving its exported API. Inspect the fixture before editing, run the focused test to reproduce\nthe failure, make the smallest correct change, rerun the test, and verify the final source before\nfinishing.\n\nThe complete required contract is:\n\n- Include every order except an order whose status is exactly `cancelled`. Orders with any other\n  status are included; in particular, a `pending` order must be counted.\n- Compute each included order's value by summing `quantity * unitPrice` over its `items`. Do not use\n  the order's `subtotal` field.\n- Group included orders by customer. Return one `{ customer, count, total }` object per customer,\n  where `count` is that customer's number of included orders and `total` is the sum of their computed\n  order values, rounded to two decimal places.\n- Sort the returned objects by customer name ascending.\n- Do not mutate the input array, any order, or any nested item.",
+      "passed": true,
+      "totalPromptTokens": 41881,
+      "totalCompletionTokens": 1178,
+      "reasoningTokens": 978,
+      "totalTokens": 44037,
+      "turnCount": 11,
+      "toolCallCount": 13,
+      "usageComplete": true,
+      "wallClockMs": 73302,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkswxwn-ef30",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/01-order-summary/e-mrkswxwn-ef30.jsonl"
+      }
+    },
+    {
+      "id": "02-ledger-contract-refactor",
+      "prompt": "The ledger fixture has inconsistent contracts across its parser, normalizer, balance builder, and\nreport formatter. Repair the implementation without changing the existing exported function names\nor module paths. Inspect the fixture, reproduce the failure with `npm test`, make the required\nmulti-file changes, and rerun the focused test.\n\nThe complete required contract is:\n\n- `parseTransactions(lines)` in `src/parser.mjs` accepts an array of strings. It ignores blank or\n  whitespace-only lines. Every other line must contain exactly four pipe-delimited, non-empty fields\n  in this order: `id|account|kind|amount`. It trims surrounding whitespace from every field and\n  returns `{ id, account, kind, amount }` objects in input order. A malformed nonblank line must throw\n  `TypeError` with the exact message `Invalid ledger line at index N`, where `N` is its zero-based\n  index in the original input array. It must not mutate `lines`.\n- `normalizeTransaction(transaction)` in `src/normalizer.mjs` returns a new\n  `{ id, account, cents }` object. `credit` produces positive cents and `debit` produces negative\n  cents. Amounts must be positive decimal strings with at most two fractional digits; conversion\n  must use integer cents rather than floating-point accumulation. The id and account must be\n  non-empty strings and kind must be exactly `credit` or `debit`. Any invalid transaction must throw\n  `TypeError` whose message is the literal string `Invalid transaction ` (including its trailing\n  space) followed immediately by `String(transaction.id)`. For example, an invalid transaction with\n  id `bad-kind` must have the exact message `Invalid transaction bad-kind`. It must not mutate the\n  input object.\n- `buildBalances(transactions)` in `src/ledger.mjs` accepts normalized transactions, ignores every\n  occurrence of an id after its first occurrence, and returns a `Map` from account name to its total\n  integer cents. It must not mutate the array or transaction objects.\n- `formatReport(balances)` in `src/report.mjs` accepts that `Map` and returns\n  `{ account, balance }` objects. `balance` is a dollar number derived from integer cents and rounded\n  to two decimal places. Sort by balance descending; ties are broken by account name ascending. It\n  must not mutate the `Map`.\n- `processLedger(lines)` in `src/index.mjs` must compose those four stages and return the formatted\n  report with all behavior above.\n\nDo not add dependencies or replace the focused test with a weaker assertion.",
+      "passed": true,
+      "totalPromptTokens": 68732,
+      "totalCompletionTokens": 2641,
+      "reasoningTokens": 10134,
+      "totalTokens": 81507,
+      "turnCount": 15,
+      "toolCallCount": 22,
+      "usageComplete": true,
+      "wallClockMs": 226042,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrksyib9-b9d8",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/02-ledger-contract-refactor/e-mrksyib9-b9d8.jsonl"
+      }
+    },
+    {
+      "id": "03-retry-cache-runtime",
+      "prompt": "The asynchronous retry cache in this fixture passes simple sequential use but violates its contract\nunder specific promise timing. Diagnose it by running the focused test and repair\n`createRetryCache` in `src/retry-cache.mjs` without changing its exported name or adding dependencies.\n\nThe complete required contract is:\n\n- `createRetryCache({ loader, ttlMs, now })` returns an object with `get(key, options = {})`.\n  `now` is an injected function returning the current time in milliseconds.\n- `get` calls `loader(key, options)` and returns a promise for its result. It passes the exact key and\n  exact options object to the loader and must not mutate either the options object or nested values.\n- Calls for the same key while its load is still pending must share that in-flight work: the loader is\n  invoked exactly once and every caller receives the same resolved value. The pending load remains\n  shared even if the injected clock advances before it settles.\n- Different keys are independent. Their loaders may be in flight at the same time; one key must not\n  serialize or block another key.\n- A rejected load must be evicted when it settles. The rejection is delivered to its callers, and the\n  next `get` for that key must invoke the loader again and may succeed.\n- A successful value remains cached until its TTL expires. The TTL begins at successful resolution,\n  not when loading starts. A call strictly before `resolvedAt + ttlMs` reuses the cached value. A call\n  exactly at or after that boundary invokes the loader again.\n\nThe timing sequence is the defect: do not weaken the asynchronous test or replace the injected clock\nwith real delays. Run `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 32008,
+      "totalCompletionTokens": 1040,
+      "reasoningTokens": 17570,
+      "totalTokens": 50618,
+      "turnCount": 10,
+      "toolCallCount": 10,
+      "usageComplete": true,
+      "wallClockMs": 244065,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkt3cq9-4df5",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/03-retry-cache-runtime/e-mrkt3cq9-4df5.jsonl"
+      }
+    },
+    {
+      "id": "04-path-routing-backtrack",
+      "prompt": "The cross-platform file router in this fixture mishandles some Windows paths, URL-like suffixes,\ncompound extensions, and precedence. Diagnose the failure and repair it without adding dependencies\nor changing the exported names.\n\nThe required contract is:\n\n- `normalizeRoutePath(input)` accepts a non-empty path string, removes a query or hash suffix,\n  converts every backslash to `/`, collapses repeated separators, and lowercases the result. It must\n  throw `TypeError('path must be a non-empty string')` for invalid input.\n- `routeFile(input, routes)` returns the `handler` of the first matching rule, or `null` when none\n  matches. Rules are checked in caller order; later rules must never override an earlier match.\n- A rule has `{ extension, handler }`. Extension matching is case-insensitive, and extensions may be\n  compound (for example `.test.ts`). A match must cover the end of the normalized pathname after\n  query/hash removal.\n- Neither the route array nor any route object may be mutated.\n\nRun `npm test` after the change. Preserve the existing first-match router logic; the root defect is\nin path normalization, even if changing the router appears to fix one example.",
+      "passed": true,
+      "totalPromptTokens": 14212,
+      "totalCompletionTokens": 335,
+      "reasoningTokens": 1598,
+      "totalTokens": 16145,
+      "turnCount": 6,
+      "toolCallCount": 8,
+      "usageComplete": true,
+      "wallClockMs": 54190,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkt8l1x-ef7f",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/04-path-routing-backtrack/e-mrkt8l1x-ef7f.jsonl"
+      }
+    },
+    {
+      "id": "05-chunked-record-decoder",
+      "prompt": "Repair the incremental NDJSON decoder in `src/decoder.mjs`. It currently treats each byte chunk as\nan independent string, which fails under real stream boundaries. Keep the public\n`createRecordDecoder()` export and add no dependencies.\n\nRequired behavior:\n\n- `push(chunk)` accepts a `Buffer` or `Uint8Array` and returns every complete decoded JSON value\n  produced by that chunk, in order.\n- Arbitrary byte boundaries must work, including boundaries inside a multi-byte UTF-8 character,\n  inside JSON syntax, and between `\\r` and `\\n`.\n- Both LF and CRLF delimit records. Empty lines are ignored but still advance the physical line\n  number.\n- `flush()` finishes UTF-8 decoding and parses a final non-empty record without requiring a newline.\n  Repeated `flush()` calls return an empty array.\n- Invalid JSON throws `Error('Invalid JSON on line N: <parser message>')`, where `N` is the physical\n  one-based input line. A decoder that has thrown need not be reused.\n- The decoder must not mutate supplied buffers or option-like caller values.\n\nRun `npm test` after the repair.",
+      "passed": true,
+      "totalPromptTokens": 74079,
+      "totalCompletionTokens": 4077,
+      "reasoningTokens": 21589,
+      "totalTokens": 99745,
+      "turnCount": 18,
+      "toolCallCount": 17,
+      "usageComplete": true,
+      "wallClockMs": 349205,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkt9qv6-1f3c",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/05-chunked-record-decoder/e-mrkt9qv6-1f3c.jsonl"
+      }
+    },
+    {
+      "id": "06-session-schema-migration",
+      "prompt": "Implement a reliable, idempotent v1-to-v2 session migration across this fixture's reader, migrator,\nwriter, and summary modules. Do not change the public exports or add dependencies.\n\nSchema and behavior:\n\n- A v1 record has `version: 1`, `id`, `user`, `startedAt`, `turns`, and optional `metadata` plus\n  unknown top-level fields. Each turn has `role`, `text`, and may contain unknown fields.\n- Its v2 form has `version: 2`, the same `id`, `owner: { id: user }`, `createdAt: startedAt`, and\n  `messages`, where each message has `role`, `content: text`, and preserves unknown turn fields.\n- Preserve metadata and unknown top-level fields. Remove only the replaced v1 fields `user`,\n  `startedAt`, and `turns`.\n- Migrating a v2 record is idempotent: it returns an equivalent v2 value. No migration, read,\n  write, or summary operation may mutate caller-owned records or nested values.\n- `readSession(path)` parses JSON and returns a migrated v2 record. `writeSession(path, record)`\n  writes canonical v2 JSON followed by a newline and returns the same v2 value.\n- Invalid JSON, unsupported versions, or missing required fields must reject/throw an error whose\n  message begins `Invalid session record:`.\n- `summarizeSessions(records)` returns `{ id, ownerId, createdAt, messageCount }` entries sorted by\n  `createdAt` and then `id`, without reordering or mutating the input array.\n\nRun `npm test` after the repair.",
+      "passed": true,
+      "totalPromptTokens": 172457,
+      "totalCompletionTokens": 3077,
+      "reasoningTokens": 11133,
+      "totalTokens": 186667,
+      "turnCount": 19,
+      "toolCallCount": 27,
+      "usageComplete": true,
+      "wallClockMs": 339354,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkth8ai-e183",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/06-session-schema-migration/e-mrkth8ai-e183.jsonl"
+      }
+    },
+    {
+      "id": "07-dependency-scheduler",
+      "prompt": "Repair `runSchedule(graph, { limit, run })` in `src/scheduler.mjs` without changing its export or\nadding dependencies.\n\nContract:\n\n- `graph` is an array of unique `{ id, deps }` nodes. `deps` contains node IDs that must finish\n  successfully before that node starts.\n- Validate the entire graph before invoking `run`: duplicate IDs, a missing dependency, or a cycle\n  must reject with a useful message containing respectively `Duplicate node`, `Missing dependency`,\n  or `Dependency cycle detected`.\n- `limit` must be a positive integer. No more than `limit` calls to `run(node)` may be active at once.\n- Start every ready node as soon as capacity exists, but never before all its dependencies finish.\n  Independent nodes should run concurrently.\n- Resolve to an array of returned values in the original graph order, regardless of completion order.\n- Reject on the first job failure and do not launch new work afterward.\n- Do not mutate the graph, dependency arrays, or node objects.\n\nRun `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 143232,
+      "totalCompletionTokens": 6551,
+      "reasoningTokens": 20872,
+      "totalTokens": 170655,
+      "turnCount": 18,
+      "toolCallCount": 19,
+      "usageComplete": true,
+      "wallClockMs": 592861,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrktoi50-c43a",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-42-677Z/07-dependency-scheduler/e-mrktoi50-c43a.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 7,
+    "passed": 7,
+    "completionRate": 1,
+    "medianTotalTokens": 81507,
+    "medianTurns": 15,
+    "sumPromptTokens": 546601,
+    "sumCompletionTokens": 18899,
+    "sumReasoningTokens": 83874,
+    "sumTotalTokens": 649374,
+    "contextRecoveryRate": 0
+  }
+}

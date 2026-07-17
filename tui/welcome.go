@@ -69,9 +69,12 @@ func (m *model) showWelcome() {
 		model = shortModel(m.fLite)
 	}
 	if model == "" {
-		model = "default"
+		// Never pretend a "default" was chosen — an unconfigured session says so and points at
+		// the wizard (which also opens automatically when there is no key at all).
+		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("model  "), warnStyle.Render("not chosen yet — run /setup"))
+	} else {
+		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("model  "), metaVal.Render(model))
 	}
-	fmt.Fprintf(&b, "%s%s\n", metaKey.Render("model  "), metaVal.Render(model))
 	cwd := m.cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()

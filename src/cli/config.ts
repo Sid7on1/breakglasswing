@@ -168,6 +168,18 @@ export async function saveConfig(updates: Partial<CliConfig>): Promise<CliConfig
     const existing = await readJson(GLOBAL_PATH);
     await fs.mkdir(GLOBAL_DIR, { recursive: true });
     await fs.writeFile(GLOBAL_PATH, JSON.stringify({ ...existing, ...globalUpdates }, null, 2), 'utf-8');
+    // Migrate-on-write: a legacy combined project file merges LAST in loadConfig, so a stale copy
+    // of a global key there (e.g. an old `model`) silently shadows the value we just saved — the
+    // user "changes model" and nothing actually changes (this pinned sub-agents to a model the
+    // user had switched away from). Strip the just-updated global keys from the project file.
+    try {
+      const existingProject = await readJson(projectPath());
+      const stale = Object.keys(globalUpdates).filter(k => k in existingProject);
+      if (stale.length) {
+        for (const k of stale) delete (existingProject as any)[k];
+        await fs.writeFile(projectPath(), JSON.stringify(existingProject, null, 2), 'utf-8');
+      }
+    } catch { /* no project file — nothing to migrate */ }
   }
   if (Object.keys(projectUpdates).length) {
     const existing = await readJson(projectPath());

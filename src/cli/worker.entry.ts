@@ -96,7 +96,14 @@ async function runSubAgentCore(
     try {
       const cfg = await loadConfig();
       llmAdapter.applyConfig({
-        model: cfg.model, liteModel: cfg.liteModel, temperature: cfg.temperature, topP: cfg.topP,
+        model: cfg.model,
+        // No explicit lite model → use the USER'S model for the lite lane too, not the adapter's
+        // hardcoded default. Sub-agents otherwise made their first call (router/smalltalk lane) on
+        // a reasoning model the user never chose — which NIM queues for minutes on free keys, the
+        // core of "sub-agents are hell of slow". Matching slots also lets the router short-circuit
+        // (no pre-flight classifier call at all).
+        liteModel: cfg.liteModel || cfg.model,
+        temperature: cfg.temperature, topP: cfg.topP,
         maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, parallelToolCalls: cfg.parallelToolCalls,
       });
     } catch { /* fall back to adapter defaults if config can't be read in the worker */ }

@@ -80,6 +80,15 @@ export const MCP_CATALOG: CatalogEntry[] = [
     command: 'npx', args: ['-y', '@playwright/mcp@latest'],
   },
   {
+    id: 'open-computer-use',
+    title: 'Desktop Computer Use (local)',
+    description: 'Control native macOS, Windows, and Linux apps through local accessibility APIs, screenshots, semantic element indexes, keyboard, mouse, scrolling, and drag actions.',
+    keywords: ['computer use', 'computer', 'desktop', 'gui', 'app', 'accessibility', 'screen', 'screenshot', 'mouse', 'keyboard', 'click', 'automation', 'macos', 'windows', 'linux'],
+    // Pin the audited upstream release. Its npm package selects a bundled native runtime for the
+    // current OS/architecture; macOS still requires explicit Accessibility + Screen Recording.
+    command: 'npx', args: ['-y', 'open-computer-use@0.2.0', 'mcp'],
+  },
+  {
     id: 'brave-search',
     title: 'Brave Web Search',
     description: 'Search the live web (and local/places) via the Brave Search API.',

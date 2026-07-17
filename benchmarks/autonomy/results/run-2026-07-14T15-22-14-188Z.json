@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-22-14-188Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "offline-tokenizer-estimate",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:22:14.188Z",
+  "finishedAt": "2026-07-14T15:22:14.791Z",
+  "tasks": [
+    {
+      "id": "07-dependency-scheduler",
+      "prompt": "Repair `runSchedule(graph, { limit, run })` in `src/scheduler.mjs` without changing its export or\nadding dependencies.\n\nContract:\n\n- `graph` is an array of unique `{ id, deps }` nodes. `deps` contains node IDs that must finish\n  successfully before that node starts.\n- Validate the entire graph before invoking `run`: duplicate IDs, a missing dependency, or a cycle\n  must reject with a useful message containing respectively `Duplicate node`, `Missing dependency`,\n  or `Dependency cycle detected`.\n- `limit` must be a positive integer. No more than `limit` calls to `run(node)` may be active at once.\n- Start every ready node as soon as capacity exists, but never before all its dependencies finish.\n  Independent nodes should run concurrently.\n- Resolve to an array of returned values in the original graph order, regardless of completion order.\n- Reject on the first job failure and do not launch new work afterward.\n- Do not mutate the graph, dependency arrays, or node objects.\n\nRun `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 14394,
+      "totalCompletionTokens": 835,
+      "reasoningTokens": 0,
+      "totalTokens": 15229,
+      "turnCount": 6,
+      "toolCallCount": 5,
+      "usageComplete": true,
+      "wallClockMs": 601,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrksv1ma-ccf9",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-22-14-188Z/07-dependency-scheduler/e-mrksv1ma-ccf9.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 15229,
+    "medianTurns": 6,
+    "sumPromptTokens": 14394,
+    "sumCompletionTokens": 835,
+    "sumReasoningTokens": 0,
+    "sumTotalTokens": 15229,
+    "contextRecoveryRate": 0
+  }
+}

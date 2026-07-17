@@ -7,12 +7,13 @@ import { cn } from '../../lib/cn';
  * the bottom of the window, so "open upward" is the only case.
  */
 export function Dropdown({
-  trigger, children, align = 'left', direction = 'up',
+  trigger, children, align = 'left', direction = 'up', ariaLabel,
 }: {
   trigger: (open: boolean) => React.ReactNode;
   children: (close: () => void) => React.ReactNode;
   align?: 'left' | 'right';
   direction?: 'up' | 'down'; // 'down' for triggers at the top of a panel (Review branch switcher)
+  ariaLabel?: string;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -35,7 +36,7 @@ export function Dropdown({
 
   return (
     <div ref={rootRef} className="relative">
-      <button type="button" onClick={() => setOpen((v) => !v)} className="cursor-pointer">
+      <button type="button" aria-label={ariaLabel} onClick={() => setOpen((v) => !v)} className="cursor-pointer">
         {trigger(open)}
       </button>
       {open && (

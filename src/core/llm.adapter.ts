@@ -110,7 +110,11 @@ export class LlmAdapter implements LLMProvider {
     const cacheKey = `${baseURL}${apiKey}`;
     let client = this.clientCache.get(cacheKey);
     if (!client) {
-      client = new OpenAI({ apiKey, baseURL, maxRetries: 3 });
+      // maxRetries MUST be 0: retries belong to OUR loop, which rotates to a different key.
+      // The SDK's built-in retry re-sends to the SAME key — under NIM's per-key server-side
+      // queueing that stacked up to 4×timeout (8 minutes) of invisible dead air per call,
+      // which is exactly the "sub-agents are hell of slow" hang.
+      client = new OpenAI({ apiKey, baseURL, maxRetries: 0 });
       this.clientCache.set(cacheKey, client);
     }
     return client;
@@ -217,6 +221,11 @@ export class LlmAdapter implements LLMProvider {
   private async getKey(): Promise<KeyResult> {
     const kr = await this.apiKeyManager.getNextKey();
     if (!kr.keyStr || kr.idx === null) throw new Error(`[LlmAdapter] FATAL: No API keys configured.`);
+    // Request-path visibility (BIMAX_LLM_TRACE=1): which key each call lands on and why turns
+    // stall is otherwise invisible — this one line made the sub-agent hang diagnosable.
+    if (process.env.BIMAX_LLM_TRACE === '1') {
+      Logger.info(`[LlmAdapter] → key #${(kr.idx ?? 0) + 1} (${kr.provider || '?'}) model=${this.userModel || this.defaultModel}`);
+    }
     if (kr.waitTimeSecs > 0) {
       // Auth-dead pool: every key's last failure was 401/403. That is permanent for these key
       // strings — sleeping through the cooldown and re-sending the same key can never succeed, it
@@ -604,7 +613,26 @@ export class LlmAdapter implements LLMProvider {
       // raw chunk is provider wait. No-op when no turn timeline is active (classifier/critic/sub-agent
       // calls, tests) and idempotent within a turn (only the first streaming call of a turn counts).
       markProviderRequest();
-      const stream: any = await client.chat.completions.create(requestOptions, requestInit);
+      // NIM's per-key queue holds the RESPONSE HEADERS until the request is granted, so a hung key
+      // stalls create() itself — before the stream iterator our chunk watchdog guards even exists.
+      // Cap the header wait with the same first-token budget (plain models / multi-key pools get
+      // the tight one) so a hung key is benched and the retry rotates instead of waiting minutes.
+      const capsSayReasoner = caps.inlineReasoning || caps.nativeThinking || this.detectedReasoners.has(model);
+      const createBudgetMs = (!process.env.BGW_FIRST_CHUNK_TIMEOUT_MS && !capsSayReasoner && this.apiKeyManager.size() > 1)
+        ? Math.min(this.firstChunkTimeoutMs, 60_000)
+        : this.firstChunkTimeoutMs;
+      requestInit.timeout = Math.min(this.requestTimeout, createBudgetMs);
+      let stream: any;
+      try {
+        stream = await client.chat.completions.create(requestOptions, requestInit);
+      } catch (e: any) {
+        // The SDK surfaces our header-wait cap as APIConnectionTimeoutError ("Request timed out").
+        // Normalize it to the watchdog's message so the catch below benches the key (reportKeyHang).
+        if (e?.name === 'APIConnectionTimeoutError' || /timed? ?out/i.test(String(e?.message))) {
+          throw new Error(`LLM stream timeout: model '${model}' sent no first token for ${Math.round(createBudgetMs / 1000)}s (provider ${kr.provider || 'NIM'} queued/hung this key — rotating)`);
+        }
+        throw e;
+      }
 
       // Accumulate streamed tool calls keyed by their delta `index` — the OpenAI streaming contract:
       // the first delta for an index carries id+name+the start of the args, later deltas append more
@@ -661,13 +689,23 @@ export class LlmAdapter implements LLMProvider {
 
       const iterator = stream[Symbol.asyncIterator]();
       let receivedFirstChunk = false;
+      // First-token budget. Reasoning/cold-start models legitimately take minutes, but a PLAIN
+      // model (llama et al) answering in >1min means the provider is queueing/hanging THIS KEY
+      // server-side. When the pool can rotate (2+ keys), give plain models a tight budget so a
+      // hung key costs ~1min, gets benched (reportKeyHang), and the retry lands on a fast key —
+      // instead of every sub-agent turn silently burning the full 180s. Explicit env wins.
+      let firstBudgetMs = this.firstChunkTimeoutMs;
+      if (!process.env.BGW_FIRST_CHUNK_TIMEOUT_MS && !knownReasoner && !capsSayReasoner && this.apiKeyManager.size() > 1) {
+        firstBudgetMs = Math.min(firstBudgetMs, 60_000);
+      }
+      const requestStartMs = Date.now();
       while (true) {
         const nextPromise = iterator.next();
         // Guard against a silently stalled stream. The first chunk (time-to-first-token) gets a
         // longer budget than later chunks: a cold start is a legitimate long pause, a mid-stream
         // gap is not. The timer MUST be cleared once the chunk arrives, or every chunk leaks a
         // timer (and a later unhandled rejection) — a long reasoning stream would spawn hundreds.
-        const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : this.firstChunkTimeoutMs;
+        const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : firstBudgetMs;
         const phase = receivedFirstChunk ? 'mid-stream' : 'first token';
         let timeoutHandle: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<any>((_, reject) => {
@@ -690,7 +728,11 @@ export class LlmAdapter implements LLMProvider {
           clearTimeout(timeoutHandle!);
         }
         if (result.done) break;
-        if (!receivedFirstChunk) markFirstRawChunk(); // perf: provider's first byte → separates provider wait from render
+        if (!receivedFirstChunk) {
+          markFirstRawChunk(); // perf: provider's first byte → separates provider wait from render
+          // Latency feedback: teach the key picker which keys answer fast (NIM queues per-key).
+          this.apiKeyManager.reportKeyLatency(kr.idx!, Date.now() - requestStartMs);
+        }
         receivedFirstChunk = true;
 
         const chunk = result.value;
@@ -839,6 +881,12 @@ export class LlmAdapter implements LLMProvider {
 
       this.enrichModelNotFound(e, kr, options.lite);
       const { status, recoverable, kind, retryAfterSecs } = classifyStreamError(e);
+      // A first-token timeout means the provider is queueing/hanging THIS key — bench it so
+      // rotation stops feeding the dead lane (reportKeyResult alone gives it a 2s cooldown,
+      // which put it right back in the mix). Message text is the watchdog's own, matched here.
+      if (typeof e?.message === 'string' && e.message.includes('sent no first token')) {
+        this.apiKeyManager.reportKeyHang(kr.idx!);
+      }
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
       yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
     }

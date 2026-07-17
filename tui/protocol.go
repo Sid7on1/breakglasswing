@@ -297,14 +297,17 @@ type SubAgent struct {
 type Menu struct {
 	ID           string       `json:"id"`
 	Title        string       `json:"title"`
+	Subtitle     string       `json:"subtitle"` // optional context line under the title (wizard step, hint)
 	Options      []menuOption `json:"options"`
 	InitialIndex int          `json:"initialIndex"`
 }
 
 type menuOption struct {
-	Label string `json:"label"`
-	Value string `json:"value"`
-	Desc  string `json:"desc"`
+	Label    string `json:"label"`
+	Value    string `json:"value"`
+	Desc     string `json:"desc"`
+	Category string `json:"category"` // optional group — menus with >1 category render tabs + section headers
+	Link     string `json:"link"`     // optional URL rendered as an OSC-8 hyperlink on the row
 }
 
 // --- Inbound encoders: TUI → engine --------------------------------------------------------

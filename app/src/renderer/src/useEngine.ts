@@ -1,7 +1,8 @@
 import { useEffect, useReducer, useRef, useCallback } from 'react';
 import {
   Outbound, RequestMsg, CompletionItem, MessageEntry, ToolCallEntry, UiSnapshot, SubAgentClaim,
-  EngineConfig, PROTOCOL_VERSION,
+  ReviewSnapshot, EngineConfig, PROTOCOL_VERSION,
+  ControlsMsg,
 } from './protocol';
 
 /**
@@ -13,6 +14,13 @@ import {
 export type TranscriptItem =
   | { kind: 'msg'; msg: MessageEntry; menuChosen?: string; thought?: string }
   | { kind: 'tool'; call: ToolCallEntry };
+
+export interface DiagnosticEntry {
+  id: string;
+  level: 'info' | 'warn' | 'error';
+  text: string;
+  timestamp: string;
+}
 
 export interface EngineUiState {
   items: TranscriptItem[];
@@ -31,6 +39,8 @@ export interface EngineUiState {
   tier: string;
   streamedChars: number;
   project: string;
+  diagnostics: DiagnosticEntry[];
+  review: ReviewSnapshot | null;   // the engine's per-thread review state (review_update)
 }
 
 const initial: EngineUiState = {
@@ -44,12 +54,14 @@ const initial: EngineUiState = {
   subagents: [],
   request: null,
   completions: { id: 0, items: [] },
-  engine: { state: 'starting', detail: '' },
+  engine: { state: 'idle', detail: '' },
   protocolMismatch: null,
   mode: '',
   tier: '',
   streamedChars: 0,
   project: '',
+  diagnostics: [],
+  review: null,
 };
 
 type Action =
@@ -72,9 +84,41 @@ function upsertTool(items: TranscriptItem[], call: ToolCallEntry): TranscriptIte
 
 function onEvent(state: EngineUiState, name: string, args: any[]): EngineUiState {
   switch (name) {
+    case 'log': {
+      const raw = args[0];
+      const text = String(typeof raw === 'object' && raw ? raw.text ?? '' : raw ?? '')
+        // Terminal adapters may include ANSI color escapes; the desktop renderer should not.
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .trim();
+      if (!text) return state;
+      const rawLevel = typeof raw === 'object' && raw ? String(raw.level ?? 'info') : 'info';
+      const level: DiagnosticEntry['level'] = rawLevel === 'error' ? 'error' : rawLevel === 'warn' ? 'warn' : 'info';
+      const entry: DiagnosticEntry = {
+        id: String((typeof raw === 'object' && raw?.id) || `${Date.now()}-${state.diagnostics.length}`),
+        level,
+        text,
+        timestamp: String((typeof raw === 'object' && raw?.timestamp) || new Date().toISOString()),
+      };
+      return { ...state, diagnostics: [...state.diagnostics, entry].slice(-100) };
+    }
     case 'message': {
       const msg = args[0] as MessageEntry;
       if (!msg) return state;
+      // The engine echoes the user's turn as its own `message` event (that echo is what the session
+      // file persists). The composer already painted an instant local bubble — adopt the engine's
+      // entry into it instead of appending a duplicate.
+      if (msg.role === 'user') {
+        for (let i = state.items.length - 1; i >= 0; i--) {
+          const it = state.items[i];
+          if (it.kind !== 'msg' || it.msg.role !== 'user') continue;
+          if (it.msg.id.startsWith('local-') && it.msg.content === msg.content) {
+            const items = state.items.slice();
+            items[i] = { kind: 'msg', msg };
+            return { ...state, items };
+          }
+          break; // a different (or already-adopted) user turn — this echo is genuinely new
+        }
+      }
       // A final assistant message supersedes the in-flight stream buffer and adopts the turn's
       // reasoning text so the "Thought for Ns" line can expand to the actual thoughts.
       const streaming = msg.role === 'assistant' ? '' : state.streaming;
@@ -96,8 +140,41 @@ function onEvent(state: EngineUiState, name: string, args: any[]): EngineUiState
       return { ...state, status: String(args[0] ?? '') };
     case 'clear':
       return { ...state, items: [], streaming: '', thinking: '', streamedChars: 0 };
+    case 'session_restore': {
+      // True resume: rebuild the transcript from the saved thread's entries (messages + tool
+      // lines) — the engine restored its context from the same file, so both sides agree.
+      const payload = args[0] as { id?: string; entries?: any[] } | undefined;
+      const entries = Array.isArray(payload?.entries) ? payload!.entries! : [];
+      const items: TranscriptItem[] = [];
+      for (const e of entries) {
+        if (!e || typeof e !== 'object') continue;
+        if (e.role === 'tool') {
+          items.push({
+            kind: 'tool',
+            call: {
+              id: String(e.id ?? `replay-${items.length}`),
+              toolName: String(e.toolName ?? 'tool'),
+              input: String(e.input ?? ''),
+              output: String(e.output ?? ''),
+              status: e.status === 'error' ? 'error' : 'success',
+              startTime: String(e.startTime ?? e.timestamp ?? ''),
+              endTime: e.endTime ? String(e.endTime) : undefined,
+              parentId: e.parentId ? String(e.parentId) : undefined,
+              agentLabel: e.agentLabel ? String(e.agentLabel) : undefined,
+            },
+          });
+        } else if (e.role === 'user' || e.role === 'assistant' || e.role === 'system') {
+          // Replayed menus are inert (their engine-side handlers died with the original process).
+          // The sentinel must not equal any option's value — '' would light up "Skip"-style options.
+          items.push({ kind: 'msg', msg: e as MessageEntry, menuChosen: e.uiComponent === 'menu' ? '__replayed__' : undefined });
+        }
+      }
+      return { ...state, items, streaming: '', thinking: '' };
+    }
     case 'ui_snapshot':
       return { ...state, snapshot: args[0] as UiSnapshot };
+    case 'review_update':
+      return { ...state, review: (args[0] as ReviewSnapshot) ?? null };
     case 'todo_update':
       return { ...state, todos: Array.isArray(args[0]) ? args[0] : [] };
     case 'subagent_update':
@@ -138,9 +215,27 @@ function reducer(state: EngineUiState, action: Action): EngineUiState {
       }
     }
     case 'engineState':
-      return { ...state, engine: { state: action.state, detail: action.detail } };
+      // An exited engine can never answer its own approval requests — leaving the modal up would
+      // falsely show the approval as pending (and a reply would go to a process that's gone).
+      return {
+        ...state,
+        engine: { state: action.state, detail: action.detail },
+        request: action.state === 'exited' ? null : state.request,
+      };
     case 'project':
-      return { ...state, project: action.dir, items: [], streaming: '', thinking: '', todos: [] };
+      return {
+        ...state,
+        project: action.dir,
+        items: [],
+        streaming: '',
+        thinking: '',
+        todos: [],
+        snapshot: null,
+        diagnostics: [],
+        review: null,
+        request: null, // any pending approval belonged to the previous engine process
+        engine: action.dir ? state.engine : { state: 'idle', detail: '' },
+      };
     case 'localUser': {
       const msg: MessageEntry = {
         id: `local-${Date.now()}`,
@@ -209,6 +304,10 @@ export function useEngine() {
 
   const interrupt = useCallback(() => window.bimax.send({ t: 'interrupt' }), []);
 
+  const setControls = useCallback((controls: Omit<ControlsMsg, 't'>) => {
+    window.bimax.send({ t: 'controls', ...controls });
+  }, []);
+
   // Chrome-initiated commands (/mode, /clear, palette executions): straight to the engine, no
   // local user bubble — the engine's own messages/status are the feedback.
   const sendCommand = useCallback((text: string) => {
@@ -256,5 +355,5 @@ export function useEngine() {
     [configRoundTrip],
   );
 
-  return { state, submit, interrupt, sendCommand, query, reply, menuSelect, clearCompletions, configGet, configSet };
+  return { state, submit, interrupt, setControls, sendCommand, query, reply, menuSelect, clearCompletions, configGet, configSet };
 }

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-15-03-750Z",
+  "mode": "live",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "provider-reported-usage",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:15:03.750Z",
+  "finishedAt": "2026-07-14T15:16:13.274Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "prompt": "The order-summary fixture has a failing focused test. Diagnose and fix `summarizeOrders` while\npreserving its exported API. Inspect the fixture before editing, run the focused test to reproduce\nthe failure, make the smallest correct change, rerun the test, and verify the final source before\nfinishing.\n\nThe complete required contract is:\n\n- Include every order except an order whose status is exactly `cancelled`. Orders with any other\n  status are included; in particular, a `pending` order must be counted.\n- Compute each included order's value by summing `quantity * unitPrice` over its `items`. Do not use\n  the order's `subtotal` field.\n- Group included orders by customer. Return one `{ customer, count, total }` object per customer,\n  where `count` is that customer's number of included orders and `total` is the sum of their computed\n  order values, rounded to two decimal places.\n- Sort the returned objects by customer name ascending.\n- Do not mutate the input array, any order, or any nested item.",
+      "passed": true,
+      "totalPromptTokens": 47388,
+      "totalCompletionTokens": 1262,
+      "reasoningTokens": 1448,
+      "totalTokens": 50098,
+      "turnCount": 13,
+      "toolCallCount": 14,
+      "usageComplete": true,
+      "wallClockMs": 69521,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrkslti3-f45b",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-15-03-750Z/01-order-summary/e-mrkslti3-f45b.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "completionRate": 1,
+    "medianTotalTokens": 50098,
+    "medianTurns": 13,
+    "sumPromptTokens": 47388,
+    "sumCompletionTokens": 1262,
+    "sumReasoningTokens": 1448,
+    "sumTotalTokens": 50098,
+    "contextRecoveryRate": 0
+  }
+}

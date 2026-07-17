@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ChevronRight, ChevronDown, Folder, FileText, AtSign, RefreshCw } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder, FileText, AtSign, RefreshCw, Database } from 'lucide-react';
 import { cn } from '../lib/cn';
 
 /**
@@ -14,6 +14,10 @@ export function insertIntoComposer(text: string): void {
 
 interface DirState { entries: { name: string; dir: boolean }[]; open: boolean }
 
+// Bimax-owned workspace state is useful for debugging, but it should not dominate the project
+// explorer. Keep it one click away instead of pretending generated databases are source files.
+const GENERATED_ROOTS = new Set(['.agents', '.bimax', '.breakglass', '.breakglass_graph']);
+
 export function FilesPanel({
   project, onOpenFile,
 }: {
@@ -22,6 +26,7 @@ export function FilesPanel({
 }): React.ReactElement {
   // rel dir path → listing; '' is the project root.
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
+  const [showGenerated, setShowGenerated] = useState(false);
 
   const loadDir = useCallback((rel: string, open = true) => {
     void window.bimax.files.list(rel)
@@ -44,10 +49,27 @@ export function FilesPanel({
   }, [project, loadDir]);
 
   const root = dirs[''];
+  const generatedCount = root?.entries.filter((entry) => GENERATED_ROOTS.has(entry.name)).length ?? 0;
+  const visibleDirs = root && !showGenerated
+    ? { ...dirs, '': { ...root, entries: root.entries.filter((entry) => !GENERATED_ROOTS.has(entry.name)) } }
+    : dirs;
   return (
     <div className="flex h-full flex-col">
       <div className="mb-1.5 flex shrink-0 items-center">
         <span className="text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase">Files</span>
+        {generatedCount > 0 && (
+          <button
+            onClick={() => setShowGenerated((value) => !value)}
+            aria-pressed={showGenerated}
+            className={cn(
+              'ml-2 flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-1 text-[10px] transition-colors',
+              showGenerated ? 'bg-ember/10 text-ember' : 'text-faint hover:bg-hover hover:text-ink',
+            )}
+            title={showGenerated ? 'Hide Bimax-generated workspace data' : 'Show Bimax-generated workspace data'}
+          >
+            <Database size={11} /> Generated {generatedCount}
+          </button>
+        )}
         <button
           onClick={() => loadDir('')}
           className="ml-auto flex size-6 cursor-pointer items-center justify-center rounded-md text-dim hover:bg-hover hover:text-ink"
@@ -62,7 +84,7 @@ export function FilesPanel({
         ) : root.entries.length === 0 ? (
           <div className="py-2 text-xs text-faint">Empty project.</div>
         ) : (
-          <Tree rel="" dirs={dirs} depth={0} onToggle={(r, open) => {
+          <Tree rel="" dirs={visibleDirs} depth={0} onToggle={(r, open) => {
             if (open && !dirs[r]) loadDir(r);
             else setDirs((d) => (d[r] ? { ...d, [r]: { ...d[r], open } } : d));
           }} onSelect={onOpenFile} />

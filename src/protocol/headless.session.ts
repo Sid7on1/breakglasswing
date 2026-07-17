@@ -307,6 +307,7 @@ export class HeadlessSession {
     cliEvents.emit('message', this.uiMsg('menu', {
       id,
       title: menu.title,
+      subtitle: menu.subtitle,
       options: menu.options,
       initialIndex: menu.initialIndex,
     }));

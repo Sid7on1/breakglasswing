@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Group, Panel, Separator } from 'react-resizable-panels';
 import { useEngine } from './useEngine';
+import { useSupervisor } from './useSupervisor';
 import { useGit } from './useGit';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar } from './components/Sidebar';
@@ -12,15 +13,16 @@ import { RequestModal } from './components/RequestModal';
 import { SettingsDialog } from './components/SettingsDialog';
 import { EditorPane } from './components/EditorPane';
 import { HomeView } from './components/HomeView';
+import { ProjectWelcome } from './components/ProjectWelcome';
 import { GalleryView } from './components/GalleryView';
-import { Footer } from './components/Footer';
-import { Button } from './components/ui/button';
+import { Appearance, savedAppearance } from './appearance';
 
 // Shift+Tab cycles agent modes — same order and gesture as the Go TUI.
 const MODES = ['general', 'explore', 'sketch', 'code', 'beast'];
 
 export function App(): React.ReactElement {
-  const { state, submit, interrupt, sendCommand, query, reply, menuSelect, clearCompletions, configGet, configSet } = useEngine();
+  const { state, submit, interrupt, setControls, sendCommand, query, reply, menuSelect, clearCompletions, configGet, configSet } = useEngine();
+  const { status: supervisorStatus } = useSupervisor();
   const { status: gitStatus, refresh: refreshGit } = useGit(state.project);
   const busy = state.spinner.state !== 'idle' && state.spinner.state !== '';
 
@@ -29,6 +31,13 @@ export function App(): React.ReactElement {
   const [dockTab, setDockTab] = useState<DockTab>('agents');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appearance, setAppearance] = useState<Appearance>(savedAppearance);
+
+  useEffect(() => {
+    localStorage.setItem('bimax:appearance', appearance);
+    document.documentElement.classList.remove('theme-graphite', 'theme-linen', 'theme-ink', 'theme-cloud', 'theme-midnight', 'theme-aurora');
+    document.documentElement.classList.add(`theme-${appearance}`);
+  }, [appearance]);
 
   // Center view: chat (default; shows Home while the transcript is empty) or the sessions gallery.
   const [view, setView] = useState<'chat' | 'gallery'>('chat');
@@ -68,10 +77,17 @@ export function App(): React.ReactElement {
     setView('chat');
   }, [state.project]);
 
+  // Typed protocol resume (v3 additive) — same engine code path as /resume, but no slash-command
+  // text is synthesized by the UI.
   const resumeSession = useCallback((id: string) => {
-    sendCommand(`/resume ${id}`);
+    window.bimax.send({ t: 'resume', id });
     setView('chat');
-  }, [sendCommand]);
+  }, []);
+
+  // Crash recovery lives in the main-process Engine Supervisor now: "Restart & resume" is a typed
+  // recovery action; the supervisor restarts the engine, waits for the NEW child's ready (stale
+  // generations are ignored), and sends a protocol-level `resume` — transcript and context both
+  // come back from the session file (the single source of truth).
 
   // Global keyboard map: ⌘B sidebar, ⌘J dock, ⌘K palette, ⌘O project, ⌘T terminal,
   // ⌘E editor⇄panels, Shift+Tab mode cycle (outside inputs).
@@ -98,53 +114,65 @@ export function App(): React.ReactElement {
           // mode_change carries UPPERCASE labels ('' = general, 'PLAN' is governor, not a mode).
           const cur = MODES.indexOf((state.mode || 'general').toLowerCase());
           const next = MODES[(cur + 1) % MODES.length];
-          sendCommand(`/mode ${next}`);
+          setControls({ mode: next as 'general' | 'explore' | 'sketch' | 'code' | 'beast' });
         }
       }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [state.mode, sendCommand, openTab, openFiles.length]);
+  }, [state.mode, setControls, openTab, openFiles.length]);
 
-  const showHome = view === 'chat' && state.items.length === 0 && !state.streaming && !state.thinking && !busy;
+  // Background project work (indexing, recovery, startup checks) must never turn an empty task
+  // into a blank transcript. Keep the home canvas visible until conversation content exists.
+  const showHome = view === 'chat' && state.items.length === 0 && !state.streaming && !state.thinking;
   const showEditor = dockOpen && rightMode === 'editor' && openFiles.length > 0;
+  const hasProject = state.project.length > 0;
+  const latestProblem = [...state.diagnostics].reverse().find((entry) => entry.level !== 'info');
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className={`theme-${appearance} flex h-screen flex-col`}>
       <TitleBar
         project={state.project}
-        engineState={state.engine.state}
         protocolMismatch={state.protocolMismatch}
         gitStatus={gitStatus}
+        review={state.review}
         sidebarOpen={sidebarOpen}
         dockOpen={dockOpen}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onToggleDock={() => setDockOpen((v) => !v)}
         onOpenReview={() => openTab('review')}
+        appearance={appearance}
+        onAppearance={setAppearance}
       />
 
-      {state.engine.state === 'exited' && (
-        <div className="flex shrink-0 items-center gap-3 border-b border-rust/30 bg-rust/10 px-4 py-2 text-[13px] text-rust">
-          Engine exited ({state.engine.detail}).
-          <Button size="sm" onClick={() => void window.bimax.restartEngine()}>
-            Restart
-          </Button>
+      {hasProject && state.engine.state !== 'exited' && latestProblem?.level === 'error' && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber/25 bg-amber/8 px-4 py-1.5 text-[12px] text-amber">
+          <span className="min-w-0 flex-1 truncate">{latestProblem.text.replace(/engine/gi, 'Bimax').replace(/supervisor/gi, 'app')}</span>
+          <button onClick={() => openTab('health')} className="cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium hover:bg-amber/10">
+            Open support
+          </button>
         </div>
       )}
 
       <div className="min-h-0 flex-1">
         <Group orientation="horizontal" className="h-full">
-          {sidebarOpen && (
+          {hasProject && sidebarOpen && (
             <>
               <Panel id="sidebar" defaultSize="17%" minSize="180px" maxSize="30%">
                 <Sidebar
                   project={state.project}
                   snapshot={state.snapshot}
-                  onNewTask={() => { sendCommand('/clear'); setView('chat'); }}
+                  // With durable threads, clearing is non-destructive (the thread stays in the
+                  // sidebar, resumable) — so New task skips the confirm menu.
+                  onNewTask={() => { sendCommand('/clear force'); setView('chat'); }}
                   onOpenPalette={() => setPaletteOpen(true)}
-                  onCommand={sendCommand}
+                  onResume={resumeSession}
                   onOpenSettings={() => setSettingsOpen(true)}
                   onOpenGallery={() => setView('gallery')}
+                  activeTool={dockOpen && rightMode === 'panels' ? dockTab : null}
+                  onOpenTool={openTab}
+                  changedFiles={gitStatus?.files.length ?? 0}
+                  runningAgents={state.subagents.filter((agent) => agent.status === 'running').length}
                 />
               </Panel>
               <Separator className="w-px bg-line hover:bg-ember/50 data-[separator-active]:bg-ember" />
@@ -152,13 +180,16 @@ export function App(): React.ReactElement {
           )}
           <Panel id="center" minSize="30%">
             <div className="flex h-full flex-col">
-              {view === 'gallery' ? (
+              {!hasProject ? (
+                <ProjectWelcome />
+              ) : view === 'gallery' ? (
                 <GalleryView project={state.project} onResume={resumeSession} onBack={() => setView('chat')} />
               ) : showHome ? (
                 <HomeView
                   project={state.project}
                   sessionsTick={state.snapshot?.sessions?.length ?? 0}
                   onBrowseSessions={() => setView('gallery')}
+                  onResume={resumeSession}
                 />
               ) : (
                 <Transcript
@@ -168,7 +199,7 @@ export function App(): React.ReactElement {
                   onMenuSelect={menuSelect}
                 />
               )}
-              {view !== 'gallery' && (
+              {hasProject && view !== 'gallery' && (
                 <Composer
                   busy={busy}
                   mode={state.mode}
@@ -178,14 +209,16 @@ export function App(): React.ReactElement {
                   completions={state.completions.items}
                   onSubmit={submit}
                   onInterrupt={interrupt}
+                  onControls={setControls}
                   onCommand={sendCommand}
                   onQuery={query}
                   onClearCompletions={clearCompletions}
+                  runtime={supervisorStatus}
                 />
               )}
             </div>
           </Panel>
-          {dockOpen && (
+          {hasProject && dockOpen && (
             <>
               <Separator className="w-px bg-line hover:bg-ember/50 data-[separator-active]:bg-ember" />
               {/* Distinct ids: the editor deserves IDE width, panels stay compact; remounting on
@@ -202,11 +235,12 @@ export function App(): React.ReactElement {
                   />
                 </Panel>
               ) : (
-                <Panel id="dock" defaultSize="28%" minSize="220px" maxSize="50%">
+                <Panel id="dock" defaultSize="34%" minSize="300px" maxSize="56%">
                   <Dock
                     tab={dockTab}
                     onTab={setDockTab}
                     snapshot={state.snapshot}
+                    review={state.review}
                     subagents={state.subagents}
                     todos={state.todos}
                     project={state.project}
@@ -216,6 +250,9 @@ export function App(): React.ReactElement {
                     onOpenFile={openFile}
                     editorFileCount={openFiles.length}
                     onShowEditor={() => setRightMode('editor')}
+                    diagnostics={state.diagnostics}
+                    runtime={supervisorStatus}
+                    onClose={() => setDockOpen(false)}
                   />
                 </Panel>
               )}
@@ -224,24 +261,21 @@ export function App(): React.ReactElement {
         </Group>
       </div>
 
-      <Footer state={state} onOpenTab={openTab} />
-
-      <CommandPalette
+      {hasProject && <CommandPalette
         open={paletteOpen}
-        completions={state.completions.items}
         onClose={() => { setPaletteOpen(false); clearCompletions(); }}
-        onQuery={query}
-        onExec={sendCommand}
         onOpenTab={openTab}
-      />
+        onOpenSettings={() => setSettingsOpen(true)}
+        onNewTask={() => { sendCommand('/clear force'); setView('chat'); }}
+      />}
 
-      <SettingsDialog
+      {hasProject && <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        onCommand={sendCommand}
+        onOpenHealth={() => openTab('health')}
         configGet={configGet}
         configSet={configSet}
-      />
+      />}
 
       {state.request && <RequestModal req={state.request} onReply={reply} />}
     </div>

@@ -7,7 +7,7 @@ import { globalSkillService } from '../../skills/skill.service';
 import { getTaintTracker } from '../../mind/taint';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getConfig } from '../config';
-import { modelMenuOptions, liveModelMenuOptions } from '../models';
+import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -160,21 +160,67 @@ globalCommandRegistry.register({
     };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
     const subagentOf = () => { try { return getConfig().subagentModel; } catch { return ''; } };
-
-    // The picker offers the IDs the provider actually serves (root fix for "400 — invalid model").
-    // Falls back to the static catalog when the provider has no /models endpoint or we're offline.
-    const pickerOptions = async (cur?: string) => {
-      try {
-        const live = await context.options.llmAdapter?.listProviderModels();
-        if (live && live.length) return liveModelMenuOptions(live, cur);
-      } catch { /* fall back to static catalog */ }
-      return modelMenuOptions(cur);
+    // "One model everywhere": the single-model setup most people want. Coding + lite collapse to
+    // the same id (the router's unified short-circuit then skips the pre-flight classifier) and
+    // sub-agents inherit — so ONE pick governs every call this session makes.
+    const applyEverywhere = (model: string) => {
+      try { context.options.llmAdapter?.applyConfig({ model, liteModel: model }); } catch { /* adapter optional */ }
+      context.options.model = model;
+      (context.options as any).liteModel = model;
+      context.saveConfig({ model, liteModel: model, subagentModel: '' });
+      cliEvents.emit('config_changed');
+      context.addSystemMessage('success', `One model everywhere → ${model} (coding · lite · sub-agents)`);
+      warnIfUnserved(model);
     };
 
-    // /model lite [id]  |  /model coding [id]  |  /model subagent [id|inherit]
+    const liveIds = async (): Promise<string[] | null> => {
+      try {
+        const live = await context.options.llmAdapter?.listProviderModels();
+        return live && live.length ? live : null;
+      } catch { return null; }
+    };
+
+    // Curated picker rows + the two escape hatches. The full provider catalog (hundreds of raw
+    // ids on NIM) lives ONE hop away behind "Browse all…" — never dumped into the first screen.
+    const pickerOptions = async (cur?: string) => {
+      const live = await liveIds();
+      const curated = live ? curatedModelMenuOptions(live, cur) : curatedModelMenuOptions(null, cur);
+      return [
+        ...curated,
+        {
+          label: `⌕ Browse all provider models…`,
+          value: `__browse__`,
+          desc: live ? `Everything ${getCurrentProvider().name} serves (${live.length} ids), searchable` : `Full ${getCurrentProvider().name} catalog, searchable`,
+          category: 'More',
+        },
+        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model id your provider supports', category: 'More' },
+      ];
+    };
+
+    const SLOT_APPLY: Record<string, (m: string) => void> = {
+      coding: applyCoding, lite: applyLite, subagent: applySubagent, one: applyEverywhere,
+    };
+
+    // /model browse [coding|lite|subagent|one] — the full provider catalog, flat + searchable.
     const slot = (args[0] || '').toLowerCase();
-    if (slot === 'lite' || slot === 'coding' || slot === 'subagent') {
-      const apply = slot === 'lite' ? applyLite : slot === 'subagent' ? applySubagent : applyCoding;
+    if (slot === 'browse') {
+      const target = (args[1] || 'one').toLowerCase();
+      const apply = SLOT_APPLY[target] || applyEverywhere;
+      const live = await liveIds();
+      const options = live ? liveModelMenuOptions(live, context.options.model) : modelMenuOptions(context.options.model);
+      return {
+        type: 'menu',
+        title: `All models on ${getCurrentProvider().name}${live ? ` (${live.length})` : ''}`,
+        subtitle: 'Type to search. Only ids the provider confirms it serves are listed.',
+        options,
+        onSelect: (opt: any) => apply(opt.value),
+      };
+    }
+
+    // /model one [id] — explicit single-model mode.
+    // /model lite [id] | /model coding [id] | /model subagent [id|inherit] — the split slots.
+    if (slot === 'one' || slot === 'lite' || slot === 'coding' || slot === 'subagent') {
+      const apply = SLOT_APPLY[slot];
       const rest = args.slice(1).join(' ').trim();
       if (rest) {
         if (rest === '__custom__') promptCustom(apply);
@@ -184,18 +230,26 @@ globalCommandRegistry.register({
       }
       const cur = slot === 'lite' ? (liteOf() || '(uses coding model)')
         : slot === 'subagent' ? (subagentOf() || '(inherits main model)')
-        : (context.options.model || 'default');
-      const title = slot === 'lite' ? 'Select LITE (fast/cheap) model'
+        : (context.options.model || '(not set)');
+      const title = slot === 'one' ? 'Pick THE model — used for everything'
+        : slot === 'lite' ? 'Select LITE (fast/cheap) model'
         : slot === 'subagent' ? 'Select SUB-AGENT model (what spawned agents run on)'
         : 'Select CODING (primary) model';
+      const subtitle = slot === 'one'
+        ? 'One model for coding, quick summaries, and sub-agents. Simplest setup — no routing surprises.'
+        : `Current: ${cur} · ←/→ switches groups · Esc keeps things as they are`;
       const extraOptions = slot === 'subagent'
-        ? [{ label: '↩ Inherit main model', value: '__inherit__', desc: 'Sub-agents use whatever the main model is (default)', category: 'Slots' }]
+        ? [{ label: '↩ Inherit main model', value: '__inherit__', desc: 'Sub-agents use whatever the main model is (default)', category: 'More' }]
         : [];
       return {
         type: 'menu',
-        title: `${title} — current: ${cur}`,
-        options: [...extraOptions, ...(await pickerOptions(cur)), { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' }],
-        onSelect: (opt: any) => (opt.value === '__custom__' ? promptCustom(apply) : apply(opt.value)),
+        title,
+        subtitle,
+        options: [...(await pickerOptions(slot === 'one' ? context.options.model : cur)), ...extraOptions],
+        onSelect: (opt: any) =>
+          opt.value === '__custom__' ? promptCustom(apply)
+          : opt.value === '__browse__' ? context.executeCommand(`/model browse ${slot}`)
+          : apply(opt.value),
       };
     }
 
@@ -212,24 +266,47 @@ globalCommandRegistry.register({
     // /model <id>  → set the coding model directly.
     if (args.length >= 1) { applyCoding(args.join(' ').trim()); return { type: 'none' }; }
 
-    // /model  → coding picker, with a jump to the lite slot at the top.
-    const current = context.options.model || 'default';
+    // /model → the clutter-free hub: your setup, single-model mode, curated picks, escape hatches.
+    const configModel = (() => { try { return getConfig().model; } catch { return ''; } })();
+    const current = context.options.model || configModel || '(not set)';
+    const lite = liteOf();
+    const sub = subagentOf();
+    const singleMode = !sub && (!lite || lite === context.options.model);
     return {
       type: 'menu',
-      title: `Models — Coding: ${current}  ·  Lite: ${liteOf() || '(uses coding)'}  ·  Sub-agents: ${subagentOf() || '(inherit)'}`,
+      title: 'Models',
+      subtitle: singleMode
+        ? `Everything runs on ${current} — pick a new one below, or split the slots under Advanced.`
+        : `Coding: ${current} · Lite: ${lite || '(uses coding)'} · Sub-agents: ${sub || '(inherit)'}`,
       options: [
-        { label: '⚙ Set CODING model…', value: '/model coding', desc: `Primary agent model — the heavy/coding slot (current: ${current})`, category: 'Slots' },
-        { label: '⚙ Set LITE model…', value: '/model lite', desc: `Fast model for summaries / self-critic / ask-user (current: ${liteOf() || 'uses coding'})`, category: 'Slots' },
-        { label: '⚙ Set SUB-AGENT model…', value: '/model subagent', desc: `What spawned sub-agents run on (current: ${subagentOf() || 'inherits main'})`, category: 'Slots' },
-        ...(await pickerOptions(current)),
-        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model your provider supports', category: 'Other providers (own key)' },
+        {
+          label: '◎ Use ONE model for everything…',
+          value: '/model one',
+          desc: 'Simplest setup: coding, summaries, and sub-agents all on one model you pick',
+          category: 'Your setup',
+        },
+        {
+          label: '⚙ Coding model…',
+          value: '/model coding',
+          desc: `The main agent (current: ${current})`,
+          category: 'Advanced — split slots',
+        },
+        {
+          label: '⚙ Lite model…',
+          value: '/model lite',
+          desc: `Summaries / self-critic / routing (current: ${lite || 'uses coding'})`,
+          category: 'Advanced — split slots',
+        },
+        {
+          label: '⚙ Sub-agent model…',
+          value: '/model subagent',
+          desc: `Spawned workers (current: ${sub || 'inherits coding'})`,
+          category: 'Advanced — split slots',
+        },
+        { label: '⇄ Switch provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name} — NVIDIA, OpenAI, Anthropic, OpenRouter, DeepSeek, Google, custom`, category: 'Advanced — split slots' },
+        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'How long reasoning models think — lower is faster', category: 'Advanced — split slots' },
       ],
-      onSelect: (opt: any) =>
-        opt.value === '/model coding' ? context.executeCommand('/model coding')
-        : opt.value === '/model lite' ? context.executeCommand('/model lite')
-        : opt.value === '/model subagent' ? context.executeCommand('/model subagent')
-        : opt.value === '__custom__' ? promptCustom(applyCoding)
-        : applyCoding(opt.value),
+      onSelect: (opt: any) => context.executeCommand(opt.value),
     };
   }
 });

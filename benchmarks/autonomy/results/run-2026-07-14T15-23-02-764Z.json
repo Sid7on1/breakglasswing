@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-23-02-764Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "offline-tokenizer-estimate",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:23:02.764Z",
+  "finishedAt": "2026-07-14T15:23:03.447Z",
+  "tasks": [
+    {
+      "id": "06-session-schema-migration",
+      "prompt": "Implement a reliable, idempotent v1-to-v2 session migration across this fixture's reader, migrator,\nwriter, and summary modules. Do not change the public exports or add dependencies.\n\nSchema and behavior:\n\n- A v1 record has `version: 1`, `id`, `user`, `startedAt`, `turns`, and optional `metadata` plus\n  unknown top-level fields. Each turn has `role`, `text`, and may contain unknown fields.\n- Its v2 form has `version: 2`, the same `id`, `owner: { id: user }`, `createdAt: startedAt`, and\n  `messages`, where each message has `role`, `content: text`, and preserves unknown turn fields.\n- Preserve metadata and unknown top-level fields. Remove only the replaced v1 fields `user`,\n  `startedAt`, and `turns`.\n- Migrating a v2 record is idempotent: it returns an equivalent v2 value. No migration, read,\n  write, or summary operation may mutate caller-owned records or nested values.\n- `readSession(path)` parses JSON and returns a migrated v2 record. `writeSession(path, record)`\n  writes canonical v2 JSON followed by a newline and returns the same v2 value.\n- Invalid JSON, unsupported versions, or missing required fields must reject/throw an error whose\n  message begins `Invalid session record:`.\n- `summarizeSessions(records)` returns `{ id, ownerId, createdAt, messageCount }` entries sorted by\n  `createdAt` and then `id`, without reordering or mutating the input array.\n\nRun `npm test` after the repair.",
+      "passed": true,
+      "totalPromptTokens": 23220,
+      "totalCompletionTokens": 503,
+      "reasoningTokens": 0,
+      "totalTokens": 23723,
+      "turnCount": 9,
+      "toolCallCount": 8,
+      "usageComplete": true,
+      "wallClockMs": 681,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrksw356-f631",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-23-02-764Z/06-session-schema-migration/e-mrksw356-f631.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 23723,
+    "medianTurns": 9,
+    "sumPromptTokens": 23220,
+    "sumCompletionTokens": 503,
+    "sumReasoningTokens": 0,
+    "sumTotalTokens": 23723,
+    "contextRecoveryRate": 0
+  }
+}

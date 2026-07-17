@@ -1,21 +1,23 @@
 import React from 'react';
-import { Loader, CircleCheck, Waypoints, BrainCircuit, Target, House, Gauge, Cpu } from 'lucide-react';
+import { Loader, CircleX, Waypoints, BrainCircuit, Target, House, Gauge, Cpu } from 'lucide-react';
 import { EngineUiState } from '../useEngine';
 import { DockTab } from './Dock';
-import { cn } from '../lib/cn';
+import type { SupervisorStatus } from '../global';
 
 /**
  * Status bar — desktop cousin of the TUI footer. Every chip is a button that opens the panel
  * holding its detail (mind → Mind, graph → Map, goals → Agents).
  */
 export function Footer({
-  state, onOpenTab,
+  state, runtime, onOpenTab,
 }: {
   state: EngineUiState;
+  runtime: SupervisorStatus | null;
   onOpenTab: (t: DockTab) => void;
 }): React.ReactElement {
   const s = state.snapshot;
-  const busy = state.spinner.state !== 'idle' && state.spinner.state !== '';
+  const turnBusy = state.spinner.state !== 'idle' && state.spinner.state !== '';
+  const unavailable = runtime?.phase === 'exited' || runtime?.phase === 'failed';
   const mind = s?.mind ?? null;
   const ctxPct = s && s.contextWindow > 0
     ? Math.round(((s.tokensBaseline + state.streamedChars / 4) / s.contextWindow) * 100)
@@ -23,10 +25,11 @@ export function Footer({
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-1 overflow-hidden border-t border-line px-2.5 text-[11.5px] text-dim select-none">
-      <span className={cn('flex items-center gap-1.5 px-1.5 whitespace-nowrap', busy ? 'text-amber' : 'text-moss')}>
-        {busy ? <Loader size={12} className="animate-spin" /> : <CircleCheck size={12} />}
-        {busy ? state.spinner.message || state.spinner.state : 'ready'}
-      </span>
+      {unavailable ? (
+        <span className="flex items-center gap-1.5 px-1.5 whitespace-nowrap text-rust"><CircleX size={12} /> Connection lost</span>
+      ) : turnBusy ? (
+        <span className="flex items-center gap-1.5 px-1.5 whitespace-nowrap text-dim"><Loader size={12} className="animate-spin" /> {state.spinner.message || 'Working'}</span>
+      ) : null}
       {state.status ? <span className="truncate px-1.5 text-faint">{state.status}</span> : null}
       <span className="flex-1" />
       {state.mode ? <span className="px-1.5 whitespace-nowrap">{state.mode}</span> : null}

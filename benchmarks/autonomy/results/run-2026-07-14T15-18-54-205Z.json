@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-18-54-205Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "offline-tokenizer-estimate",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:18:54.205Z",
+  "finishedAt": "2026-07-14T15:18:54.768Z",
+  "tasks": [
+    {
+      "id": "04-path-routing-backtrack",
+      "prompt": "The cross-platform file router in this fixture mishandles some Windows paths, URL-like suffixes,\ncompound extensions, and precedence. Diagnose the failure and repair it without adding dependencies\nor changing the exported names.\n\nThe required contract is:\n\n- `normalizeRoutePath(input)` accepts a non-empty path string, removes a query or hash suffix,\n  converts every backslash to `/`, collapses repeated separators, and lowercases the result. It must\n  throw `TypeError('path must be a non-empty string')` for invalid input.\n- `routeFile(input, routes)` returns the `handler` of the first matching rule, or `null` when none\n  matches. Rules are checked in caller order; later rules must never override an earlier match.\n- A rule has `{ extension, handler }`. Extension matching is case-insensitive, and extensions may be\n  compound (for example `.test.ts`). A match must cover the end of the normalized pathname after\n  query/hash removal.\n- Neither the route array nor any route object may be mutated.\n\nRun `npm test` after the change. Preserve the existing first-match router logic; the root defect is\nin path normalization, even if changing the router appears to fix one example.",
+      "passed": true,
+      "totalPromptTokens": 10376,
+      "totalCompletionTokens": 173,
+      "reasoningTokens": 0,
+      "totalTokens": 10549,
+      "turnCount": 6,
+      "toolCallCount": 5,
+      "usageComplete": true,
+      "wallClockMs": 561,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrksqrc1-939a",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-18-54-205Z/04-path-routing-backtrack/e-mrksqrc1-939a.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 10549,
+    "medianTurns": 6,
+    "sumPromptTokens": 10376,
+    "sumCompletionTokens": 173,
+    "sumReasoningTokens": 0,
+    "sumTotalTokens": 10549,
+    "contextRecoveryRate": 0
+  }
+}

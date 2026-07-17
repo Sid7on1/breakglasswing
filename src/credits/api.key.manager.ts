@@ -17,6 +17,10 @@ export interface KeyState extends KeyConfig {
   total_ok: number;
   total_fail: number;
   last_used: number;
+  // Latency health (NIM free-tier keys get server-side queued INDIVIDUALLY — one key answers in
+  // 1s while a sibling takes 40s or hangs, so rotation must be latency-aware, not blind RR).
+  ewma_first_ms: number; // time-to-first-token EWMA; 0 = no data yet
+  hang_strikes: number;  // consecutive first-token timeouts — benched with growing cooldowns
 }
 
 export interface KeyResult {
@@ -67,9 +71,15 @@ export class ApiKeyManager {
         total_ok: old?.total_ok ?? 0,
         total_fail: old?.total_fail ?? 0,
         last_used: old?.last_used ?? 0,
+        ewma_first_ms: old?.ewma_first_ms ?? 0,
+        hang_strikes: old?.hang_strikes ?? 0,
       };
     });
-    this.keyRR = this.keyStates.length > 0 ? this.keyRR % this.keyStates.length : 0;
+    // Start the rotation at a random index: N parallel sub-agent workers each build their OWN
+    // manager over the same pool, and a deterministic start had them all piling onto key #1.
+    this.keyRR = this.keyStates.length > 0
+      ? (this.keyRR || Math.floor(Math.random() * this.keyStates.length)) % this.keyStates.length
+      : 0;
     Logger.info(`[ApiKeyManager] Key pool set: ${this.keyStates.length} key(s) across ${new Set(keys.map(k => k.provider || 'unknown')).size} provider(s).`);
   }
 
@@ -82,19 +92,34 @@ export class ApiKeyManager {
       const n = this.keyStates.length;
       const now = Date.now() / 1000;
 
-      // Pass 1 (multi-key pools only): round-robin over keys that are off cooldown AND "cold"
-      // (not used within MIN_REUSE_SECS) — spreads a burst across the whole pool so no single
-      // key trips its RPM limit while siblings sit idle. Pass 2 is the original behavior (any
+      // Pass 1 (multi-key pools only): among keys that are off cooldown AND "cold" (not used
+      // within MIN_REUSE_SECS), pick the one with the LOWEST measured time-to-first-token.
+      // NIM free-tier keys are queued individually server-side (1s on one key, 20-40s on a
+      // sibling), so blind round-robin kept walking calls into the slow lane — this is the
+      // single biggest sub-agent latency fix. Keys with no data yet score as the median of the
+      // measured ones so they still get probed. Pass 2 is the original behavior (any
       // off-cooldown key), so this NEVER blocks or delays a call — it only reorders preference.
       if (n > 1 && this.MIN_REUSE_SECS > 0) {
+        const known = this.keyStates.filter(s => s.ewma_first_ms > 0).map(s => s.ewma_first_ms).sort((a, b) => a - b);
+        const median = known.length ? known[Math.floor(known.length / 2)] : 0;
+        let bestIdx = -1;
+        let bestScore = Infinity;
         for (let i = 0; i < n; i++) {
           const idx = (this.keyRR + i) % n;
           const state = this.keyStates[idx];
           if (now >= state.cooldown_until && now - state.last_used >= this.MIN_REUSE_SECS) {
-            this.keyRR = (idx + 1) % n;
-            state.last_used = now;
-            return { keyStr: state.keyStr, model: state.model || null, baseURL: state.baseURL || null, provider: state.provider || null, idx, waitTimeSecs: 0 };
+            const score = state.ewma_first_ms > 0 ? state.ewma_first_ms : median;
+            if (score < bestScore) {
+              bestScore = score;
+              bestIdx = idx;
+            }
           }
+        }
+        if (bestIdx >= 0) {
+          const state = this.keyStates[bestIdx];
+          this.keyRR = (bestIdx + 1) % n;
+          state.last_used = now;
+          return { keyStr: state.keyStr, model: state.model || null, baseURL: state.baseURL || null, provider: state.provider || null, idx: bestIdx, waitTimeSecs: 0 };
         }
       }
 
@@ -160,6 +185,39 @@ export class ApiKeyManager {
   }
 
   /**
+   * Feed back a successful call's time-to-first-token so the picker can prefer fast keys.
+   * EWMA (α=0.3) smooths jitter; a success also clears the hang bench.
+   */
+  public reportKeyLatency(idx: number, firstTokenMs: number): void {
+    const s = this.keyStates[idx];
+    if (!s || !(firstTokenMs > 0)) return;
+    s.ewma_first_ms = s.ewma_first_ms > 0 ? Math.round(0.7 * s.ewma_first_ms + 0.3 * firstTokenMs) : Math.round(firstTokenMs);
+    s.hang_strikes = 0;
+  }
+
+  /**
+   * A first-token timeout on this key — the provider is queueing/hanging it server-side. Bench it
+   * with a growing cooldown (45s → 90s → 3min → capped 10min) so rotation stops feeding the dead
+   * lane; a later success clears the strikes (reportKeyLatency).
+   */
+  public reportKeyHang(idx: number): void {
+    const now = Date.now() / 1000;
+    const s = this.keyStates[idx];
+    if (!s) return;
+    s.hang_strikes++;
+    const benchSecs = Math.min(45 * Math.pow(2, s.hang_strikes - 1), 600);
+    s.cooldown_until = Math.max(s.cooldown_until, now + benchSecs);
+    // Poison the latency estimate too, so pass-1 stops preferring it even after the bench expires.
+    s.ewma_first_ms = Math.max(s.ewma_first_ms, 60_000);
+    Logger.warn(`[ApiKeyManager] KEY #${idx + 1} (${s.label || s.provider || '?'}) hung before first token — benched ${benchSecs.toFixed(0)}s (strike ${s.hang_strikes})`);
+  }
+
+  /** Pool size — lets the adapter pick a tighter first-token budget when rotation is possible. */
+  public size(): number {
+    return this.keyStates.length;
+  }
+
+  /**
    * True when EVERY key in the pool has most recently failed auth (401/403). Auth failures are
    * permanent for a given key string — sleeping through a cooldown and retrying the same key can
    * never succeed, it just adds dead seconds to every turn. Callers should fail fast with an
@@ -181,6 +239,8 @@ export class ApiKeyManager {
       fail: s.total_fail,
       onCooldown: s.cooldown_until > now,
       cooldownSecs: Math.max(0, s.cooldown_until - now),
+      firstTokenMs: s.ewma_first_ms,
+      hangs: s.hang_strikes,
     }));
   }
 }

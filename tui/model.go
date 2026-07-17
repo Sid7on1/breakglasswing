@@ -209,12 +209,17 @@ type model struct {
 
 	// interactive menu (command palette, pickers) — selecting sends the option's value as input.
 	// menuFilter fuzzy-filters menuOpts as the user types (Ink InteractiveMenu enableSearch).
-	menuOpen   bool
-	menuID     string // correlates a selection back to the engine's onSelect (menuSelect message)
-	menuTitle  string
-	menuOpts   []menuOption
-	menuIdx    int
-	menuFilter string
+	menuOpen     bool
+	menuID       string // correlates a selection back to the engine's onSelect (menuSelect message)
+	menuTitle    string
+	menuSubtitle string
+	menuOpts     []menuOption
+	menuIdx      int
+	menuFilter   string
+	// Category tabs: derived from the options' Category fields on open (order of first appearance).
+	// menuTab 0 = "All"; >0 filters to menuTabs[menuTab]. ←/→ or Tab cycles.
+	menuTabs []string
+	menuTab  int
 
 	// multi-line paste chips (SimpleInput.tsx): pastes holds the collapsed blobs; expanded on submit.
 	pastes       []pasteChip
@@ -355,9 +360,8 @@ func cwdOrWD(p string) string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Deliberately NO screen/scrollback clear at launch: the terminal's existing content (the
-	// user's shell history) is theirs, not ours. The welcome banner simply prints inline below
-	// whatever was already there — the same quiet entrance Claude Code makes.
+	// The screen + scrollback were wiped in main() before the program started (launch scroll-lock),
+	// so the welcome banner prints at the top of a clean scrollback. No further clear needed here.
 	return tea.Batch(
 		waitForEngine(m.engine),
 		textarea.Blink,

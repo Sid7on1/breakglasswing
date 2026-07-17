@@ -207,7 +207,7 @@ def scenario_keyless():
             [{"at": 4.5, "send": ESC}, {"at": 6.0, "send": "hi\r"}, {"at": 10.0, "send": "/exit\r"}],
             timeout=20, env={"BIMAX_BREAKGLASS_DIR": fresh})
         raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
-        check("provider picker auto-opens", "Select a provider" in raw)
+        check("setup wizard auto-opens", "Choose your AI provider" in raw)
         check("keyless turn fails loudly with the fix", "No API key configured" in raw and "/keys" in raw)
         check("clean exit", ex and ex.get("exit") == 0, str(ex))
     finally:

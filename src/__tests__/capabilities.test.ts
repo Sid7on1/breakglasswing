@@ -58,6 +58,21 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('nvidia', 'meta/llama-3.1-70b-instruct').parallelToolCalls).toBe(false);
   });
 
+  it('routes NVIDIA GUI/vision models with vision and their real context windows', () => {
+    const omni = capabilitiesFor('nvidia', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
+    expect(omni.visionInput).toBe(true);
+    expect(omni.inlineReasoning).toBe(true);
+    expect(omni.parallelToolCalls).toBe(false);
+    expect(omni.contextWindow).toBe(256_000);
+
+    const ministral = capabilitiesFor('nvidia', 'mistralai/ministral-14b-instruct-2512');
+    expect(ministral.visionInput).toBe(true);
+    expect(ministral.contextWindow).toBe(256_000);
+
+    expect(capabilitiesFor('nvidia', 'nvidia/nemotron-nano-12b-v2-vl').visionInput).toBe(true);
+    expect(capabilitiesFor('nvidia', 'meta/llama-3.2-11b-vision-instruct').visionInput).toBe(true);
+  });
+
   it('DeepSeek reasoner exposes a reasoning channel + effort knob, no structured outputs', () => {
     const caps = capabilitiesFor('deepseek', 'deepseek-reasoner');
     expect(caps.nativeThinking).toBe(true);

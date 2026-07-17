@@ -1,4 +1,11 @@
 import type { Inbound, Outbound } from './protocol';
+// Type-only import (erased at build time): the supervisor's wire shapes come straight from the
+// main process source, so renderer and main can never drift.
+import type { SupervisorStatus, CrashRecord } from '../../main/supervisor/types';
+
+export type { SupervisorStatus, CrashRecord };
+
+export type RecoveryActionName = 'retry' | 'restartSafe' | 'resume' | 'startMinimal' | 'stop';
 
 export interface GitFile {
   path: string;
@@ -38,10 +45,19 @@ declare global {
       onMessage: (cb: (msg: Outbound) => void) => () => void;
       onEngineState: (cb: (state: string, detail: string) => void) => () => void;
       onProject: (cb: (dir: string) => void) => () => void;
+      supervisor: {
+        onStatus: (cb: (status: SupervisorStatus) => void) => () => void;
+        getStatus: () => Promise<SupervisorStatus | null>;
+        action: (action: { action: RecoveryActionName; sessionId?: string }) => Promise<boolean>;
+        crashHistory: () => Promise<CrashRecord[]>;
+        diagnostics: () => Promise<string>;
+      };
       pickFolder: () => Promise<string | null>;
       pickFiles: () => Promise<string[]>;
       restartEngine: () => Promise<string>;
       getProject: () => Promise<string>;
+      recentProjects: () => Promise<string[]>;
+      openProject: (dir: string) => Promise<string | null>;
       rendererReady: () => void;
       git: {
         status: () => Promise<GitStatusResult | null>;

@@ -1,0 +1,33 @@
+{
+  "automationId": "fable-browser-computer-integration",
+  "status": "in_progress",
+  "startedAt": "2026-07-17T05:09:35+0530",
+  "lastUpdatedAt": "2026-07-17T00:42:02.000Z",
+  "claudeDesktop": {
+    "app": "/Applications/Claude.app",
+    "sessionUrl": "claude.ai/epitaxy/local_387c810f-52de-41e4-964e-6020a0eb534f",
+    "model": "Fable 5",
+    "readiness": "FABLE_READY"
+  },
+  "workspace": {
+    "path": "/Users/vishsiddharth/Desktop/Bimax",
+    "branch": "codex/cli-v1-launch",
+    "baselineCommit": "b05f0fdea502b71e2d3e073cfad995e5c9192afd",
+    "dirtyWorktreeExpected": true
+  },
+  "phase": "repair_running",
+  "evidence": [
+    "Fable 5 was explicitly selected in Claude Code Desktop.",
+    "Readiness response: FABLE_READY; Claude verified the Bimax project directory.",
+    "Full implementation brief and guardrails were delivered in the active Claude session.",
+    "Fable reported implementation complete with all targeted Jest, TypeScript, Go, Electron, protocol-mirror, renderer, and real-Chromium gates passing.",
+    "Independent verification passed 18 targeted Jest suites (225 tests), the TypeScript engine build, Go TUI build, protocol mirror, and Electron typecheck/build.",
+    "Independent review found incomplete high-impact, taint, observation-loop, typed-UI, headless-smoke, and screenshot-rig requirements; the detailed repair set is active in the same Fable 5 session.",
+    "Independent real-Chromium rerun could not bind loopback inside the Codex automation sandbox; escalation was rejected by the account approval/usage ceiling, so Fable must rerun that gate in Claude Code Desktop."
+  ],
+  "remaining": [
+    "Supervise Fable repair implementation and verification",
+    "Independently inspect repaired diff and rerun available gates",
+    "Deactivate automation only after all completion criteria pass"
+  ]
+}

@@ -1,9 +1,10 @@
-import { spawn, execFileSync, ChildProcess } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { app } from 'electron';
 import { existsSync, mkdirSync, createWriteStream, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import type { EngineHandle, SpawnCallbacks } from './supervisor/supervisor';
 
 /**
  * Finder-launched macOS apps inherit launchd's minimal PATH (/usr/bin:/bin:...), not the user's
@@ -30,10 +31,13 @@ function userShellPath(): string {
 }
 
 /**
- * Engine host — spawns and talks to the headless Bimax engine (BIMAX_HEADLESS=1), the exact
- * process the Go TUI drives (see tui/engine.go, which this ports). Outbound messages arrive as
- * NDJSON on the child's stdout; inbound commands go out as NDJSON on its stdin. Engine stderr
+ * Engine process adapter — spawns and pipes the headless Bimax engine (BIMAX_HEADLESS=1), the
+ * exact process the Go TUI drives (see tui/engine.go, which this ports). Outbound messages arrive
+ * as NDJSON on the child's stdout; inbound commands go out as NDJSON on its stdin. Engine stderr
  * (boot logs) is diverted to <userData>/engine.log so it can never corrupt the protocol stream.
+ *
+ * Lifecycle policy lives in supervisor/supervisor.ts — this file is deliberately dumb: resolve
+ * the command, spawn, decode lines, report exits. It never restarts anything itself.
  *
  * Command resolution, in order (mirrors StartEngine in tui/engine.go):
  *   1. $BIMAX_ENGINE_CMD                  — explicit override (dev escape hatch)
@@ -42,13 +46,6 @@ function userShellPath(): string {
  *   3. node <repo>/dist/index.js          — dev with a fresh compiled build (~3× faster boot)
  *   4. npx tsx <repo>/src/index.ts        — dev from source
  */
-
-export type EngineState = 'starting' | 'ready' | 'exited';
-
-export interface EngineEvents {
-  onMessage: (msg: unknown) => void;
-  onState: (state: EngineState, detail?: string) => void;
-}
 
 // In dev the app lives at <repo>/app, so the engine repo is one level up from the app package.
 // electron-vite bundles main to app/out/main/index.js — walk up to app/, then to the repo.
@@ -94,79 +91,111 @@ function distFresh(repo: string): boolean {
   }
 }
 
-export class Engine {
-  private child: ChildProcess | null = null;
-  private events: EngineEvents;
-  public projectDir: string;
+// Desktop-owned rolling log: the last few hundred engine stderr / lifecycle lines, in memory,
+// ACROSS launches — this is the crash journal's evidence when a SIGKILLed child couldn't flush
+// anything. The on-disk engine.log keeps the full history (append mode) for deep dives.
+const LOG_RING_MAX = 400;
+const logRing: string[] = [];
+function ringWrite(line: string): void {
+  logRing.push(line.length > 500 ? line.slice(0, 500) + '…' : line);
+  if (logRing.length > LOG_RING_MAX) logRing.splice(0, logRing.length - LOG_RING_MAX);
+}
 
-  constructor(projectDir: string, events: EngineEvents) {
-    this.projectDir = projectDir;
-    this.events = events;
-  }
+/** The bounded recent engine log — injected into the supervisor as its `logTail` dependency. */
+export function recentEngineLog(maxChars = 6000): string {
+  return logRing.join('\n').slice(-maxChars);
+}
 
-  start(): void {
-    const { cmd, args, cwd } = resolveCommand(this.projectDir);
-    this.events.onState('starting', `${cmd} ${args.join(' ')}`.trim());
+/**
+ * Spawn one engine child for `projectDir`. Fits the supervisor's `deps.spawn` contract: callbacks
+ * fire exactly once per event, the handle only exposes write/end/kill (no raw process access ever
+ * reaches the renderer), and cleanup of streams + listeners happens on exit here.
+ */
+export function spawnEngineProcess(projectDir: string, extraEnv: Record<string, string>, cb: SpawnCallbacks): EngineHandle {
+  const { cmd, args, cwd } = resolveCommand(projectDir);
+  const startedAt = Date.now();
+  const command = `${cmd} ${args.join(' ')}`.trim();
 
-    const logDir = path.join(app.getPath('userData'));
-    mkdirSync(logDir, { recursive: true });
-    const logStream = createWriteStream(path.join(logDir, 'engine.log'));
+  const logDir = path.join(app.getPath('userData'));
+  mkdirSync(logDir, { recursive: true });
+  // Append instead of truncating: a force-killed child cannot flush a final message, so retaining
+  // the previous boot and the desktop-owned lifecycle lines is essential crash evidence.
+  const logStream = createWriteStream(path.join(logDir, 'engine.log'), { flags: 'a' });
+  const logLine = (line: string): void => {
+    ringWrite(line);
+    logStream.write(line + '\n');
+  };
+  logLine(`[desktop] ${new Date().toISOString()} starting engine for ${projectDir}: ${command}`);
 
-    // The engine must START where its runtime resolves (repo root in dev), but the user's project
-    // is projectDir — BIMAX_CWD tells the engine to chdir there (same contract as the Go TUI).
-    const child = spawn(cmd, args, {
-      cwd,
-      env: { ...process.env, PATH: userShellPath(), BIMAX_HEADLESS: '1', BIMAX_CWD: this.projectDir },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    this.child = child;
+  // The engine must START where its runtime resolves (repo root in dev), but the user's project
+  // is projectDir — BIMAX_CWD tells the engine to chdir there (same contract as the Go TUI).
+  const child = spawn(cmd, args, {
+    cwd,
+    env: {
+      ...process.env,
+      ...extraEnv, // the supervisor's capability plan (headroom/codemem/autoIndex/drives gates)
+      PATH: userShellPath(),
+      BIMAX_HEADLESS: '1',
+      BIMAX_CWD: projectDir,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 
-    child.stderr?.pipe(logStream);
+  // stderr → engine.log + the in-memory ring (journal evidence), never the protocol stream.
+  let stderrBuf = '';
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderrBuf += chunk.toString('utf8');
+    let nl: number;
+    while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+      logLine(stderrBuf.slice(0, nl));
+      stderrBuf = stderrBuf.slice(nl + 1);
+    }
+  });
 
-    // NDJSON decode. readline handles arbitrarily long lines (command menus serialize to one very
-    // long line), unlike a fixed-size scanner buffer.
-    const rl = createInterface({ input: child.stdout! });
-    rl.on('line', (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const msg = JSON.parse(trimmed);
-        if (msg && msg.t === 'ready') this.events.onState('ready', String(msg.protocol ?? ''));
-        this.events.onMessage(msg);
-      } catch (err) {
-        // Never silently drop a malformed line — a desync is invisible otherwise.
-        logStream.write(`[app] dropped malformed line: ${String(err)}\n`);
-      }
-    });
+  // NDJSON decode. readline handles arbitrarily long lines (command menus serialize to one very
+  // long line), unlike a fixed-size scanner buffer.
+  const rl = createInterface({ input: child.stdout! });
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const msg = JSON.parse(trimmed);
+      if (msg && typeof msg === 'object') cb.onMessage(msg as Record<string, unknown>);
+      else cb.onMalformed(trimmed);
+    } catch {
+      // Never silently drop a malformed line — a desync is invisible otherwise.
+      logLine(`[app] dropped malformed line (${trimmed.length} chars)`);
+      cb.onMalformed(trimmed);
+    }
+  });
 
-    child.on('exit', (code, signal) => {
-      if (this.child === child) this.child = null;
-      this.events.onState('exited', signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`);
-    });
-    child.on('error', (err) => {
-      if (this.child === child) this.child = null;
-      this.events.onState('exited', err.message);
-    });
-  }
+  let settled = false;
+  child.on('exit', (code, signal) => {
+    if (settled) return;
+    settled = true;
+    if (stderrBuf) logLine(stderrBuf); // flush a final partial stderr line
+    logLine(`[desktop] engine exited after ${Date.now() - startedAt}ms: ${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}`);
+    rl.close();
+    logStream.end();
+    cb.onExit(code, signal);
+  });
+  child.on('error', (err) => {
+    if (settled) return;
+    settled = true;
+    logLine(`[desktop] engine process error after ${Date.now() - startedAt}ms: ${err.message}`);
+    rl.close();
+    logStream.end();
+    cb.onError(err);
+  });
 
-  send(msg: unknown): void {
-    const stdin = this.child?.stdin;
-    if (!stdin || !stdin.writable) return;
-    stdin.write(JSON.stringify(msg) + '\n');
-  }
-
-  get running(): boolean {
-    return this.child !== null;
-  }
-
-  stop(): void {
-    const child = this.child;
-    this.child = null;
-    if (!child) return;
-    try { child.stdin?.end(); } catch { /* already gone */ }
-    // The engine exits on stdin close / SIGTERM (headless.entry shutdown hooks); escalate if not.
-    const killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 3000);
-    child.once('exit', () => clearTimeout(killTimer));
-    try { child.kill('SIGTERM'); } catch { /* gone */ }
-  }
+  return {
+    pid: child.pid,
+    command,
+    write: (line: string) => {
+      const stdin = child.stdin;
+      if (stdin && stdin.writable) stdin.write(line);
+    },
+    endStdin: () => { try { child.stdin?.end(); } catch { /* already gone */ } },
+    kill: (signal) => { try { child.kill(signal); } catch { /* already gone */ } },
+  };
 }

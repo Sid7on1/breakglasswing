@@ -115,6 +115,53 @@ export interface UiSnapshotSession {
   current: boolean;
 }
 
+// --- Review domain (review_update payload) ----------------------------------------------------
+// Mirrors src/review/review.model.ts ReviewSnapshot — the engine's derived, per-thread review
+// state. Always a full snapshot; the renderer never accumulates deltas.
+
+export type ReviewStateName =
+  | 'idle' | 'planning' | 'awaiting_approval' | 'applying'
+  | 'unverified' | 'verification_failed' | 'verified' | 'checkpointed';
+
+export interface ReviewApproval {
+  id: number;
+  kind: 'permission' | 'diff' | 'question';
+  question: string;
+  requestedAt: number;
+  resolution?: { value: string; approved: boolean; at: number; interrupted?: boolean };
+}
+
+export interface ReviewChange {
+  file: string;
+  tools: string[];
+  edits: number;
+  lastCallId?: string;
+  lastAt: number;
+}
+
+export interface ReviewVerification {
+  command: string;
+  ok: boolean;
+  settled: number;
+  coveredFiles: string[];
+  repoWide: boolean;
+  at: number;
+}
+
+export interface ReviewSnapshot {
+  sessionId: string;
+  state: ReviewStateName;
+  nextAction: string;
+  approvals: ReviewApproval[];
+  changes: ReviewChange[];
+  verifications: ReviewVerification[];
+  checkpoints: { id: string; label: string; ts: number; auto: boolean; ok: boolean }[];
+  lastCheckpoint: { id: string; label: string; ts: number; auto: boolean; ok: boolean } | null;
+  todos: { content: string; status: string }[];
+  interrupted: boolean;
+  updatedAt: number;
+}
+
 /** v2: one Time Machine checkpoint for the History strip; restore with `/rewind <id>`. */
 export interface UiSnapshotCheckpoint {
   id: string;
@@ -149,4 +196,24 @@ export interface UiSnapshot {
   sessions?: UiSnapshotSession[];
   checkpoints?: UiSnapshotCheckpoint[];
   git?: { branch: string; dirty: number; ahead: number; behind: number };
+  tools?: {
+    registered: number;
+    ready: number;
+    deferred: number;
+    discovered: number;
+    mcp: number;
+    graphReady: boolean;
+  };
+  /** v3 additive: computer-use posture (browser/desktop/vision/grants/taint), all live values. */
+  computer?: UiSnapshotComputer;
+}
+
+/** Mirrors src/protocol/ui.snapshot.ts UiSnapshotComputer. */
+export interface UiSnapshotComputer {
+  browserUrl: string | null;
+  desktop: 'connected' | 'configured' | 'not-installed';
+  desktopTools: number;
+  vision: boolean;
+  grants: string[];
+  tainted: boolean;
 }

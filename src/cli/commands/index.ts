@@ -1,6 +1,8 @@
 import './builtins';
 import './help';
 import './session';
+import './setup';
+import './computer';
 import './git';
 import './skills';
 import './code';

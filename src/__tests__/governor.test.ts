@@ -59,4 +59,20 @@ describe('Governor', () => {
         .rejects.toThrow(GovernorVetoError);
     });
   });
+
+  describe('Computer and external tool control', () => {
+    it('asks for destructive generic and computer-control tools', async () => {
+      await governor.approveTaskExecution('COMPUTER_CONTROL', { tool: 'BrowserTool', action: 'click', isDestructive: true });
+      await governor.approveTaskExecution('TOOL_EXECUTION', { tool: 'mcp__desktop__click', isDestructive: true });
+      expect(GlobalPrompter.ask).toHaveBeenCalledWith(expect.stringContaining('BrowserTool'), expect.any(Array));
+      expect(GlobalPrompter.ask).toHaveBeenCalledWith(expect.stringContaining('mcp__desktop__click'), expect.any(Array));
+    });
+
+    it('blocks destructive computer control in plan mode', async () => {
+      governor.mode = 'plan';
+      await expect(governor.approveTaskExecution('COMPUTER_CONTROL', {
+        tool: 'BrowserTool', action: 'click', isDestructive: true,
+      })).rejects.toThrow(GovernorVetoError);
+    });
+  });
 });

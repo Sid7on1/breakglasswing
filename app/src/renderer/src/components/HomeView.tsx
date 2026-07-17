@@ -1,210 +1,106 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Asterisk, ArrowRight } from 'lucide-react';
-import { cn } from '../lib/cn';
+import { ArrowUpRight, Code2, FileSearch, MessageSquare, Sparkles, WandSparkles } from 'lucide-react';
 import type { SessionMetaRecord } from '../global';
+import { BrandMark } from './BrandMark';
 
-/**
- * Home — the empty-transcript dashboard: greeting, usage stats over the project's session
- * history (sessions-meta.jsonl via the main process), and an ember contribution heatmap.
- * Everything is computed locally; zero engine round-trips.
- */
+function relTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const seconds = Math.round((Date.now() - t) / 1000);
+  if (seconds < 90) return 'now';
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
 
-type Range = 'all' | '30d' | '7d';
+const STARTERS = [
+  { icon: <Code2 size={15} />, title: 'Build a feature', prompt: 'Help me build a new feature in this project. Start by understanding the codebase and asking what outcome I want.' },
+  { icon: <FileSearch size={15} />, title: 'Understand the code', prompt: 'Give me a concise tour of this codebase: its architecture, important entry points, and the best place to start.' },
+  { icon: <WandSparkles size={15} />, title: 'Improve the app', prompt: 'Review this project for the highest-impact product and engineering improvements, then propose a focused plan.' },
+];
 
-const DAY = 86400e3;
-// The Lord of the Rings ≈ 550k words ≈ 730k tokens — the classic yardstick.
-const LOTR_TOKENS = 730_000;
-
-function dayKey(d: Date): string {
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+function projectName(project: string): string {
+  return project.split('/').filter(Boolean).pop() || 'this project';
 }
 
 export function HomeView({
-  project, sessionsTick, onBrowseSessions,
+  project, sessionsTick, onBrowseSessions, onResume,
 }: {
   project: string;
-  sessionsTick: number; // bump to refetch (e.g. on ui_snapshot session changes)
+  sessionsTick: number;
   onBrowseSessions: () => void;
+  onResume: (id: string) => void;
 }): React.ReactElement {
   const [meta, setMeta] = useState<SessionMetaRecord[]>([]);
-  const [range, setRange] = useState<Range>('all');
 
   useEffect(() => {
     void window.bimax.sessionsMeta().then(setMeta).catch(() => setMeta([]));
   }, [project, sessionsTick]);
 
-  const user = useMemo(() => {
-    const m = project.match(/\/Users\/([^/]+)\//);
-    const raw = m?.[1] ?? '';
-    return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : '';
-  }, [project]);
+  const recent = useMemo(
+    () => meta.filter((m) => m.messageCount > 0 && m.title && m.title !== '(no messages yet)').slice(0, 4),
+    [meta],
+  );
 
-  const stats = useMemo(() => {
-    const cutoff = range === 'all' ? 0 : Date.now() - (range === '30d' ? 30 : 7) * DAY;
-    const rows = meta.filter((m) => Date.parse(m.startedAt) >= cutoff);
-    const messages = rows.reduce((n, m) => n + m.messageCount, 0);
-    const tokens = rows.reduce((n, m) => n + m.tokenEstimate, 0);
-
-    const days = new Set<string>();
-    const hourCounts = new Array(24).fill(0);
-    for (const m of rows) {
-      const d = new Date(m.startedAt);
-      if (!Number.isFinite(d.getTime())) continue;
-      days.add(dayKey(d));
-      hourCounts[d.getHours()] += m.messageCount || 1;
-    }
-
-    // Streaks over ALL history (a streak is a streak regardless of the stats range).
-    const allDays = new Set(meta.map((m) => dayKey(new Date(m.startedAt))));
-    let current = 0;
-    for (let i = 0; ; i++) {
-      const d = new Date(Date.now() - i * DAY);
-      if (allDays.has(dayKey(d))) current++;
-      else if (i === 0) continue; // today can still be blank without breaking the streak
-      else break;
-    }
-    let longest = 0;
-    if (allDays.size > 0) {
-      const times = [...allDays].map((k) => {
-        const [y, mo, da] = k.split('-').map(Number);
-        return new Date(y, mo, da).getTime();
-      }).sort((a, b) => a - b);
-      let run = 1;
-      for (let i = 1; i < times.length; i++) {
-        run = times[i] - times[i - 1] === DAY ? run + 1 : 1;
-        longest = Math.max(longest, run);
-      }
-      longest = Math.max(longest, 1);
-    }
-
-    const peakHour = hourCounts.some((c) => c > 0) ? hourCounts.indexOf(Math.max(...hourCounts)) : -1;
-    return { sessions: rows.length, messages, tokens, activeDays: days.size, current, longest, peakHour };
-  }, [meta, range]);
-
-  // Heatmap: last 20 weeks, columns = weeks, rows = Mon..Sun; intensity by messages/day.
-  const heatmap = useMemo(() => {
-    const perDay = new Map<string, number>();
-    for (const m of meta) {
-      const k = dayKey(new Date(m.startedAt));
-      perDay.set(k, (perDay.get(k) ?? 0) + (m.messageCount || 1));
-    }
-    const weeks = 20;
-    const today = new Date();
-    const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const endDow = (end.getDay() + 6) % 7; // Mon = 0
-    const cells: { key: string; level: number }[][] = [];
-    const max = Math.max(1, ...perDay.values());
-    for (let w = weeks - 1; w >= 0; w--) {
-      const col: { key: string; level: number }[] = [];
-      for (let dow = 0; dow < 7; dow++) {
-        const t = end.getTime() - (endDow - dow) * DAY - w * 7 * DAY;
-        if (t > end.getTime()) { col.push({ key: `f${w}-${dow}`, level: -1 }); continue; }
-        const k = dayKey(new Date(t));
-        const v = perDay.get(k) ?? 0;
-        const level = v === 0 ? 0 : Math.min(4, Math.ceil((v / max) * 4));
-        col.push({ key: k, level });
-      }
-      cells.push(col);
-    }
-    return cells;
-  }, [meta]);
-
-  const lotr = stats.tokens > LOTR_TOKENS / 4
-    ? `You've used ~${Math.max(1, Math.round(stats.tokens / LOTR_TOKENS))}× more tokens than The Lord of the Rings.`
-    : stats.tokens > 0
-      ? `You're ${Math.round((stats.tokens / LOTR_TOKENS) * 100)}% of the way through The Lord of the Rings, in tokens.`
-      : '';
-
-  const fmt = (n: number): string => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n.toLocaleString());
+  const start = (prompt: string): void => {
+    window.dispatchEvent(new CustomEvent('bimax:compose-insert', { detail: prompt }));
+  };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-[860px] px-6 pt-14 pb-8">
-        <div className="anim-fade-up flex items-center gap-3">
-          <Asterisk size={30} className="animate-spin-slow text-ember" />
-          <h1 className="text-[26px] font-semibold tracking-tight text-ink">
-            What's next{user ? `, ${user}` : ''}?
-          </h1>
-        </div>
-
-        {meta.length > 0 && (
-          <div className="anim-fade-up mt-8 rounded-2xl border border-line bg-raise/60 p-5" style={{ animationDelay: '80ms' }}>
-            <div className="mb-4 flex items-center">
-              <span className="rounded-lg bg-hover px-2.5 py-1 text-xs font-medium text-ink">Overview</span>
-              <div className="ml-auto flex gap-0.5 rounded-lg border border-line p-0.5">
-                {(['all', '30d', '7d'] as Range[]).map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => setRange(r)}
-                    className={cn(
-                      'cursor-pointer rounded-md px-2.5 py-1 text-[11.5px] transition-colors',
-                      range === r ? 'bg-hover text-ink' : 'text-faint hover:text-ink',
-                    )}
-                  >
-                    {r === 'all' ? 'All' : r}
-                  </button>
-                ))}
-              </div>
+    <main className="home-canvas min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto flex min-h-full w-full max-w-[820px] flex-col justify-center px-7 py-12">
+        <section className="anim-fade-up">
+          <div className="mb-6 flex items-center gap-3">
+            <BrandMark className="size-10" />
+            <div>
+              <div className="text-[11px] font-medium tracking-[0.08em] text-faint uppercase">{projectName(project)}</div>
+              <h1 className="font-display mt-0.5 text-[34px] font-semibold tracking-[-0.04em] text-ink">What do you want to make?</h1>
             </div>
+          </div>
+          <p className="max-w-[560px] text-[14px] leading-relaxed text-dim">
+            Describe an outcome. Bimax can explore the code, make changes, run checks, and show you exactly what changed.
+          </p>
 
-            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <HomeTile label="Sessions" value={fmt(stats.sessions)} i={0} />
-              <HomeTile label="Messages" value={fmt(stats.messages)} i={1} />
-              <HomeTile label="Total tokens" value={fmt(stats.tokens)} i={2} />
-              <HomeTile label="Active days" value={String(stats.activeDays)} i={3} />
-              <HomeTile label="Current streak" value={`${stats.current}d`} i={4} />
-              <HomeTile label="Longest streak" value={`${stats.longest}d`} i={5} />
-              <HomeTile label="Peak hour" value={stats.peakHour < 0 ? '—' : `${((stats.peakHour + 11) % 12) + 1} ${stats.peakHour < 12 ? 'AM' : 'PM'}`} i={6} />
-              <HomeTile label="Avg msgs / session" value={stats.sessions ? String(Math.round(stats.messages / stats.sessions)) : '—'} i={7} />
+          <div className="mt-7 grid gap-2.5 md:grid-cols-3">
+            {STARTERS.map((item, index) => (
+              <button
+                key={item.title}
+                onClick={() => start(item.prompt)}
+                className="anim-fade-up group flex min-h-[112px] cursor-pointer flex-col rounded-2xl border border-line/80 bg-raise/55 p-4 text-left transition-[border-color,background-color,transform] hover:-translate-y-0.5 hover:border-ember/35 hover:bg-raise focus-visible:outline-2 focus-visible:outline-ember"
+                style={{ animationDelay: `${60 + index * 45}ms` }}
+              >
+                <span className="flex size-8 items-center justify-center rounded-xl bg-hover text-dim transition-colors group-hover:bg-ember/12 group-hover:text-ember">{item.icon}</span>
+                <span className="mt-auto flex items-center gap-2 pt-4 text-[12.5px] font-medium text-ink">
+                  {item.title}<ArrowUpRight size={13} className="ml-auto text-faint transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-ember" />
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {recent.length > 0 && (
+          <section className="anim-fade-up mt-10" style={{ animationDelay: '180ms' }}>
+            <div className="mb-2.5 flex items-center">
+              <span className="flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.08em] text-faint uppercase"><Sparkles size={12} /> Pick up where you left off</span>
+              <button onClick={onBrowseSessions} className="ml-auto cursor-pointer rounded-lg px-2 py-1 text-[11px] text-faint hover:bg-hover hover:text-ink">View all</button>
             </div>
-
-            {/* Contribution heatmap — ember scale, never neon */}
-            <div className="mt-5 flex gap-[3px] overflow-hidden">
-              {heatmap.map((col, i) => (
-                <div key={i} className="flex flex-col gap-[3px]">
-                  {col.map((c) => (
-                    <div
-                      key={c.key}
-                      title={c.level >= 0 ? c.key : undefined}
-                      className={cn(
-                        'size-[13px] rounded-[3px]',
-                        c.level === -1 && 'opacity-0',
-                        c.level === 0 && 'bg-hover',
-                        c.level === 1 && 'bg-ember/25',
-                        c.level === 2 && 'bg-ember/45',
-                        c.level === 3 && 'bg-ember/70',
-                        c.level === 4 && 'bg-ember',
-                      )}
-                    />
-                  ))}
-                </div>
+            <div className="overflow-hidden rounded-2xl border border-line/80 bg-raise/35">
+              {recent.map((task, index) => (
+                <button
+                  key={task.id}
+                  onClick={() => onResume(task.id)}
+                  className="group flex w-full cursor-pointer items-center gap-3 border-b border-line/60 px-4 py-3 text-left last:border-b-0 hover:bg-hover/65"
+                >
+                  <MessageSquare size={14} className="shrink-0 text-faint group-hover:text-ember" />
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] text-dim group-hover:text-ink">{task.title}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-faint">{relTime(task.startedAt)}</span>
+                  <ArrowUpRight size={13} className="shrink-0 text-faint opacity-0 transition-opacity group-hover:opacity-100" />
+                </button>
               ))}
             </div>
-            {lotr && <div className="mt-3 text-xs text-faint">{lotr}</div>}
-          </div>
+          </section>
         )}
-
-        <button
-          onClick={onBrowseSessions}
-          className="anim-fade-up mt-6 flex cursor-pointer items-center gap-2 rounded-xl border border-line bg-raise/60 px-4 py-3 text-[13px] text-dim transition-all hover:border-ember/40 hover:text-ink"
-          style={{ animationDelay: '160ms' }}
-        >
-          Browse past sessions
-          <ArrowRight size={14} className="text-ember" />
-        </button>
       </div>
-    </div>
-  );
-}
-
-function HomeTile({ label, value, i }: { label: string; value: string; i: number }): React.ReactElement {
-  return (
-    <div
-      className="anim-fade-up rounded-xl border border-line bg-bg/60 px-3.5 py-3 transition-colors hover:border-ember/30"
-      style={{ animationDelay: `${100 + i * 40}ms` }}
-    >
-      <div className="text-[11px] text-faint">{label}</div>
-      <div className="mt-0.5 text-[17px] font-semibold text-ink tabular-nums">{value}</div>
-    </div>
+    </main>
   );
 }

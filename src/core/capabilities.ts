@@ -170,6 +170,47 @@ const RULES: CapabilityRule[] = [
       contextWindow: 64_000,
     },
   },
+  // --- NVIDIA Nemotron Omni: purpose-built for GUI/browser agents. The hosted model accepts
+  // image/video/audio/text, emits inline reasoning, supports tools, and advertises a 256K window.
+  // Keep parallel tools and response_format conservative because NIM deployments vary. ---
+  {
+    match: ['nemotron-3-nano-omni'],
+    caps: {
+      inlineReasoning: true,
+      parallelToolCalls: false,
+      visionInput: true,
+      contextWindow: 256_000,
+    },
+  },
+  // --- NVIDIA's compact document/visual model. Reasoning is prompt-controlled; leave the
+  // reasoning flags off so ordinary instruct responses stream without an implicit think buffer. ---
+  {
+    match: ['nemotron-nano-12b-v2-vl'],
+    caps: {
+      parallelToolCalls: false,
+      visionInput: true,
+      contextWindow: 128_000,
+    },
+  },
+  // --- Ministral 3 Instruct VLM: native function calling, up to ten images, and 256K context. ---
+  {
+    match: ['ministral-14b-instruct-2512', 'ministral-3-14b-instruct'],
+    caps: {
+      parallelToolCalls: false,
+      visionInput: true,
+      contextWindow: 256_000,
+    },
+  },
+  // --- Meta Llama 3.2 Vision endpoints on NVIDIA NIM. These are perception models first; keep
+  // structured/parallel tool flags conservative and let the BIMAX tool loop sequence actions. ---
+  {
+    match: ['llama-3.2-11b-vision', 'llama-3.2-90b-vision'],
+    caps: {
+      parallelToolCalls: false,
+      visionInput: true,
+      contextWindow: 128_000,
+    },
+  },
   // --- MiniMax (NIM): NOT a reasoning model (confirmed by the user who runs it) — it streams its
   // answer directly, with no reasoning_content channel and no inline </think>. So inlineReasoning AND
   // reasoningEffortKnob are FALSE (sending reasoning_effort to a non-reasoning model risks a 400, and

@@ -1,7 +1,8 @@
 // Visual smoke-test for the renderer without Electron: serve out/renderer over localhost
 // (file:// blanks on crossorigin module CORS), stub the preload bridge, feed fake protocol
 // events, drive the shell (dock tabs, ⌘K palette), and screenshot each state.
-// Usage: node app/scripts/screenshot-ui.mjs → app/release/ui-{transcript,agents,mind,palette,modal}.png
+// Usage: node app/scripts/screenshot-ui.mjs → full suite
+//        node app/scripts/screenshot-ui.mjs --quick → welcome + home only
 import puppeteer from 'puppeteer';
 import path from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -36,7 +37,7 @@ const page = await browser.newPage();
 await page.setViewport({ width: 1440, height: 860, deviceScaleFactor: 2 });
 
 await page.evaluateOnNewDocument(() => {
-  window.__cbs = { msg: [], state: [], project: [] };
+  window.__cbs = { msg: [], state: [], project: [], supervisor: [] };
   const FAKE_COMMANDS = [
     { value: '/beast', label: '/beast', desc: 'Mega-pipeline: swarm → heal → self-critic → checkpoint', kind: 'command' },
     { value: '/swarm', label: '/swarm', desc: 'Parallel sub-agents on a shared blackboard', kind: 'command' },
@@ -75,8 +76,33 @@ await page.evaluateOnNewDocument(() => {
     onProject: (cb) => { window.__cbs.project.push(cb); return () => {}; },
     pickFolder: async () => null,
     restartEngine: async () => '',
-    getProject: async () => '/Users/dev/projects/bimax',
+    // Start without a project so the visual smoke covers the project-first welcome. The script
+    // switches to the fake Bimax project after that screenshot and continues the normal suite.
+    getProject: async () => '',
+    recentProjects: async () => [
+      '/Users/dev/projects/bimax',
+      '/Users/dev/projects/payments-service',
+      '/Users/dev/projects/design-system',
+    ],
+    openProject: async (dir) => {
+      window.__cbs.project.forEach((cb) => cb(dir));
+      return dir;
+    },
     rendererReady: () => {},
+    supervisor: {
+      getStatus: async () => ({
+        phase: 'ready', enteredAt: Date.now(), attempt: 1, generation: 1,
+        message: 'Engine ready', reason: 'ready', profile: 'full',
+        capabilities: [], degradedCapabilities: [], lastHeartbeat: {
+          at: Date.now(), uptimeMs: 42000, rssMb: 286, heapMb: 121,
+          eventLoopDelayMs: 2, activeTurn: false,
+        },
+      }),
+      onStatus: (cb) => { window.__cbs.supervisor.push(cb); return () => {}; },
+      action: async () => true,
+      crashHistory: async () => [],
+      diagnostics: async () => 'Bimax engine diagnostics',
+    },
     git: {
       status: async () => ({
         branch: 'feat/retry-backoff', ahead: 2, behind: 0,
@@ -186,11 +212,43 @@ await page.evaluateOnNewDocument(() => {
   };
 });
 
-page.on('pageerror', (e) => console.error('[pageerror]', e.message));
-await page.goto(base + '/', { waitUntil: 'networkidle0' });
+const pageErrors = [];
+page.on('pageerror', (e) => {
+  pageErrors.push(e.message);
+  console.error('[pageerror]', e.message);
+});
+// The renderer keeps long-lived app bridges/listeners open; DOM readiness is the stable visual
+// boundary, while networkidle can wait forever in both Electron-like and CI environments.
+await page.goto(base + '/', { waitUntil: 'domcontentloaded', timeout: 15_000 });
 
 const feed = (msg) => page.evaluate((m) => window.__cbs.msg.forEach((cb) => cb(m)), msg);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const clickButton = async ({ title, text: buttonText }) => {
+  const clicked = await page.evaluate(({ title: wantedTitle, text: wantedText }) => {
+    const buttons = [...document.querySelectorAll('button')];
+    const button = buttons.find((candidate) => (
+      (wantedTitle && candidate.title === wantedTitle)
+      || (wantedText && candidate.textContent.trim() === wantedText)
+    ));
+    button?.click();
+    return Boolean(button);
+  }, { title, text: buttonText });
+  if (!clicked) throw new Error(`Missing button: ${title || buttonText}`);
+};
+const assertVisible = async (selector, description) => {
+  const visible = await page.$eval(selector, (node) => {
+    const rect = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }).catch(() => false);
+  if (!visible) throw new Error(`Expected visible ${description}`);
+};
+
+// Project-first welcome — no engine is running and no chat controls should be visible.
+await sleep(500);
+await page.screenshot({ path: path.join(outDir, 'ui-welcome.png') });
+await page.evaluate(() => window.__cbs.project.forEach((cb) => cb('/Users/dev/projects/bimax')));
+await sleep(200);
 
 await feed({ t: 'ready', protocol: 3 });
 await feed({ t: 'event', name: 'ui_snapshot', args: [{
@@ -222,6 +280,14 @@ await feed({ t: 'event', name: 'ui_snapshot', args: [{
   },
   contextWindow: 128000, tokensBaseline: 8948, compressionSaved: 12400,
   workspace: { count: 1, names: ['bimax'], writable: 1 },
+  tools: { registered: 47, ready: 21, deferred: 24, discovered: 2, mcp: 1, graphReady: true },
+  computer: {
+    browserUrl: 'http://localhost:5173/checkout',
+    desktop: 'connected', desktopTools: 9,
+    vision: true,
+    grants: ['domain:localhost'],
+    tainted: true,
+  },
   sessions: [
     { id: '2026-07-10_14-02-11', title: 'Add retry with backoff to the fetch client', startedAt: new Date(Date.now() - 40 * 60e3).toISOString(), messageCount: 12, cwd: '/Users/dev/projects/bimax', current: true },
     { id: '2026-07-10_09-31-52', title: 'Fix pty resize race in terminal panel', startedAt: new Date(Date.now() - 5 * 3600e3).toISOString(), messageCount: 34, cwd: '/Users/dev/projects/bimax', current: false },
@@ -240,17 +306,18 @@ await feed({ t: 'event', name: 'ui_snapshot', args: [{
 await sleep(500);
 await page.screenshot({ path: path.join(outDir, 'ui-home.png') });
 
+if (process.argv.includes('--quick')) {
+  await browser.close();
+  server.close();
+  console.log('screenshots: release/ui-welcome.png, release/ui-home.png');
+  process.exit(0);
+}
+
 // Sessions gallery via the sidebar's "view all".
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.title === 'Browse all sessions')?.click();
-});
+await clickButton({ title: 'Browse all sessions' });
 await sleep(450);
 await page.screenshot({ path: path.join(outDir, 'ui-gallery.png') });
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.title === 'Back to chat')?.click();
-});
+await clickButton({ title: 'Back to chat' });
 await sleep(250);
 
 await feed({ t: 'event', name: 'message', args: [{
@@ -296,16 +363,43 @@ await feed({ t: 'event', name: 'subagent_update', args: [[
   { taskId: 'sa-1', agentType: 'coder', scope: 'src/api/**', prompt: 'Wrap fetchJson call sites in retry()', status: 'running', startedAt: Date.now() - 42000, toolCalls: 7 },
   { taskId: 'sa-2', agentType: 'tester', scope: 'src/__tests__/**', prompt: 'Add retry/backoff unit tests', status: 'done', startedAt: Date.now() - 90000, endedAt: Date.now() - 8000, toolCalls: 12, result: '4 tests added, all green' },
 ]] });
+await feed({ t: 'event', name: 'review_update', args: [{
+  sessionId: '2026-07-10_14-02-11',
+  state: 'verification_failed',
+  nextAction: 'Verification failed (npm test -- retry) — fix and re-run.',
+  approvals: [
+    { id: 1, kind: 'permission', question: 'Allow edits under src/api?', requestedAt: Date.now() - 8 * 60e3, resolution: { value: 'Approve', approved: true, at: Date.now() - 7 * 60e3 } },
+    { id: 2, kind: 'diff', question: 'Apply retry backoff changes?', requestedAt: Date.now() - 4 * 60e3, resolution: { value: 'Approve', approved: true, at: Date.now() - 3 * 60e3 } },
+  ],
+  changes: [
+    { file: 'src/api/client.ts', tools: ['EditFileTool'], edits: 2, lastCallId: 'tc-2', lastAt: Date.now() - 2 * 60e3 },
+    { file: 'src/api/retry.ts', tools: ['WriteFileTool'], edits: 1, lastCallId: 'tc-3', lastAt: Date.now() - 2 * 60e3 },
+  ],
+  verifications: [
+    { command: 'npm test -- retry', ok: false, settled: 2, at: Date.now() - 45e3 },
+  ],
+  checkpoints: [
+    { id: '', label: 'verified task', ts: Date.now() - 30e3, auto: false, ok: false },
+  ],
+  lastCheckpoint: null,
+  todos: [
+    { content: 'Locate fetch call sites', status: 'completed' },
+    { content: 'Add retry helper', status: 'completed' },
+    { content: 'Fix failing retry test', status: 'in_progress' },
+  ],
+  interrupted: false,
+  updatedAt: Date.now(),
+}] });
 
 await sleep(400);
 await page.screenshot({ path: path.join(outDir, 'ui-transcript.png') });
 
 // Composer selectors: open the permission preset dropdown.
-await page.evaluate(() => {
-  const spans = [...document.querySelectorAll('button span')];
-  spans.find((s) => s.textContent.includes('Approve for me'))?.closest('button')?.click();
-});
+await clickButton({ text: 'Work automatically' });
 await sleep(250);
+const hasAskPreset = await page.evaluate(() => [...document.querySelectorAll('button')]
+  .some((button) => button.textContent.includes('Ask before changes')));
+if (!hasAskPreset) throw new Error('Permission preset menu did not open');
 await page.screenshot({ path: path.join(outDir, 'ui-composer.png') });
 await page.keyboard.press('Escape');
 await sleep(150);
@@ -317,26 +411,26 @@ await page.keyboard.up('Meta');
 await sleep(300);
 await page.screenshot({ path: path.join(outDir, 'ui-agents.png') });
 
+const clickTab = async (label) => {
+  const clicked = await page.evaluate((l) => {
+    const btns = [...document.querySelectorAll('button')];
+    const button = btns.find((b) => b.getAttribute('aria-label') === l || b.textContent.trim().startsWith(l));
+    button?.click();
+    return Boolean(button);
+  }, label);
+  if (!clicked) throw new Error(`Missing dock tab: ${label}`);
+};
+
 // Mind tab
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.textContent.trim() === 'Mind')?.click();
-});
+await clickTab('Memory');
 await sleep(300);
 await page.screenshot({ path: path.join(outDir, 'ui-mind.png') });
 
 // Review tab (P3): changed-file list + branch pill, then a file's word-level diff.
-const clickTab = (label) => page.evaluate((l) => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.textContent.trim() === l)?.click();
-}, label);
 await clickTab('Review');
 await sleep(350);
 await page.screenshot({ path: path.join(outDir, 'ui-review.png') });
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.title === 'src/api/client.ts')?.click();
-});
+await clickButton({ title: 'src/api/client.ts' });
 await sleep(350);
 await page.screenshot({ path: path.join(outDir, 'ui-diff.png') });
 
@@ -370,27 +464,32 @@ await sleep(500);
 await page.screenshot({ path: path.join(outDir, 'ui-terminal.png') });
 
 // Agents tab (P4): swarm launcher form open over the live cards.
-await clickTab('Agents');
+await clickTab('Agent team');
 await sleep(200);
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.textContent.trim() === 'Swarm')?.click();
-});
+await clickButton({ text: 'Parallel team' });
 await sleep(250);
 await page.screenshot({ path: path.join(outDir, 'ui-agents-launch.png') });
 await page.keyboard.press('Escape');
 
 // Map tab (P4): graph stats + index actions + impact query.
-await clickTab('Map');
+await clickTab('Code map');
 await sleep(250);
 await page.screenshot({ path: path.join(outDir, 'ui-map.png') });
 
+// Health tab: engine warnings/errors are durable and the latest one surfaces as a top banner.
+await feed({ t: 'event', name: 'log', args: [{
+  id: 'diag-1', level: 'warn',
+  text: 'Graph persistence is using the in-memory fallback; restart durability is unavailable.',
+  timestamp: new Date().toISOString(),
+}] });
+await clickButton({ title: 'Help and app status' });
+await sleep(250);
+await page.screenshot({ path: path.join(outDir, 'ui-health.png') });
+
 // Settings dialog (P6): grouped engine-menu entry points.
-await page.evaluate(() => {
-  const btns = [...document.querySelectorAll('button')];
-  btns.find((b) => b.title === 'Settings')?.click();
-});
+await clickButton({ title: 'Settings' });
 await sleep(350);
+await assertVisible('input[placeholder="Search settings"]', 'settings search');
 await page.screenshot({ path: path.join(outDir, 'ui-settings.png') });
 await page.keyboard.press('Escape');
 await sleep(200);
@@ -400,6 +499,7 @@ await page.keyboard.down('Meta');
 await page.keyboard.press('k');
 await page.keyboard.up('Meta');
 await sleep(350);
+await assertVisible('input[placeholder="Search Bimax…"]', 'command search');
 await page.screenshot({ path: path.join(outDir, 'ui-palette.png') });
 await page.keyboard.press('Escape');
 await sleep(200);
@@ -409,8 +509,13 @@ await feed({ t: 'request', id: 7, kind: 'diff', question: 'Apply this edit to sr
   options: ['Approve', 'Reject', 'Always allow edits'],
   body: '@@ -12,6 +12,9 @@\n-  const res = await fetch(url);\n+  const res = await retry(3, () => fetch(url));\n+  // exponential backoff: 250ms, 500ms, 1s\n   if (!res.ok) throw new ApiError(res);' });
 await sleep(350);
+const unnamedButtons = await page.evaluate(() => [...document.querySelectorAll('button:not([disabled])')]
+  .filter((button) => !(button.textContent.trim() || button.title || button.getAttribute('aria-label')))
+  .map((button) => button.outerHTML.slice(0, 240)));
+if (unnamedButtons.length > 0) throw new Error(`Enabled button(s) have no accessible name: ${unnamedButtons.join(' | ')}`);
+if (pageErrors.length > 0) throw new Error(`Renderer errors: ${pageErrors.join(' | ')}`);
 await page.screenshot({ path: path.join(outDir, 'ui-modal.png') });
 
 await browser.close();
 server.close();
-console.log('screenshots:', ['ui-home', 'ui-gallery', 'ui-transcript', 'ui-agents', 'ui-agents-launch', 'ui-map', 'ui-mind', 'ui-review', 'ui-diff', 'ui-files', 'ui-editor', 'ui-terminal', 'ui-settings', 'ui-palette', 'ui-modal'].map((n) => `release/${n}.png`).join(', '));
+console.log('screenshots:', ['ui-welcome', 'ui-home', 'ui-gallery', 'ui-transcript', 'ui-agents', 'ui-agents-launch', 'ui-map', 'ui-health', 'ui-mind', 'ui-review', 'ui-diff', 'ui-files', 'ui-editor', 'ui-terminal', 'ui-settings', 'ui-palette', 'ui-modal'].map((n) => `release/${n}.png`).join(', '));

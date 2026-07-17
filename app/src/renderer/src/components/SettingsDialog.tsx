@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Settings2, Cpu, Bot, Shield, Activity, Search, X, ChevronDown,
-  Gauge, CircleDollarSign, Stethoscope, ScrollText,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 import { cn } from '../lib/cn';
@@ -10,8 +9,7 @@ import type { EngineConfig } from '../protocol';
 /**
  * Settings v2 — a real settings surface (Claude-desktop style): left nav + search, pages of
  * live controls that read/write the engine config over the silent protocol-v3 round-trip
- * (configGet/configSet). Nothing prints into the transcript. Only the Diagnostics entries
- * still open engine dashboards in chat, and they say so.
+ * (configGet/configSet). Nothing in this surface prints into the transcript.
  */
 
 type Control =
@@ -36,11 +34,9 @@ const PAGES: { id: PageId; label: string; icon: React.ReactNode; items: Item[] }
     icon: <Settings2 size={15} />,
     items: [
       { key: 'notificationBell', label: 'Notification bell', desc: 'Play a sound when a turn finishes while the window is in the background.', control: { kind: 'toggle' } },
-      { key: 'autoIndex', label: 'Auto-index projects', desc: 'Build the codebase map graph automatically when a new project opens, unlocking symbol-level navigation.', control: { kind: 'toggle' } },
-      { key: 'verbose', label: 'Verbose logging', desc: 'Log extra engine detail — useful when debugging, noisy otherwise.', control: { kind: 'toggle' } },
-      { key: 'reducedMotion', label: 'Reduce motion', desc: 'Calm, static UI: disables entrance animations, shimmer, and spinners across the app and TUI.', control: { kind: 'toggle' } },
-      { key: 'showMapPanel', label: 'Codebase map panel (TUI)', desc: 'Pin the map overview panel above the input in the terminal UI.', control: { kind: 'toggle' } },
-      { key: 'showTokenMeter', label: 'Token meter (TUI)', desc: 'Live "tokens that will be sent" estimate near the terminal input.', control: { kind: 'toggle' } },
+      { key: 'autoIndex', label: 'Build code maps automatically', desc: 'Prepare the visual code map when a project opens.', control: { kind: 'toggle' } },
+      { key: 'verbose', label: 'Verbose logging', desc: 'Include extra diagnostic detail for troubleshooting.', control: { kind: 'toggle' } },
+      { key: 'reducedMotion', label: 'Reduce motion', desc: 'Use a calmer interface with fewer animations.', control: { kind: 'toggle' } },
     ],
   },
   {
@@ -48,10 +44,10 @@ const PAGES: { id: PageId; label: string; icon: React.ReactNode; items: Item[] }
     label: 'Models',
     icon: <Cpu size={15} />,
     items: [
-      { key: 'model', label: 'Coding model', desc: 'Drives the main agent loop. Any OpenAI-compatible model id.', control: { kind: 'text', placeholder: 'provider/model-id' } },
-      { key: 'liteModel', label: 'Lite model', desc: 'Cheap auxiliary calls: summaries, self-critic, ask-user.', control: { kind: 'text', placeholder: 'provider/model-id' } },
-      { key: 'subagentModel', label: 'Sub-agent model', desc: 'Model sub-agents run on. Empty = inherit the coding model.', control: { kind: 'text', placeholder: 'inherit coding model' } },
-      { key: 'fallbackModel', label: 'Fallback model', desc: 'When the active model keeps failing mid-run, switch here once instead of dying. Empty = off.', control: { kind: 'text', placeholder: 'off' } },
+      { key: 'model', label: 'Main model', desc: 'The model Bimax uses for building and reasoning.', control: { kind: 'text', placeholder: 'provider/model-id' } },
+      { key: 'liteModel', label: 'Fast model', desc: 'A quicker model for summaries and small supporting tasks.', control: { kind: 'text', placeholder: 'provider/model-id' } },
+      { key: 'subagentModel', label: 'Specialist model', desc: 'The model used by the agent team. Leave empty to use the main model.', control: { kind: 'text', placeholder: 'use main model' } },
+      { key: 'fallbackModel', label: 'Backup model', desc: 'Used when the main model is temporarily unavailable.', control: { kind: 'text', placeholder: 'off' } },
       {
         key: 'reasoningEffort', label: 'Reasoning effort', desc: 'Thinking budget for reasoning-capable models. Off sends no effort hint.',
         control: { kind: 'select', options: [{ value: '', label: 'Off' }, { value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
@@ -69,11 +65,11 @@ const PAGES: { id: PageId; label: string; icon: React.ReactNode; items: Item[] }
   },
   {
     id: 'autonomy',
-    label: 'Autonomy',
+    label: 'Agent behavior',
     icon: <Bot size={15} />,
     items: [
       { key: 'maxToolIterations', label: 'Max tool iterations', desc: 'Per-turn budget for autonomous tool loops. Higher = deeper multi-file work without babysitting.', control: { kind: 'number', min: 1, max: 500, step: 5 } },
-      { key: 'maxSubAgents', label: 'Max sub-agents', desc: 'Ceiling for concurrent swarm/speculate/heal agents.', control: { kind: 'number', min: 1, max: 20, step: 1 } },
+      { key: 'maxSubAgents', label: 'Parallel specialists', desc: 'Maximum number of specialists Bimax may coordinate at once.', control: { kind: 'number', min: 1, max: 20, step: 1 } },
       { key: 'selfCritic', label: 'Self-critic pass', desc: 'A lite-model review of each result before it reaches you.', control: { kind: 'toggle' } },
       { key: 'adversarialVerify', label: 'Adversarial verify', desc: 'Full-model red-team pass after self-critic. Slower, catches sneaky mistakes.', control: { kind: 'toggle' } },
       { key: 'autoVerify', label: 'Auto-verify edits', desc: 'Typecheck after each edit and feed errors straight back into the loop.', control: { kind: 'toggle' } },
@@ -92,20 +88,12 @@ const PAGES: { id: PageId; label: string; icon: React.ReactNode; items: Item[] }
   },
 ];
 
-const DIAGNOSTICS: { label: string; icon: React.ReactNode; cmd: string }[] = [
-  { label: 'Trace', icon: <Activity size={14} />, cmd: '/trace' },
-  { label: 'Performance', icon: <Gauge size={14} />, cmd: '/perf' },
-  { label: 'Cost', icon: <CircleDollarSign size={14} />, cmd: '/cost' },
-  { label: 'Diagnostics', icon: <Stethoscope size={14} />, cmd: '/diagnostics' },
-  { label: 'Changelog', icon: <ScrollText size={14} />, cmd: '/changelog' },
-];
-
 export function SettingsDialog({
-  open, onClose, onCommand, configGet, configSet,
+  open, onClose, onOpenHealth, configGet, configSet,
 }: {
   open: boolean;
   onClose: () => void;
-  onCommand: (cmd: string) => void;
+  onOpenHealth: () => void;
   configGet: () => Promise<EngineConfig>;
   configSet: (patch: EngineConfig) => Promise<EngineConfig>;
 }): React.ReactElement {
@@ -182,19 +170,17 @@ export function SettingsDialog({
               {p.label}
             </button>
           ))}
-          <div className="mt-4 mb-1 px-2 text-[10px] font-medium tracking-[0.08em] text-faint uppercase">Diagnostics</div>
-          {DIAGNOSTICS.map((d) => (
-            <button
-              key={d.cmd}
-              onClick={() => { onCommand(d.cmd); onClose(); }}
-              title={`${d.cmd} — opens in chat`}
-              className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] text-dim transition-colors hover:bg-hover/60 hover:text-ink"
-            >
-              <span className="shrink-0 text-faint">{d.icon}</span>
-              {d.label}
-              <span className="ml-auto text-[9.5px] text-faint">chat</span>
-            </button>
-          ))}
+          <div className="mt-4 mb-1 px-2 text-[10px] font-medium tracking-[0.08em] text-faint uppercase">System</div>
+          <button
+            onClick={() => { onClose(); onOpenHealth(); }}
+            className="flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.5px] text-dim transition-colors hover:bg-hover/60 hover:text-ink"
+          >
+            <Activity size={14} className="mt-0.5 shrink-0 text-faint" />
+            <span>
+              <span className="block">Support</span>
+              <span className="mt-0.5 block text-[10.5px] leading-snug text-faint">App status and troubleshooting</span>
+            </span>
+          </button>
         </div>
 
         {/* Content */}
@@ -213,7 +199,7 @@ export function SettingsDialog({
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
             {unsupported && (
               <div className="anim-fade-up mt-3 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber">
-                This engine predates settings sync (protocol v3). Rebuild it with <code className="font-mono">npm run build</code>, then restart.
+                These settings are unavailable in this build. Update Bimax and try again.
               </div>
             )}
             {!cfg && !unsupported ? (

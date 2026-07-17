@@ -153,6 +153,8 @@ globalCommandRegistry.register({
         desc: [
           s.model !== 'default' ? s.model : null,
           `${s.ok} ok / ${s.fail} fail`,
+          s.firstTokenMs > 0 ? `~${(s.firstTokenMs / 1000).toFixed(1)}s to first token` : null,
+          s.hangs > 0 ? `${s.hangs} hang${s.hangs > 1 ? 's' : ''}` : null,
           s.onCooldown ? `cooldown ${Math.ceil(s.cooldownSecs)}s` : null,
         ].filter(Boolean).join(' · '),
         category: 'Pool health (this session)',

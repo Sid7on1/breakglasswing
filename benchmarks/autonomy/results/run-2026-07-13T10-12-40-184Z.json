@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-13T10-12-40-184Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "startedAt": "2026-07-13T10:12:40.184Z",
+  "finishedAt": "2026-07-13T10:12:40.851Z",
+  "tasks": [
+    {
+      "id": "03-retry-cache-runtime",
+      "prompt": "The asynchronous retry cache in this fixture passes simple sequential use but violates its contract\nunder specific promise timing. Diagnose it by running the focused test and repair\n`createRetryCache` in `src/retry-cache.mjs` without changing its exported name or adding dependencies.\n\nThe complete required contract is:\n\n- `createRetryCache({ loader, ttlMs, now })` returns an object with `get(key, options = {})`.\n  `now` is an injected function returning the current time in milliseconds.\n- `get` calls `loader(key, options)` and returns a promise for its result. It passes the exact key and\n  exact options object to the loader and must not mutate either the options object or nested values.\n- Calls for the same key while its load is still pending must share that in-flight work: the loader is\n  invoked exactly once and every caller receives the same resolved value. The pending load remains\n  shared even if the injected clock advances before it settles.\n- Different keys are independent. Their loaders may be in flight at the same time; one key must not\n  serialize or block another key.\n- A rejected load must be evicted when it settles. The rejection is delivered to its callers, and the\n  next `get` for that key must invoke the loader again and may succeed.\n- A successful value remains cached until its TTL expires. The TTL begins at successful resolution,\n  not when loading starts. A call strictly before `resolvedAt + ttlMs` reuses the cached value. A call\n  exactly at or after that boundary invokes the loader again.\n\nThe timing sequence is the defect: do not weaken the asynchronous test or replace the injected clock\nwith real delays. Run `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 17578,
+      "totalCompletionTokens": 591,
+      "totalTokens": 18169,
+      "turnCount": 7,
+      "toolCallCount": 6,
+      "wallClockMs": 666,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj2d36b-b731",
+        "chainOk": true
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 18169,
+    "medianTurns": 7
+  }
+}

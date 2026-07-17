@@ -48,7 +48,11 @@ const TASK_TYPE_MAP: Record<string, string> = {
 export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
   const isDestructive = def.isDestructive ?? true;
   const isConcurrencySafe = def.isConcurrencySafe ?? false;
-  const taskType = TASK_TYPE_MAP[def.name] || 'TOOL_EXECUTION';
+  // Desktop-control MCP tools (the pinned open-computer-use companion) are COMPUTER_CONTROL, not
+  // generic TOOL_EXECUTION: they get the sensitive-app hard deny, per-app session grants, and the
+  // computer-control prompt label instead of an opaque "Run mcp__…".
+  const isDesktopControl = def.name.startsWith('mcp__open-computer-use__');
+  const taskType = TASK_TYPE_MAP[def.name] || (isDesktopControl ? 'COMPUTER_CONTROL' : 'TOOL_EXECUTION');
 
   return {
     name: def.name,
@@ -58,8 +62,17 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
     isConcurrencySafe,
     execute: async (args: any, context?: any) => {
       const payload = taskType === 'OS_COMMAND'
-        ? { command: args.command, context, isDestructive }
-        : { ...args, targetPath: args.path, isDestructive };
+        ? { tool: def.name, command: args.command, context, isDestructive }
+        : isDesktopControl
+          ? {
+              tool: def.name,
+              action: def.name.slice('mcp__open-computer-use__'.length),
+              // The companion's tools address apps by name/bundle in one of these args; surface it
+              // for grant scoping and the sensitive-app deny. Absent → prompt without a scope.
+              app: args?.app || args?.application || args?.bundle_id || args?.window || undefined,
+              ...args, isDestructive,
+            }
+          : { tool: def.name, ...args, targetPath: args.path, isDestructive };
 
       // WS5 step 3: time each guard phase so a slow guard is visible before it's blamed (see /perf).
       const tApprove = Date.now();

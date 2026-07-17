@@ -7,6 +7,7 @@ import { createBrowserTool } from '../tools/implementations/browser.tool';
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
 
 describe('BrowserTool', () => {
+  beforeEach(() => jest.clearAllMocks());
   it('allows localhost, rejects non-http URLs, and gates private networks explicitly', () => {
     expect(validateBrowserUrl('http://localhost:3000').ok).toBe(true);
     expect(validateBrowserUrl('file:///etc/passwd').ok).toBe(false);
@@ -27,6 +28,20 @@ describe('BrowserTool', () => {
     const output = await tool.execute({ action: 'assert', assertion: { textIncludes: 'Ready' } }, { cwd: process.cwd() });
     expect(JSON.parse(output).ok).toBe(true);
     await expect(evidence).resolves.toMatchObject({ action: 'assert', ok: true, trusted: true });
+  });
+
+  it('gates state-changing actions while leaving snapshots read-only', async () => {
+    const runtime: BrowserRuntimePort = {
+      close: jest.fn().mockResolvedValue(undefined),
+      run: jest.fn().mockImplementation(async (command: any) => ({
+        ok: true, action: command.action, summary: 'ok', consoleErrors: [], failedRequests: [], attempts: 1, durationMs: 1,
+      })),
+    };
+    const tool = createBrowserTool(governor, runtime);
+    await tool.execute({ action: 'snapshot' }, { cwd: process.cwd() });
+    expect((governor.approveTaskExecution as jest.Mock).mock.calls.filter(call => call[0] === 'COMPUTER_CONTROL')).toHaveLength(0);
+    await tool.execute({ action: 'click', elementIndex: 0 }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({ action: 'click', isDestructive: true }));
   });
 
   it('lets deterministic assertions pass visual criteria while screenshots remain untrusted', () => {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -93,6 +94,7 @@ func (m *model) renderMessage(me MessageEntry) {
 			m.menuOpen = true
 			m.menuID = menu.ID
 			m.menuTitle = menu.Title
+			m.menuSubtitle = menu.Subtitle
 			m.menuOpts = menu.Options
 			// Land the cursor on the currently-set option (toggle submenus send initialIndex);
 			// clamp so a stale index can't point past the list.
@@ -101,6 +103,47 @@ func (m *model) renderMessage(me MessageEntry) {
 				m.menuIdx = 0
 			}
 			m.menuFilter = ""
+			// Derive category tabs (order of first appearance). Tabs only exist when the menu
+			// carries 2+ distinct categories; tab 0 is always the unfiltered "All" view.
+			m.menuTabs = nil
+			m.menuTab = 0
+			seen := map[string]bool{}
+			for _, o := range menu.Options {
+				if o.Category != "" && !seen[o.Category] {
+					seen[o.Category] = true
+					m.menuTabs = append(m.menuTabs, o.Category)
+				}
+			}
+			if len(m.menuTabs) < 2 {
+				m.menuTabs = nil
+			} else {
+				// Group rows contiguously (stable, by each category's first appearance) so the
+				// section headers render once per group instead of repeating when the engine
+				// interleaves categories. InitialIndex tracks its option to its new position.
+				order := map[string]int{}
+				for i, cat := range m.menuTabs {
+					order[cat] = i
+				}
+				initial := m.menuIdx
+				type keyed struct {
+					opt  menuOption
+					orig int
+				}
+				rows := make([]keyed, len(m.menuOpts))
+				for i, o := range m.menuOpts {
+					rows[i] = keyed{o, i}
+				}
+				sort.SliceStable(rows, func(a, b int) bool {
+					return order[rows[a].opt.Category] < order[rows[b].opt.Category]
+				})
+				m.menuOpts = make([]menuOption, len(rows))
+				for i, r := range rows {
+					m.menuOpts[i] = r.opt
+					if r.orig == initial {
+						m.menuIdx = i
+					}
+				}
+			}
 			m.relayout()
 		}
 		return
@@ -243,15 +286,27 @@ func (m *model) answer(value string) {
 	m.reqMasked = false
 }
 
-// filteredMenu applies the live fuzzy filter (case-insensitive substring over label/desc/value),
-// mirroring Ink InteractiveMenu's enableSearch. Empty filter → the full list.
+// filteredMenu applies the active category tab, then the live fuzzy filter (case-insensitive
+// substring over label/desc/value), mirroring Ink InteractiveMenu's enableSearch. Typing a filter
+// searches across ALL tabs — a search should never silently miss rows hidden by the tab.
 func (m model) filteredMenu() []menuOption {
+	opts := m.menuOpts
+	if len(m.menuTabs) > 0 && m.menuTab > 0 && m.menuTab <= len(m.menuTabs) && m.menuFilter == "" {
+		cat := m.menuTabs[m.menuTab-1]
+		tabbed := make([]menuOption, 0, len(opts))
+		for _, o := range opts {
+			if o.Category == cat {
+				tabbed = append(tabbed, o)
+			}
+		}
+		opts = tabbed
+	}
 	if m.menuFilter == "" {
-		return m.menuOpts
+		return opts
 	}
 	q := strings.ToLower(m.menuFilter)
-	out := make([]menuOption, 0, len(m.menuOpts))
-	for _, o := range m.menuOpts {
+	out := make([]menuOption, 0, len(opts))
+	for _, o := range opts {
 		if strings.Contains(strings.ToLower(o.Label+" "+o.Desc+" "+o.Value), q) {
 			out = append(out, o)
 		}

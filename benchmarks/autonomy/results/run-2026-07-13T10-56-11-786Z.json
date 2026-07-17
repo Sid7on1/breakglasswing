@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-13T10-56-11-786Z",
+  "mode": "live",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "provider-reported-usage",
+    "completionTokens": "gpt-tokenizer-estimate-from-recorded-response",
+    "totalTokens": "prompt-tokens-plus-estimated-completion-tokens"
+  },
+  "startedAt": "2026-07-13T10:56:11.786Z",
+  "finishedAt": "2026-07-13T11:07:28.352Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "prompt": "The order-summary fixture has a failing focused test. Diagnose and fix `summarizeOrders` while\npreserving its exported API. Inspect the fixture before editing, run the focused test to reproduce\nthe failure, make the smallest correct change, rerun the test, and verify the final source before\nfinishing.\n\nThe complete required contract is:\n\n- Include every order except an order whose status is exactly `cancelled`. Orders with any other\n  status are included; in particular, a `pending` order must be counted.\n- Compute each included order's value by summing `quantity * unitPrice` over its `items`. Do not use\n  the order's `subtotal` field.\n- Group included orders by customer. Return one `{ customer, count, total }` object per customer,\n  where `count` is that customer's number of included orders and `total` is the sum of their computed\n  order values, rounded to two decimal places.\n- Sort the returned objects by customer name ascending.\n- Do not mutate the input array, any order, or any nested item.",
+      "passed": true,
+      "totalPromptTokens": 39158,
+      "totalCompletionTokens": 1224,
+      "totalTokens": 40382,
+      "turnCount": 12,
+      "toolCallCount": 12,
+      "wallClockMs": 50482,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "completionTokenSource": "gpt-tokenizer-estimate-from-recorded-response",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj3x2ao-7031",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/01-order-summary/e-mrj3x2ao-7031.jsonl"
+      }
+    },
+    {
+      "id": "02-ledger-contract-refactor",
+      "prompt": "The ledger fixture has inconsistent contracts across its parser, normalizer, balance builder, and\nreport formatter. Repair the implementation without changing the existing exported function names\nor module paths. Inspect the fixture, reproduce the failure with `npm test`, make the required\nmulti-file changes, and rerun the focused test.\n\nThe complete required contract is:\n\n- `parseTransactions(lines)` in `src/parser.mjs` accepts an array of strings. It ignores blank or\n  whitespace-only lines. Every other line must contain exactly four pipe-delimited, non-empty fields\n  in this order: `id|account|kind|amount`. It trims surrounding whitespace from every field and\n  returns `{ id, account, kind, amount }` objects in input order. A malformed nonblank line must throw\n  `TypeError` with the exact message `Invalid ledger line at index N`, where `N` is its zero-based\n  index in the original input array. It must not mutate `lines`.\n- `normalizeTransaction(transaction)` in `src/normalizer.mjs` returns a new\n  `{ id, account, cents }` object. `credit` produces positive cents and `debit` produces negative\n  cents. Amounts must be positive decimal strings with at most two fractional digits; conversion\n  must use integer cents rather than floating-point accumulation. The id and account must be\n  non-empty strings and kind must be exactly `credit` or `debit`. Any invalid transaction must throw\n  `TypeError` whose message is the literal string `Invalid transaction ` (including its trailing\n  space) followed immediately by `String(transaction.id)`. For example, an invalid transaction with\n  id `bad-kind` must have the exact message `Invalid transaction bad-kind`. It must not mutate the\n  input object.\n- `buildBalances(transactions)` in `src/ledger.mjs` accepts normalized transactions, ignores every\n  occurrence of an id after its first occurrence, and returns a `Map` from account name to its total\n  integer cents. It must not mutate the array or transaction objects.\n- `formatReport(balances)` in `src/report.mjs` accepts that `Map` and returns\n  `{ account, balance }` objects. `balance` is a dollar number derived from integer cents and rounded\n  to two decimal places. Sort by balance descending; ties are broken by account name ascending. It\n  must not mutate the `Map`.\n- `processLedger(lines)` in `src/index.mjs` must compose those four stages and return the formatted\n  report with all behavior above.\n\nDo not add dependencies or replace the focused test with a weaker assertion.",
+      "passed": true,
+      "totalPromptTokens": 75613,
+      "totalCompletionTokens": 2106,
+      "totalTokens": 77719,
+      "turnCount": 17,
+      "toolCallCount": 22,
+      "wallClockMs": 163079,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "completionTokenSource": "gpt-tokenizer-estimate-from-recorded-response",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj3y537-da5b",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/02-ledger-contract-refactor/e-mrj3y537-da5b.jsonl"
+      }
+    },
+    {
+      "id": "03-retry-cache-runtime",
+      "prompt": "The asynchronous retry cache in this fixture passes simple sequential use but violates its contract\nunder specific promise timing. Diagnose it by running the focused test and repair\n`createRetryCache` in `src/retry-cache.mjs` without changing its exported name or adding dependencies.\n\nThe complete required contract is:\n\n- `createRetryCache({ loader, ttlMs, now })` returns an object with `get(key, options = {})`.\n  `now` is an injected function returning the current time in milliseconds.\n- `get` calls `loader(key, options)` and returns a promise for its result. It passes the exact key and\n  exact options object to the loader and must not mutate either the options object or nested values.\n- Calls for the same key while its load is still pending must share that in-flight work: the loader is\n  invoked exactly once and every caller receives the same resolved value. The pending load remains\n  shared even if the injected clock advances before it settles.\n- Different keys are independent. Their loaders may be in flight at the same time; one key must not\n  serialize or block another key.\n- A rejected load must be evicted when it settles. The rejection is delivered to its callers, and the\n  next `get` for that key must invoke the loader again and may succeed.\n- A successful value remains cached until its TTL expires. The TTL begins at successful resolution,\n  not when loading starts. A call strictly before `resolvedAt + ttlMs` reuses the cached value. A call\n  exactly at or after that boundary invokes the loader again.\n\nThe timing sequence is the defect: do not weaken the asynchronous test or replace the injected clock\nwith real delays. Run `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 57289,
+      "totalCompletionTokens": 1107,
+      "totalTokens": 58396,
+      "turnCount": 16,
+      "toolCallCount": 11,
+      "wallClockMs": 462972,
+      "contextRecoveryFired": false,
+      "usageComplete": false,
+      "completionTokenSource": "gpt-tokenizer-estimate-from-recorded-response",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj41mxs-6778",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-13T10-56-11-786Z/03-retry-cache-runtime/e-mrj41mxs-6778.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 3,
+    "passed": 3,
+    "completionRate": 1,
+    "medianTotalTokens": 58396,
+    "medianTurns": 16,
+    "sumPromptTokens": 172060,
+    "sumCompletionTokens": 4437,
+    "sumTotalTokens": 176497,
+    "contextRecoveryRate": 0
+  }
+}

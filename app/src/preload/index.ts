@@ -22,10 +22,26 @@ const api = {
     ipcRenderer.on('app:project', h);
     return () => ipcRenderer.removeListener('app:project', h);
   },
+  // Engine supervisor: full typed lifecycle status + validated recovery actions. The renderer
+  // gets levers (retry/restart-safe/resume/minimal/stop), never raw process execution.
+  supervisor: {
+    onStatus: (cb: (status: unknown) => void): (() => void) => {
+      const h = (_e: unknown, status: unknown): void => cb(status);
+      ipcRenderer.on('supervisor:status', h);
+      return () => ipcRenderer.removeListener('supervisor:status', h);
+    },
+    getStatus: (): Promise<unknown> => ipcRenderer.invoke('supervisor:get-status'),
+    action: (action: { action: string; sessionId?: string }): Promise<boolean> =>
+      ipcRenderer.invoke('supervisor:action', action),
+    crashHistory: (): Promise<unknown[]> => ipcRenderer.invoke('supervisor:crash-history'),
+    diagnostics: (): Promise<string> => ipcRenderer.invoke('supervisor:diagnostics'),
+  },
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('app:pick-folder'),
   pickFiles: (): Promise<string[]> => ipcRenderer.invoke('app:pick-files'),
   restartEngine: (): Promise<string> => ipcRenderer.invoke('engine:restart'),
   getProject: (): Promise<string> => ipcRenderer.invoke('app:get-project'),
+  recentProjects: (): Promise<string[]> => ipcRenderer.invoke('app:recent-projects'),
+  openProject: (dir: string): Promise<string | null> => ipcRenderer.invoke('app:open-project', dir),
   rendererReady: (): void => ipcRenderer.send('app:renderer-ready'),
 
   // Electron-native dock subsystems (P3): git reads, file tree, pty terminal.

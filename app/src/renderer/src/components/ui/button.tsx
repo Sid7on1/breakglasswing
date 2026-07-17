@@ -2,7 +2,7 @@ import React from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/cn';
 
-/** shadcn-pattern Button on the Graphite & Phosphor tokens (dark-only, terracotta accent). */
+/** Shared button variants on the active Bimax appearance tokens. */
 const buttonVariants = cva(
   'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors ' +
     'cursor-pointer select-none whitespace-nowrap disabled:pointer-events-none disabled:opacity-45 ' +
@@ -12,9 +12,9 @@ const buttonVariants = cva(
       variant: {
         default:
           'border border-line bg-raise text-ink hover:border-ember hover:bg-ember/15',
-        accent: 'bg-ember font-semibold text-[#1a120e] hover:bg-ember-bright',
+        accent: 'bg-ember font-semibold text-white hover:bg-ember-bright',
         ghost: 'text-dim hover:bg-hover hover:text-ink',
-        destructive: 'bg-rust text-[#1a120e] hover:opacity-90',
+        destructive: 'bg-rust text-white hover:opacity-90',
         outline:
           'border border-line bg-transparent text-ink hover:border-ember hover:bg-ember/15',
       },

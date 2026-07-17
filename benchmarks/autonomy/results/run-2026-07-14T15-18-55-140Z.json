@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-14T15-18-55-140Z",
+  "mode": "offline-trajectory-smoke",
+  "serial": true,
+  "metricSources": {
+    "promptTokens": "offline-tokenizer-estimate",
+    "completionTokens": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+    "reasoningTokens": "tokenizer-estimate-from-recorded-thinking",
+    "totalTokens": "sum-of-prompt-visible-completion-and-reasoning-tokens"
+  },
+  "startedAt": "2026-07-14T15:18:55.140Z",
+  "finishedAt": "2026-07-14T15:18:55.531Z",
+  "tasks": [
+    {
+      "id": "05-chunked-record-decoder",
+      "prompt": "Repair the incremental NDJSON decoder in `src/decoder.mjs`. It currently treats each byte chunk as\nan independent string, which fails under real stream boundaries. Keep the public\n`createRecordDecoder()` export and add no dependencies.\n\nRequired behavior:\n\n- `push(chunk)` accepts a `Buffer` or `Uint8Array` and returns every complete decoded JSON value\n  produced by that chunk, in order.\n- Arbitrary byte boundaries must work, including boundaries inside a multi-byte UTF-8 character,\n  inside JSON syntax, and between `\\r` and `\\n`.\n- Both LF and CRLF delimit records. Empty lines are ignored but still advance the physical line\n  number.\n- `flush()` finishes UTF-8 decoding and parses a final non-empty record without requiring a newline.\n  Repeated `flush()` calls return an empty array.\n- Invalid JSON throws `Error('Invalid JSON on line N: <parser message>')`, where `N` is the physical\n  one-based input line. A decoder that has thrown need not be reused.\n- The decoder must not mutate supplied buffers or option-like caller values.\n\nRun `npm test` after the repair.",
+      "passed": true,
+      "totalPromptTokens": 13935,
+      "totalCompletionTokens": 316,
+      "reasoningTokens": 0,
+      "totalTokens": 14251,
+      "turnCount": 7,
+      "toolCallCount": 6,
+      "usageComplete": true,
+      "wallClockMs": 389,
+      "contextRecoveryFired": false,
+      "completionTokenSource": "tokenizer-estimate-from-recorded-text-and-tool-calls",
+      "reasoningTokenSource": "tokenizer-estimate-from-recorded-thinking",
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrksqs0k-ab26",
+        "chainOk": true,
+        "file": "benchmarks/autonomy/results/episodes/run-2026-07-14T15-18-55-140Z/05-chunked-record-decoder/e-mrksqs0k-ab26.jsonl"
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 1,
+    "passed": 1,
+    "pipelineSmokePassed": true,
+    "medianTotalTokens": 14251,
+    "medianTurns": 7,
+    "sumPromptTokens": 13935,
+    "sumCompletionTokens": 316,
+    "sumReasoningTokens": 0,
+    "sumTotalTokens": 14251,
+    "contextRecoveryRate": 0
+  }
+}

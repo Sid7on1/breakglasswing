@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ArrowUp, Square, SlashSquare, FunctionSquare, FileText, Plus, Compass, Shield, Cpu,
-  ChevronUp, Sparkles, Pencil, Search, Hammer, Flame,
+  ArrowUp, Square, FunctionSquare, FileText, Compass, Shield, Cpu,
+  ChevronUp, Sparkles, Pencil, Search, Hammer, Flame, Paperclip, Gauge,
 } from 'lucide-react';
-import { CompletionItem, UiSnapshot } from '../protocol';
+import { CompletionItem, ControlsMsg, UiSnapshot } from '../protocol';
 import { cn } from '../lib/cn';
 import { Button } from './ui/button';
 import { Dropdown, DropdownItem } from './ui/dropdown';
+import type { SupervisorStatus } from '../global';
 
 /**
  * Composer v2 — the control strip under the input holds the agent-mode selector, the
@@ -17,18 +18,18 @@ import { Dropdown, DropdownItem } from './ui/dropdown';
  */
 
 const AGENT_MODES = [
-  { id: 'general', label: 'General', icon: <Sparkles size={13} />, desc: 'Balanced default' },
-  { id: 'explore', label: 'Explore', icon: <Search size={13} />, desc: 'Read-only research' },
-  { id: 'sketch', label: 'Sketch', icon: <Pencil size={13} />, desc: 'Architect: blueprints before code' },
-  { id: 'code', label: 'Code', icon: <Hammer size={13} />, desc: 'Heads-down implementation' },
-  { id: 'beast', label: 'Beast', icon: <Flame size={13} />, desc: 'Swarm → heal → self-critic pipeline' },
+  { id: 'general', label: 'Balanced', icon: <Sparkles size={13} />, desc: 'Understand, decide, and build' },
+  { id: 'explore', label: 'Research', icon: <Search size={13} />, desc: 'Study the project without changing it' },
+  { id: 'sketch', label: 'Plan', icon: <Pencil size={13} />, desc: 'Design the approach before editing' },
+  { id: 'code', label: 'Build', icon: <Hammer size={13} />, desc: 'Focus on implementation and verification' },
+  { id: 'beast', label: 'Agent team', icon: <Flame size={13} />, desc: 'Coordinate parallel work on a larger goal' },
 ];
 
 const PERMISSION_PRESETS = [
-  { id: 'ask', label: 'Ask before changes', desc: 'Every edit shows a diff for approval', cmds: ['/governor on', '/diff-approval on'] },
-  { id: 'auto', label: 'Approve for me', desc: 'Governor vetoes destructive actions; edits apply', cmds: ['/governor on', '/diff-approval off'] },
-  { id: 'plan', label: 'Plan only', desc: 'Read-only — research and propose, no writes', cmds: ['/plan on'] },
-  { id: 'full', label: 'Full auto', desc: 'Governor off — no approval gates at all', cmds: ['/plan off', '/governor off', '/diff-approval off'] },
+  { id: 'ask', label: 'Ask before changes', desc: 'Every edit shows a diff for approval' },
+  { id: 'auto', label: 'Work automatically', desc: 'Apply safe edits and ask for risky actions' },
+  { id: 'plan', label: 'Plan only', desc: 'Read-only — research and propose, no writes' },
+  { id: 'full', label: 'Unrestricted', desc: 'Continue without approval gates' },
 ];
 
 const TIERS = [
@@ -39,7 +40,7 @@ const TIERS = [
 
 export function Composer({
   busy, mode, tier, snapshot, streamedChars, completions,
-  onSubmit, onInterrupt, onCommand, onQuery, onClearCompletions,
+  onSubmit, onInterrupt, onControls, onCommand, onQuery, onClearCompletions, runtime,
 }: {
   busy: boolean;
   mode: string;
@@ -49,11 +50,14 @@ export function Composer({
   completions: CompletionItem[];
   onSubmit: (text: string) => void;
   onInterrupt: () => void;
+  onControls: (controls: Omit<ControlsMsg, 't'>) => void;
   onCommand: (cmd: string) => void;
   onQuery: (text: string) => void;
   onClearCompletions: () => void;
+  runtime: SupervisorStatus | null;
 }): React.ReactElement {
   const [text, setText] = useState('');
+  const [queued, setQueued] = useState<string | null>(null);
   const [sel, setSel] = useState(0);
   const [permission, setPermission] = useState('auto');
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -61,16 +65,27 @@ export function Composer({
   const historyRef = useRef<string[]>([]);
   const histIdxRef = useRef(-1);
 
-  const showDropdown = completions.length > 0 && text.trim().length > 0;
+  const visibleCompletions = completions.filter((item) => item.kind !== 'command');
+  const showDropdown = visibleCompletions.length > 0 && text.trim().length > 0;
   const modeId = (mode || '').toLowerCase() === 'plan' ? 'general' : (mode || '').toLowerCase() || 'general';
   const activeMode = AGENT_MODES.find((m) => m.id === modeId) ?? AGENT_MODES[0];
-  const activePermission = (mode || '').toUpperCase() === 'PLAN'
+  const readOnlyMode = ['PLAN', 'EXPLORE', 'SKETCH'].includes((mode || '').toUpperCase());
+  const activePermission = readOnlyMode
     ? PERMISSION_PRESETS[2]
     : PERMISSION_PRESETS.find((p) => p.id === permission) ?? PERMISSION_PRESETS[1];
 
   const ctxPct = snapshot && snapshot.contextWindow > 0
     ? Math.min(100, Math.round(((snapshot.tokensBaseline + streamedChars / 4) / snapshot.contextWindow) * 100))
     : null;
+  const available = runtime?.phase === 'ready' || runtime?.phase === 'degraded';
+
+  // Let the first instruction feel instant even while a newly opened project finishes loading.
+  // The user never has to wait for or understand the background runtime lifecycle.
+  useEffect(() => {
+    if (!available || !queued) return;
+    onSubmit(queued);
+    setQueued(null);
+  }, [available, queued, onSubmit]);
 
   useEffect(() => { setSel(0); }, [completions]);
 
@@ -97,7 +112,7 @@ export function Composer({
     setText(v);
     histIdxRef.current = -1;
     clearTimeout(debounceRef.current);
-    if (v.startsWith('/') || v.includes('@')) {
+    if (v.includes('@')) {
       debounceRef.current = setTimeout(() => onQuery(v), 120);
     } else if (completions.length) {
       onClearCompletions();
@@ -105,20 +120,22 @@ export function Composer({
   };
 
   const submit = (): void => {
-    if (!text.trim()) return;
+    if (!text.trim() || busy || queued) return;
     historyRef.current.push(text);
     histIdxRef.current = -1;
+    if (!available) {
+      setQueued(text);
+      setText('');
+      return;
+    }
     onSubmit(text);
     setText('');
   };
 
   const accept = (item: CompletionItem): void => {
     if (item.disabled) return;
-    if (text.startsWith('/')) setText(item.value + ' ');
-    else {
-      const at = text.lastIndexOf('@');
-      setText(at === -1 ? item.value : text.slice(0, at) + item.value);
-    }
+    const at = text.lastIndexOf('@');
+    setText(at === -1 ? item.value : text.slice(0, at) + item.value);
     onClearCompletions();
     taRef.current?.focus();
   };
@@ -134,11 +151,11 @@ export function Composer({
 
   const keyDown = (e: React.KeyboardEvent): void => {
     if (showDropdown) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(s + 1, completions.length - 1)); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSel((s) => Math.min(s + 1, visibleCompletions.length - 1)); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSel((s) => Math.max(s - 1, 0)); return; }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey)) {
         e.preventDefault();
-        accept(completions[sel]);
+        accept(visibleCompletions[sel]);
         return;
       }
       if (e.key === 'Escape') { e.preventDefault(); onClearCompletions(); return; }
@@ -169,10 +186,10 @@ export function Composer({
   };
 
   return (
-    <div className="relative shrink-0 px-6 pt-2.5 pb-3">
+    <div className="relative shrink-0 px-6 pt-2 pb-3">
       {showDropdown && (
         <div className="absolute bottom-full left-1/2 z-20 mb-1 w-[min(860px,calc(100%-48px))] -translate-x-1/2 overflow-hidden rounded-[10px] border border-line bg-raise shadow-[0_12px_32px_rgba(0,0,0,0.45)]">
-          {completions.slice(0, 8).map((c, i) => (
+          {visibleCompletions.slice(0, 8).map((c, i) => (
             <button
               key={c.value + i}
               onMouseEnter={() => setSel(i)}
@@ -184,7 +201,7 @@ export function Composer({
               )}
             >
               <span className="w-4 shrink-0 text-ember">
-                {c.kind === 'command' ? <SlashSquare size={13} /> : c.kind === 'symbol' ? <FunctionSquare size={13} /> : <FileText size={13} />}
+                {c.kind === 'symbol' ? <FunctionSquare size={13} /> : <FileText size={13} />}
               </span>
               <span className="font-mono">{c.label}</span>
               <span className="truncate text-faint">{c.disabled ? c.disabledReason || c.desc : c.desc}</span>
@@ -193,121 +210,78 @@ export function Composer({
         </div>
       )}
 
-      <div className="mx-auto max-w-[860px] rounded-xl border border-line bg-raise focus-within:border-ember/55">
-        <div className="flex items-end gap-2.5 px-3 pt-2.5">
+      <div className="launch-console mx-auto max-w-[920px] overflow-hidden rounded-[22px] border border-line bg-raise shadow-[0_18px_50px_rgba(30,35,70,0.14)] transition-[border-color,box-shadow] focus-within:border-ember/45 focus-within:shadow-[0_20px_56px_rgba(78,69,199,0.16)]">
+        <div className="flex items-end gap-3 px-5 pt-4 pb-3">
           <textarea
             ref={taRef}
             rows={1}
             value={text}
-            placeholder={busy ? 'Esc to interrupt — or queue another instruction…' : 'Message Bimax — / for commands, @ for files & symbols'}
+            placeholder={busy ? 'Add direction while Bimax works…' : queued ? 'Your task will start in a moment…' : 'Describe what you want to build or change…'}
             onChange={(e) => change(e.target.value)}
             onKeyDown={keyDown}
-            className="max-h-[200px] flex-1 resize-none border-none bg-transparent leading-relaxed outline-none placeholder:text-faint"
+            className="max-h-[220px] min-h-12 flex-1 resize-none border-none bg-transparent font-display text-[15px] leading-relaxed outline-none placeholder:text-faint"
           />
         </div>
 
-        <div className="flex items-center gap-1 px-2 py-1.5">
+        <div className="no-scrollbar flex min-w-0 items-center gap-1.5 overflow-x-auto px-3 pb-3">
           <button
             type="button"
-            title="Attach files (@path)"
+            title="Attach files as @references"
             onClick={attach}
-            className="flex size-6.5 cursor-pointer items-center justify-center rounded-md text-dim hover:bg-hover hover:text-ink"
+            className="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-xl text-dim hover:bg-hover hover:text-ink"
           >
-            <Plus size={15} />
+            <Paperclip size={15} />
           </button>
 
-          <Dropdown
-            trigger={(open) => (
-              <ControlPill open={open} icon={<Compass size={12} />} label={activeMode.label} />
-            )}
-          >
+          <Dropdown trigger={(open) => <ComposerPill open={open} icon={<Compass size={13} />} label={activeMode.label} />}>
             {(close) => (
               <>
                 {AGENT_MODES.map((m) => (
-                  <DropdownItem
-                    key={m.id}
-                    icon={m.icon}
-                    selected={m.id === activeMode.id}
-                    label={m.label}
-                    desc={m.desc}
-                    onClick={() => { onCommand(`/mode ${m.id}`); close(); }}
-                  />
+                  <DropdownItem key={m.id} icon={m.icon} selected={m.id === activeMode.id} label={m.label} desc={m.desc} onClick={() => { onControls({ mode: m.id as ControlsMsg['mode'] }); close(); }} />
                 ))}
-                <div className="px-2.5 pt-1 pb-0.5 text-[10px] text-faint">Shift+Tab cycles modes</div>
+              </>
+            )}
+          </Dropdown>
+
+          <Dropdown trigger={(open) => <ComposerPill open={open} icon={<Shield size={13} />} label={activePermission.label} />}>
+            {(close) => (
+              <>
+                {PERMISSION_PRESETS.map((p) => (
+                  <DropdownItem key={p.id} selected={p.id === activePermission.id} label={p.label} desc={p.desc} onClick={() => { onControls({ autonomy: p.id as ControlsMsg['autonomy'] }); setPermission(p.id); close(); }} />
+                ))}
               </>
             )}
           </Dropdown>
 
           <Dropdown
-            trigger={(open) => (
-              <ControlPill open={open} icon={<Shield size={12} />} label={activePermission.label} />
-            )}
+            trigger={(open) => <ComposerPill open={open} icon={<Cpu size={13} />} label={shortModel(snapshot?.models.coding)} mono />}
           >
             {(close) => (
               <>
-                {PERMISSION_PRESETS.map((p) => (
-                  <DropdownItem
-                    key={p.id}
-                    selected={p.id === activePermission.id}
-                    label={p.label}
-                    desc={p.desc}
-                    onClick={() => {
-                      p.cmds.forEach(onCommand);
-                      setPermission(p.id);
-                      close();
-                    }}
-                  />
+                <div className="px-2.5 pt-1.5 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">Model quality</div>
+                {TIERS.map((t) => (
+                  <DropdownItem key={t.id} selected={(tier || 'auto') === t.id} label={t.label} desc={t.desc} onClick={() => { onControls({ tier: t.id as ControlsMsg['tier'] }); close(); }} />
                 ))}
+                <div className="my-1 border-t border-line" />
+                <DropdownItem label="Change model…" desc="Choose a different coding model" onClick={() => { onCommand('/model'); close(); }} />
               </>
             )}
           </Dropdown>
 
           <span className="flex-1" />
-
-          <Dropdown
-            align="right"
-            trigger={(open) => (
-              <ControlPill
-                open={open}
-                icon={<Cpu size={12} />}
-                label={shortModel(snapshot?.models.coding) + (tier ? ` · ${tier}` : '')}
-              />
-            )}
-          >
-            {(close) => (
-              <>
-                {TIERS.map((t) => (
-                  <DropdownItem
-                    key={t.id}
-                    selected={(tier || 'auto') === t.id}
-                    label={t.label}
-                    desc={t.desc}
-                    onClick={() => { onCommand(`/tier ${t.id}`); close(); }}
-                  />
-                ))}
-                <div className="my-1 border-t border-line" />
-                <DropdownItem
-                  label="Change model…"
-                  desc="Opens the model picker in the transcript"
-                  onClick={() => { onCommand('/model'); close(); }}
-                />
-                <DropdownItem
-                  label="API keys…"
-                  desc="Provider keys + pool health"
-                  onClick={() => { onCommand('/keys'); close(); }}
-                />
-              </>
-            )}
-          </Dropdown>
-
-          {ctxPct !== null && <ContextRing pct={ctxPct} window={snapshot!.contextWindow} />}
+          {ctxPct !== null && <ContextMeter pct={ctxPct} window={snapshot!.contextWindow} />}
+          {queued && (
+            <span className="hidden items-center gap-1.5 text-[10px] text-dim sm:flex">
+              <span className="signal-beacon size-1.5 rounded-full bg-amber" /> Starting your task…
+            </span>
+          )}
 
           {busy ? (
-            <Button variant="destructive" size="icon" title="Interrupt (Esc)" onClick={onInterrupt}>
+            <Button variant="destructive" size="icon" className="ml-1 size-9 rounded-xl" title="Stop (Esc)" onClick={onInterrupt}>
               <Square size={13} fill="currentColor" />
             </Button>
           ) : (
-            <Button variant="accent" size="icon" title="Send (Enter)" disabled={!text.trim()} onClick={submit}>
+            <Button variant="accent" size="icon" className="ml-1 size-9 rounded-xl shadow-[0_6px_16px_rgba(90,46,29,0.24)]" title="Send (Enter)" disabled={!text.trim() || !!queued} onClick={submit}>
               <ArrowUp size={16} />
             </Button>
           )}
@@ -317,38 +291,31 @@ export function Composer({
   );
 }
 
-function ControlPill({ open, icon, label }: { open: boolean; icon: React.ReactNode; label: string }): React.ReactElement {
+function ComposerPill({ open, icon, label, mono = false }: { open: boolean; icon: React.ReactNode; label: string; mono?: boolean }): React.ReactElement {
   return (
     <span
       className={cn(
-        'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] whitespace-nowrap',
-        open ? 'bg-hover text-ink' : 'text-dim hover:bg-hover hover:text-ink',
+        'flex max-w-[170px] items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[10.5px] transition-colors',
+        open ? 'bg-ember/12 text-ember' : 'text-dim hover:bg-hover hover:text-ink',
       )}
     >
-      {icon}
-      {label}
-      <ChevronUp size={11} className={cn('text-faint transition-transform', open && 'rotate-180')} />
+      <span className={open ? 'text-ember' : 'text-faint'}>{icon}</span>
+      <span className={cn('truncate', mono && 'font-mono text-[9.5px]')}>{label}</span>
+      <ChevronUp size={9} className={cn('shrink-0 text-faint transition-transform', open && 'rotate-180')} />
     </span>
   );
 }
 
-function ContextRing({ pct, window: win }: { pct: number; window: number }): React.ReactElement {
-  const r = 7;
-  const c = 2 * Math.PI * r;
+function ContextMeter({ pct, window: win }: { pct: number; window: number }): React.ReactElement {
   const tint = pct >= 85 ? 'text-rust' : pct >= 60 ? 'text-amber' : 'text-moss';
   return (
     <span
-      className="mx-1 flex items-center gap-1"
+      className="flex items-center gap-1.5"
       title={`Context ~${pct}% of ${win.toLocaleString()} tokens`}
     >
-      <svg width={18} height={18} viewBox="0 0 18 18" className={tint}>
-        <circle cx={9} cy={9} r={r} fill="none" stroke="var(--color-line)" strokeWidth={2.5} />
-        <circle
-          cx={9} cy={9} r={r} fill="none" stroke="currentColor" strokeWidth={2.5}
-          strokeDasharray={`${(pct / 100) * c} ${c}`} strokeLinecap="round" transform="rotate(-90 9 9)"
-        />
-      </svg>
-      <span className="text-[10.5px] text-faint tabular-nums">{pct}%</span>
+      <Gauge size={12} className={tint} />
+      <span className="h-1 w-12 overflow-hidden rounded-full bg-line"><span className={cn('block h-full rounded-full bg-current', tint)} style={{ width: `${pct}%` }} /></span>
+      <span className="font-mono text-[9px] text-faint tabular-nums">{pct}%</span>
     </span>
   );
 }

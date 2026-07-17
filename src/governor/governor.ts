@@ -18,6 +18,27 @@ export interface ToolPermissionRule {
   persistent: boolean;
 }
 
+/**
+ * Targets computer control must never touch, regardless of grants, rules, or mode: credential
+ * stores, OS security surfaces, and asset wallets. Matched against the app/window name a desktop
+ * action names (and the browser host when one obviously identifies a credential manager). The
+ * list is deliberately short and high-confidence — everything else still faces the normal
+ * approval ladder.
+ */
+const SENSITIVE_COMPUTER_TARGETS: RegExp[] = [
+  /keychain/i,
+  /1password|lastpass|bitwarden|dashlane|keepass|keeper/i,
+  /system settings|system preferences/i,
+  /passwords?\.app/i,
+  /\bwallet\b|metamask|ledger live|trezor/i,
+];
+
+export function isSensitiveComputerTarget(target: string): boolean {
+  const t = (target || '').trim();
+  if (!t) return false;
+  return SENSITIVE_COMPUTER_TARGETS.some(pattern => pattern.test(t));
+}
+
 export class Governor implements IGovernor {
   public budget: BudgetVeto;
   public fs: FileSystemVeto;
@@ -34,6 +55,26 @@ export class Governor implements IGovernor {
     if (this.budget) this.budget.enabled = m !== 'bypass';
   }
   public rules: ToolPermissionRule[] = [];
+  // Session-scoped computer-control grants ("this browser domain" / "this desktop app"), never
+  // persisted — a fresh session always starts with zero standing computer-control permissions.
+  private sessionGrants = new Set<string>();
+
+  /** Scope key a COMPUTER_CONTROL payload can be granted under: browser domain or desktop app. */
+  public static computerGrantKey(payload: any): string | null {
+    const host = String(payload?.host || '').trim().toLowerCase();
+    if (host) return `domain:${host}`;
+    const app = String(payload?.app || '').trim().toLowerCase();
+    if (app) return `app:${app}`;
+    return null;
+  }
+
+  public computerGrants(): string[] { return Array.from(this.sessionGrants).sort(); }
+
+  public revokeComputerGrants(): number {
+    const n = this.sessionGrants.size;
+    this.sessionGrants.clear();
+    return n;
+  }
 
   constructor(private eventBus: IEventBus, private yolo?: YoloClassifier) {
     this.budget = new BudgetVeto();
@@ -55,6 +96,18 @@ export class Governor implements IGovernor {
   }
 
   public async approveTaskExecution(taskType: string, payload: any): Promise<void> {
+    // Hard floor for computer control: credential stores, OS security surfaces, and wallets are
+    // denied outright — before bypass, before rules, before grants. A prompt-injected page or a
+    // blanket "always allow" must never be able to steer clicks into a password manager.
+    if (taskType === 'COMPUTER_CONTROL') {
+      const target = `${payload?.app || ''} ${payload?.host || ''}`.trim();
+      if (isSensitiveComputerTarget(target)) {
+        throw new GovernorVetoError(
+          `Computer control is not allowed on sensitive targets (credential managers, system security settings, wallets): ${target}. Do it manually if it is genuinely needed.`
+        );
+      }
+    }
+
     if (this.mode === 'bypass') {
       Logger.info(`[Governor] ⚠️ Bypassed completely for task: ${taskType}`);
       cliEvents.emit('status', `Approved (Bypassed): ${taskType}`);
@@ -68,7 +121,8 @@ export class Governor implements IGovernor {
       const blocked =
         taskType === 'FILE_WRITE' ||
         taskType === 'FILE_DELETE' ||
-        (taskType === 'OS_COMMAND' && this.bashAnalyzer.analyze(payload.command || '').category !== 'read');
+        (taskType === 'OS_COMMAND' && this.bashAnalyzer.analyze(payload.command || '').category !== 'read') ||
+        (payload.isDestructive !== false && (taskType === 'TOOL_EXECUTION' || taskType === 'COMPUTER_CONTROL'));
 
       if (blocked) {
         const label = taskType === 'OS_COMMAND'
@@ -100,10 +154,21 @@ export class Governor implements IGovernor {
       if (matchingRule.effect === 'deny') {
         throw new GovernorVetoError(`Rule explicitly denied task: ${taskType}`);
       }
-      if (matchingRule.effect === 'allow' && !taintCut) {
+      // High-impact computer control (uploads, sends, purchases) never rides a blanket allow —
+      // each occurrence faces the human individually.
+      if (matchingRule.effect === 'allow' && !taintCut && !(taskType === 'COMPUTER_CONTROL' && payload.highImpact)) {
         cliEvents.emit('status', `Approved (Rule): ${taskType}`);
         return;
       }
+    }
+
+    // Layer 1.5: session-scoped computer-control grants. A grant covers routine interaction
+    // (click/type/press/select) within ONE browser domain or ONE desktop app for THIS session
+    // only; high-impact actions and tainted contexts still prompt.
+    const computerGrantKey = taskType === 'COMPUTER_CONTROL' ? Governor.computerGrantKey(payload) : null;
+    if (computerGrantKey && !payload.highImpact && !taintCut && this.sessionGrants.has(computerGrantKey)) {
+      cliEvents.emit('status', `Approved (session grant ${computerGrantKey}): ${payload.action || taskType}`);
+      return;
     }
 
     try {
@@ -148,25 +213,47 @@ export class Governor implements IGovernor {
     }
 
     // Layer 4: Interactive Fallback
-    const isDestructiveTask = payload.isDestructive !== false && (taskType === 'FILE_WRITE' || taskType === 'OS_COMMAND' || taskType === 'FILE_DELETE');
+    // Generic and computer-control tools used to be marked destructive by buildTool but silently
+    // skipped the prompt because only file/shell task types were considered here. That made browser
+    // clicks and external MCP actions effectively ungated in interactive mode. Honor the tool's
+    // fail-closed declaration for these task classes as well.
+    const isDestructiveTask = payload.isDestructive !== false && (
+      taskType === 'FILE_WRITE' || taskType === 'OS_COMMAND' || taskType === 'FILE_DELETE'
+      || taskType === 'TOOL_EXECUTION' || taskType === 'COMPUTER_CONTROL'
+    );
     const shouldAsk = isDestructiveTask || this.mode === 'strict';
 
     if (shouldAsk) {
+      const computerScope = String(payload.host || payload.app || '').trim();
       const label = taskType === 'FILE_WRITE' ? `Write ${payload.targetPath || payload.path || 'file'}`
         : taskType === 'OS_COMMAND' ? `Run: ${(payload.command || '').slice(0, 60)}`
+        : taskType === 'COMPUTER_CONTROL' ? `${payload.highImpact ? '⚡ HIGH-IMPACT — ' : ''}${payload.action || 'Act'} in ${payload.tool || 'computer control'}${computerScope ? ` @ ${computerScope}` : ''}`
+        : taskType === 'TOOL_EXECUTION' && payload.tool ? `Run ${payload.tool}`
         : `${taskType}`;
 
       // A taint-narrowed command asks with the taint source in view — the human decides knowingly.
       const question = taintCut ? `⚠ TAINTED CONTEXT — ${taintCut.reason}\nAllow anyway? ${label}` : `Allow? ${label}`;
-      const answer = await GlobalPrompter.ask(question, ['Yes', 'No', 'Always Allow This Tool']);
+      // Computer control never offers the blanket "Always Allow" — its widest shortcut is a
+      // session-scoped grant for one domain/app, and high-impact actions get plain Yes/No.
+      const grantOption = computerGrantKey && !payload.highImpact && !taintCut
+        ? `Allow ${computerGrantKey.replace(':', ' ')} for this session` : null;
+      const options = taskType === 'COMPUTER_CONTROL'
+        ? ['Yes', 'No', ...(grantOption ? [grantOption] : [])]
+        : ['Yes', 'No', 'Always Allow This Tool'];
+      const answer = await GlobalPrompter.ask(question, options);
 
       if (answer === 'No') {
         throw new GovernorVetoError("User explicitly denied this action.");
       }
 
-      if (answer === 'Always Allow This Tool') {
+      if (answer === 'Always Allow This Tool' && taskType !== 'COMPUTER_CONTROL') {
         this.addRule({ tool: taskType, effect: 'allow', persistent: true });
         Logger.info(`[Governor] Added persistent allow rule for ${taskType}`);
+      }
+
+      if (grantOption && answer === grantOption && computerGrantKey) {
+        this.sessionGrants.add(computerGrantKey);
+        Logger.info(`[Governor] Session computer-control grant added: ${computerGrantKey}`);
       }
     }
 

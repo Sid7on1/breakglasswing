@@ -17,6 +17,7 @@ describe('MCP catalog discovery (agent finds a server by intent)', () => {
     expect(discoverServers('I need to query a postgres database')[0].id).toBe('postgres');
     expect(discoverServers('search the web for docs')[0].id).toBe('brave-search');
     expect(discoverServers('drive a headless browser and screenshot a page').map(e => e.id)).toContain('puppeteer');
+    expect(discoverServers('control a native desktop app with computer use').map(e => e.id)).toContain('open-computer-use');
     expect(discoverServers('work with github issues and pull requests')[0].id).toBe('github');
   });
 

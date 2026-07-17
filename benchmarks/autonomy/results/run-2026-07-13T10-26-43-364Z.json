@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "runId": "run-2026-07-13T10-26-43-364Z",
+  "mode": "live",
+  "serial": true,
+  "startedAt": "2026-07-13T10:26:43.364Z",
+  "finishedAt": "2026-07-13T10:35:32.486Z",
+  "tasks": [
+    {
+      "id": "01-order-summary",
+      "prompt": "The order-summary fixture has a failing focused test. Diagnose and fix `summarizeOrders` while\npreserving its exported API. The summary must follow the behavior encoded by the tests. Inspect the\nfixture before editing, run the focused test to reproduce the failure, make the smallest correct\nchange, rerun the test, and verify the final source before finishing.",
+      "passed": false,
+      "totalPromptTokens": 65677,
+      "totalCompletionTokens": 0,
+      "totalTokens": 65677,
+      "turnCount": 17,
+      "toolCallCount": 17,
+      "wallClockMs": 161611,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 1,
+        "stdout": "",
+        "stderr": "node:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n+ actual - expected\n\n  [\n    {\n      count: 1,\n-     customer: 'Amy',\n-     total: 10\n-   },\n-   {\n-     count: 1,\n      customer: 'Zed',\n      total: 13.75\n    }\n  ]\n\n    at file:///Users/vishsiddharth/Desktop/Bimax/benchmarks/autonomy/tasks/01-order-summary/check.mjs:14:8 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: [ { customer: 'Zed', count: 1, total: 13.75 } ],\n  expected: [\n    { customer: 'Amy', count: 1, total: 10 },\n    { customer: 'Zed', count: 1, total: 13.75 }\n  ],\n  operator: 'deepStrictEqual',\n  diff: 'simple'\n}\n\nNode.js v22.23.1"
+      },
+      "episode": {
+        "id": "e-mrj2v5rm-1335",
+        "chainOk": true
+      }
+    },
+    {
+      "id": "02-ledger-contract-refactor",
+      "prompt": "The ledger fixture has inconsistent contracts across its parser, normalizer, balance builder, and\nreport formatter. Repair the implementation without changing the existing exported function names\nor module paths. Inspect the fixture, reproduce the failure with `npm test`, make the required\nmulti-file changes, and rerun the focused test.\n\nThe complete required contract is:\n\n- `parseTransactions(lines)` in `src/parser.mjs` accepts an array of strings. It ignores blank or\n  whitespace-only lines. Every other line must contain exactly four pipe-delimited, non-empty fields\n  in this order: `id|account|kind|amount`. It trims surrounding whitespace from every field and\n  returns `{ id, account, kind, amount }` objects in input order. A malformed nonblank line must throw\n  `TypeError` with the exact message `Invalid ledger line at index N`, where `N` is its zero-based\n  index in the original input array. It must not mutate `lines`.\n- `normalizeTransaction(transaction)` in `src/normalizer.mjs` returns a new\n  `{ id, account, cents }` object. `credit` produces positive cents and `debit` produces negative\n  cents. Amounts must be positive decimal strings with at most two fractional digits; conversion\n  must use integer cents rather than floating-point accumulation. The id and account must be\n  non-empty strings and kind must be exactly `credit` or `debit`. Any invalid transaction must throw\n  `TypeError` with the exact message `Invalid transaction ID`, replacing `ID` with\n  `String(transaction.id)`. It must not mutate the input object.\n- `buildBalances(transactions)` in `src/ledger.mjs` accepts normalized transactions, ignores every\n  occurrence of an id after its first occurrence, and returns a `Map` from account name to its total\n  integer cents. It must not mutate the array or transaction objects.\n- `formatReport(balances)` in `src/report.mjs` accepts that `Map` and returns\n  `{ account, balance }` objects. `balance` is a dollar number derived from integer cents and rounded\n  to two decimal places. Sort by balance descending; ties are broken by account name ascending. It\n  must not mutate the `Map`.\n- `processLedger(lines)` in `src/index.mjs` must compose those four stages and return the formatted\n  report with all behavior above.\n\nDo not add dependencies or replace the focused test with a weaker assertion.",
+      "passed": false,
+      "totalPromptTokens": 99475,
+      "totalCompletionTokens": 0,
+      "totalTokens": 99475,
+      "turnCount": 19,
+      "toolCallCount": 25,
+      "wallClockMs": 185709,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 1,
+        "stdout": "",
+        "stderr": "node:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n+ actual - expected\n\n  Comparison {\n+   message: 'Invalid transaction IDbad-kind',\n-   message: 'Invalid transaction bad-kind',\n    name: 'TypeError'\n  }\n\n    at file:///Users/vishsiddharth/Desktop/Bimax/benchmarks/autonomy/tasks/02-ledger-contract-refactor/check.mjs:46:8 {\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: TypeError: Invalid transaction IDbad-kind\n      at normalizeTransaction (file:///private/var/folders/_m/bbwv6gw15h55zxyx89r4g7fm0000gn/T/bimax-autonomy-02-ledger-contract-refactor-Hv4meU/src/normalizer.mjs?check=1783938750687:14:11)\n      at assert.throws.name (file:///Users/vishsiddharth/Desktop/Bimax/benchmarks/autonomy/tasks/02-ledger-contract-refactor/check.mjs:47:9)\n      at getActual (node:assert:609:5)\n      at Function.throws (node:assert:757:24)\n      at file:///Users/vishsiddharth/Desktop/Bimax/benchmarks/autonomy/tasks/02-ledger-contract-refactor/check.mjs:46:8,\n  expected: { name: 'TypeError', message: 'Invalid transaction bad-kind' },\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v22.23.1"
+      },
+      "episode": {
+        "id": "e-mrj2ymcc-d186",
+        "chainOk": true
+      }
+    },
+    {
+      "id": "03-retry-cache-runtime",
+      "prompt": "The asynchronous retry cache in this fixture passes simple sequential use but violates its contract\nunder specific promise timing. Diagnose it by running the focused test and repair\n`createRetryCache` in `src/retry-cache.mjs` without changing its exported name or adding dependencies.\n\nThe complete required contract is:\n\n- `createRetryCache({ loader, ttlMs, now })` returns an object with `get(key, options = {})`.\n  `now` is an injected function returning the current time in milliseconds.\n- `get` calls `loader(key, options)` and returns a promise for its result. It passes the exact key and\n  exact options object to the loader and must not mutate either the options object or nested values.\n- Calls for the same key while its load is still pending must share that in-flight work: the loader is\n  invoked exactly once and every caller receives the same resolved value. The pending load remains\n  shared even if the injected clock advances before it settles.\n- Different keys are independent. Their loaders may be in flight at the same time; one key must not\n  serialize or block another key.\n- A rejected load must be evicted when it settles. The rejection is delivered to its callers, and the\n  next `get` for that key must invoke the loader again and may succeed.\n- A successful value remains cached until its TTL expires. The TTL begins at successful resolution,\n  not when loading starts. A call strictly before `resolvedAt + ttlMs` reuses the cached value. A call\n  exactly at or after that boundary invokes the loader again.\n\nThe timing sequence is the defect: do not weaken the asynchronous test or replace the injected clock\nwith real delays. Run `npm test` after the change.",
+      "passed": true,
+      "totalPromptTokens": 41922,
+      "totalCompletionTokens": 0,
+      "totalTokens": 41922,
+      "turnCount": 12,
+      "toolCallCount": 13,
+      "wallClockMs": 181785,
+      "contextRecoveryFired": false,
+      "usageComplete": true,
+      "check": {
+        "command": "node ./check.mjs",
+        "exitCode": 0,
+        "stdout": "success check passed",
+        "stderr": ""
+      },
+      "episode": {
+        "id": "e-mrj32lm6-1879",
+        "chainOk": true
+      }
+    }
+  ],
+  "summary": {
+    "tasks": 3,
+    "passed": 1,
+    "completionRate": 0.3333333333333333,
+    "medianTotalTokens": 65677,
+    "medianTurns": 17,
+    "sumTotalTokens": 207074,
+    "contextRecoveryRate": 0
+  }
+}

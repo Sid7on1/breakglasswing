@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import type { Browser, HTTPResponse, Page } from 'puppeteer';
+import type { Browser, ElementHandle, HTTPResponse, Page } from 'puppeteer';
 
 export type BrowserWaitUntil = 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2';
 
@@ -17,11 +17,17 @@ export interface BrowserAssertion {
 }
 
 export interface BrowserCommand {
-  action: 'navigate' | 'click' | 'type' | 'scroll' | 'wait' | 'inspect' | 'screenshot' | 'compare'
+  action: 'navigate' | 'snapshot' | 'click' | 'type' | 'press' | 'select' | 'hover'
+    | 'scroll' | 'wait' | 'inspect' | 'screenshot' | 'compare'
     | 'assert' | 'viewport' | 'upload' | 'back' | 'reload' | 'status' | 'close';
   url?: string;
   selector?: string;
+  elementIndex?: number | string;
   text?: string;
+  key?: string;
+  values?: string[];
+  x?: number;
+  y?: number;
   path?: string;
   baseline?: string;
   fullPage?: boolean;
@@ -34,6 +40,19 @@ export interface BrowserCommand {
   clear?: boolean;
   allowPrivate?: boolean;
   assertion?: BrowserAssertion;
+  maxElements?: number;
+  /** snapshot: only index elements whose name/role/tag/value matches this substring (progressive
+   * query — ask for "submit" instead of paging through 200 rows; borrowed from Pi's search_ui). */
+  filter?: string;
+  /** Mutating actions: how long to let the page react before the automatic fresh observation
+   * (0–5000 ms, default 800). The wait ends at the FIRST DOM mutation — it never sleeps blind. */
+  settleMs?: number;
+  /** click: interpret x/y in the 0–1000 normalized space VLMs emit (Gemini computer-use
+   * convention) and scale to the live viewport before dispatching. */
+  normalized?: boolean;
+  /** wait: resolve when the DOM mutates (or the timeout elapses) instead of sleeping blind —
+   * change detection à la Pi's wait_for. */
+  forChange?: boolean;
 }
 
 export interface BrowserCommandResult {
@@ -54,6 +73,12 @@ export interface BrowserCommandResult {
 export interface BrowserRuntimePort {
   run(command: BrowserCommand, context?: { cwd?: string; signal?: AbortSignal }): Promise<BrowserCommandResult>;
   close(): Promise<void>;
+  /** URL of the live page WITHOUT launching a browser — null when no page is open. Optional so
+   * lightweight test doubles only need run/close. */
+  currentUrl?(): string | null;
+  /** Value-safe metadata of one element from the CURRENT observation (null when the index is not
+   * part of it). Lets the tool layer classify impact before acting. Optional for test doubles. */
+  indexedElementInfo?(index: number | string | undefined): SnapshotElementInfo | null;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -84,6 +109,75 @@ export function validateBrowserUrl(raw: string, allowPrivate = false): { ok: tru
   return { ok: true, url };
 }
 
+/** The observation-stable identity of one indexed element (tag/role/name/state, not position). */
+export interface SnapshotElementInfo {
+  tag: string;
+  role: string;
+  type?: string;
+  name: string;
+  value?: string;
+  checked?: boolean;
+  disabled?: boolean;
+}
+
+/** Stable per-element signature for successor diffs. Deliberately excludes rect: scrolling or a
+ * layout shift must not read as "the UI changed". */
+export function elementSignature(info: SnapshotElementInfo): string {
+  return [info.tag, info.role, info.type || '', info.name, info.value ?? '', info.checked ?? '', info.disabled ? 'disabled' : '']
+    .join('|');
+}
+
+export interface SnapshotDiff {
+  /** Sample of appeared/disappeared signatures (capped at 20 each for readability). */
+  added: string[];
+  removed: string[];
+  /** TRUE totals — never understated by the sample caps. */
+  addedCount: number;
+  removedCount: number;
+  changed: boolean;
+}
+
+/** Successor diff between two consecutive snapshots (Pi's compact-diff idea): what appeared and
+ * what disappeared, by signature, order-insensitive. Samples are capped; counts are exact. */
+export function diffSnapshots(previous: string[], next: string[]): SnapshotDiff {
+  const count = (list: string[]) => {
+    const m = new Map<string, number>();
+    for (const s of list) m.set(s, (m.get(s) || 0) + 1);
+    return m;
+  };
+  const prev = count(previous);
+  const added: string[] = [];
+  for (const sig of next) {
+    const left = prev.get(sig) || 0;
+    if (left > 0) prev.set(sig, left - 1);
+    else added.push(sig);
+  }
+  const removed: string[] = [];
+  for (const [sig, n] of prev) for (let i = 0; i < n; i++) removed.push(sig);
+  return {
+    added: added.slice(0, 20),
+    removed: removed.slice(0, 20),
+    addedCount: added.length,
+    removedCount: removed.length,
+    changed: added.length > 0 || removed.length > 0,
+  };
+}
+
+/** Case-insensitive substring match over an element's identity fields (progressive query). */
+export function matchesElementFilter(info: SnapshotElementInfo, filter?: string): boolean {
+  if (!filter || !filter.trim()) return true;
+  const q = filter.trim().toLowerCase();
+  return [info.name, info.role, info.tag, info.type || '', info.value || '']
+    .some(field => field.toLowerCase().includes(q));
+}
+
+/** Map one coordinate from the 0–1000 normalized space VLMs emit to real pixels (Gemini
+ * computer-use denormalization: value / 1000 × size, clamped into the viewport). */
+export function denormalizeCoordinate(value: number, size: number): number {
+  if (!Number.isFinite(value) || !Number.isFinite(size) || size <= 0) return 0;
+  return Math.min(Math.max(Math.round((value / 1000) * size), 0), Math.max(0, Math.round(size) - 1));
+}
+
 function within(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -109,6 +203,22 @@ export function findBrowserExecutable(): string | undefined {
   });
 }
 
+/** Page-side mutation counter: lets the runtime detect "the page reacted" without blind sleeps.
+ * Installed at page creation AND on every new document, so it survives navigations. */
+const MUTATION_COUNTER_SCRIPT = `(() => {
+  if (window.__bimaxObs) return;
+  window.__bimaxMutations = 0;
+  const observer = new MutationObserver(records => { window.__bimaxMutations += records.length; });
+  const start = () => {
+    try {
+      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      window.__bimaxObs = true;
+    } catch { /* no documentElement yet */ }
+  };
+  if (document.documentElement) start();
+  else document.addEventListener('DOMContentLoaded', start, { once: true });
+})()`;
+
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw new Error('Browser action interrupted.');
   await new Promise<void>((resolve, reject) => {
@@ -131,6 +241,28 @@ export class BrowserRuntime implements BrowserRuntimePort {
   private failedRequests: string[] = [];
   private lastStatus?: number;
   private projectRoot = '';
+  /** Element handles from the latest OBSERVATION. Identity is observation-scoped: every action
+   * attempt CONSUMES the observation (handles are invalidated success or failure) and a fresh one
+   * is captured automatically, so an index is only ever valid against the state it described. */
+  private indexedElements = new Map<number, ElementHandle<Element>>();
+  /** Value-safe metadata mirror of indexedElements, for impact classification and state surfaces. */
+  private indexedElementMeta = new Map<number, SnapshotElementInfo>();
+  /** Signatures of the previous snapshot's elements (same filter only), fueling successor diffs. */
+  private lastSnapshotSignatures: string[] | null = null;
+  private lastSnapshotFilter = '';
+
+  /** URL of the live page without launching anything (for status surfaces and approval scoping). */
+  currentUrl(): string | null {
+    try { return this.page && !this.page.isClosed() ? this.page.url() : null; } catch { return null; }
+  }
+
+  /** Value-safe metadata of an element in the CURRENT observation, or null. Never launches. */
+  indexedElementInfo(raw: number | string | undefined): SnapshotElementInfo | null {
+    if (raw === undefined || raw === null || raw === '') return null;
+    const index = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isInteger(index) || index < 0) return null;
+    return this.indexedElementMeta.get(index) || null;
+  }
 
   private roots(cwd: string) {
     const root = path.resolve(cwd);
@@ -156,6 +288,29 @@ export class BrowserRuntime implements BrowserRuntimePort {
         updatedAt: Date.now(),
       }, null, 2));
     } catch { /* browser evidence must never crash the turn */ }
+  }
+
+  private async clearIndexedElements(): Promise<void> {
+    const handles = Array.from(this.indexedElements.values());
+    this.indexedElements.clear();
+    this.indexedElementMeta.clear();
+    await Promise.all(handles.map(handle => handle.dispose().catch(() => {})));
+  }
+
+  /** Resolve an elementIndex against the CURRENT observation. `{stale}` means the caller passed a
+   * real index that is no longer part of it (consumed by an action or navigation) — the action
+   * must fail truthfully instead of falling back to a misleading "requires selector" message. */
+  private resolveIndexed(raw: number | string | undefined):
+    { handle: ElementHandle<Element> } | { stale: number } | null {
+    if (raw === undefined || raw === null || raw === '') return null;
+    const index = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isInteger(index) || index < 0) return null;
+    const handle = this.indexedElements.get(index);
+    return handle ? { handle } : { stale: index };
+  }
+
+  private staleIndexResult(base: (ok: boolean, summary: string, data?: unknown) => BrowserCommandResult, index: number): BrowserCommandResult {
+    return base(false, `elementIndex ${index} is stale: the observation it came from was consumed by a previous action or navigation. Use the fresh \`observation.elements\` returned by your last action, or take a new snapshot.`);
   }
 
   private async ensure(cwd: string): Promise<Page> {
@@ -189,7 +344,112 @@ export class BrowserRuntime implements BrowserRuntimePort {
       if (this.failedRequests.length > MAX_DIAGNOSTICS) this.failedRequests.shift();
     });
     this.page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+    await this.page.evaluateOnNewDocument(MUTATION_COUNTER_SCRIPT);
+    await this.page.evaluate(MUTATION_COUNTER_SCRIPT).catch(() => { /* about:blank etc. */ });
     return this.page;
+  }
+
+  /** Capture the interactive-element observation: (re)indexes handles + value-safe metadata.
+   * ALWAYS consumes the previous observation first — identity is strictly observation-scoped. */
+  private async captureSnapshot(page: Page, filter: string, maxElements: number): Promise<{
+    elements: Array<Record<string, unknown>>;
+    signatures: string[];
+    truncated: boolean;
+  }> {
+    await this.clearIndexedElements();
+    const candidates = await page.$$('a[href], area[href], button, input:not([type="hidden"]), textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [tabindex]:not([tabindex="-1"])');
+    const elements: Array<Record<string, unknown>> = [];
+    for (const handle of candidates) {
+      if (elements.length >= maxElements) { await handle.dispose().catch(() => {}); continue; }
+      const info = await handle.evaluate(element => {
+        const node = element as HTMLElement;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none'
+          && style.visibility !== 'hidden' && Number(style.opacity || '1') > 0;
+        if (!visible) return null;
+        const input = node as HTMLInputElement;
+        const type = (input.type || '').toLowerCase();
+        const role = node.getAttribute('role') || node.tagName.toLowerCase();
+        const name = node.getAttribute('aria-label') || node.getAttribute('alt')
+          || node.getAttribute('title') || input.placeholder
+          || (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        return {
+          tag: node.tagName.toLowerCase(), role, type: type || undefined,
+          name: name.slice(0, 500),
+          value: type === 'password' ? undefined : (input.value || undefined),
+          href: node instanceof HTMLAnchorElement ? node.href : undefined,
+          disabled: (node as HTMLButtonElement).disabled || node.getAttribute('aria-disabled') === 'true',
+          checked: typeof input.checked === 'boolean' && ['checkbox', 'radio'].includes(type) ? input.checked : undefined,
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        };
+      }).catch(() => null);
+      if (!info || !matchesElementFilter(info as SnapshotElementInfo, filter)) { await handle.dispose().catch(() => {}); continue; }
+      const index = elements.length;
+      this.indexedElements.set(index, handle);
+      this.indexedElementMeta.set(index, {
+        tag: String(info.tag), role: String(info.role), type: info.type as string | undefined,
+        name: String(info.name), value: info.value as string | undefined,
+        checked: info.checked as boolean | undefined, disabled: !!info.disabled,
+      });
+      elements.push({ index, ...info });
+    }
+    return {
+      elements,
+      signatures: elements.map(e => elementSignature(e as unknown as SnapshotElementInfo)),
+      truncated: candidates.length > maxElements,
+    };
+  }
+
+  /**
+   * The observe→act→observe loop's back half: after a mutating action, wait (bounded,
+   * interruptible, first-mutation-exit — never a blind sleep) for the page to react, then capture
+   * a FRESH observation and its successor diff against the observation the action consumed.
+   * The fresh indexes ship in the same result, so the next reasoning step acts on current state.
+   */
+  private async observeAfterAction(page: Page, preMutations: number, signal: AbortSignal | undefined, settleMs: number): Promise<Record<string, unknown>> {
+    if (settleMs > 0) {
+      try {
+        const current = await page.evaluate(() => (window as any).__bimaxMutations || 0) as number;
+        if (current <= preMutations) {
+          let onAbort: (() => void) | undefined;
+          const aborted = new Promise<void>(resolve => {
+            onAbort = () => resolve();
+            signal?.addEventListener('abort', onAbort, { once: true });
+          });
+          await Promise.race([
+            page.waitForFunction(
+              (n: number) => ((window as any).__bimaxMutations || 0) > n,
+              { timeout: settleMs, polling: 100 },
+              preMutations,
+            ).catch(() => { /* no mutation within budget — observe anyway */ }),
+            aborted,
+          ]);
+          if (onAbort) signal?.removeEventListener('abort', onAbort);
+        }
+      } catch { /* settle is best-effort; the observation below is what matters */ }
+      if (signal?.aborted) throw new Error('Browser action interrupted.');
+    }
+    const filter = this.lastSnapshotFilter;
+    const previous = this.lastSnapshotSignatures;
+    const captured = await this.captureSnapshot(page, filter, 200);
+    const diff = previous !== null ? diffSnapshots(previous, captured.signatures) : null;
+    this.lastSnapshotSignatures = captured.signatures;
+    return {
+      ...(filter ? { filter } : {}),
+      elements: captured.elements.slice(0, 60),
+      truncated: captured.truncated || captured.elements.length > 60,
+      ...(diff ? { diff } : {}),
+    };
+  }
+
+  /** One-line truth about what the action did to the page, appended to action summaries. */
+  private observationNote(observation: Record<string, unknown>): string {
+    const diff = observation.diff as SnapshotDiff | undefined;
+    if (!diff) return ' Fresh observation attached (no prior snapshot to diff against).';
+    return diff.changed
+      ? ` Page updated: +${diff.addedCount} −${diff.removedCount} element(s); fresh indexes attached.`
+      : ' Page elements unchanged; fresh indexes attached.';
   }
 
   private async retry<T>(attempts: number, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<{ value: T; attempts: number }> {
@@ -227,6 +487,24 @@ export class BrowserRuntime implements BrowserRuntimePort {
       page.setDefaultTimeout(timeout);
       if (context.signal?.aborted) throw new Error('Browser action interrupted.');
 
+      // Observe→act→observe: mutating actions consume the current observation and return a fresh
+      // one. Read the page's mutation counter BEFORE acting so the settle wait can end at the
+      // first post-action mutation instead of sleeping blind.
+      const isMutatingAction = ['click', 'type', 'press', 'select', 'hover', 'upload'].includes(command.action);
+      const settleMs = boundedInt(command.settleMs, 800, 0, 5000);
+      const preMutations = isMutatingAction
+        ? (await page.evaluate(() => (window as any).__bimaxMutations || 0).catch(() => 0)) as number
+        : 0;
+      const finishAction = async (ok: boolean, summary: string, extra?: Record<string, unknown>): Promise<BrowserCommandResult> => {
+        const observation = await this.observeAfterAction(page, preMutations, context.signal, settleMs)
+          .catch((e: any) => { if (context.signal?.aborted) throw e; return null; });
+        this.checkpoint(cwd);
+        return base(ok, `${summary}${observation ? this.observationNote(observation) : ''}`, {
+          ...(extra || {}),
+          ...(observation ? { observation } : {}),
+        });
+      };
+
       switch (command.action) {
         case 'navigate': {
           const check = validateBrowserUrl(String(command.url || ''), command.allowPrivate === true);
@@ -237,34 +515,113 @@ export class BrowserRuntime implements BrowserRuntimePort {
             return result;
           });
           response = run.value; attempts = run.attempts; this.lastStatus = response.status();
+          await this.clearIndexedElements();
           const title = await page.title();
           this.checkpoint(cwd);
           return { ...base(response.ok(), `Loaded ${page.url()} (${response.status()})`), title };
         }
+        case 'snapshot': {
+          const maxElements = boundedInt(command.maxElements, 200, 1, 1000);
+          const filter = (command.filter || '').trim();
+          const captured = await this.captureSnapshot(page, filter, maxElements);
+          // Successor diff (Pi): what appeared/disappeared since the previous same-filter snapshot,
+          // so the model reads "what my action changed" instead of re-scanning the whole list.
+          const diff = this.lastSnapshotSignatures !== null && this.lastSnapshotFilter === filter
+            ? diffSnapshots(this.lastSnapshotSignatures, captured.signatures)
+            : null;
+          this.lastSnapshotSignatures = captured.signatures;
+          this.lastSnapshotFilter = filter;
+          const bodyText = await page.$eval('body', node => (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20_000));
+          return {
+            ...base(true, `Captured ${captured.elements.length} indexed interactive element(s)${filter ? ` matching "${filter}"` : ''}${diff ? ` (${diff.changed ? `since last snapshot: +${diff.addedCount} −${diff.removedCount}` : 'no element changes since last snapshot'})` : ''}. Indexes are valid until your next action, navigation, or snapshot.`, {
+              text: bodyText,
+              elements: captured.elements,
+              truncated: captured.truncated,
+              ...(diff ? { diff } : {}),
+            }),
+            title: await page.title(),
+          };
+        }
         case 'click': {
-          if (!command.selector) return base(false, 'click requires selector.');
+          const resolved = this.resolveIndexed(command.elementIndex);
+          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
+          const hasCoordinates = Number.isFinite(command.x) && Number.isFinite(command.y);
+          if (!command.selector && !indexed && !hasCoordinates) return base(false, 'click requires selector, elementIndex from snapshot, or x/y coordinates.');
           const run = await this.retry(maxAttempts, context.signal, async () => {
-            await page.waitForSelector(command.selector!, { visible: true, timeout });
-            await page.click(command.selector!);
+            if (indexed) await indexed.click();
+            else if (hasCoordinates) {
+              let px = Number(command.x), py = Number(command.y);
+              if (command.normalized) {
+                const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+                px = denormalizeCoordinate(px, viewport.width);
+                py = denormalizeCoordinate(py, viewport.height);
+              }
+              await page.mouse.click(px, py);
+            }
+            else {
+              await page.waitForSelector(command.selector!, { visible: true, timeout });
+              await page.click(command.selector!);
+            }
           });
-          attempts = run.attempts; this.checkpoint(cwd);
-          return base(true, `Clicked ${command.selector}.`);
+          attempts = run.attempts;
+          return finishAction(true, indexed ? `Clicked elementIndex ${command.elementIndex}.`
+            : hasCoordinates ? `Clicked (${command.x}, ${command.y}).` : `Clicked ${command.selector}.`);
         }
         case 'type': {
-          if (!command.selector) return base(false, 'type requires selector.');
+          const resolved = this.resolveIndexed(command.elementIndex);
+          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
+          if (!command.selector && !indexed) return base(false, 'type requires selector or elementIndex from snapshot.');
           const run = await this.retry(maxAttempts, context.signal, async () => {
-            await page.waitForSelector(command.selector!, { visible: true, timeout });
+            const target = indexed || await page.waitForSelector(command.selector!, { visible: true, timeout });
+            if (!target) throw new Error('Type target was not found.');
             if (command.clear !== false) {
-              await page.focus(command.selector!);
+              await target.focus();
               await page.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
               await page.keyboard.press('A');
               await page.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
               await page.keyboard.press('Backspace');
             }
-            await page.type(command.selector!, String(command.text || ''));
+            await target.type(String(command.text || ''));
           });
-          attempts = run.attempts; this.checkpoint(cwd);
-          return base(true, `Typed ${String(command.text || '').length} character(s) into ${command.selector}.`);
+          attempts = run.attempts;
+          return finishAction(true, `Typed ${String(command.text || '').length} character(s) into ${indexed ? `elementIndex ${command.elementIndex}` : command.selector}.`);
+        }
+        case 'press': {
+          if (!command.key) return base(false, 'press requires key.');
+          const resolved = this.resolveIndexed(command.elementIndex);
+          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
+          if (indexed) await indexed.focus();
+          else if (command.selector) {
+            const target = await page.waitForSelector(command.selector, { visible: true, timeout });
+            if (!target) return base(false, `Press target not found: ${command.selector}`);
+            await target.focus();
+          }
+          await page.keyboard.press(command.key as any);
+          return finishAction(true, `Pressed ${command.key}${indexed ? ` on elementIndex ${command.elementIndex}` : ''}.`);
+        }
+        case 'select': {
+          const resolved = this.resolveIndexed(command.elementIndex);
+          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
+          if (!command.selector && !indexed) return base(false, 'select requires selector or elementIndex from snapshot.');
+          if (!command.values?.length) return base(false, 'select requires at least one value.');
+          const target = indexed || await page.waitForSelector(command.selector!, { visible: true, timeout });
+          if (!target) return base(false, 'Select target was not found.');
+          const selected = await (target as ElementHandle<HTMLSelectElement>).select(...command.values);
+          return finishAction(true, `Selected ${selected.join(', ') || '(none)'}.`, { selected });
+        }
+        case 'hover': {
+          const resolved = this.resolveIndexed(command.elementIndex);
+          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
+          if (!command.selector && !indexed) return base(false, 'hover requires selector or elementIndex from snapshot.');
+          const target = indexed || await page.waitForSelector(command.selector!, { visible: true, timeout });
+          if (!target) return base(false, 'Hover target was not found.');
+          await target.hover();
+          return finishAction(true, `Hovered ${indexed ? `elementIndex ${command.elementIndex}` : command.selector}.`);
         }
         case 'scroll': {
           const pixels = boundedInt(command.pixels, 700, -20_000, 20_000);
@@ -272,6 +629,16 @@ export class BrowserRuntime implements BrowserRuntimePort {
           return base(true, `Scrolled ${pixels}px.`);
         }
         case 'wait': {
+          if (command.forChange) {
+            // Change detection (Pi wait_for): resolve on the first DOM mutation instead of
+            // sleeping blind; report truthfully when nothing changed within the budget.
+            const changed = await page.evaluate(budgetMs => new Promise<boolean>(resolve => {
+              const observer = new MutationObserver(() => { observer.disconnect(); resolve(true); });
+              observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+              setTimeout(() => { observer.disconnect(); resolve(false); }, budgetMs);
+            }), timeout);
+            return base(changed, changed ? 'DOM changed.' : `No DOM change within ${timeout}ms.`);
+          }
           if (command.selector) await page.waitForSelector(command.selector, { timeout });
           else await delay(timeout, context.signal);
           return base(true, command.selector ? `Found ${command.selector}.` : `Waited ${timeout}ms.`);
@@ -291,14 +658,16 @@ export class BrowserRuntime implements BrowserRuntimePort {
           const handle = input?.asElement();
           if (!handle) return base(false, `Upload selector is not an element: ${command.selector}`);
           await (handle as any).uploadFile(target);
-          return base(true, `Uploaded ${path.relative(cwd, target)} through ${command.selector}.`);
+          return finishAction(true, `Uploaded ${path.relative(cwd, target)} through ${command.selector}.`);
         }
         case 'back':
           response = await page.goBack({ waitUntil: command.waitUntil || 'networkidle2', timeout });
+          await this.clearIndexedElements();
           this.lastStatus = response?.status(); this.checkpoint(cwd);
           return base(!!response?.ok(), `Navigated back to ${page.url()}.`);
         case 'reload':
           response = await page.reload({ waitUntil: command.waitUntil || 'networkidle2', timeout });
+          await this.clearIndexedElements();
           this.lastStatus = response?.status(); this.checkpoint(cwd);
           return base(!!response?.ok(), `Reloaded ${page.url()}.`);
         case 'inspect': {
@@ -378,6 +747,12 @@ export class BrowserRuntime implements BrowserRuntimePort {
         }
       }
     } catch (error: any) {
+      // A failed action attempt still CONSUMED its observation — the page may have half-reacted,
+      // so surviving indexes would be lies. Invalidate; the caller re-observes with a snapshot.
+      if (['click', 'type', 'press', 'select', 'hover', 'upload'].includes(command.action)) {
+        await this.clearIndexedElements();
+        this.lastSnapshotSignatures = null;
+      }
       this.checkpoint(cwd);
       return base(false, error?.message || String(error));
     }
@@ -385,6 +760,9 @@ export class BrowserRuntime implements BrowserRuntimePort {
 
   async close(): Promise<void> {
     const browser = this.browser;
+    await this.clearIndexedElements();
+    this.lastSnapshotSignatures = null;
+    this.lastSnapshotFilter = '';
     this.page = null; this.browser = null; this.projectRoot = '';
     if (browser) await browser.close().catch(() => {});
   }

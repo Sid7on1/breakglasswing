@@ -3,16 +3,20 @@ import { MODEL_CATALOG, modelMenuOptions, DEFAULT_CODING_MODEL, DEFAULT_LITE_MOD
 describe('model catalog', () => {
   it('includes the verified working models across tiers', () => {
     const ids = MODEL_CATALOG.map(m => m.value);
-    // Only NIM-verified ids remain. step-3.5-flash was removed — it 400s as "not a valid model ID";
-    // the valid Step "flash" id is step-3.7-flash (now the lite default).
+    // Coding/lite IDs are NIM-probed; vision IDs are live-catalog-confirmed and filtered against
+    // `/models` at runtime. step-3.5-flash was removed because it 400s as an invalid model ID.
     expect(ids).toEqual(expect.arrayContaining([
       'minimaxai/minimax-m3', 'z-ai/glm-5.1', 'mistralai/mistral-medium-3.5-128b',
       'stepfun-ai/step-3.7-flash', 'minimaxai/minimax-m2.7',
       'meta/llama-3.1-70b-instruct', 'sarvamai/sarvam-m',
+      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+      'mistralai/ministral-14b-instruct-2512', 'nvidia/nemotron-nano-12b-v2-vl',
+      'meta/llama-3.2-11b-vision-instruct',
     ]));
     expect(ids).not.toContain('stepfun-ai/step-3.5-flash'); // invalid on NIM
     expect(MODEL_CATALOG.some(m => m.tier === 'coding')).toBe(true);
     expect(MODEL_CATALOG.some(m => m.tier === 'lite')).toBe(true);
+    expect(MODEL_CATALOG.some(m => m.tier === 'vision')).toBe(true);
   });
 
   it('uses the correct GLM publisher slug (z-ai, not zai) and omits the non-responding giants', () => {

@@ -25,11 +25,24 @@ function mockCtx() {
 }
 
 describe('/model (menu fix)', () => {
-  it('menu carries an onSelect that applies the model live + persists', async () => {
+  it('top level is a clutter-free hub whose rows are runnable commands', async () => {
     const ctx = mockCtx();
     const res = await getCmd('/model').execute([], ctx);
     expect(res.type).toBe('menu');
     expect(typeof res.onSelect).toBe('function');
+    const values = res.options.map((o: any) => o.value);
+    // The hub NEVER dumps the raw model catalog — it routes to single-model mode + slot pickers.
+    expect(values).toContain('/model one');
+    expect(values).toContain('/model coding');
+    expect(values).not.toContain('minimaxai/minimax-m3');
+    res.onSelect({ value: '/model one' });
+    expect(ctx._spies.executeCommand).toHaveBeenCalledWith('/model one');
+  });
+
+  it('the coding picker applies the model live + persists', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/model').execute(['coding'], ctx);
+    expect(res.type).toBe('menu');
     expect(res.options.map((o: any) => o.value)).toContain('minimaxai/minimax-m3');
 
     res.onSelect({ value: 'gpt-4o' });
@@ -37,6 +50,14 @@ describe('/model (menu fix)', () => {
     expect(ctx._spies.saveConfig).toHaveBeenCalledWith({ model: 'gpt-4o' });
     expect(ctx.options.model).toBe('gpt-4o');
     expect(ctx._spies.addSystemMessage).toHaveBeenCalled();
+  });
+
+  it('`/model one <id>` pins one model everywhere (coding + lite + sub-agents inherit)', async () => {
+    const ctx = mockCtx();
+    await getCmd('/model').execute(['one', 'gpt-4o'], ctx);
+    expect(ctx._spies.applyConfig).toHaveBeenCalledWith({ model: 'gpt-4o', liteModel: 'gpt-4o' });
+    expect(ctx._spies.saveConfig).toHaveBeenCalledWith({ model: 'gpt-4o', liteModel: 'gpt-4o', subagentModel: '' });
+    expect(ctx.options.model).toBe('gpt-4o');
   });
 
   it('`/model <id>` applies directly', async () => {
@@ -95,7 +116,7 @@ describe('/config (hub fix)', () => {
 describe('/model custom entry', () => {
   it('the custom option opens a prompt that applies the typed id', async () => {
     const ctx = mockCtx();
-    const res = await getCmd('/model').execute([], ctx);
+    const res = await getCmd('/model').execute(['coding'], ctx);
     expect(res.options.map((o: any) => o.value)).toContain('__custom__');
     res.onSelect({ value: '__custom__' });
     expect(ctx._spies.setActivePrompt).toHaveBeenCalled();

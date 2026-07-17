@@ -170,6 +170,21 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.menuIdx = (m.menuIdx + 1) % len(filtered)
 			}
 			return m, nil
+		case "right", "tab":
+			// Cycle category tabs (All → each category). Only active when the menu is grouped.
+			if len(m.menuTabs) > 0 {
+				m.menuTab = (m.menuTab + 1) % (len(m.menuTabs) + 1)
+				m.menuIdx = 0
+				m.relayout()
+			}
+			return m, nil
+		case "left", "shift+tab":
+			if len(m.menuTabs) > 0 {
+				m.menuTab = (m.menuTab - 1 + len(m.menuTabs) + 1) % (len(m.menuTabs) + 1)
+				m.menuIdx = 0
+				m.relayout()
+			}
+			return m, nil
 		case "enter":
 			m.menuOpen = false
 			m.menuFilter = ""

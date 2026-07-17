@@ -1,42 +1,120 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'node:path';
-import { FSWatcher } from 'node:fs';
-import { Engine, EngineState } from './engine';
+import os from 'node:os';
+import { FSWatcher, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { spawnEngineProcess, recentEngineLog } from './engine';
+import { EngineSupervisor } from './supervisor/supervisor';
+import { CrashJournal } from './supervisor/journal';
+import { SupervisorStatus } from './supervisor/types';
 import { gitStatus, gitDiff, gitBranches, gitLog } from './git';
 import { listDir, readFilePreview, writeFileContent, readSessionMeta, watchProject } from './files';
 import { createPty, writePty, resizePty, killPty, killAllPtys } from './pty';
+import { pickInitialProject, loadSettings, recordProject, recentProjects, isRealProject } from './settings';
 
 /**
- * Bimax desktop shell. One window, one engine child process per project directory. The renderer
- * never touches Node — everything crosses the contextBridge in preload/index.ts:
- *   renderer → main:  'engine:send' (protocol Inbound msg), 'app:pick-folder', 'engine:restart',
+ * Bimax desktop shell. One window, ONE authoritative EngineSupervisor owning the engine child
+ * lifecycle (spawn/monitor/recover/resume — see supervisor/supervisor.ts). The renderer never
+ * touches Node — everything crosses the contextBridge in preload/index.ts:
+ *   renderer → main:  'engine:send' (protocol Inbound msg), 'app:pick-folder',
+ *                     'supervisor:*' (typed recovery actions + diagnostics),
  *                     git:/files:/pty: (Electron-native Review/Files/Terminal subsystems)
- *   main → renderer:  'engine:msg' (protocol Outbound msg), 'engine:state', 'app:project',
+ *   main → renderer:  'engine:msg' (protocol Outbound msg), 'engine:state' (legacy 3-state),
+ *                     'supervisor:status' (full typed lifecycle), 'app:project',
  *                     'files:changed', 'pty:data', 'pty:exit'
  */
 
 let win: BrowserWindow | null = null;
-let engine: Engine | null = null;
+let supervisor: EngineSupervisor | null = null;
 let projectWatcher: FSWatcher | null = null;
+let lastStatus: SupervisorStatus | null = null;
+let latestUiSnapshot: unknown = null;
+let latestReviewSnapshot: unknown = null;
 
 function broadcast(channel: string, ...args: unknown[]): void {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
-function startEngine(projectDir: string): void {
-  engine?.stop();
-  engine = new Engine(projectDir, {
-    onMessage: (msg) => broadcast('engine:msg', msg),
-    onState: (state: EngineState, detail?: string) => broadcast('engine:state', state, detail ?? ''),
+// The old 3-state wire ('starting'|'ready'|'exited') stays for renderer parts that only need
+// coarse liveness; the full lifecycle rides 'supervisor:status'.
+function legacyState(s: SupervisorStatus): { state: string; detail: string } | null {
+  switch (s.phase) {
+    case 'idle': return null;
+    case 'ready':
+    case 'degraded': return { state: 'ready', detail: s.message };
+    case 'exited':
+    case 'failed': return { state: 'exited', detail: s.reason };
+    default: return { state: 'starting', detail: s.message };
+  }
+}
+
+function createSupervisor(): EngineSupervisor {
+  const journalPath = path.join(app.getPath('userData'), 'crash-journal.json');
+  const journal = new CrashJournal({
+    load: () => {
+      try { return readFileSync(journalPath, 'utf8'); } catch { return null; }
+    },
+    save: (text: string) => {
+      // Atomic: a crash mid-write must never leave a truncated journal.
+      mkdirSync(path.dirname(journalPath), { recursive: true });
+      const tmp = `${journalPath}.tmp`;
+      writeFileSync(tmp, text);
+      renameSync(tmp, journalPath);
+    },
   });
-  engine.start();
+
+  return new EngineSupervisor({
+    spawn: spawnEngineProcess,
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h as NodeJS.Timeout),
+    setInterval: (fn, ms) => setInterval(fn, ms),
+    clearInterval: (h) => clearInterval(h as NodeJS.Timeout),
+    random: () => Math.random(),
+    memory: () => ({ freeBytes: os.freemem(), totalBytes: os.totalmem() }),
+    env: process.env,
+    journal,
+    logTail: () => recentEngineLog(),
+    onStatus: (status) => {
+      lastStatus = status;
+      broadcast('supervisor:status', status);
+      const legacy = legacyState(status);
+      if (legacy) broadcast('engine:state', legacy.state, legacy.detail);
+    },
+    onMessage: (msg: any) => {
+      if (msg?.t === 'event' && msg.name === 'ui_snapshot') latestUiSnapshot = msg;
+      if (msg?.t === 'event' && msg.name === 'review_update') latestReviewSnapshot = msg;
+      broadcast('engine:msg', msg);
+    },
+    // Notices reuse the renderer's existing diagnostics pipeline (the 'log' event fold), so they
+    // show up in the Health panel without a parallel plumbing path.
+    onNotice: (level, text) => {
+      broadcast('engine:msg', {
+        t: 'event',
+        name: 'log',
+        args: [{ id: `sup-${Date.now()}`, level, text: `[supervisor] ${text}`, timestamp: new Date().toISOString() }],
+      });
+    },
+  });
+}
+
+function startEngine(projectDir: string): void {
+  latestUiSnapshot = null;
+  latestReviewSnapshot = null;
+  // macOS: window-all-closed disposes the supervisor but the app lives on — reopening a window
+  // (dock click → activate) needs a fresh instance, since a disposed supervisor never respawns.
+  if (!supervisor) supervisor = createSupervisor();
+  supervisor.openProject(projectDir);
   projectWatcher?.close();
   projectWatcher = watchProject(projectDir, () => broadcast('files:changed'));
   broadcast('app:project', projectDir);
+  // Persist so the NEXT launch resumes here instead of defaulting to $HOME (P0.1).
+  recordProject(projectDir);
 }
 
+// The active project for native git/files/pty reads. Empty string when no project is open (the
+// renderer shows the project-first welcome then) — never $HOME, which caused the Git/genome errors.
 function projectDir(): string {
-  return engine?.projectDir || process.env.BIMAX_CWD || app.getPath('home');
+  return supervisor?.currentProject ?? '';
 }
 
 function createWindow(): void {
@@ -72,13 +150,16 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  supervisor = createSupervisor();
   createWindow();
 
-  // Default project = home dir; the engine treats non-codebase dirs as a scratch session, and the
-  // renderer offers "Open Project…" (Cmd+O) to point it at a real repo.
-  const initialDir = process.env.BIMAX_CWD || app.getPath('home');
+  // Launch project: an env override or the last valid saved project — NEVER $HOME. When null, the
+  // renderer shows the project-first welcome and we don't boot an engine in the wrong place (P0.1).
+  const initialDir = pickInitialProject(loadSettings().lastProject);
 
-  ipcMain.on('engine:send', (_e, msg: unknown) => engine?.send(msg));
+  // Protocol messages from the renderer flow through the supervisor: delivered when the engine is
+  // interactive, queued when safe to replay, rejected with a visible notice otherwise.
+  ipcMain.on('engine:send', (_e, msg: unknown) => supervisor?.sendFromRenderer(msg));
 
   ipcMain.handle('app:pick-folder', async () => {
     if (!win) return null;
@@ -93,22 +174,42 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('engine:restart', () => {
-    startEngine(engine?.projectDir || initialDir);
-    return engine?.projectDir;
+    // Restart the current project, or re-resolve one if none is open. No valid project → stay on
+    // the welcome (never boot $HOME).
+    const dir = supervisor?.currentProject || pickInitialProject(loadSettings().lastProject);
+    if (dir) startEngine(dir);
+    else broadcast('app:project', '');
+    return supervisor?.currentProject ?? '';
   });
 
-  ipcMain.handle('app:get-project', () => engine?.projectDir ?? initialDir);
+  // Supervisor surface: typed state + validated recovery actions. The renderer never gets raw
+  // process access — these are the only levers.
+  ipcMain.handle('supervisor:get-status', () => lastStatus ?? supervisor?.status() ?? null);
+  ipcMain.handle('supervisor:action', (_e, raw: unknown) => supervisor?.handleAction(raw) ?? false);
+  ipcMain.handle('supervisor:crash-history', () => supervisor?.crashHistory() ?? []);
+  ipcMain.handle('supervisor:diagnostics', () => supervisor?.diagnosticsText() ?? '');
+
+  ipcMain.handle('app:get-project', () => projectDir());
+
+  // Recent projects for the welcome screen (validated, most-recent first).
+  ipcMain.handle('app:recent-projects', () => recentProjects());
+
+  // Open a specific recent project by path (from the welcome list).
+  ipcMain.handle('app:open-project', (_e, dir: string) => {
+    if (isRealProject(dir)) { startEngine(dir); return dir; }
+    return null;
+  });
 
   // Composer attach: pick files, return paths relative to the project so they insert as @refs.
   ipcMain.handle('app:pick-files', async () => {
     if (!win) return [];
     const res = await dialog.showOpenDialog(win, {
       title: 'Attach files',
-      defaultPath: engine?.projectDir ?? initialDir,
+      defaultPath: projectDir() || undefined,
       properties: ['openFile', 'multiSelections'],
     });
     if (res.canceled) return [];
-    const root = (engine?.projectDir ?? initialDir).replace(/\/+$/, '');
+    const root = projectDir().replace(/\/+$/, '');
     return res.filePaths.map((p) => (p.startsWith(root + '/') ? p.slice(root.length + 1) : p));
   });
 
@@ -143,9 +244,25 @@ app.whenReady().then(() => {
   ipcMain.on('pty:kill', (_e, id: number) => killPty(Number(id)));
 
   // Renderer signals it has mounted its listeners; only then spawn (so no early events are lost).
+  // With a valid saved/override project we boot it; otherwise we broadcast an empty project so the
+  // renderer shows the project-first welcome instead of an engine running in $HOME (P0.1).
   ipcMain.on('app:renderer-ready', () => {
-    if (!engine) startEngine(initialDir);
-    else broadcast('app:project', engine.projectDir);
+    const dir = projectDir();
+    if (dir) {
+      broadcast('app:project', dir);
+      if (lastStatus) {
+        broadcast('supervisor:status', lastStatus);
+        const legacy = legacyState(lastStatus);
+        if (legacy) broadcast('engine:state', legacy.state, legacy.detail);
+      }
+      // Renderer reload/reconnect: replay the latest full snapshots so missing intermediate events
+      // cannot leave repository or task-review state stale.
+      if (latestUiSnapshot) broadcast('engine:msg', latestUiSnapshot);
+      if (latestReviewSnapshot) broadcast('engine:msg', latestReviewSnapshot);
+      return;
+    }
+    if (initialDir) startEngine(initialDir);
+    else broadcast('app:project', '');
   });
 
   app.on('activate', () => {
@@ -153,9 +270,11 @@ app.whenReady().then(() => {
   });
 });
 
+// dispose() supersedes the child and cancels every timer — the supervisor can never relaunch the
+// engine while the app is quitting.
 app.on('window-all-closed', () => {
-  engine?.stop();
-  engine = null;
+  supervisor?.dispose();
+  supervisor = null;
   killAllPtys();
   projectWatcher?.close();
   projectWatcher = null;
@@ -163,8 +282,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  engine?.stop();
-  engine = null;
+  supervisor?.dispose();
+  supervisor = null;
   killAllPtys();
   projectWatcher?.close();
   projectWatcher = null;

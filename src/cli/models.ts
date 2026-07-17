@@ -6,11 +6,13 @@ export interface ModelEntry {
   label: string;
   value: string;
   desc: string;
-  tier: 'coding' | 'lite' | 'other';
+  tier: 'coding' | 'vision' | 'lite' | 'other';
 }
 
-// NIM ids below were each VERIFIED to respond to "hi" on NVIDIA NIM (2026-06-15 probe). Three
-// catalogued NIM models did NOT respond within ~3 min even after a warm-up (deepseek-v4-pro 1.6T,
+// The original coding/lite NIM ids below were VERIFIED to respond to "hi" on NVIDIA NIM
+// (2026-06-15 probe). Vision ids were confirmed against NVIDIA's live catalog on 2026-07-17 and
+// are still filtered through the provider's `/models` response before the live picker shows them.
+// Three catalogued NIM models did NOT respond within ~3 min even after a warm-up (deepseek-v4-pro 1.6T,
 // deepseek-v4-flash 284B, google/gemma-4-31b — likely free-tier capacity / cold-start); add them
 // via the Custom entry if NIM has them warm. The "other" tier needs that provider's own API key.
 export const MODEL_CATALOG: ModelEntry[] = [
@@ -19,6 +21,13 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Flagship agentic + coding + long-horizon reasoning', tier: 'coding' },
   { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Strong text/coding/agentic (slow cold-start)', tier: 'coding' },
   { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: '230B coding/reasoning/office (slow cold-start)', tier: 'coding' },
+
+  // — Vision / GUI agents on NVIDIA NIM —
+  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Recommended for GUI/browser agents: vision + tool calling + 256K context', tier: 'vision' },
+  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Fast VLM with native function calling, up to 10 images, 256K context', tier: 'vision' },
+  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Efficient multi-image/video understanding and visual Q&A', tier: 'vision' },
+  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Free NVIDIA vision endpoint; useful perception fallback', tier: 'vision' },
+  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Larger image-reasoning fallback on NVIDIA NIM', tier: 'vision' },
 
   // — Fast / lite (good as the LITE model: summaries, self-critic) —
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Sparse-MoE multimodal reasoning, agentic + coding — THE DEFAULT (both slots)', tier: 'lite' },
@@ -42,7 +51,9 @@ export const MODEL_CATALOG: ModelEntry[] = [
 export const DEFAULT_CODING_MODEL = 'stepfun-ai/step-3.7-flash';
 export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.7-flash';
 
-const TIER_LABEL: Record<ModelEntry['tier'], string> = { coding: 'Coding / agentic', lite: 'Fast / lite', other: 'Other providers (own key)' };
+const TIER_LABEL: Record<ModelEntry['tier'], string> = {
+  coding: 'Coding / agentic', vision: 'Vision / computer use', lite: 'Fast / lite', other: 'Other providers (own key)',
+};
 
 /** Menu options for a model picker, optionally annotated with which slot is current. */
 export function modelMenuOptions(current?: string): { label: string; value: string; desc: string; category: string }[] {
@@ -70,4 +81,32 @@ export function liveModelMenuOptions(liveIds: string[], current?: string): { lab
       category: known ? TIER_LABEL[known.tier] : 'Available on your provider',
     };
   });
+}
+
+/**
+ * Clutter-free picker: ONLY the curated recommendations (filtered to what the provider actually
+ * serves when we have its live list), never the raw multi-hundred-row catalog. The full list
+ * stays one hop away behind a "Browse all…" row the caller wires to `__browse__`.
+ */
+export function curatedModelMenuOptions(
+  liveIds: string[] | null,
+  current?: string,
+): { label: string; value: string; desc: string; category: string }[] {
+  const served = liveIds && liveIds.length ? new Set(liveIds) : null;
+  const mark = (v: string, label: string) => (v === current ? `● ${label}` : label);
+  const rows = MODEL_CATALOG
+    .filter(m => m.tier !== 'other' && (!served || served.has(m.value)))
+    .map(m => ({
+      label: mark(m.value, m.label),
+      value: m.value,
+      desc: m.desc,
+      category: m.tier === 'coding' ? 'Recommended — strong coding'
+        : m.tier === 'vision' ? 'Recommended — vision / computer use'
+        : 'Recommended — fast',
+    }));
+  // If the current model isn't in the curated set, surface it so "what am I on?" is always visible.
+  if (current && !rows.some(r => r.value === current)) {
+    rows.unshift({ label: `● ${current}`, value: current, desc: 'Your current model', category: 'Recommended — strong coding' });
+  }
+  return rows;
 }

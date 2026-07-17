@@ -13,13 +13,13 @@ export function Dashboard({ msg }: { msg: MessageEntry }): React.ReactElement | 
   switch (msg.uiComponent) {
     case 'HelpDashboard':
       return (
-        <Panel title="Commands">
+        <Panel title="Available actions">
           {(p.sections ?? []).map((sec: { title?: string; commands?: { cmd: string; desc: string }[] }, i: number) => (
             <div key={i} className="mb-2 last:mb-0">
               <div className="mb-1 text-[10.5px] font-medium tracking-[0.08em] text-ember uppercase">{sec.title}</div>
               {(sec.commands ?? []).map((c, j) => (
                 <div key={j} className="flex gap-3 py-0.5 text-xs">
-                  <code className="w-32 shrink-0 font-mono text-ink">{c.cmd}</code>
+                  <span className="w-32 shrink-0 font-medium text-ink">{c.cmd.replace(/^\/+/, '').replace(/-/g, ' ')}</span>
                   <span className="text-dim">{c.desc}</span>
                 </div>
               ))}

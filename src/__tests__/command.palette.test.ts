@@ -51,7 +51,9 @@ describe('CommandRegistry.getPaletteOptions — curated palette', () => {
   it('stays curated to ~25 primary verbs (Gate 5) — discoverability, not sprawl', () => {
     // The whole point of PALETTE_HIDDEN: the browsable surface is a small set of primary verbs,
     // with the rest reachable when typed / via the Ctrl+X HUD. Guard against re-sprawl.
-    expect(opts.length).toBeLessThanOrEqual(26);
+    // (+1 in 2026-07: /setup — the guided provider→key→model wizard belongs on the surface.)
+    // (+1 in 2026-07: /computer — the browser/desktop computer-use capability hub is a primary verb.)
+    expect(opts.length).toBeLessThanOrEqual(28);
     const values = opts.map(o => o.value);
     // Demoted clusters must NOT be on the browsable surface (they live in the HUD / a primary verb).
     for (const hidden of ['/self', '/tier', '/undo', '/checkpoint', '/edit', '/write', '/resume', '/output', '/index-ai']) {

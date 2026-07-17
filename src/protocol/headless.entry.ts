@@ -3,7 +3,7 @@ import { goalEvents } from '../memory/goal.manager';
 import { buildPersonas } from '../cli/personas/factory';
 import { HeadlessSession } from './headless.session';
 import { startStdioHost } from './stdio.host';
-import { startUiSnapshot, setTokensBaseline } from './ui.snapshot';
+import { startUiSnapshot, setTokensBaseline, setUiSnapshotGovernor } from './ui.snapshot';
 import { completeInput } from './completions';
 import { isCodebase, summarizeGraph } from '../graph/graph.summary';
 import { getConfig, saveConfig } from '../cli/config';
@@ -332,6 +332,7 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   goalEvents.on('goals_changed', onGoals);
 
   // Push footer + map-panel + token-meter state the Go front-end can't read from engine singletons.
+  setUiSnapshotGovernor(governor);
   startUiSnapshot(graphStore, toolRegistry);
 
   // Launch-grade first run: an empty key pool opens the real provider picker automatically. The
@@ -349,7 +350,7 @@ export async function startHeadless(container: any, config: any): Promise<void> 
             timer.unref?.();
             return;
           }
-          if (!session.isBusy) void session.dispatch('/keys');
+          if (!session.isBusy) void session.dispatch('/setup');
         };
         const timer = setTimeout(() => offerKeys(), 350);
         timer.unref?.();

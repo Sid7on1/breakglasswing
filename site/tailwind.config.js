@@ -4,29 +4,26 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        heading: ["'Instrument Serif'", 'serif'],
-        body: ["'Inter'", 'system-ui', 'sans-serif'],
-        mono: ["'JetBrains Mono'", 'ui-monospace', 'monospace'],
+        heading: ["'Bimax Sans'", 'system-ui', 'sans-serif'],
+        body: ["'Bimax Sans'", 'system-ui', 'sans-serif'],
+        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
-        // Deep-space observatory system — indigo-black void, violet aurora accent, starlight cyan.
-        // Keyed as `ink` so every surviving ink-* utility (nav, glass, borders) re-themes in place.
-        ink: {
-          950: '#040412',
-          900: '#08081d',
-          800: '#0e0e2a',
-          700: '#161638',
-          600: '#1e1e4b',
+        void: '#09100B',
+        surface: {
+          DEFAULT: '#0F1611',
+          raised: '#151D17',
         },
-        accent: {
-          DEFAULT: '#8b5cf6', // violet — the observatory beam
-          bright: '#a78bfa',
-          dim: '#7c3aed',
-        },
-        glowblue: '#67e8f9', // starlight cyan
+        panel: '#1A241C',
+        chalk: '#E8E2CF',
+        mist: '#AEB8A7',
+        line: 'rgba(232, 226, 207, 0.13)',
+        ember: '#4566FF',
+        teal: '#8FBF8A',
       },
-      boxShadow: {
-        glow: '0 0 40px -8px rgba(139, 92, 246, 0.4)',
+      maxWidth: {
+        content: '1240px',
+        wide: '1440px',
       },
     },
   },

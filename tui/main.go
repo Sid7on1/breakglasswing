@@ -49,9 +49,12 @@ func main() {
 	// the history — smooth, native, no custom scrollbar. Only a small live region (streaming answer,
 	// running tools, input box, footer) is redrawn in place at the bottom.
 	//
-	// INLINE mode (opencode / Claude-Code style): NO alt-screen. Committed transcript lines are printed
-	// into the terminal's OWN scrollback (via tea.Println), so the terminal's NATIVE scrollbar scrolls
-	// the history — smooth, native, no custom scrollbar.
+	// Launch scroll-lock: wipe the visible screen AND the terminal's saved scrollback (2J + 3J), then
+	// home the cursor, so the session starts with nothing above it — scrolling up at launch shows no
+	// stale shell output or ghost frames from a previous bimax run. From here on the scrollback is
+	// bimax's own transcript only. (Escape codes are safe here: bubbletea requires a TTY to run, and
+	// the engine-free flags above returned before this point for scripted/piped invocations.)
+	fmt.Print("\x1b[2J\x1b[3J\x1b[H")
 	p := tea.NewProgram(initialModel(eng))
 
 	// Graceful SIGHUP (closed terminal tab / hangup): quit through Bubble Tea so it restores the

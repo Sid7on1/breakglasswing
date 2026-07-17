@@ -96,6 +96,23 @@ export interface UiSnapshotGit {
   behind: number;
 }
 
+/** Computer-use posture: what BiMax can observe/act on right now, truthfully. All values are read
+ * from live engine state (browser runtime, MCP manager, model capabilities, governor, taint). */
+export interface UiSnapshotComputer {
+  /** URL of the live automated page, or null when no browser session is open. */
+  browserUrl: string | null;
+  /** Desktop-control companion (pinned open-computer-use MCP): install/connection posture. */
+  desktop: 'connected' | 'configured' | 'not-installed';
+  /** Registered native desktop tool count (0 unless connected). */
+  desktopTools: number;
+  /** Whether the ACTIVE model advertises vision (screenshots become model-visible observations). */
+  vision: boolean;
+  /** Standing session-scoped computer-control grants (domain:… / app:…). */
+  grants: string[];
+  /** Untrusted web/MCP/page content has entered the conversation window. */
+  tainted: boolean;
+}
+
 /** Live tool fabric: what the model can call now vs what remains load-on-demand. */
 export interface UiSnapshotTools {
   registered: number;
@@ -135,6 +152,8 @@ export interface UiSnapshot {
   git?: UiSnapshotGit;
   // v3 additive: live registry posture for desktop/tooling surfaces.
   tools?: UiSnapshotTools;
+  // v3 additive: computer-use capability/safety posture for the desktop app's Runtime lane.
+  computer?: UiSnapshotComputer;
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -277,6 +296,28 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* git best-effort */ }
 
+  let computer: UiSnapshotComputer | undefined;
+  try {
+    const { globalBrowserRuntime } = require('../browser/browser.runtime');
+    const { globalMcpManager } = require('../mcp/manager');
+    const { getTaintTracker } = require('../mind/taint');
+    const desktopConnected = !!globalMcpManager.get('open-computer-use');
+    const desktopConfigured = desktopConnected || globalMcpManager.configuredNames().includes('open-computer-use');
+    let vision = false;
+    try {
+      const { capabilitiesFor } = require('../core/capabilities');
+      vision = !!capabilitiesFor(undefined, models.coding || models.lite).visionInput;
+    } catch { /* capabilities optional */ }
+    computer = {
+      browserUrl: (() => { try { return globalBrowserRuntime.currentUrl?.() ?? null; } catch { return null; } })(),
+      desktop: desktopConnected ? 'connected' : desktopConfigured ? 'configured' : 'not-installed',
+      desktopTools: desktopConnected ? (globalMcpManager.get('open-computer-use')?.toolNames.length ?? 0) : 0,
+      vision,
+      grants: (governorRef as any)?.computerGrants?.() ?? [],
+      tainted: (() => { try { return getTaintTracker().isTainted(); } catch { return false; } })(),
+    };
+  } catch { /* computer posture best-effort */ }
+
   let tools: UiSnapshotTools | undefined;
   try {
     if (toolRegistry) {
@@ -292,8 +333,13 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* registry posture best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools };
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer };
 }
+
+// The governor is per-container (no engine singleton), so the host hands it in at startup for the
+// computer-use grants readout. Absent → grants render empty, everything else still populates.
+let governorRef: unknown;
+export function setUiSnapshotGovernor(governor: unknown): void { governorRef = governor; }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
 export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): void {

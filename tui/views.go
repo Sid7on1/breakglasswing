@@ -132,18 +132,86 @@ const menuMaxVisible = 8
 
 // menuView renders the interactive menu (Ink InteractiveMenu): a title + search box, fuzzy-filtered
 // options windowed to menuMaxVisible rows with ↑/↓ "...more..." scroll indicators.
+// osc8 wraps text in an OSC-8 terminal hyperlink; modern terminals make it clickable and
+// degrade gracefully everywhere else (the escape bytes are invisible).
+func osc8(url, text string) string {
+	return "\x1b]8;;" + url + "\x07" + text + "\x1b]8;;\x07"
+}
+
+// menuRow renders one option row fitted to `width` printable cells: bold-ish label column,
+// dim description truncated with an ellipsis (never wrapped), optional ↗ link suffix.
+func menuRow(op menuOption, width int, selected bool) string {
+	labelW := 24
+	if width < 60 {
+		labelW = 18
+	}
+	label := op.Label
+	if len([]rune(label)) > labelW {
+		label = string([]rune(label)[:labelW-1]) + "…"
+	}
+	descW := width - labelW - 6 // "❯ " + gap + margins
+	if op.Link != "" {
+		descW -= 7 // room for " ↗ docs"
+	}
+	desc := op.Desc
+	if descW > 3 && len([]rune(desc)) > descW {
+		desc = strings.TrimRight(string([]rune(desc)[:descW-1]), " ") + "…"
+	}
+	row := fmt.Sprintf("%-*s %s", labelW, label, desc)
+	var out string
+	if selected {
+		out = compSel.Render("❯ " + row)
+	} else {
+		out = "  " + dimStyle.Render(row)
+	}
+	if op.Link != "" {
+		out += " " + linkStyle.Render(osc8(op.Link, "↗ docs"))
+	}
+	return out
+}
+
+// menuView renders the interactive picker: title, optional subtitle, category tabs (when the
+// options are grouped), a live search line, then the windowed option rows with section headers
+// on the "All" tab. Rows are width-fitted — descriptions truncate instead of wrapping.
 func (m model) menuView() string {
 	opts := m.filteredMenu()
 	idx := m.menuIdx
 	if idx >= len(opts) {
 		idx = 0
 	}
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
 	var b strings.Builder
 	title := m.menuTitle
 	if m.menuFilter != "" {
 		title += fmt.Sprintf("  (%d/%d)", len(opts), len(m.menuOpts))
 	}
-	fmt.Fprintf(&b, "%s%s\n", dashTitle.Render(title), subtleStyle.Render("  [↑/↓ navigate, Enter select, Esc cancel]"))
+	fmt.Fprintf(&b, "%s\n", dashTitle.Render(title))
+	if m.menuSubtitle != "" {
+		fmt.Fprintf(&b, "%s\n", subtleStyle.Render(linkifyURLs(m.menuSubtitle)))
+	}
+
+	// Category tab bar — only for grouped menus. The active tab is an ember block; a live
+	// search overrides tabs (searches all rows), so show it dimmed while filtering.
+	if len(m.menuTabs) > 0 {
+		tabs := append([]string{"All"}, m.menuTabs...)
+		var tb strings.Builder
+		for i, t := range tabs {
+			name := " " + t + " "
+			if i == m.menuTab && m.menuFilter == "" {
+				tb.WriteString(menuTabActive.Render(name))
+			} else {
+				tb.WriteString(menuTabIdle.Render(name))
+			}
+			if i < len(tabs)-1 {
+				tb.WriteString(" ")
+			}
+		}
+		fmt.Fprintf(&b, "%s\n", tb.String())
+	}
+
 	b.WriteString(searchHdr.Render("🔍 "))
 	if m.menuFilter == "" {
 		fmt.Fprintf(&b, "%s\n", subtleStyle.Render("Type to search…"))
@@ -172,21 +240,57 @@ func (m model) menuView() string {
 		end = len(opts)
 	}
 	if start > 0 {
-		fmt.Fprintf(&b, "  %s\n", subtleStyle.Render("↑ ...more options..."))
+		fmt.Fprintf(&b, "  %s\n", subtleStyle.Render(fmt.Sprintf("↑ %d more", start)))
+	}
+	// Section headers appear on the ungrouped ("All") view of a grouped menu, whenever the
+	// category changes between consecutive visible rows.
+	showSections := len(m.menuTabs) > 0 && m.menuTab == 0 && m.menuFilter == ""
+	lastCat := ""
+	if showSections && start > 0 {
+		lastCat = opts[start-1].Category // don't repeat a header continued from above the window
 	}
 	for i := start; i < end; i++ {
 		op := opts[i]
-		row := fmt.Sprintf("%-25s %s", op.Label, op.Desc)
-		if i == idx {
-			fmt.Fprintf(&b, "%s\n", compSel.Render("❯ "+row))
-		} else {
-			fmt.Fprintf(&b, "  %s\n", dimStyle.Render(row))
+		if showSections && op.Category != "" && op.Category != lastCat {
+			fmt.Fprintf(&b, "  %s\n", menuSection.Render(strings.ToUpper(op.Category)))
 		}
+		lastCat = op.Category
+		fmt.Fprintf(&b, "%s\n", menuRow(op, width, i == idx))
 	}
 	if end < len(opts) {
-		fmt.Fprintf(&b, "  %s\n", subtleStyle.Render("↓ ...more options..."))
+		fmt.Fprintf(&b, "  %s\n", subtleStyle.Render(fmt.Sprintf("↓ %d more", len(opts)-end)))
 	}
+	hints := "↑↓ move · enter select · esc close · type to search"
+	if len(m.menuTabs) > 0 {
+		hints = "↑↓ move · ←→ tabs · enter select · esc close · type to search"
+	}
+	fmt.Fprintf(&b, "%s\n", subtleStyle.Render(hints))
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// linkifyURLs turns bare https:// URLs inside a line into OSC-8 hyperlinks (visible text unchanged).
+func linkifyURLs(s string) string {
+	if !strings.Contains(s, "https://") {
+		return s
+	}
+	var out strings.Builder
+	for {
+		i := strings.Index(s, "https://")
+		if i < 0 {
+			out.WriteString(s)
+			break
+		}
+		out.WriteString(s[:i])
+		rest := s[i:]
+		end := strings.IndexAny(rest, " )>,\t")
+		if end < 0 {
+			end = len(rest)
+		}
+		url := rest[:end]
+		out.WriteString(osc8(url, url))
+		s = rest[end:]
+	}
+	return out.String()
 }
 
 // completionView renders the autocomplete dropdown, highlighting the selected row. The list is
