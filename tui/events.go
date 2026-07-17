@@ -97,22 +97,31 @@ func (m *model) handleEvent(o Outbound) {
 		}
 
 	case "thinking":
-		// Start the reasoning clock on the first thinking token; keep the tail snippet for the
-		// ThinkingText line (single line, last ~72 chars).
+		// Start the reasoning clock on the first thinking token. The raw reasoning stream accumulates
+		// in thinkBuf (bounded tail) and renders LIVE as a dim block while the model thinks — a
+		// 23-second silent reasoning phase used to look like a hang; now the user watches it think.
+		// thinkSnip keeps the old one-line tail for the post-answer working indicator.
 		if m.turnThinkStart.IsZero() {
 			m.turnThinkStart = time.Now()
 		}
-		if t := argString(o.Args, 0); t != "" {
-			t = strings.TrimSpace(strings.Join(strings.Fields(t), " "))
+		if raw := argString(o.Args, 0); raw != "" {
+			m.thinkBuf += raw
+			if r := []rune(m.thinkBuf); len(r) > 4000 {
+				m.thinkBuf = string(r[len(r)-4000:])
+			}
+			t := strings.TrimSpace(strings.Join(strings.Fields(raw), " "))
 			r := []rune(t)
 			if len(r) > 72 {
 				t = "…" + string(r[len(r)-72:])
 			}
-			m.thinkSnip = t
+			if t != "" {
+				m.thinkSnip = t
+			}
 		}
 
 	case "thinking_clear":
 		m.thinkSnip = ""
+		m.thinkBuf = ""
 
 	case "mode_change":
 		// The bold per-mode chip in the footer is the single source of truth for the active mode, so

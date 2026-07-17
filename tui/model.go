@@ -266,6 +266,7 @@ type model struct {
 	thinkTick   int
 	thinkDots   int
 	thinkSnip   string
+	thinkBuf    string // rolling tail of the model's live reasoning stream (rendered while thinking)
 	sessionVerb string
 
 	// thought-clock: measure reasoning time Go-side (the headless engine doesn't emit thoughtMs).

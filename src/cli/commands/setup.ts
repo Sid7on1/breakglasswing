@@ -69,16 +69,16 @@ function stepModel(context: any): void {
 
     context.setActiveMenu?.({
       title: 'Step 3 of 3 — Pick your model',
-      subtitle: 'One model runs everything (coding, summaries, sub-agents). Split the slots later with /model if you ever want to.',
+      subtitle: 'Runs everything · split slots later via /model',
       options: [
         ...curatedModelMenuOptions(live, context.options?.model),
         {
-          label: '⌕ Browse all provider models…',
+          label: '⌕ Browse all…',
           value: '__browse__',
-          desc: live ? `Everything ${getCurrentProvider().name} serves (${live.length} ids), searchable` : 'Full provider catalog, searchable',
+          desc: live ? `All ${live.length} ids on ${getCurrentProvider().name}` : 'Full provider catalog',
           category: 'More',
         },
-        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model id your provider supports', category: 'More' },
+        { label: '✎ Custom id…', value: '__custom__', desc: 'Type any model id', category: 'More' },
       ],
       onSelect: (opt: any) => {
         if (opt.value === '__browse__') { context.executeCommand?.('/model browse one'); return; }

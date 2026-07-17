@@ -160,6 +160,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		m.turnThinkStart = time.Time{}
 		m.turnThoughtMs = 0
 		m.thinkSnip = ""
+		m.thinkBuf = ""
 		m.stream = ""
 		m.streamCommitted = 0
 		m.turnAnswerStarted = false

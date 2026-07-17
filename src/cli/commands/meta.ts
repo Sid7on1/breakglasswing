@@ -188,12 +188,12 @@ globalCommandRegistry.register({
       return [
         ...curated,
         {
-          label: `⌕ Browse all provider models…`,
+          label: `⌕ Browse all…`,
           value: `__browse__`,
-          desc: live ? `Everything ${getCurrentProvider().name} serves (${live.length} ids), searchable` : `Full ${getCurrentProvider().name} catalog, searchable`,
+          desc: live ? `All ${live.length} ids on ${getCurrentProvider().name}` : `Full ${getCurrentProvider().name} catalog`,
           category: 'More',
         },
-        { label: '✎ Custom model id…', value: '__custom__', desc: 'Type any model id your provider supports', category: 'More' },
+        { label: '✎ Custom id…', value: '__custom__', desc: 'Type any model id', category: 'More' },
       ];
     };
 
@@ -211,7 +211,7 @@ globalCommandRegistry.register({
       return {
         type: 'menu',
         title: `All models on ${getCurrentProvider().name}${live ? ` (${live.length})` : ''}`,
-        subtitle: 'Type to search. Only ids the provider confirms it serves are listed.',
+        subtitle: 'Type to search',
         options,
         onSelect: (opt: any) => apply(opt.value),
       };
@@ -231,15 +231,15 @@ globalCommandRegistry.register({
       const cur = slot === 'lite' ? (liteOf() || '(uses coding model)')
         : slot === 'subagent' ? (subagentOf() || '(inherits main model)')
         : (context.options.model || '(not set)');
-      const title = slot === 'one' ? 'Pick THE model — used for everything'
-        : slot === 'lite' ? 'Select LITE (fast/cheap) model'
-        : slot === 'subagent' ? 'Select SUB-AGENT model (what spawned agents run on)'
-        : 'Select CODING (primary) model';
+      const title = slot === 'one' ? 'Pick your model'
+        : slot === 'lite' ? 'Lite model'
+        : slot === 'subagent' ? 'Sub-agent model'
+        : 'Coding model';
       const subtitle = slot === 'one'
-        ? 'One model for coding, quick summaries, and sub-agents. Simplest setup — no routing surprises.'
-        : `Current: ${cur} · ←/→ switches groups · Esc keeps things as they are`;
+        ? 'Runs everything. ←/→ groups · Esc cancels'
+        : `Now: ${cur} · ←/→ groups · Esc cancels`;
       const extraOptions = slot === 'subagent'
-        ? [{ label: '↩ Inherit main model', value: '__inherit__', desc: 'Sub-agents use whatever the main model is (default)', category: 'More' }]
+        ? [{ label: '↩ Inherit', value: '__inherit__', desc: 'Use the main model (default)', category: 'More' }]
         : [];
       return {
         type: 'menu',
@@ -276,35 +276,35 @@ globalCommandRegistry.register({
       type: 'menu',
       title: 'Models',
       subtitle: singleMode
-        ? `Everything runs on ${current} — pick a new one below, or split the slots under Advanced.`
-        : `Coding: ${current} · Lite: ${lite || '(uses coding)'} · Sub-agents: ${sub || '(inherit)'}`,
+        ? `Everything runs on ${current}`
+        : `Coding: ${current} · Lite: ${lite || 'same'} · Sub-agents: ${sub || 'inherit'}`,
       options: [
         {
-          label: '◎ Use ONE model for everything…',
+          label: '◎ Change model…',
           value: '/model one',
-          desc: 'Simplest setup: coding, summaries, and sub-agents all on one model you pick',
-          category: 'Your setup',
+          desc: 'One model for everything',
+          category: 'Model',
         },
+        { label: '⇄ Provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name}`, category: 'Model' },
+        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'Lower = faster replies', category: 'Model' },
         {
           label: '⚙ Coding model…',
           value: '/model coding',
-          desc: `The main agent (current: ${current})`,
-          category: 'Advanced — split slots',
+          desc: current,
+          category: 'Split slots',
         },
         {
           label: '⚙ Lite model…',
           value: '/model lite',
-          desc: `Summaries / self-critic / routing (current: ${lite || 'uses coding'})`,
-          category: 'Advanced — split slots',
+          desc: lite || 'same as coding',
+          category: 'Split slots',
         },
         {
           label: '⚙ Sub-agent model…',
           value: '/model subagent',
-          desc: `Spawned workers (current: ${sub || 'inherits coding'})`,
-          category: 'Advanced — split slots',
+          desc: sub || 'inherits coding',
+          category: 'Split slots',
         },
-        { label: '⇄ Switch provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name} — NVIDIA, OpenAI, Anthropic, OpenRouter, DeepSeek, Google, custom`, category: 'Advanced — split slots' },
-        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'How long reasoning models think — lower is faster', category: 'Advanced — split slots' },
       ],
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };

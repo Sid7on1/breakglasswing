@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 )
 
 // midView is the live region between the transcript and the prompt: an interactive menu, the
@@ -517,10 +518,36 @@ func (m model) thinkingView() string {
 	dots := strings.Repeat(".", m.thinkDots)
 
 	s := m.spin.View() + " " + workLabel.Render("● ") + shimmerText + workLabel.Render(dots+" "+fmtElapsed(m.elapsed)) + m.tierTag() + statusStyle.Render(" · esc to stop")
-	if m.thinkSnip != "" {
+	if blk := m.thinkBlock(); blk != "" {
+		s = blk + "\n" + s
+	} else if m.thinkSnip != "" {
 		s += thinkSnip.Render(" " + m.thinkSnip)
 	}
 	return s
+}
+
+// thinkBlock renders the live reasoning stream: the last few wrapped lines of thinkBuf in the same
+// dim italic as committed "Thought" lines. Long silent reasoning phases (20s+ on step-3.7/QwQ) used
+// to render as a bare spinner — indistinguishable from a hang; this shows the model actually working.
+// Capped at 5 rows so the live region never grows unbounded (the View top-clip protects the frame).
+func (m model) thinkBlock() string {
+	if strings.TrimSpace(m.thinkBuf) == "" {
+		return ""
+	}
+	width := m.width - 4
+	if width < 20 {
+		width = 20
+	}
+	text := strings.TrimSpace(strings.Join(strings.Fields(m.thinkBuf), " "))
+	wrapped := strings.Split(wordwrap.String(text, width), "\n")
+	const rows = 5
+	if len(wrapped) > rows {
+		wrapped = wrapped[len(wrapped)-rows:]
+	}
+	for i, l := range wrapped {
+		wrapped[i] = thinkSnip.Render("  " + l)
+	}
+	return strings.Join(wrapped, "\n")
 }
 
 // tierTag names which of the two minds is handling this turn — the fast intuition (the lite model)
