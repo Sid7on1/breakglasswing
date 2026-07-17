@@ -4,11 +4,19 @@ describe('ApiKeyManager', () => {
   let manager: ApiKeyManager;
 
   beforeEach(() => {
+    // The pool deliberately starts its rotation at a RANDOM index (parallel sub-agent workers
+    // each build their own manager over the same pool — a deterministic start had them all piling
+    // onto key #1). Pin Math.random so these ordering assertions stay deterministic.
+    jest.spyOn(Math, 'random').mockReturnValue(0);
     manager = new ApiKeyManager([
       { keyStr: 'key1', baseURL: 'https://api.openai.com/v1', provider: 'openai', label: 'openai #1' },
       { keyStr: 'key2', baseURL: 'https://api.openai.com/v1', provider: 'openai', label: 'openai #2' },
       { keyStr: 'key3', baseURL: 'https://api.openai.com/v1', provider: 'openai', label: 'openai #3' },
     ]);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   it('round robins through keys', async () => {
