@@ -18,23 +18,23 @@ export interface ModelEntry {
 // deepseek-v4-flash 284B, google/gemma-4-31b — likely free-tier capacity / cold-start); add them
 // via the Custom entry if NIM has them warm. The "other" tier needs that provider's own API key.
 export const MODEL_CATALOG: ModelEntry[] = [
-  // — Strong coding / agentic (verified) —
-  { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Agentic coding · 1M ctx', tier: 'coding' },
-  { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Flagship coding + reasoning', tier: 'coding' },
-  { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Strong all-round · slow start', tier: 'coding' },
-  { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: '230B reasoning · slow start', tier: 'coding' },
+  // — Work: does the real coding/agentic work — (tier 'coding' kept as the internal key)
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'The default — fast and smart', tier: 'coding' },
+  { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strongest coder — slow to start', tier: 'coding' },
+  { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Strong coding + reasoning', tier: 'coding' },
+  { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Good all-rounder — slow to start', tier: 'coding' },
+  { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: 'Deep reasoning — slow to start', tier: 'coding' },
 
-  // — Vision / GUI agents on NVIDIA NIM —
-  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Best for GUI agents · 256K ctx', tier: 'vision' },
-  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens accurately · ~30s/shot', tier: 'vision' },
-  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Fastest (~5s/shot) · rough reads', tier: 'vision' },
-  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Tool calls · often COLD on NIM (minutes)', tier: 'vision' },
-  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Image/video Q&A', tier: 'vision' },
+  // — Vision: sees screenshots and images —
+  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens accurately — ~30s a shot', tier: 'vision' },
+  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Fastest — ~5s a shot, rougher reads', tier: 'vision' },
+  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Built for GUI agents — thinks first', tier: 'vision' },
+  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Often unavailable for minutes — avoid', tier: 'vision' },
+  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Image and video Q&A', tier: 'vision' },
 
-  // — Fast / lite (good as the LITE model: summaries, self-critic) —
-  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'The default · fast reasoning', tier: 'lite' },
-  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'No reasoning = lowest latency', tier: 'lite' },
-  { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual · coding + math', tier: 'lite' },
+  // — Quick: instant small replies (never a thinking model) — (tier 'lite' kept as the internal key)
+  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'The default — answers instantly', tier: 'lite' },
+  { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual alternative', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
   { label: 'GPT-4o (OpenAI)', value: 'gpt-4o', desc: 'Needs OPENAI_API_KEY', tier: 'other' },
@@ -64,9 +64,41 @@ export function isReasoningModel(id: string): boolean {
   return !!(caps.nativeThinking || caps.inlineReasoning || caps.openerlessReasoning);
 }
 
+// ONE vocabulary everywhere: Work · Quick · Vision. The banner, the /model hub, the pickers, and
+// every confirmation use exactly these three words — "coding/lite/fast" survive only as internal
+// keys and accepted command aliases, never as UI text. (This naming drift was the #1 recurring
+// clutter complaint.)
 const TIER_LABEL: Record<ModelEntry['tier'], string> = {
-  coding: 'Coding', vision: 'Vision', lite: 'Fast', other: 'Other (own key)',
+  coding: 'Work', vision: 'Vision', lite: 'Quick', other: 'Other (own key)',
 };
+
+/**
+ * Slot-scoped picker rows: each slot's picker shows ONLY models that belong in that slot, as one
+ * flat "Recommended" list (no tab groups to arrow through). Work → work-tier models; Quick →
+ * plain non-thinking models only (a reasoner in the quick slot hides 20-30s of thought behind
+ * "hi"); Vision → vision models. Everything else stays one hop away behind "Browse all…".
+ */
+export function slotModelMenuOptions(
+  slot: 'work' | 'quick' | 'vision',
+  liveIds: string[] | null,
+  current?: string,
+): { label: string; value: string; desc: string; category: string }[] {
+  const served = liveIds && liveIds.length ? new Set(liveIds) : null;
+  const tier: ModelEntry['tier'] = slot === 'work' ? 'coding' : slot === 'quick' ? 'lite' : 'vision';
+  const rows = MODEL_CATALOG
+    .filter(m => m.tier === tier && (!served || served.has(m.value)))
+    .filter(m => slot !== 'quick' || !isReasoningModel(m.value))
+    .map(m => ({
+      label: m.value === current ? `● ${m.label}` : m.label,
+      value: m.value,
+      desc: m.desc,
+      category: 'Recommended',
+    }));
+  if (current && !rows.some(r => r.value === current)) {
+    rows.unshift({ label: `● ${current}`, value: current, desc: 'Your current pick', category: 'Recommended' });
+  }
+  return rows;
+}
 
 /** Menu options for a model picker, optionally annotated with which slot is current. */
 export function modelMenuOptions(current?: string): { label: string; value: string; desc: string; category: string }[] {

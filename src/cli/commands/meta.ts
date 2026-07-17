@@ -7,7 +7,7 @@ import { globalSkillService } from '../../skills/skill.service';
 import { getTaintTracker } from '../../mind/taint';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getConfig } from '../config';
-import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL, MODEL_CATALOG } from '../models';
+import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions, slotModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL, MODEL_CATALOG } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -131,7 +131,7 @@ globalCommandRegistry.register({
       context.options.model = model;
       context.saveConfig({ model });
       cliEvents.emit('config_changed'); // refresh the live UI (token meter + model display)
-      context.addSystemMessage('success', `Coding model → ${model}`);
+      context.addSystemMessage('success', `Work model → ${model}`);
       warnIfUnserved(model);
     };
     const applyLite = (model: string) => {
@@ -139,7 +139,7 @@ globalCommandRegistry.register({
       (context.options as any).liteModel = model;
       context.saveConfig({ liteModel: model });
       cliEvents.emit('config_changed');
-      context.addSystemMessage('success', `Lite model → ${model}`);
+      context.addSystemMessage('success', `Quick model → ${model}`);
       warnIfUnserved(model);
     };
     const promptCustom = (apply: (m: string) => void) => {
@@ -166,8 +166,8 @@ globalCommandRegistry.register({
       context.saveConfig({ visionModel: val });
       cliEvents.emit('config_changed');
       context.addSystemMessage('success', val
-        ? `Vision model → ${val} — screenshots and images go here; ${context.options.model || 'your coding model'} keeps the coding work`
-        : 'Vision model → none (images are dropped unless the coding model can see them)');
+        ? `Vision model → ${val} — screenshots and images go here; your work model is untouched`
+        : 'Vision model → none (images are dropped unless the work model can see them)');
       if (val) warnIfUnserved(val);
     };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
@@ -186,8 +186,8 @@ globalCommandRegistry.register({
       context.saveConfig({ model, liteModel: lite, subagentModel: '' });
       cliEvents.emit('config_changed');
       context.addSystemMessage('success', lite === model
-        ? `One model everywhere → ${model} (coding · lite · sub-agents)`
-        : `Model → ${model} (coding · sub-agents) · quick replies → ${lite} (no thinking = instant)`);
+        ? `One model everywhere → ${model} (work · quick · sub-agents)`
+        : `Work model → ${model} (sub-agents too) · quick replies stay on ${lite} (instant)`);
       warnIfUnserved(model);
     };
 
@@ -198,13 +198,14 @@ globalCommandRegistry.register({
       } catch { return null; }
     };
 
-    // Curated picker rows + the two escape hatches. The full provider catalog (hundreds of raw
-    // ids on NIM) lives ONE hop away behind "Browse all…" — never dumped into the first screen.
-    const pickerOptions = async (cur?: string) => {
+    // Slot-scoped picker rows + the two escape hatches: ONLY models that belong in the slot, one
+    // flat list, no tab groups. The full provider catalog (hundreds of raw ids on NIM) lives ONE
+    // hop away behind "Browse all…" — never dumped into the first screen.
+    const pickerOptions = async (slotKind: 'work' | 'quick', cur?: string) => {
       const live = await liveIds();
-      const curated = live ? curatedModelMenuOptions(live, cur) : curatedModelMenuOptions(null, cur);
+      const scoped = slotModelMenuOptions(slotKind, live, cur);
       return [
-        ...curated,
+        ...scoped,
         {
           label: `⌕ Browse all…`,
           value: `__browse__`,
@@ -279,24 +280,23 @@ globalCommandRegistry.register({
         else apply(rest);
         return { type: 'none' };
       }
-      const cur = slot === 'lite' ? (liteOf() || '(uses coding model)')
-        : slot === 'subagent' ? (subagentOf() || '(inherits main model)')
+      const cur = slot === 'lite' ? (liteOf() || '(uses work model)')
+        : slot === 'subagent' ? (subagentOf() || '(inherits work model)')
         : (context.options.model || '(not set)');
-      const title = slot === 'one' ? 'Pick your model'
-        : slot === 'lite' ? 'Lite model'
+      const title = slot === 'one' ? 'Work model — one pick runs everything'
+        : slot === 'lite' ? 'Quick model — instant small replies'
         : slot === 'subagent' ? 'Sub-agent model'
-        : 'Coding model';
-      const subtitle = slot === 'one'
-        ? 'Runs everything. ←/→ groups · Esc cancels'
-        : `Now: ${cur} · ←/→ groups · Esc cancels`;
+        : 'Work model';
+      const subtitle = `Now: ${cur} · type to search · Esc cancels`;
       const extraOptions = slot === 'subagent'
-        ? [{ label: '↩ Inherit', value: '__inherit__', desc: 'Use the main model (default)', category: 'More' }]
+        ? [{ label: '↩ Inherit', value: '__inherit__', desc: 'Use the work model (default)', category: 'More' }]
         : [];
+      const slotKind = slot === 'lite' ? 'quick' as const : 'work' as const;
       return {
         type: 'menu',
         title,
         subtitle,
-        options: [...(await pickerOptions(slot === 'one' ? context.options.model : cur)), ...extraOptions],
+        options: [...(await pickerOptions(slotKind, slot === 'one' ? context.options.model : cur)), ...extraOptions],
         onSelect: (opt: any) =>
           opt.value === '__custom__' ? promptCustom(apply)
           : opt.value === '__browse__' ? context.executeCommand(`/model browse ${slot}`)
@@ -413,8 +413,8 @@ globalCommandRegistry.register({
 
         // — Session —
         { label: 'Workspace', value: 'workspace', desc: context.cwd, category: 'Session' },
-        { label: 'Coding model', value: '/model', desc: context.options.model || 'default', category: 'Session' },
-        { label: 'Lite model', value: '/model lite', desc: (() => { try { return getConfig().liteModel || 'uses coding model'; } catch { return 'uses coding model'; } })(), category: 'Session' },
+        { label: 'Work model', value: '/model', desc: context.options.model || 'default', category: 'Session' },
+        { label: 'Quick model', value: '/model lite', desc: (() => { try { return getConfig().liteModel || 'uses work model'; } catch { return 'uses work model'; } })(), category: 'Session' },
         { label: 'Agent', value: '/agents', desc: context.options.agent, category: 'Session' },
         { label: 'Provider', value: '/provider', desc: String(getCurrentProvider().name), category: 'Session' },
         { label: 'Theme', value: '/config theme', desc: context.options.theme, category: 'Session' },

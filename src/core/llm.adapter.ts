@@ -277,9 +277,27 @@ export class LlmAdapter implements LLMProvider {
     return (tokens / 1000) * 0.002;
   }
 
-  // Map an OpenAI/network error to a status code: timeout → 408, otherwise the API-reported status,
-  // else 500. Was copy-pasted verbatim in every method's catch block.
+  // A failure that happened on THIS machine's network path — DNS refused to resolve, the socket
+  // never connected, or it reset before the provider said anything. The provider never saw the
+  // request, so the API key must not be blamed: cooling/benching the key for a local blip is how
+  // one DNS hiccup snowballed into "all keys cooling down" minutes (observed live on a 1-key
+  // pool, and this Mac's DNS genuinely drops out intermittently — same family as its git-fetch
+  // hangs). These report as status 0, which the key manager treats as neutral.
+  static isLocalNetworkError(e: any): boolean {
+    const codes = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
+    for (let err = e; err; err = err.cause) {
+      if (err?.code && codes.has(String(err.code))) return true;
+      if (/getaddrinfo|nodename nor servname|socket hang up|other side closed/i.test(String(err?.message || ''))) return true;
+    }
+    // OpenAI SDK connection errors with no HTTP status = the request never reached the API.
+    return e instanceof OpenAI.APIConnectionError && !(e instanceof OpenAI.APIConnectionTimeoutError) && e?.status == null;
+  }
+
+  // Map an OpenAI/network error to a status code: local network failure → 0 (neutral — never
+  // bills the key), timeout → 408, otherwise the API-reported status, else 500. Was copy-pasted
+  // verbatim in every method's catch block.
   private errorStatus(e: any): number {
+    if (LlmAdapter.isLocalNetworkError(e)) return 0;
     if (e instanceof OpenAI.APIConnectionTimeoutError || e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')) return 408;
     return e?.status || 500;
   }

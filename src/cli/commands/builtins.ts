@@ -154,8 +154,8 @@ globalCommandRegistry.register({
         title: 'Settings — type to search, ↑/↓ to move, Enter to open',
         options: [
           // — Models & access —
-          { label: 'Coding model', value: '/model', desc: `Primary agent model — ${context.options.model || 'default'}`, category: 'Models & Access' },
-          { label: 'Lite model', value: '/model lite', desc: `Fast model for summaries / self-critic — ${(() => { try { return getConfig().liteModel || 'uses coding model'; } catch { return 'uses coding model'; } })()}`, category: 'Models & Access' },
+          { label: 'Work model', value: '/model', desc: `Does the real work — ${context.options.model || 'default'}`, category: 'Models & Access' },
+          { label: 'Quick model', value: '/model lite', desc: `Instant small replies — ${(() => { try { return getConfig().liteModel || 'uses work model'; } catch { return 'uses work model'; } })()}`, category: 'Models & Access' },
           { label: 'Provider', value: '/provider', desc: 'Switch AI provider', category: 'Models & Access' },
           { label: 'API Keys', value: '/keys', desc: 'Add / replace API keys', category: 'Models & Access' },
           { label: 'Agent persona', value: '/agents', desc: `Active: ${context.options.agent || 'default'} — switch persona`, category: 'Models & Access' },

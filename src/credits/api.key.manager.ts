@@ -152,6 +152,11 @@ export class ApiKeyManager {
     const s = this.keyStates[idx];
     if (!s) return;
 
+    // Status 0 = the failure was LOCAL (DNS, socket, connect) — the provider never saw the
+    // request, so the key is not to blame. Neutral: no health counters, no cooldown. Billing
+    // the machine's network to the key is how one blip snowballed into a benched pool.
+    if (status === 0) return;
+
     if (status >= 200 && status < 300) {
       s.total_ok++;
       s.consecutive_429 = 0;
@@ -205,7 +210,12 @@ export class ApiKeyManager {
     const s = this.keyStates[idx];
     if (!s) return;
     s.hang_strikes++;
-    const benchSecs = Math.min(45 * Math.pow(2, s.hang_strikes - 1), 600);
+    // Benching exists to steer ROTATION away from a hanging lane. With a single key there is
+    // nothing to rotate to — a long bench just converts one stall into minutes of self-inflicted
+    // "all keys cooling down" dead time (observed live). Cap the solo-pool bench at 3s.
+    const benchSecs = this.keyStates.length === 1
+      ? 3
+      : Math.min(45 * Math.pow(2, s.hang_strikes - 1), 600);
     s.cooldown_until = Math.max(s.cooldown_until, now + benchSecs);
     // Poison the latency estimate too, so pass-1 stops preferring it even after the bench expires.
     s.ewma_first_ms = Math.max(s.ewma_first_ms, 60_000);

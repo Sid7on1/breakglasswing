@@ -58,8 +58,8 @@ export function createModelManageTool(governor: IGovernor, llmAdapter: LlmAdapte
         const providers = getProviders().map(p => p.name).join(', ');
         return [
           `Active provider: ${prov.name}  (available: ${providers})`,
-          `Coding model: ${c.model || '(default)'}`,
-          `Lite model:   ${c.liteModel || '(default)'}`,
+          `Work model:  ${c.model || '(default)'}`,
+          `Quick model: ${c.liteModel || '(default)'}`,
           ``,
           `Models your provider serves: ${served}`,
         ].join('\n');
