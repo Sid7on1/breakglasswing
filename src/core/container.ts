@@ -42,6 +42,7 @@ import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { createBrowserTool } from '../tools/implementations/browser.tool';
+import { createComputerTool } from '../tools/implementations/computer.tool';
 import { globalBrowserRuntime } from '../browser/browser.runtime';
 import { shutdownTracer } from '../telemetry/trace';
 import { createSkillTool } from '../tools/implementations/skill.tool';
@@ -238,6 +239,8 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createToolSearchTool(governor, toolRegistry));
   toolRegistry.register(createWebSearchTool(governor));
   toolRegistry.register(createBrowserTool(governor));
+  // Native desktop control (first-party OS driver — screenshots, mouse, keyboard; no MCP).
+  toolRegistry.register(createComputerTool(governor));
   if (!browserShutdownWired) {
     browserShutdownWired = true;
     cliEvents.once('shutdown', () => {

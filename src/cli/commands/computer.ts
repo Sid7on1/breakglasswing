@@ -1,16 +1,16 @@
 import { globalCommandRegistry } from './registry';
 import { globalMcpManager } from '../../mcp/manager';
-import { catalogEntry } from '../../mcp/catalog';
 import { globalBrowserRuntime } from '../../browser/browser.runtime';
+import { globalDesktopRuntime } from '../../computer/desktop.runtime';
 import { getTaintTracker } from '../../mind/taint';
 
 // /computer — the truthful status hub for computer use: what BiMax can currently OBSERVE and ACT
-// on (browser + native desktop), whether the active model can actually see screenshots, which
-// session grants are standing, and the one-keystroke installer for the pinned desktop companion.
-// Every row reflects live engine state; nothing here is invented (no fake permission probes:
-// macOS only reveals Accessibility/Screen Recording status to the native companion at first use).
+// on (browser + native desktop), whether the active model can actually see screenshots, and which
+// session grants are standing. Desktop control is FIRST-PARTY (ComputerTool + the in-repo Swift
+// helper) — the old open-computer-use MCP companion is legacy and only surfaces here when it is
+// still configured, with removal as the suggested action.
 
-const DESKTOP_SERVER = 'open-computer-use';
+const LEGACY_DESKTOP_SERVER = 'open-computer-use';
 
 globalCommandRegistry.register({
   name: '/computer',
@@ -29,13 +29,19 @@ globalCommandRegistry.register({
     }
 
     if (sub === 'install-desktop') {
-      const entry = catalogEntry(DESKTOP_SERVER);
-      if (!entry || !entry.command) {
-        return { type: 'message', level: 'error', content: `Catalog entry '${DESKTOP_SERVER}' is unavailable.` };
-      }
-      // Reuse the /mcp add pipeline (persists to .bimax/mcp.json + connects + registers tools)
-      // with the catalog's PINNED command line, so the installed version is always the audited one.
-      await context.executeCommand(`/mcp add ${DESKTOP_SERVER} ${entry.command} ${(entry.args || []).join(' ')}`);
+      // Legacy alias from the MCP-companion era: desktop control is built in now.
+      context.addSystemMessage('info', 'Desktop control is built into BiMax now (ComputerTool) — nothing to install. Use "/computer perms" to grant macOS permissions.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'perms') {
+      // Trigger the OS permission prompts, then report the live verdict.
+      const req = await globalDesktopRuntime.run({ action: 'request_access' });
+      const st = await globalDesktopRuntime.run({ action: 'status' });
+      const level = st.ok && st.accessibility !== false && st.screenRecording !== false ? 'success' : 'info';
+      context.addSystemMessage(level, st.ok
+        ? `Desktop control (${st.driver}): accessibility ${st.accessibility == null ? 'unknown' : st.accessibility ? 'granted' : 'NOT granted'} · screen recording ${st.screenRecording == null ? 'unknown' : st.screenRecording ? 'granted' : 'NOT granted'}${st.accessibility === false || st.screenRecording === false ? ' — approve BiMax\'s terminal in System Settings → Privacy & Security' : ''}`
+        : `Desktop control unavailable: ${st.error || req.error || 'unknown error'}`);
       return { type: 'none' };
     }
 
@@ -78,35 +84,31 @@ globalCommandRegistry.register({
       category: 'Capabilities',
     });
 
-    // Desktop control: pinned local MCP companion.
-    const configured = (() => { try { return globalMcpManager.configuredNames().includes(DESKTOP_SERVER); } catch { return false; } })();
-    const connected = (() => { try { return !!globalMcpManager.get(DESKTOP_SERVER); } catch { return false; } })();
-    const entry = catalogEntry(DESKTOP_SERVER);
-    const pin = entry?.args?.find(a => a.startsWith(`${DESKTOP_SERVER}@`)) || `${DESKTOP_SERVER}@pinned`;
-    if (connected) {
-      const tools = globalMcpManager.get(DESKTOP_SERVER)?.toolNames.length ?? 0;
+    // Desktop control: first-party (ComputerTool + in-repo native driver). quickStatus never
+    // spawns or compiles — permissions show as "unknown" until the first real probe.
+    const desktop = globalDesktopRuntime.quickStatus();
+    const permBits = [
+      desktop.accessibility == null ? null : `accessibility ${desktop.accessibility ? '✓' : '✗'}`,
+      desktop.screenRecording == null ? null : `screen recording ${desktop.screenRecording ? '✓' : '✗'}`,
+    ].filter(Boolean).join(' · ');
+    options.push(desktop.ready
+      ? {
+          label: '● Desktop control — built in', value: '/computer perms',
+          desc: `${desktop.driver}${permBits ? ` · ${permBits}` : ' · Enter checks/grants macOS permissions'}`,
+          category: 'Capabilities',
+        }
+      : {
+          label: '○ Desktop control', value: '/computer',
+          desc: `not supported on this platform (driver: ${desktop.driver})`,
+          category: 'Capabilities',
+        });
+
+    // Legacy MCP companion: only surfaces if it is still configured, and the action is removal.
+    const legacyConfigured = (() => { try { return globalMcpManager.configuredNames().includes(LEGACY_DESKTOP_SERVER); } catch { return false; } })();
+    if (legacyConfigured) {
       options.push({
-        label: '● Desktop control', value: `/mcp server ${DESKTOP_SERVER}`,
-        desc: `connected — ${tools} native tools`,
-        category: 'Capabilities',
-      });
-    } else if (configured) {
-      options.push({
-        label: '◌ Desktop control', value: `/mcp server ${DESKTOP_SERVER}`,
-        desc: 'not connected — open to diagnose',
-        category: 'Capabilities',
-      });
-    } else {
-      options.push({
-        label: '○ Desktop control — install', value: '/computer install-desktop',
-        desc: `pinned companion (${pin}, MIT)`,
-        category: 'Capabilities',
-      });
-    }
-    if (process.platform === 'darwin' && !connected) {
-      options.push({
-        label: 'ⓘ macOS requirements', value: '/computer',
-        desc: 'macOS 14+ · grant Accessibility + Screen Recording on first ask',
+        label: '◌ Legacy MCP companion', value: `/mcp remove ${LEGACY_DESKTOP_SERVER}`,
+        desc: 'desktop control is native now — Enter removes open-computer-use',
         category: 'Capabilities',
       });
     }

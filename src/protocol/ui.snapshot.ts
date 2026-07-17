@@ -101,9 +101,10 @@ export interface UiSnapshotGit {
 export interface UiSnapshotComputer {
   /** URL of the live automated page, or null when no browser session is open. */
   browserUrl: string | null;
-  /** Desktop-control companion (pinned open-computer-use MCP): install/connection posture. */
+  /** Desktop control posture. 'connected' = the first-party native driver (ComputerTool) is
+   * ready on this platform (or the legacy open-computer-use MCP companion is connected). */
   desktop: 'connected' | 'configured' | 'not-installed';
-  /** Registered native desktop tool count (0 unless connected). */
+  /** Desktop tool count: 1 for the native ComputerTool, plus any legacy MCP companion tools. */
   desktopTools: number;
   /** Whether the ACTIVE model advertises vision (screenshots become model-visible observations). */
   vision: boolean;
@@ -301,7 +302,10 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     const { globalBrowserRuntime } = require('../browser/browser.runtime');
     const { globalMcpManager } = require('../mcp/manager');
     const { getTaintTracker } = require('../mind/taint');
-    const desktopConnected = !!globalMcpManager.get('open-computer-use');
+    const { globalDesktopRuntime } = require('../computer/desktop.runtime');
+    const nativeReady = (() => { try { return !!globalDesktopRuntime.quickStatus().ready; } catch { return false; } })();
+    const legacyConnected = !!globalMcpManager.get('open-computer-use');
+    const desktopConnected = nativeReady || legacyConnected;
     const desktopConfigured = desktopConnected || globalMcpManager.configuredNames().includes('open-computer-use');
     let vision = false;
     try {
@@ -314,7 +318,7 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     computer = {
       browserUrl: (() => { try { return globalBrowserRuntime.currentUrl?.() ?? null; } catch { return null; } })(),
       desktop: desktopConnected ? 'connected' : desktopConfigured ? 'configured' : 'not-installed',
-      desktopTools: desktopConnected ? (globalMcpManager.get('open-computer-use')?.toolNames.length ?? 0) : 0,
+      desktopTools: (nativeReady ? 1 : 0) + (legacyConnected ? (globalMcpManager.get('open-computer-use')?.toolNames.length ?? 0) : 0),
       vision,
       grants: (governorRef as any)?.computerGrants?.() ?? [],
       tainted: (() => { try { return getTaintTracker().isTainted(); } catch { return false; } })(),

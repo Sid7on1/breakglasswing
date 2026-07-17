@@ -196,10 +196,39 @@ rejections recorded so they aren't re-litigated:
 - macOS Accessibility/Screen Recording are **not** probed or invented: the surfaces state that
   macOS reveals them to the native companion at first use.
 
+## Phase 3 (implemented 2026-07-17): native desktop control — no MCP
+
+Desktop control is now FIRST-PARTY. The pinned `open-computer-use` MCP companion is retired to
+legacy status (still usable if configured; `/computer` offers removal).
+
+- `src/computer/helper.source.ts` — the macOS driver is a ~200-line Swift CLI whose source ships
+  in-repo (auditable), compiled once on the user's machine with the system `swiftc` and cached at
+  `~/.bimax/native/bimax-desktop-<sha8>` (hash of source + protocol version; stale builds swept).
+  CGEvent mouse (move/click/drag/scroll, click-state for double/triple), unicode typing via
+  `keyboardSetUnicodeString` chunks, key combos, cursor, frontmost app, display geometry, and
+  truthful TCC probes (`AXIsProcessTrusted`, `CGPreflightScreenCaptureAccess`) +
+  `request-access` prompts.
+- `src/computer/desktop.runtime.ts` — degradation ladder: native helper → `cliclick` →
+  AppleScript System Events on macOS; `xdotool` on Linux; screenshots via `screencapture`
+  (`grim`/`gnome-screenshot`/`import`/`scrot` on Linux). Coordinate contract: GLOBAL SCREEN
+  POINTS — Retina captures are downscaled to point resolution with `sips` so image pixels equal
+  click coordinates; `normalized: true` accepts the Gemini 0–1000 space. Missing Screen Recording
+  permission is a detected, actionable error, not a silent wallpaper shot.
+- `src/tools/implementations/computer.tool.ts` — one `ComputerTool` (screenshot · click · move ·
+  drag · scroll · type · key · cursor · frontmost · open · wait · status · request_access).
+  Acting verbs are governor-gated `COMPUTER_CONTROL` scoped to the frontmost app (session
+  `app:` grants; sensitive targets hard-denied; `classifyDesktopActionImpact` now has its call
+  site — high-impact wording always prompts). Screenshots taint the session like WebFetch and
+  feed the existing vision observation loop (`screenshotFromToolResult` accepts ComputerTool),
+  so they reroute to the dedicated vision slot automatically.
+- Surfaces: `/computer` hub shows the native driver + permission state (`/computer perms`
+  triggers the macOS prompts); `ui_snapshot.computer.desktop` reports 'connected' when the
+  native driver is ready; the persona computer-operation contract covers ComputerTool.
+
 ## Next phases
 
 1. Managed Computer Use onboarding panel (test snapshot, uninstall, permission walk-through
-   driven by the companion's own diagnostics).
+   driven by the native driver's own diagnostics).
 2. Multi-tab browser state, download handling, selector/index healing.
 3. Extend high-impact classification beyond uploads (send/submit/purchase detection from element
    semantics).

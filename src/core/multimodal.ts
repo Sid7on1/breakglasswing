@@ -167,7 +167,7 @@ export const MAX_SCREENSHOT_OBSERVATIONS = 2;
 
 /** Pull the evidence screenshot path out of a BrowserTool result string, when the call made one. */
 export function screenshotFromToolResult(toolName: string, result: string): string | null {
-  if (toolName !== 'BrowserTool' || !result) return null;
+  if ((toolName !== 'BrowserTool' && toolName !== 'ComputerTool') || !result) return null;
   try {
     const parsed = JSON.parse(result);
     if (parsed && parsed.ok === true && typeof parsed.screenshot === 'string' && parsed.screenshot) {
