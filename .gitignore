@@ -30,6 +30,10 @@ media-masters/
 .bimax/worktrees/
 .bimax/subagent-capacity.json
 
+# Computer-use runtime state (browser profile/checkpoints + desktop screenshots — per-machine)
+.bimax/browser/
+.bimax/computer/
+
 # Third-party CLI local config
 .grok/
 
