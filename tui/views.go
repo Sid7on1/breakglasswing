@@ -584,7 +584,7 @@ func lerpRGB(a, b rgb, t float64) rgb {
 var (
 	baseRGB    = rgb{215, 133, 98}  // colAccent (#D78562) — ember
 	shimmerRGB = rgb{232, 255, 248} // near-white with a cool phosphor cast for the highlight
-	errorRGB   = rgb{229, 83, 75}   // colErr (#E5534B) — signal red
+	errorRGB   = rgb{223, 118, 111} // colErr (#DF766F) — the stall tint mirrors the real error token
 )
 
 // renderShimmerVerb renders the working verb as a single CALM whole-word breath — one phosphor pulse
