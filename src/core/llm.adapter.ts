@@ -554,16 +554,22 @@ export class LlmAdapter implements LLMProvider {
     let usageRecorded = false;
 
     try {
-      const caps = this.capabilitiesForKey(kr, options.lite);
-
       let finalMessages: any[] = options.system
         ? [{ role: 'system', content: options.system }, ...messages]
         : messages;
 
-      // Vision safety net: image content is built upstream from the *configured* model's caps, but a
-      // key-pool can route THIS call to a different model. If the resolved model can't see images,
-      // flatten any image_url parts to a "[image]" text placeholder so we never send multimodal
-      // content to a model that would 400 on it. Vision-capable models pass through untouched.
+      // Resolve the model BEFORE any image handling: an image-bearing turn is exactly what
+      // reroutes to the dedicated vision slot (pickModel), so the images must still be present
+      // when the pick happens. Deriving caps from the RESOLVED model also keeps every knob below
+      // (sampling, reasoning, caching) aligned with the model actually called.
+      const model = this.pickModel(kr, options.lite, LlmAdapter.messagesHaveImages(finalMessages));
+      const caps = capabilitiesFor(kr.provider, model);
+
+      // Vision safety net: only if the RESOLVED model (after any vision-slot reroute) still can't
+      // see images do we flatten image_url parts to a "[image]" text placeholder — never send
+      // multimodal content to a model that would 400 on it. Ordering bug fixed 2026-07-17: this
+      // used to run on the PRIMARY model's caps before the reroute, silently eating the screenshot
+      // the vision slot existed to see.
       if (!caps.visionInput && finalMessages.some(m => Array.isArray(m.content))) {
         finalMessages = finalMessages.map(m => Array.isArray(m.content) ? { ...m, content: contentToText(m.content) } : m);
       }
@@ -582,7 +588,6 @@ export class LlmAdapter implements LLMProvider {
         finalMessages = applyCacheBreakpoints(finalMessages);
       }
 
-      const model = this.pickModel(kr, options.lite, LlmAdapter.messagesHaveImages(finalMessages));
       const sampling = this.resolveSampling(model, options.temperature);
       const requestOptions: any = {
         model,

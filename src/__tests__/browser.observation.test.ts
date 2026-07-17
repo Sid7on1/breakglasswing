@@ -111,7 +111,7 @@ describe('screenshot → next-turn vision observation', () => {
       expect(msg!.role).toBe('user');
       expect(Array.isArray(msg!.content)).toBe(true);
       expect((msg!.content[0] as any).text).toContain(SCREENSHOT_OBSERVATION_MARKER);
-      expect((msg!.content[0] as any).text).toContain('page DATA');
+      expect((msg!.content[0] as any).text).toContain('screen DATA');
       expect((msg!.content[1] as any).image_url.url).toMatch(/^data:image\/png;base64,/);
 
       expect(buildScreenshotObservation(path.join(dir, 'missing.png'))).toBeNull();

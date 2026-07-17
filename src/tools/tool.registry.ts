@@ -26,6 +26,10 @@ const CORE_TOOLS = new Set<string>([
   // BrowserTool is the native convergence/verification instrument. Keeping its schema available
   // avoids a ToolSearch detour when a task explicitly asks the agent to inspect a real UI.
   'BrowserTool',
+  // ComputerTool is the native desktop counterpart. Deferring it made the model deny having
+  // desktop control and improvise raw `screencapture` through Bash (observed live) — the schema
+  // must be on the wire for "my desktop / this app / my screen" requests to route correctly.
+  'ComputerTool',
   // SkillTool is itself the progressive-disclosure entry point (the prompt's AVAILABLE SKILLS
   // section tells the model to call it), so it must always be loaded — never deferred.
   'SkillTool',

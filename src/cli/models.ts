@@ -26,10 +26,10 @@ export const MODEL_CATALOG: ModelEntry[] = [
 
   // — Vision / GUI agents on NVIDIA NIM —
   { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Best for GUI agents · 256K ctx', tier: 'vision' },
-  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Fast VLM · tool calls · 256K ctx', tier: 'vision' },
+  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens accurately · ~30s/shot', tier: 'vision' },
+  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Fastest (~5s/shot) · rough reads', tier: 'vision' },
+  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Tool calls · often COLD on NIM (minutes)', tier: 'vision' },
   { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Image/video Q&A', tier: 'vision' },
-  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Light vision fallback', tier: 'vision' },
-  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Big vision fallback', tier: 'vision' },
 
   // — Fast / lite (good as the LITE model: summaries, self-critic) —
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'The default · fast reasoning', tier: 'lite' },
