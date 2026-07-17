@@ -84,6 +84,29 @@ export interface BrowserRuntimePort {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_DIAGNOSTICS = 100;
+/** Hard cap on live pages. target=_blank links and window.open popups create pages this runtime
+ * never drives; unchecked they accumulate for hours (tab explosion → memory growth → crash). */
+const MAX_PAGES = 4;
+/** Consecutive identical failures before the result starts telling the model to change approach. */
+const FAILURE_LOOP_THRESHOLD = 3;
+
+/** True when an error means the browser PROCESS or its CDP connection died — not that the page
+ * merely misbehaved. These must reset the runtime (next action relaunches) instead of leaving a
+ * dead handle that fails every subsequent action forever. */
+export function isBrowserCrashError(message: string): boolean {
+  return /Protocol error|Target closed|Session closed|Connection closed|browser has disconnected|WebSocket is not open|Navigating frame was detached|Browser closed unexpectedly/i
+    .test(message);
+}
+
+/** Stable identity of an attempted action (what was tried, not how it failed) for consecutive-
+ * failure tracking. Deliberately excludes typed text content — retyping different text into the
+ * same field is the same failing approach. */
+export function browserActionKey(command: BrowserCommand): string {
+  return [
+    command.action, command.url || '', command.selector || '',
+    String(command.elementIndex ?? ''), command.key || '',
+  ].join('|');
+}
 
 function boundedInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -315,7 +338,11 @@ export class BrowserRuntime implements BrowserRuntimePort {
 
   private async ensure(cwd: string): Promise<Page> {
     const roots = this.roots(cwd);
-    if (this.page && this.projectRoot === roots.root && !this.page.isClosed()) return this.page;
+    // Health check: the page handle alone is not enough — after a browser-process crash the CDP
+    // connection is gone while the Page object still looks open. `connected` is the truth.
+    if (this.page && this.projectRoot === roots.root && !this.page.isClosed() && this.browser?.connected) {
+      return this.page;
+    }
     if (this.browser) await this.close();
     fs.mkdirSync(roots.profile, { recursive: true });
     fs.mkdirSync(roots.evidence, { recursive: true });
@@ -452,6 +479,19 @@ export class BrowserRuntime implements BrowserRuntimePort {
       : ' Page elements unchanged; fresh indexes attached.';
   }
 
+  /** Close stray pages (popups, target=_blank tabs) beyond MAX_PAGES, never the driven page.
+   * Newest strays survive — a popup the flow just opened may matter; hour-old ones do not. */
+  private async prunePages(): Promise<void> {
+    if (!this.browser?.connected) return;
+    try {
+      const pages = await this.browser.pages();
+      const strays = pages.filter(p => p !== this.page && !p.isClosed());
+      const excess = pages.length - MAX_PAGES;
+      if (excess <= 0) return;
+      await Promise.all(strays.slice(0, excess).map(p => p.close().catch(() => {})));
+    } catch { /* pruning is hygiene, never a turn-breaker */ }
+  }
+
   private async retry<T>(attempts: number, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<{ value: T; attempts: number }> {
     let error: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -465,7 +505,27 @@ export class BrowserRuntime implements BrowserRuntimePort {
     throw error;
   }
 
+  /** Consecutive-failure memory: the last failed action's key and how many times in a row it
+   * failed. Any success clears it. Powers the "stop repeating this exact action" nudge. */
+  private failureLoop: { key: string; count: number } | null = null;
+
   async run(command: BrowserCommand, context: { cwd?: string; signal?: AbortSignal } = {}): Promise<BrowserCommandResult> {
+    const result = await this.dispatch(command, context);
+    if (result.ok) {
+      this.failureLoop = null;
+      return result;
+    }
+    const key = browserActionKey(command);
+    this.failureLoop = this.failureLoop?.key === key
+      ? { key, count: this.failureLoop.count + 1 }
+      : { key, count: 1 };
+    if (this.failureLoop.count >= FAILURE_LOOP_THRESHOLD) {
+      result.summary += ` This exact action has now failed ${this.failureLoop.count} times in a row — repeating it is unlikely to work. Take a fresh snapshot and try a different element, selector, or route.`;
+    }
+    return result;
+  }
+
+  private async dispatch(command: BrowserCommand, context: { cwd?: string; signal?: AbortSignal } = {}): Promise<BrowserCommandResult> {
     const started = Date.now();
     const cwd = path.resolve(context.cwd || process.cwd());
     const timeout = boundedInt(command.timeout, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS);
@@ -516,11 +576,13 @@ export class BrowserRuntime implements BrowserRuntimePort {
           });
           response = run.value; attempts = run.attempts; this.lastStatus = response.status();
           await this.clearIndexedElements();
+          await this.prunePages();
           const title = await page.title();
           this.checkpoint(cwd);
           return { ...base(response.ok(), `Loaded ${page.url()} (${response.status()})`), title };
         }
         case 'snapshot': {
+          await this.prunePages();
           const maxElements = boundedInt(command.maxElements, 200, 1, 1000);
           const filter = (command.filter || '').trim();
           const captured = await this.captureSnapshot(page, filter, maxElements);
@@ -748,6 +810,14 @@ export class BrowserRuntime implements BrowserRuntimePort {
       }
       return base(false, `Unsupported browser action: ${String((command as { action?: unknown }).action)}.`);
     } catch (error: any) {
+      const message = String(error?.message || error);
+      // The browser process (or its CDP connection) died. Reset fully: keeping the dead handle
+      // would fail every later action forever; a reset means the next action relaunches with the
+      // same persistent profile, so cookies/logins survive the crash.
+      if (isBrowserCrashError(message)) {
+        await this.close();
+        return base(false, `Browser disconnected mid-action (${message.slice(0, 160)}). The runtime was reset — your next action relaunches the browser with the same profile; take a fresh snapshot before acting.`);
+      }
       // A failed action attempt still CONSUMED its observation — the page may have half-reacted,
       // so surviving indexes would be lies. Invalidate; the caller re-observes with a snapshot.
       if (['click', 'type', 'press', 'select', 'hover', 'upload'].includes(command.action)) {
@@ -755,7 +825,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
         this.lastSnapshotSignatures = null;
       }
       this.checkpoint(cwd);
-      return base(false, error?.message || String(error));
+      return base(false, message);
     }
   }
 
@@ -765,7 +835,16 @@ export class BrowserRuntime implements BrowserRuntimePort {
     this.lastSnapshotSignatures = null;
     this.lastSnapshotFilter = '';
     this.page = null; this.browser = null; this.projectRoot = '';
-    if (browser) await browser.close().catch(() => {});
+    this.failureLoop = null;
+    if (browser) {
+      // Bounded close: on a crashed browser the graceful close can hang on a dead CDP socket.
+      // After the budget, hard-kill the child so a long session never accumulates zombie Chromes.
+      await Promise.race([
+        browser.close().catch(() => {}),
+        new Promise<void>(resolve => setTimeout(resolve, 3000)),
+      ]);
+      try { browser.process()?.kill('SIGKILL'); } catch { /* already gone */ }
+    }
   }
 }
 

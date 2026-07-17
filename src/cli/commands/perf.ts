@@ -2,6 +2,7 @@ import { globalCommandRegistry } from './registry';
 import { perfSnapshot, PerfSnapshot } from '../../telemetry/perf';
 import { guardTimings } from '../../tools/guard.timing';
 import { performanceBudgetReport } from '../../telemetry/performance.budget';
+import { slowWaitEvidence, describeAttribution } from '../../telemetry/netprobe';
 
 /**
  * /perf — a hidden diagnostics readout of the engine's own performance: cold-start (process load →
@@ -50,6 +51,21 @@ export function renderPerf(s: PerfSnapshot): string {
       lines.push(`    remaining critical path  ${ms(schedule.estimatedCriticalPathMs)}`);
     }
   } catch { /* /perf also works before the outcome runtime starts */ }
+
+  // Slow-wait attribution: every long first-token wait triggered a background DNS→TCP→TLS probe
+  // of the provider origin, so a stall is attributed from EVIDENCE, never assumption.
+  const waits = slowWaitEvidence();
+  if (waits.length > 0) {
+    lines.push('', '  Slow-wait evidence (most recent first):');
+    for (const w of waits.slice(0, 5)) {
+      const when = new Date(w.at).toLocaleTimeString();
+      const phases = w.probe.ok || w.probe.failedPhase
+        ? `dns ${w.probe.dnsMs}ms · tcp ${w.probe.tcpMs}ms · tls ${w.probe.tlsMs}ms${w.probe.failedPhase ? ` · ${w.probe.failedPhase} FAILED` : ''}`
+        : 'probe failed';
+      lines.push(`    ${when}  waited ${Math.round(w.waitedMs / 1000)}s${w.timedOut ? ' (timed out)' : ''} on ${w.origin}`);
+      lines.push(`      ${phases} → ${describeAttribution(w.attribution)}`);
+    }
+  }
 
   // WS5 step 3 — guard pipeline timing. Shows whether tool latency is spent in the guards
   // (governor approval, hooks) or in the tool itself, so a slow guard is caught, not blamed.

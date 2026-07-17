@@ -15,6 +15,7 @@ import {
 } from './llm.stream';
 import type { ToolCallSlot } from './llm.stream';
 import { markProviderRequest, markFirstRawChunk } from '../telemetry/perf';
+import { attributeSlowWait, SLOW_WAIT_THRESHOLD_MS } from '../telemetry/netprobe';
 export {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy,
@@ -681,7 +682,10 @@ export class LlmAdapter implements LLMProvider {
         // The SDK surfaces our header-wait cap as APIConnectionTimeoutError ("Request timed out").
         // Normalize it to the watchdog's message so the catch below benches the key (reportKeyHang).
         if (e?.name === 'APIConnectionTimeoutError' || /timed? ?out/i.test(String(e?.message))) {
-          throw new Error(`LLM stream timeout: model '${model}' sent no first token for ${Math.round(createBudgetMs / 1000)}s (provider ${kr.provider || 'NIM'} queued/hung this key — rotating)`, { cause: e });
+          // Attribute from evidence, not assumption: probe the origin in the background so /perf
+          // can say WHERE this stall happened (provider-side vs DNS vs network path).
+          attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', createBudgetMs, true);
+          throw new Error(`LLM stream timeout: model '${model}' sent no response headers for ${Math.round(createBudgetMs / 1000)}s — benching this key and rotating (run /perf for network-path evidence)`, { cause: e });
         }
         throw e;
       }
@@ -761,7 +765,12 @@ export class LlmAdapter implements LLMProvider {
         const phase = receivedFirstChunk ? 'mid-stream' : 'first token';
         let timeoutHandle: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<any>((_, reject) => {
-          timeoutHandle = setTimeout(() => reject(new Error(`LLM stream timeout: model '${model}' sent no ${phase} for ${Math.round(chunkTimeoutMs / 1000)}s (provider ${kr.provider || 'NIM'} cold/slow — not a tool error)`)), chunkTimeoutMs);
+          timeoutHandle = setTimeout(() => {
+            // Never assert "provider cold/slow" without evidence: probe the origin in the
+            // background so /perf can attribute this stall (provider-side vs DNS vs network path).
+            if (!receivedFirstChunk) attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', chunkTimeoutMs, true);
+            reject(new Error(`LLM stream timeout: model '${model}' sent no ${phase} for ${Math.round(chunkTimeoutMs / 1000)}s — not a tool error (run /perf for network-path evidence)`));
+          }, chunkTimeoutMs);
         });
 
         let result: any;
@@ -782,8 +791,14 @@ export class LlmAdapter implements LLMProvider {
         if (result.done) break;
         if (!receivedFirstChunk) {
           markFirstRawChunk(); // perf: provider's first byte → separates provider wait from render
+          const waitedMs = Date.now() - requestStartMs;
           // Latency feedback: teach the key picker which keys answer fast (NIM queues per-key).
-          this.apiKeyManager.reportKeyLatency(kr.idx!, Date.now() - requestStartMs);
+          this.apiKeyManager.reportKeyLatency(kr.idx!, waitedMs);
+          // Slow-but-successful first token: gather attribution evidence too, so /perf can say
+          // whether that long wait was provider-side or a degraded local network path.
+          if (waitedMs > SLOW_WAIT_THRESHOLD_MS) {
+            attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', waitedMs, false);
+          }
         }
         receivedFirstChunk = true;
 
@@ -936,7 +951,7 @@ export class LlmAdapter implements LLMProvider {
       // A first-token timeout means the provider is queueing/hanging THIS key — bench it so
       // rotation stops feeding the dead lane (reportKeyResult alone gives it a 2s cooldown,
       // which put it right back in the mix). Message text is the watchdog's own, matched here.
-      if (typeof e?.message === 'string' && e.message.includes('sent no first token')) {
+      if (typeof e?.message === 'string' && /sent no (first token|response headers)/.test(e.message)) {
         this.apiKeyManager.reportKeyHang(kr.idx!);
       }
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
