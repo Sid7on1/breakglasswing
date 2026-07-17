@@ -1,6 +1,6 @@
 {
   "name": "bimax",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "BiMax — Autonomous AI agent for your terminal",
   "bin": {
     "bimax": "bin/bimax.js"
