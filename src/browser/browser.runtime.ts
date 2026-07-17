@@ -471,7 +471,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
     const timeout = boundedInt(command.timeout, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS);
     const maxAttempts = boundedInt(command.retries, 2, 1, 4);
     let attempts = 1;
-    let response: HTTPResponse | null = null;
+    let response: HTTPResponse | null;
     const base = (ok: boolean, summary: string, data?: unknown): BrowserCommandResult => ({
       ok, action: command.action, url: this.page?.url(), status: this.lastStatus,
       summary, data, consoleErrors: this.consoleErrors.slice(-20), failedRequests: this.failedRequests.slice(-20),

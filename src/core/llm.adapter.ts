@@ -629,7 +629,7 @@ export class LlmAdapter implements LLMProvider {
         // The SDK surfaces our header-wait cap as APIConnectionTimeoutError ("Request timed out").
         // Normalize it to the watchdog's message so the catch below benches the key (reportKeyHang).
         if (e?.name === 'APIConnectionTimeoutError' || /timed? ?out/i.test(String(e?.message))) {
-          throw new Error(`LLM stream timeout: model '${model}' sent no first token for ${Math.round(createBudgetMs / 1000)}s (provider ${kr.provider || 'NIM'} queued/hung this key — rotating)`);
+          throw new Error(`LLM stream timeout: model '${model}' sent no first token for ${Math.round(createBudgetMs / 1000)}s (provider ${kr.provider || 'NIM'} queued/hung this key — rotating)`, { cause: e });
         }
         throw e;
       }

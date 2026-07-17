@@ -3,6 +3,7 @@ import { globalMcpManager } from '../../mcp/manager';
 import { catalogEntry } from '../../mcp/catalog';
 import { globalBrowserRuntime } from '../../browser/browser.runtime';
 import { getTaintTracker } from '../../mind/taint';
+import { MODEL_CATALOG } from '../models';
 
 // /computer — the truthful status hub for computer use: what BiMax can currently OBSERVE and ACT
 // on (browser + native desktop), whether the active model can actually see screenshots, which
@@ -39,6 +40,36 @@ globalCommandRegistry.register({
       return { type: 'none' };
     }
 
+    // /computer vision — vision models ONLY, one keystroke from the hub's "text-only" row. Each
+    // pick applies via `/model one <id>` (quick replies stay on the plain lite model automatically
+    // when the pick is a reasoner — see applyEverywhere).
+    if (sub === 'vision') {
+      const cur = context.options?.model;
+      let served: Set<string> | null = null;
+      try {
+        const live = await context.options?.llmAdapter?.listProviderModels?.();
+        if (live && live.length) served = new Set(live);
+      } catch { /* offline — show the curated set unfiltered */ }
+      const rows = MODEL_CATALOG
+        .filter(m => m.tier === 'vision' && (!served || served.has(m.value)))
+        .map(m => ({
+          label: m.value === cur ? `● ${m.label}` : m.label,
+          value: `/model one ${m.value}`,
+          desc: m.desc,
+          category: 'Vision',
+        }));
+      return {
+        type: 'menu',
+        title: 'Pick a vision model',
+        subtitle: 'These see screenshots — required for visual computer use',
+        options: [
+          ...rows,
+          { label: '⌕ Browse all…', value: '/model browse one', desc: 'Full provider catalog', category: 'More' },
+        ],
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
+
     // --- status hub (default) -----------------------------------------------------------------
     const options: any[] = [];
 
@@ -47,27 +78,23 @@ globalCommandRegistry.register({
     options.push({
       label: '● Browser automation',
       value: '/computer',
-      desc: liveUrl
-        ? `active — ${liveUrl} (profile persists in .bimax/browser)`
-        : 'ready — native Chromium via BrowserTool; profile persists in .bimax/browser',
+      desc: liveUrl ? `active — ${liveUrl}` : 'ready — built-in Chromium',
       category: 'Capabilities',
     });
 
-    // Vision: does the ACTIVE model actually see screenshots?
-    let visionDesc = 'unknown — model capabilities unavailable';
+    // Vision: does the ACTIVE model actually see screenshots? Text-only → one keystroke to the
+    // vision-only picker (not the full model hub).
     let visionOk = false;
+    let model = '(not set)';
     try {
       const caps = await context.options?.llmAdapter?.activeCapabilities?.();
-      const model = context.options?.model || '(not set)';
+      model = context.options?.model || '(not set)';
       visionOk = !!caps?.visionInput;
-      visionDesc = visionOk
-        ? `${model} accepts images — browser screenshots are attached to its next turn`
-        : `${model} is text-only — screenshots stay on disk; pick a vision model for visual operation`;
     } catch { /* adapter optional in some contexts */ }
     options.push({
-      label: `${visionOk ? '●' : '○'} Model vision`,
-      value: visionOk ? '/computer' : '/model one',
-      desc: visionDesc,
+      label: visionOk ? '● Model vision' : '○ Model vision — pick one…',
+      value: visionOk ? '/computer' : '/computer vision',
+      desc: visionOk ? `${model} sees screenshots` : `${model} can't see images`,
       category: 'Capabilities',
     });
 
@@ -80,26 +107,26 @@ globalCommandRegistry.register({
       const tools = globalMcpManager.get(DESKTOP_SERVER)?.toolNames.length ?? 0;
       options.push({
         label: '● Desktop control', value: `/mcp server ${DESKTOP_SERVER}`,
-        desc: `connected — ${tools} native desktop tool(s) via ${pin}; actions face the computer-control approval ladder`,
+        desc: `connected — ${tools} native tools`,
         category: 'Capabilities',
       });
     } else if (configured) {
       options.push({
         label: '◌ Desktop control', value: `/mcp server ${DESKTOP_SERVER}`,
-        desc: `configured but not connected (${pin}) — open to reconnect or diagnose`,
+        desc: 'not connected — open to diagnose',
         category: 'Capabilities',
       });
     } else {
       options.push({
         label: '○ Desktop control — install', value: '/computer install-desktop',
-        desc: `installs the pinned local companion (${pin}, MIT) for native macOS/Windows/Linux app control`,
+        desc: `pinned companion (${pin}, MIT)`,
         category: 'Capabilities',
       });
     }
     if (process.platform === 'darwin' && !connected) {
       options.push({
         label: 'ⓘ macOS requirements', value: '/computer',
-        desc: 'macOS 14+; grant Accessibility + Screen Recording in System Settings when the companion first asks — BiMax cannot pre-check those for you',
+        desc: 'macOS 14+ · grant Accessibility + Screen Recording on first ask',
         category: 'Capabilities',
       });
     }
@@ -110,8 +137,8 @@ globalCommandRegistry.register({
       label: grants.length ? `⚑ Session grants (${grants.length})` : '⚑ Session grants (none)',
       value: grants.length ? '/computer revoke-grants' : '/computer',
       desc: grants.length
-        ? `${grants.join(' · ')} — Enter revokes all; grants never outlive the session`
-        : 'each browser domain / desktop app asks once; you can grant it for the session at the prompt',
+        ? `${grants.join(' · ')} — Enter revokes all`
+        : 'each domain/app asks once per session',
       category: 'Safety',
     });
     const taint = (() => { try { return getTaintTracker(); } catch { return null; } })();
@@ -120,15 +147,15 @@ globalCommandRegistry.register({
       label: taint?.isTainted() ? '⚠ Context taint: ACTIVE' : '✓ Context taint: clean',
       value: '/taint',
       desc: taint?.isTainted()
-        ? `untrusted content in context (latest: ${latest?.source} — ${latest?.detail}); network-capable commands are narrowed until /taint clear`
-        : 'no untrusted web/MCP/page content in the conversation window yet',
+        ? `untrusted content in context (${latest?.source}) — network commands narrowed until /taint clear`
+        : 'no untrusted web/MCP content yet',
       category: 'Safety',
     });
 
     return {
       type: 'menu',
       title: 'Computer use',
-      subtitle: 'Observation is free; actions ask per domain/app. High-impact actions (uploads, sends) always ask. Sensitive apps (credential managers, wallets, system security) are always denied.',
+      subtitle: 'Watching is free · acting asks per app/domain · sensitive apps always denied',
       options,
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };
