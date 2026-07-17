@@ -61,7 +61,7 @@ export function foldSubagentRuns(ledger: EventLedger = getEventLedger()): Subage
   for (const e of ledger.byType('subagent')) {
     const p = e.payload as SubagentJournalEvent;
     if (!p?.taskId) continue;
-    let r = runs.get(p.taskId);
+    const r = runs.get(p.taskId);
     switch (p.phase) {
       case 'spawned':
         runs.set(p.taskId, { taskId: p.taskId, agentType: p.agentType || '?', spawnedAt: e.ts, toolCalls: 0, calls: [] });

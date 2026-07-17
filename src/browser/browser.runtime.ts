@@ -746,6 +746,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
           }), title: await page.title() };
         }
       }
+      return base(false, `Unsupported browser action: ${String((command as { action?: unknown }).action)}.`);
     } catch (error: any) {
       // A failed action attempt still CONSUMED its observation — the page may have half-reacted,
       // so surviving indexes would be lies. Invalidate; the caller re-observes with a snapshot.

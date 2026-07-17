@@ -14,7 +14,9 @@ concurrency:
 jobs:
   engine:
     name: Engine (typecheck · lint · test)
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor. Pin 22.04 so the
+    # bubblewrap test exercises the real Linux kernel boundary instead of merely finding the bin.
+    runs-on: ubuntu-22.04
     env:
       # Tests mock the browser; never pull ~150MB of Chromium in CI.
       PUPPETEER_SKIP_DOWNLOAD: "true"
@@ -22,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       # bubblewrap enables the Linux Bash-sandbox parity test (writes outside cwd must be denied).
       - name: Install bubblewrap (Linux sandbox backend)
@@ -47,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
       # The app's wire contract is generated from src/protocol (app/src/renderer/src/protocol.gen.ts);
@@ -70,15 +72,28 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # TUI integration tests start the real compiled engine; Chromium is not needed here.
+      PUPPETEER_SKIP_DOWNLOAD: "true"
     defaults:
       run:
         working-directory: tui
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
           cache-dependency-path: tui/go.sum
+      - name: Install engine dependencies
+        run: npm ci
+        working-directory: .
+      - name: Build headless engine
+        run: npm run build
+        working-directory: .
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...

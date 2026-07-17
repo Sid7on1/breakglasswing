@@ -1,6 +1,10 @@
-# Bimax CLI v1.0.0 release candidate
+# Bimax CLI v1.0.1 public beta
 
 Date: 2026-07-14
+
+Patch `v1.0.1` explicitly restricts the global provider-credential directory to the current user
+and the credential file to owner read/write. Existing installations are tightened automatically at
+the next launch; no provider keys are bundled in release artifacts.
 
 ## Launch gate
 
@@ -19,28 +23,27 @@ Date: 2026-07-14
 
 ## Release artifacts
 
-The four archives and `SHA256SUMS` are in `build/`:
+The release contains four self-contained archives and `SHA256SUMS`. Every published asset receives
+a GitHub artifact attestation backed by Sigstore. When Apple credentials are configured, the tagged
+release workflow also signs, notarizes, and repackages the two macOS binaries; the attached
+`SHA256SUMS` is always authoritative for the published release.
 
-| Platform | Archive | SHA-256 |
-|---|---|---|
-| macOS arm64 | `bimax-darwin-arm64.tar.gz` | `bf1ac7d918419d9ff8a9aa8b2fb638641a23b3c52d6e411a565b64d293aec9c6` |
-| macOS x64 | `bimax-darwin-x64.tar.gz` | `9b8af4c82f5653c009961b08d6f9d47b98131d011fd1a45a396161d934350931` |
-| Linux x64 | `bimax-linux-x64.tar.gz` | `2c2558a5c85271ffd0e68c44e546ced380d13135f6869464343d36cd1ec56ab3` |
-| Linux arm64 | `bimax-linux-arm64.tar.gz` | `6bebbff14e601253137b9a498a3a8e4820a3c7f16af59276a44baed7a6b291ea` |
+Use the attached `SHA256SUMS` file for the exact v1.0.1 archive digests.
 
 ## Publish checklist
 
 - Commit the verified CLI/TUI source and this evidence on the release branch.
 - Merge or select that commit as the release target.
-- Create tag `v1.0.0`.
-- Upload all four archives and `build/SHA256SUMS` to the GitHub release.
+- Optionally add the five Apple credential secrets documented in `docs/INSTALL.md`.
+- Create tag `v1.0.1`; the release workflow builds, checksums, attests, and uploads all five release
+  assets. With Apple credentials it also signs and notarizes the macOS binaries; without them it
+  clearly labels the macOS release as an unsigned beta.
 - Confirm the one-line installer on one clean macOS host and one clean Linux host.
-- Add signing/notarization when the owner credentials are available.
 
 ## Honest scope
 
-This is a technically verified public-beta release candidate. It is not evidence of a completed
+This is a technically verified public beta. It is not evidence of a completed
 multi-hour private beta. The expanded live autonomy suite subsequently passed 7/7 in one
 production-provider run with no retries or result selection. Sustained fault injection, external
-no-help beta feedback, signing/notarization, and the hosted release remain visible in
+no-help beta feedback, optional Apple credential provisioning, and post-launch feedback remain visible in
 `docs/MASTER_CLI.md`.

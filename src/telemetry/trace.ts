@@ -197,11 +197,10 @@ export class Tracer {
         fs.mkdirSync(dir, { recursive: true });
         this.jsonlDirEnsured = true;
       }
-      let write!: Promise<void>;
-      write = fs.promises.appendFile(this.exportPath(), JSON.stringify(span) + '\n')
-        .catch(() => undefined)
-        .finally(() => this.pendingWrites.delete(write));
+      const write = fs.promises.appendFile(this.exportPath(), JSON.stringify(span) + '\n')
+        .catch(() => undefined);
       this.pendingWrites.add(write);
+      void write.then(() => this.pendingWrites.delete(write));
     } catch { /* tracing must never break the agent */ }
 
     // OTLP exporter — buffered; flushed on size or timer.
