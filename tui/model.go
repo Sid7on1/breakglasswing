@@ -278,6 +278,10 @@ type model struct {
 	bell bool // emit a terminal bell when a turn completes
 
 	welcomed bool // the low-chrome welcome banner has been shown once at the top of the transcript
+	// The banner waits for the first ui_snapshot after `ready` so it can name the model slots —
+	// `ready` arrives first and rendering there showed "not chosen yet" to configured users. If no
+	// snapshot lands by this deadline (old engine), the tick shows the banner anyway.
+	welcomeBy time.Time
 
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier      string         // "lite" | "heavy"
@@ -286,6 +290,7 @@ type model struct {
 	fTokens    int            // running session token estimate
 	fCoding    string         // coding model id
 	fLite      string         // lite model id
+	fVision    string         // vision model id ('' = no vision slot)
 	fGoals     int            // active goal count
 	fMcp       int            // connected (non-disabled) MCP server count
 	fMind      MindStrip      // mind layer: weak spots / drive deviations / compiled habits
@@ -523,6 +528,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// Welcome fallback: `ready` arrived but no ui_snapshot followed within the deadline
+		// (pre-snapshot engine) — show the banner without model details rather than never.
+		if !m.welcomeBy.IsZero() && time.Now().After(m.welcomeBy) {
+			m.welcomeBy = time.Time{}
+			m.showWelcome()
+		}
 		// Resize settled (no WindowSizeMsg for 250ms): clear the visible screen once to remove any
 		// ghost frames from the drag, and reprint only the last screenful of transcript so the view
 		// isn't left blank. Never wipes scrollback — bounded duplication (≤1 screenful per gesture)
@@ -654,7 +665,11 @@ func (m *model) handleEngine(o Outbound) {
 				"⚠ Protocol mismatch: engine speaks v%d, this TUI speaks v%d — rebuild both (npm run build + go build ./tui) so they realign.",
 				o.Protocol, supportedProtocol)))
 		}
-		m.showWelcome()
+		// Don't render the banner yet: the first ui_snapshot (which carries the model slots) is
+		// right behind this event — rendering now showed "model not chosen yet" to a fully
+		// configured session. The snapshot handler shows it; the tick fallback covers an engine
+		// that never sends one.
+		m.welcomeBy = time.Now().Add(2 * time.Second)
 
 	case "request":
 		m.reqOpen = true

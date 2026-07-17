@@ -61,6 +61,10 @@ export class LlmAdapter implements LLMProvider {
   // The LITE model — used for cheap auxiliary calls (history summaries, self-critic, ask-user
   // auto-decisions). Falls back to the main (coding) model when unset. Set via /model lite.
   public liteModel?: string = process.env.BGW_LITE_MODEL || undefined;
+  // The VISION model — used ONLY for calls whose messages carry images when the primary model is
+  // text-only. Picking a vision model must never displace the user's coding model (that swap is
+  // exactly what made "vision" confusing); this slot routes the image turns and nothing else.
+  public visionModel?: string = process.env.BGW_VISION_MODEL || undefined;
   // The model the user EXPLICITLY chose (config.model / /model). Takes precedence over a key's
   // provider-default model so the picker actually changes the model. Unset = use the key/default.
   public userModel?: string = process.env.BGW_MODEL || undefined;
@@ -89,7 +93,7 @@ export class LlmAdapter implements LLMProvider {
     return this.apiKeyManager.getStates();
   }
 
-  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string }) {
+  public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string; visionModel?: string }) {
     if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
     if (cfg.temperature !== undefined) this.temperature = cfg.temperature;
@@ -98,6 +102,7 @@ export class LlmAdapter implements LLMProvider {
     if (cfg.reasoningEffort !== undefined) this.reasoningEffort = cfg.reasoningEffort || undefined;
     if (cfg.parallelToolCalls !== undefined) this.parallelToolCalls = cfg.parallelToolCalls;
     if (cfg.liteModel !== undefined) this.liteModel = cfg.liteModel || undefined;
+    if (cfg.visionModel !== undefined) this.visionModel = cfg.visionModel || undefined;
   }
 
   // Reuse one OpenAI client per (baseURL, key) instead of constructing a fresh one — with its own
@@ -193,11 +198,34 @@ export class LlmAdapter implements LLMProvider {
     return capabilitiesFor(undefined, model).fixedSampling ? {} : { temperature };
   }
 
-  private pickModel(keyResult: KeyResult, lite?: boolean): string {
-    if (lite && this.liteModel) return this.liteModel;
-    // The user's explicit choice (set via /model → applyConfig) must win. Previously the key's
-    // baked-in provider default (keyResult.model) shadowed it, so /model appeared to do nothing.
-    return this.userModel || keyResult.model || this.defaultModel;
+  private pickModel(keyResult: KeyResult, lite?: boolean, hasImages?: boolean): string {
+    const chosen = (lite && this.liteModel)
+      ? this.liteModel
+      // The user's explicit choice (set via /model → applyConfig) must win. Previously the key's
+      // baked-in provider default (keyResult.model) shadowed it, so /model appeared to do nothing.
+      : (this.userModel || keyResult.model || this.defaultModel);
+    // Image turns silently reroute to the vision slot when the chosen model can't see — the ONLY
+    // condition under which visionModel is used. A vision-capable primary keeps its own turn.
+    if (hasImages && this.visionModel && !capabilitiesFor(keyResult.provider, chosen).visionInput) {
+      return this.visionModel;
+    }
+    return chosen;
+  }
+
+  /** Any message carrying an OpenAI image_url content part → this call needs a vision-capable model. */
+  private static messagesHaveImages(messages: Array<{ content?: unknown }>): boolean {
+    return messages.some(m => Array.isArray(m.content) && (m.content as Array<{ type?: string }>).some(p => p?.type === 'image_url'));
+  }
+
+  /**
+   * Can the NEXT image-bearing turn actually be seen by a model? True when the active model has
+   * vision, or a dedicated vision slot is configured. The attach/drop gates key off this — NOT off
+   * the primary model's caps — so setting a vision model is sufficient to enable screenshots.
+   */
+  public canSeeImages(): boolean {
+    const primary = this.userModel || this.defaultModel;
+    if (capabilitiesFor(undefined, primary).visionInput) return true;
+    return !!(this.visionModel && capabilitiesFor(undefined, this.visionModel).visionInput);
   }
 
   /**
@@ -452,10 +480,11 @@ export class LlmAdapter implements LLMProvider {
       const finalMessages = systemContext
         ? [{ role: 'system', content: systemContext }, ...messages]
         : messages;
+      const chatModel = this.pickModel(kr, opts?.lite, LlmAdapter.messagesHaveImages(finalMessages));
       const response = await client.chat.completions.create({
-        model: this.pickModel(kr, opts?.lite),
+        model: chatModel,
         messages: finalMessages,
-        ...this.samplingFieldsFor(this.pickModel(kr, opts?.lite), this.temperature),
+        ...this.samplingFieldsFor(chatModel, this.temperature),
         max_tokens: this.maxTokens,
       }, { timeout: this.requestTimeout });
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
@@ -553,7 +582,7 @@ export class LlmAdapter implements LLMProvider {
         finalMessages = applyCacheBreakpoints(finalMessages);
       }
 
-      const model = this.pickModel(kr, options.lite);
+      const model = this.pickModel(kr, options.lite, LlmAdapter.messagesHaveImages(finalMessages));
       const sampling = this.resolveSampling(model, options.temperature);
       const requestOptions: any = {
         model,

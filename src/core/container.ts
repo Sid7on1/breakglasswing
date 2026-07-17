@@ -118,6 +118,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
     reasoningEffort: cfg.reasoningEffort,
     parallelToolCalls: cfg.parallelToolCalls,
     liteModel: cfg.liteModel,
+    visionModel: cfg.visionModel,
   });
 
   // Governor — YoloClassifier only fires in 'auto' mode (never in default interactive mode).

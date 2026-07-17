@@ -31,9 +31,11 @@ describe('/model (menu fix)', () => {
     expect(res.type).toBe('menu');
     expect(typeof res.onSelect).toBe('function');
     const values = res.options.map((o: any) => o.value);
-    // The hub NEVER dumps the raw model catalog — it routes to single-model mode + slot pickers.
+    // The hub NEVER dumps the raw model catalog — it routes to the three slot pickers
+    // (work=/model one, quick=/model lite, vision=/model vision) plus the advanced rows.
     expect(values).toContain('/model one');
-    expect(values).toContain('/model coding');
+    expect(values).toContain('/model lite');
+    expect(values).toContain('/model vision');
     expect(values).not.toContain('minimaxai/minimax-m3');
     res.onSelect({ value: '/model one' });
     expect(ctx._spies.executeCommand).toHaveBeenCalledWith('/model one');

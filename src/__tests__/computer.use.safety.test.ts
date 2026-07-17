@@ -247,7 +247,7 @@ describe('computer-use safety ladder', () => {
       expect(res.type).toBe('menu');
       const labels = res.options.map((o: any) => o.label).join('\n');
       expect(labels).toContain('Browser automation');
-      expect(labels).toContain('Model vision');
+      expect(labels).toContain('Vision');
       expect(labels).toContain('Desktop control');
       expect(labels).toContain('Session grants (none)');
       expect(labels).toContain('Context taint: clean');

@@ -384,7 +384,10 @@ export abstract class AgentPersona {
     // otherwise keep the plain-text turn and tell the user why the images were dropped.
     const images = options?.images ?? [];
     if (images.length > 0) {
-      const built = buildUserContent(prompt, images, !!caps?.visionInput);
+      // A configured vision slot counts: the adapter reroutes image turns to it when the primary
+      // model is text-only, so the images should be attached rather than dropped.
+      const canSee = (this.llmAdapter as any).canSeeImages?.() ?? !!caps?.visionInput;
+      const built = buildUserContent(prompt, images, canSee);
       if (built.notice && onToken) onToken(`_${built.notice}_\n`);
       this.messages.push({ role: 'user', content: built.content });
     } else {

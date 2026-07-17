@@ -124,7 +124,7 @@ export interface UiSnapshotTools {
 }
 
 export interface UiSnapshot {
-  models: { coding: string; lite: string };
+  models: { coding: string; lite: string; vision?: string };
   goalCount: number;
   mind: UiSnapshotMind;
   // The codebase-map graph overview, mirrored so the Go front-end can render CodebaseMapPanel and
@@ -162,14 +162,14 @@ let baselineFn: (() => number) | undefined;
 export function setTokensBaseline(fn: () => number): void { baselineFn = fn; }
 
 function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnapshot {
-  let models = { coding: '', lite: '' };
+  let models: { coding: string; lite: string; vision?: string } = { coding: '', lite: '' };
   let goalCount = 0;
   let contextWindow = 0;
   let contextMode: ContextMode = 'smart';
   try {
     const { getConfig } = require('../cli/config');
     const c = getConfig();
-    models = { coding: c.model, lite: c.liteModel };
+    models = { coding: c.model, lite: c.liteModel, vision: c.visionModel || undefined };
     contextWindow = c.contextWindowTokens || 0;
     contextMode = c.contextMode === 'full' ? 'full' : 'smart';
   } catch { /* config not ready */ }
@@ -306,7 +306,10 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     let vision = false;
     try {
       const { capabilitiesFor } = require('../core/capabilities');
-      vision = !!capabilitiesFor(undefined, models.coding || models.lite).visionInput;
+      // True when screenshots can be SEEN by some configured model: a vision-capable coding model
+      // OR the dedicated vision slot (image turns reroute there automatically).
+      vision = !!capabilitiesFor(undefined, models.coding || models.lite).visionInput
+        || !!(models.vision && capabilitiesFor(undefined, models.vision).visionInput);
     } catch { /* capabilities optional */ }
     computer = {
       browserUrl: (() => { try { return globalBrowserRuntime.currentUrl?.() ?? null; } catch { return null; } })(),

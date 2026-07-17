@@ -117,6 +117,7 @@ type UiSnapshot struct {
 	Models struct {
 		Coding string `json:"coding"`
 		Lite   string `json:"lite"`
+		Vision string `json:"vision"` // '' = no vision slot configured
 	} `json:"models"`
 	GoalCount      int          `json:"goalCount"`
 	Mind           MindStrip    `json:"mind"`

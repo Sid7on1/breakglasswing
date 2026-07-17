@@ -3,7 +3,6 @@ import { globalMcpManager } from '../../mcp/manager';
 import { catalogEntry } from '../../mcp/catalog';
 import { globalBrowserRuntime } from '../../browser/browser.runtime';
 import { getTaintTracker } from '../../mind/taint';
-import { MODEL_CATALOG } from '../models';
 
 // /computer — the truthful status hub for computer use: what BiMax can currently OBSERVE and ACT
 // on (browser + native desktop), whether the active model can actually see screenshots, which
@@ -40,34 +39,10 @@ globalCommandRegistry.register({
       return { type: 'none' };
     }
 
-    // /computer vision — vision models ONLY, one keystroke from the hub's "text-only" row. Each
-    // pick applies via `/model one <id>` (quick replies stay on the plain lite model automatically
-    // when the pick is a reasoner — see applyEverywhere).
+    // /computer vision → the dedicated vision SLOT picker (/model vision). Screenshots/images
+    // route to the slot; the user's coding model is never displaced by enabling vision.
     if (sub === 'vision') {
-      const cur = context.options?.model;
-      let served: Set<string> | null = null;
-      try {
-        const live = await context.options?.llmAdapter?.listProviderModels?.();
-        if (live && live.length) served = new Set(live);
-      } catch { /* offline — show the curated set unfiltered */ }
-      const rows = MODEL_CATALOG
-        .filter(m => m.tier === 'vision' && (!served || served.has(m.value)))
-        .map(m => ({
-          label: m.value === cur ? `● ${m.label}` : m.label,
-          value: `/model one ${m.value}`,
-          desc: m.desc,
-          category: 'Vision',
-        }));
-      return {
-        type: 'menu',
-        title: 'Pick a vision model',
-        subtitle: 'These see screenshots — required for visual computer use',
-        options: [
-          ...rows,
-          { label: '⌕ Browse all…', value: '/model browse one', desc: 'Full provider catalog', category: 'More' },
-        ],
-        onSelect: (opt: any) => context.executeCommand(opt.value),
-      };
+      return { type: 'redirect', command: '/model vision' };
     }
 
     // --- status hub (default) -----------------------------------------------------------------
@@ -82,19 +57,24 @@ globalCommandRegistry.register({
       category: 'Capabilities',
     });
 
-    // Vision: does the ACTIVE model actually see screenshots? Text-only → one keystroke to the
-    // vision-only picker (not the full model hub).
+    // Vision: can screenshots be SEEN — by the coding model itself, or by the dedicated vision
+    // slot (image turns reroute there automatically)? Text-only + no slot → one keystroke to the
+    // vision-slot picker.
     let visionOk = false;
     let model = '(not set)';
+    let visionSlot = '';
     try {
-      const caps = await context.options?.llmAdapter?.activeCapabilities?.();
       model = context.options?.model || '(not set)';
-      visionOk = !!caps?.visionInput;
+      visionSlot = (context.options?.llmAdapter as any)?.visionModel || '';
+      visionOk = (context.options?.llmAdapter as any)?.canSeeImages?.()
+        ?? !!(await context.options?.llmAdapter?.activeCapabilities?.())?.visionInput;
     } catch { /* adapter optional in some contexts */ }
     options.push({
-      label: visionOk ? '● Model vision' : '○ Model vision — pick one…',
-      value: visionOk ? '/computer' : '/computer vision',
-      desc: visionOk ? `${model} sees screenshots` : `${model} can't see images`,
+      label: visionOk ? '● Vision' : '○ Vision — pick a model…',
+      value: visionOk ? '/model vision' : '/computer vision',
+      desc: visionOk
+        ? (visionSlot ? `screenshots → ${visionSlot}` : `${model} sees screenshots itself`)
+        : `${model} can't see images and no vision slot is set`,
       category: 'Capabilities',
     });
 

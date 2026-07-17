@@ -146,13 +146,19 @@ func (m *model) handleEvent(o Outbound) {
 	case "ui_snapshot":
 		var s UiSnapshot
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &s) == nil {
-			m.fCoding, m.fLite, m.fGoals = s.Models.Coding, s.Models.Lite, s.GoalCount
+			m.fCoding, m.fLite, m.fVision, m.fGoals = s.Models.Coding, s.Models.Lite, s.Models.Vision, s.GoalCount
 			m.fMind = s.Mind
 			m.graph = s.Graph
 			m.ctxWindow = s.ContextWindow
 			m.ctxBaseline = s.TokensBaseline
 			m.ctxSaved = s.CompressionSaved
 			m.fWorkspace = s.Workspace
+			// First snapshot after `ready`: the model slots are now known — render the banner with
+			// them (idempotent; no-op once welcomed).
+			if !m.welcomeBy.IsZero() {
+				m.welcomeBy = time.Time{}
+				m.showWelcome()
+			}
 		}
 
 	case "outcome_update":

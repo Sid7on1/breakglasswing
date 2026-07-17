@@ -103,6 +103,7 @@ async function runSubAgentCore(
         // core of "sub-agents are hell of slow". Matching slots also lets the router short-circuit
         // (no pre-flight classifier call at all).
         liteModel: cfg.liteModel || cfg.model,
+        visionModel: cfg.visionModel,
         temperature: cfg.temperature, topP: cfg.topP,
         maxTokens: cfg.maxTokens, reasoningEffort: cfg.reasoningEffort, parallelToolCalls: cfg.parallelToolCalls,
       });

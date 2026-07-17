@@ -50,8 +50,11 @@ func shortPath(p string) string {
 	return p
 }
 
-// showWelcome injects the low-chrome welcome banner at the top of the transcript, once: the accent
-// wordmark, a dim metadata block, and a couple of quiet tips — content-first, like WelcomeBanner.tsx.
+// showWelcome injects the landing banner at the top of the (freshly cleared) screen, once.
+// Design: NO box — a full-width bordered rectangle on an empty screen read as stark and broken.
+// Instead: the gradient wordmark + version, then the three model slots in plain words (work /
+// quick / vision) so "which model does what" is answered before the first prompt, then cwd and
+// one line of key hints. Left-aligned, six rows of quiet metadata, content-first.
 func (m *model) showWelcome() {
 	if m.welcomed {
 		return
@@ -59,45 +62,46 @@ func (m *model) showWelcome() {
 	m.welcomed = true
 
 	var b strings.Builder
-	for _, ln := range logoLines {
-		fmt.Fprintf(&b, "%s\n", gradientLine(ln))
+	if version != "dev" {
+		fmt.Fprintf(&b, "%s %s\n", gradientLine(logoLines[0]), metaVal.Render("v"+version))
+	} else {
+		fmt.Fprintf(&b, "%s\n", gradientLine(logoLines[0]))
 	}
-	fmt.Fprintf(&b, "\n%s\n\n", tipStyle.Render("Describe an outcome. Bimax can explore, build, verify, and show its work."))
+	fmt.Fprintf(&b, "%s\n\n", gradientLine(logoLines[1]))
 
-	model := shortModel(m.fCoding)
-	if model == "" {
-		model = shortModel(m.fLite)
-	}
-	if model == "" {
+	work := shortModel(m.fCoding)
+	if work == "" {
 		// Never pretend a "default" was chosen — an unconfigured session says so and points at
 		// the wizard (which also opens automatically when there is no key at all).
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("model  "), warnStyle.Render("not chosen yet — run /setup"))
+		fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("model "), warnStyle.Render("not chosen yet — run /setup"))
 	} else {
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("model  "), metaVal.Render(model))
+		fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("work  "), metaVal.Render(work), tipStyle.Render("· deep work"))
+		if q := shortModel(m.fLite); q != "" && q != work {
+			fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("quick "), metaVal.Render(q), tipStyle.Render("· instant small replies"))
+		}
+		if v := shortModel(m.fVision); v != "" {
+			fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("vision"), metaVal.Render(v), tipStyle.Render("· sees screenshots"))
+		}
 	}
+
 	cwd := m.cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
-	fmt.Fprintf(&b, "%s%s\n", metaKey.Render("cwd    "), metaVal.Render(shortPath(cwd)))
-
-	mcpCount := countMcpServers(cwd)
-	if mcpCount > 0 {
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("mcp    "), metaVal.Render(fmt.Sprintf("%d active", mcpCount)))
+	loc := shortPath(cwd)
+	if mcpCount := countMcpServers(cwd); mcpCount > 0 {
+		loc += tipStyle.Render(fmt.Sprintf(" · %d mcp", mcpCount))
 	}
+	fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("cwd   "), metaVal.Render(loc))
 
 	if m.fMode == "bypass" {
-		fmt.Fprintf(&b, "%s%s\n", metaKey.Render("guard  "), warnStyle.Render("bypassed — no approval prompts"))
+		fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("guard "), warnStyle.Render("bypassed — no approval prompts"))
 	}
-	fmt.Fprintf(&b, "\n%s", tipStyle.Render("Ctrl+G actions · Ctrl+F search · Ctrl+O activity · Ctrl+X memory"))
 
-	// Stretch the banner across the terminal instead of hugging its content. width-3 keeps the box one
-	// column short of the edge (border 2 + a spare col) so it never wraps the inline renderer.
-	box := welcomeBox
-	if m.width > 20 {
-		box = box.Width(m.width - 6) // content width; border(2)+padding(4) bring the outer box to width-2
-	}
-	m.append("\n" + box.Render(b.String()) + "\n")
+	fmt.Fprintf(&b, "\n  %s\n  %s", tipStyle.Render("Describe an outcome — Bimax explores, builds, and verifies."),
+		tipStyle.Render("/model models · /help commands · Shift+Tab modes · Ctrl+F search"))
+
+	m.append("\n" + b.String() + "\n")
 }
 
 func countMcpServers(cwd string) int {

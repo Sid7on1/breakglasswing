@@ -7,7 +7,7 @@ import { globalSkillService } from '../../skills/skill.service';
 import { getTaintTracker } from '../../mind/taint';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getConfig } from '../config';
-import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL } from '../models';
+import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL, MODEL_CATALOG } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -158,6 +158,18 @@ globalCommandRegistry.register({
       context.addSystemMessage('success', val ? `Sub-agent model → ${val}` : 'Sub-agent model → (inherits main model)');
       if (val) warnIfUnserved(val);
     };
+    // Vision is a SLOT, not a swap: image turns (screenshots, attached files) reroute to it when
+    // the coding model is text-only. Setting it never changes what does the coding work.
+    const applyVision = (model: string) => {
+      const val = model === '__none__' ? '' : model;
+      try { context.options.llmAdapter?.applyConfig({ visionModel: val }); } catch { /* adapter optional */ }
+      context.saveConfig({ visionModel: val });
+      cliEvents.emit('config_changed');
+      context.addSystemMessage('success', val
+        ? `Vision model → ${val} — screenshots and images go here; ${context.options.model || 'your coding model'} keeps the coding work`
+        : 'Vision model → none (images are dropped unless the coding model can see them)');
+      if (val) warnIfUnserved(val);
+    };
     const liteOf = () => { try { return getConfig().liteModel; } catch { return ''; } };
     const subagentOf = () => { try { return getConfig().subagentModel; } catch { return ''; } };
     // "One model everywhere": the single-model setup most people want. Coding + lite collapse to
@@ -204,8 +216,41 @@ globalCommandRegistry.register({
     };
 
     const SLOT_APPLY: Record<string, (m: string) => void> = {
-      coding: applyCoding, lite: applyLite, subagent: applySubagent, one: applyEverywhere,
+      coding: applyCoding, lite: applyLite, subagent: applySubagent, one: applyEverywhere, vision: applyVision,
     };
+
+    // /model vision [id|none] — the dedicated vision-slot picker: ONLY vision-capable models.
+    if ((args[0] || '').toLowerCase() === 'vision') {
+      const rest = args.slice(1).join(' ').trim();
+      if (rest) {
+        applyVision(rest === 'none' || rest === 'off' ? '__none__' : rest);
+        return { type: 'none' };
+      }
+      const curVision = (() => { try { return getConfig().visionModel; } catch { return ''; } })();
+      let served: Set<string> | null = null;
+      try { const live = await liveIds(); if (live) served = new Set(live); } catch { /* offline */ }
+      const rows = MODEL_CATALOG
+        .filter(m => m.tier === 'vision' && (!served || served.has(m.value)))
+        .map(m => ({
+          label: m.value === curVision ? `● ${m.label}` : m.label,
+          value: m.value,
+          desc: m.desc,
+          category: 'Vision',
+        }));
+      return {
+        type: 'menu',
+        title: 'Vision model',
+        subtitle: curVision
+          ? `Now: ${curVision} · screenshots/images go here · coding model untouched`
+          : 'Screenshots/images go here · coding model untouched',
+        options: [
+          ...rows,
+          { label: '✎ Custom id…', value: '__custom__', desc: 'Type any vision model id', category: 'More' },
+          { label: '⊘ None', value: '__none__', desc: 'Drop images unless the coding model sees them', category: 'More' },
+        ],
+        onSelect: (opt: any) => opt.value === '__custom__' ? promptCustom(applyVision) : applyVision(opt.value),
+      };
+    }
 
     // /model browse [coding|lite|subagent|one] — the full provider catalog, flat + searchable.
     const slot = (args[0] || '').toLowerCase();
@@ -272,45 +317,41 @@ globalCommandRegistry.register({
     // /model <id>  → set the coding model directly.
     if (args.length >= 1) { applyCoding(args.join(' ').trim()); return { type: 'none' }; }
 
-    // /model → the clutter-free hub: your setup, single-model mode, curated picks, escape hatches.
+    // /model → the hub. THREE slots, each with one job, each showing its current value:
+    //   work   — the coding model that does the real work
+    //   quick  — the plain model that answers small stuff instantly
+    //   vision — where screenshots/images go (never displaces work)
     const configModel = (() => { try { return getConfig().model; } catch { return ''; } })();
     const current = context.options.model || configModel || '(not set)';
     const lite = liteOf();
     const sub = subagentOf();
-    const singleMode = !sub && (!lite || lite === context.options.model);
+    const vis = (() => { try { return getConfig().visionModel; } catch { return ''; } })();
     return {
       type: 'menu',
       title: 'Models',
-      subtitle: singleMode
-        ? `Everything runs on ${current}`
-        : `Coding: ${current} · Lite: ${lite || 'same'} · Sub-agents: ${sub || 'inherit'}`,
+      subtitle: `work ${current} · quick ${lite || current} · vision ${vis || 'none'}`,
       options: [
         {
-          label: '◎ Change model…',
+          label: '◉ Work model…',
           value: '/model one',
-          desc: 'One model for everything',
-          category: 'Model',
-        },
-        { label: '⇄ Provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name}`, category: 'Model' },
-        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'Lower = faster replies', category: 'Model' },
-        {
-          label: '⚙ Coding model…',
-          value: '/model coding',
-          desc: current,
-          category: 'Split slots',
+          desc: `${current} — does the coding; quick replies auto-stay fast`,
+          category: 'Slots',
         },
         {
-          label: '⚙ Lite model…',
+          label: '⚡ Quick-reply model…',
           value: '/model lite',
-          desc: lite || 'same as coding',
-          category: 'Split slots',
+          desc: `${lite || 'same as work'} — greetings, summaries, routing`,
+          category: 'Slots',
         },
         {
-          label: '⚙ Sub-agent model…',
-          value: '/model subagent',
-          desc: sub || 'inherits coding',
-          category: 'Split slots',
+          label: '👁 Vision model…',
+          value: '/model vision',
+          desc: `${vis || 'none'} — screenshots & images route here`,
+          category: 'Slots',
         },
+        { label: '⚙ Sub-agent model…', value: '/model subagent', desc: sub || 'inherits work model', category: 'More' },
+        { label: '⇄ Provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name}`, category: 'More' },
+        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'Lower = faster replies', category: 'More' },
       ],
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };

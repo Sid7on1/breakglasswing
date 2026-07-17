@@ -714,8 +714,11 @@ export class AgentLoop {
         // adapter without capability introspection simply attaches nothing.
         if (screenshotPaths.length > 0) {
           try {
-            const caps = await (this.llm as any).activeCapabilities?.();
-            if (caps?.visionInput) {
+            // canSeeImages covers BOTH a vision-capable primary AND a configured vision slot —
+            // the adapter reroutes image turns to the vision model automatically.
+            const canSee = (this.llm as any).canSeeImages?.()
+              ?? (await (this.llm as any).activeCapabilities?.())?.visionInput;
+            if (canSee) {
               const observation = buildScreenshotObservation(screenshotPaths[screenshotPaths.length - 1]);
               if (observation) {
                 this.messages.push(observation);

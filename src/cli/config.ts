@@ -21,6 +21,7 @@ export interface CliConfig {
   defaultAgent: string;
   model: string;       // the CODING model — drives the main agent loop
   liteModel: string;   // the LITE model — used for cheap aux calls (summaries, self-critic, ask-user)
+  visionModel: string; // the VISION model — image turns reroute here when the coding model is text-only ('' = none)
   // Resilience chain: when the active model keeps failing mid-run (retry budget exhausted, or the
   // provider starts rejecting it), the loop switches to this model once instead of dying. '' = off.
   fallbackModel: string;
@@ -91,6 +92,9 @@ const DEFAULTS: CliConfig = {
   // Lite slot: PLAIN model, never a reasoner — step-3.7 thinks on every call with no API off
   // switch, which put a 20-30s hidden reasoning phase in front of greetings/summaries/routing.
   liteModel: 'meta/llama-3.1-70b-instruct',
+  // Vision slot: '' = none. Set via /model vision (or /computer). Screenshots/images reroute to
+  // it per-turn; it never displaces the coding model.
+  visionModel: '',
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   subagentModel: '', // '' = sub-agents use the main model
 
