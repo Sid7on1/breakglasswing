@@ -88,7 +88,9 @@ const DEFAULTS: CliConfig = {
   // the real work now. (Restore minimax here if you prefer it; the plainContent cap now streams it
   // from token 1 so it no longer feels like it hangs.)
   model: 'stepfun-ai/step-3.7-flash',
-  liteModel: 'stepfun-ai/step-3.7-flash', // valid NIM id (step-3.5-flash 400s "not a valid model ID")
+  // Lite slot: PLAIN model, never a reasoner — step-3.7 thinks on every call with no API off
+  // switch, which put a 20-30s hidden reasoning phase in front of greetings/summaries/routing.
+  liteModel: 'meta/llama-3.1-70b-instruct',
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   subagentModel: '', // '' = sub-agents use the main model
 
@@ -144,6 +146,17 @@ export async function loadConfig(): Promise<CliConfig> {
   // and the next saveConfig migrates global keys out to the global file.
   cached = { ...DEFAULTS, ...globalCfg, ...projectCfg };
   cached!.workspaceRoot = path.resolve(projectCfg.workspaceRoot || globalCfg.workspaceRoot || DEFAULTS.workspaceRoot);
+  // Migration: earlier builds saved "one model everywhere" by literally copying the coding model
+  // into the lite slot. With a reasoning model that meant every small task (greeting, summary,
+  // routing) sat behind an unhidable 20-30s think phase. Split it back apart in memory — the
+  // coding slot keeps the user's pick; quick replies go to the plain lite default. Non-reasoning
+  // picks are untouched (true single-model setups stay unified).
+  try {
+    const { isReasoningModel, DEFAULT_LITE_MODEL } = require('./models');
+    if (cached!.liteModel && cached!.liteModel === cached!.model && isReasoningModel(cached!.liteModel)) {
+      cached!.liteModel = DEFAULT_LITE_MODEL;
+    }
+  } catch { /* models module unavailable in some test harnesses — defaults already sane */ }
   return cached!;
 }
 

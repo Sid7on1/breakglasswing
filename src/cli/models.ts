@@ -2,6 +2,8 @@
 // (the default provider). If your provider names a model differently, use the "Custom model id…" entry.
 // `tier` groups them for the picker: 'coding' = strong agentic/coding models, 'lite' = fast/cheap ones.
 
+import { capabilitiesFor } from '../core/capabilities';
+
 export interface ModelEntry {
   label: string;
   value: string;
@@ -41,15 +43,26 @@ export const MODEL_CATALOG: ModelEntry[] = [
 ];
 
 /**
- * Default model for each slot. Both slots default to Step 3.7 Flash — the coding/lite split is
- * retired as a default (one great fast model everywhere; the router short-circuits when the two
- * slots match, skipping the pre-flight classifier LLM call entirely). Pin a different coding model
- * with /model if you want the split back.
- * step-3.7-flash is the valid NIM id for the Step "flash" model (the old step-3.5-flash 400s as
- * "not a valid model ID").
+ * Default model for each slot. CODING is the reasoning model (step-3.7-flash — the valid NIM id;
+ * the old step-3.5-flash 400s as "not a valid model ID"). LITE is deliberately a PLAIN,
+ * non-reasoning model: NIM's step-3.7 reasons on EVERY call and ignores every server-side off
+ * switch (enable_thinking/thinking:false and reasoning_effort probed live 2026-07-17 — all
+ * ignored), so with a reasoner in the lite slot even "hi" burned 20-30s of hidden chain-of-thought.
+ * The north-star rule is "fastest safe path": small/conversational/aux calls run on a model that
+ * simply doesn't think.
  */
 export const DEFAULT_CODING_MODEL = 'stepfun-ai/step-3.7-flash';
-export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.7-flash';
+export const DEFAULT_LITE_MODEL = 'meta/llama-3.1-70b-instruct';
+
+/**
+ * True when `id` is a reasoning/thinking model (native channel, inline <think>, or opener-less
+ * CoT). Used to keep such models OUT of the lite slot: quick replies and aux calls must never
+ * sit behind a hidden reasoning phase there is no API switch to turn off.
+ */
+export function isReasoningModel(id: string): boolean {
+  const caps = capabilitiesFor(null, id);
+  return !!(caps.nativeThinking || caps.inlineReasoning || caps.openerlessReasoning);
+}
 
 const TIER_LABEL: Record<ModelEntry['tier'], string> = {
   coding: 'Coding', vision: 'Vision', lite: 'Fast', other: 'Other (own key)',

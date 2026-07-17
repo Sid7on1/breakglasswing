@@ -1,7 +1,7 @@
 import { globalCommandRegistry } from './registry';
 import { getProviders, setProvider, getCurrentProvider, buildKeyPool } from '../provider';
 import { saveApiKeyToEnv } from '../env.loader';
-import { curatedModelMenuOptions } from '../models';
+import { curatedModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL } from '../models';
 import { cliEvents } from '../events';
 
 /**
@@ -56,12 +56,17 @@ function stepModel(context: any): void {
     } catch { /* offline / no models endpoint — curated catalog still works */ }
 
     const applyEverywhere = (model: string) => {
-      try { context.options?.llmAdapter?.applyConfig?.({ model, liteModel: model }); } catch { /* optional */ }
+      // Reasoners never fill the lite slot (no API switch turns their thinking off — small talk
+      // and aux calls would each hide 20-30s of CoT). Quick replies run on the plain lite default.
+      const lite = isReasoningModel(model) ? DEFAULT_LITE_MODEL : model;
+      try { context.options?.llmAdapter?.applyConfig?.({ model, liteModel: lite }); } catch { /* optional */ }
       context.options.model = model;
-      (context.options as any).liteModel = model;
-      context.saveConfig({ model, liteModel: model, subagentModel: '', onboardingKeysDone: true });
+      (context.options as any).liteModel = lite;
+      context.saveConfig({ model, liteModel: lite, subagentModel: '', onboardingKeysDone: true });
       cliEvents.emit('config_changed');
-      context.addSystemMessage('success', `You're set: everything runs on ${model}.`);
+      context.addSystemMessage('success', lite === model
+        ? `You're set: everything runs on ${model}.`
+        : `You're set: ${model} does the work · ${lite} answers quick replies instantly.`);
       context.addSystemMessage('info',
         'Quickstart — just describe an outcome ("explain this codebase", "fix the failing test"). ' +
         'Useful next: /help commands · /model change models · Shift+Tab cycles agent modes · Ctrl+A live sub-agents.');

@@ -7,7 +7,7 @@ import { globalSkillService } from '../../skills/skill.service';
 import { getTaintTracker } from '../../mind/taint';
 import { clearActiveTodos } from '../../tools/implementations/todo.tool';
 import { getConfig } from '../config';
-import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions } from '../models';
+import { modelMenuOptions, liveModelMenuOptions, curatedModelMenuOptions, isReasoningModel, DEFAULT_LITE_MODEL } from '../models';
 import { encode } from 'gpt-tokenizer';
 
 globalCommandRegistry.register({
@@ -164,12 +164,18 @@ globalCommandRegistry.register({
     // the same id (the router's unified short-circuit then skips the pre-flight classifier) and
     // sub-agents inherit — so ONE pick governs every call this session makes.
     const applyEverywhere = (model: string) => {
-      try { context.options.llmAdapter?.applyConfig({ model, liteModel: model }); } catch { /* adapter optional */ }
+      // A reasoning model never goes in the lite slot: NIM reasoners think on EVERY call with no
+      // API off switch, so "hi"/summaries/routing would each eat a hidden 20-30s think phase.
+      // Quick replies stay on the plain lite default; the user's pick drives all real work.
+      const lite = isReasoningModel(model) ? DEFAULT_LITE_MODEL : model;
+      try { context.options.llmAdapter?.applyConfig({ model, liteModel: lite }); } catch { /* adapter optional */ }
       context.options.model = model;
-      (context.options as any).liteModel = model;
-      context.saveConfig({ model, liteModel: model, subagentModel: '' });
+      (context.options as any).liteModel = lite;
+      context.saveConfig({ model, liteModel: lite, subagentModel: '' });
       cliEvents.emit('config_changed');
-      context.addSystemMessage('success', `One model everywhere → ${model} (coding · lite · sub-agents)`);
+      context.addSystemMessage('success', lite === model
+        ? `One model everywhere → ${model} (coding · lite · sub-agents)`
+        : `Model → ${model} (coding · sub-agents) · quick replies → ${lite} (no thinking = instant)`);
       warnIfUnserved(model);
     };
 
