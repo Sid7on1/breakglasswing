@@ -107,6 +107,7 @@ export class ExecutionLedger {
   append(record: Omit<LedgerRecord, 'v' | 'ts'>): void {
     const full: LedgerRecord = { v: LEDGER_SCHEMA_VERSION, ts: Date.now(), ...redactForLedger(record) };
     try {
+      require('./fault.injection').faultPoint('ledger.append');
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       fs.appendFileSync(this.file, JSON.stringify(full) + '\n', 'utf-8');
     } catch { /* the ledger is an observer — it must never break execution */ }
@@ -210,6 +211,7 @@ export class ExecutionLedger {
   // Atomic rewrite (tmp + rename) — a crash mid-compaction can't lose the journal.
   private rewrite(records: LedgerRecord[]): void {
     try {
+      require('./fault.injection').faultPoint('ledger.rewrite');
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}`;
       fs.writeFileSync(tmp, records.map(r => JSON.stringify(r)).join('\n') + (records.length ? '\n' : ''), 'utf-8');

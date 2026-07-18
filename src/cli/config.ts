@@ -198,6 +198,8 @@ async function readJson(file: string): Promise<Partial<CliConfig>> {
 // which is the same semantics the two processes would have had with whole-file writes).
 let tmpSeq = 0;
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require('../core/fault.injection').faultPoint('config.write');
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}`;
   await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf-8');

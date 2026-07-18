@@ -20,8 +20,20 @@ export function startShellTask(command: string, opts: { cwd?: string; title?: st
   const cwd = opts.cwd || process.cwd();
   const title = (opts.title || command).slice(0, 60);
 
-  // detached → own process group, so signals reach the whole pipeline (`a | b`), not just the shell.
-  const child = spawn('/bin/bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // A spawn that fails — sync throw (fork EAGAIN, injected fault) or async 'error' — must land
+  // the task in failed-resumable with the command recorded, never wedge it or escape the caller.
+  let child: ReturnType<typeof spawn>;
+  try {
+    require('./fault.injection').faultPoint('shell.spawn');
+    // detached → own process group, so signals reach the whole pipeline (`a | b`), not just the shell.
+    child = spawn('/bin/bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e: any) {
+    const task = registry.create({ kind: 'shell', title, command, cwd });
+    registry.transition(task.id, 'starting', 'spawning');
+    registry.transition(task.id, 'failed-resumable', `spawn error: ${e?.message || e}`);
+    notifyDone(task.id);
+    return { task, summary: `Background task ${task.id} failed to start: ${e?.message || e}. Retry with /tasks retry ${task.id}.` };
+  }
 
   const task = registry.create({
     kind: 'shell', title, command, cwd,
