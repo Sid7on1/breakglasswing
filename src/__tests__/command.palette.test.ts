@@ -53,7 +53,8 @@ describe('CommandRegistry.getPaletteOptions — curated palette', () => {
     // with the rest reachable when typed / via the Ctrl+X HUD. Guard against re-sprawl.
     // (+1 in 2026-07: /setup — the guided provider→key→model wizard belongs on the surface.)
     // (+1 in 2026-07: /computer — the browser/desktop computer-use capability hub is a primary verb.)
-    expect(opts.length).toBeLessThanOrEqual(28);
+    // (+1 in 2026-07: /tasks — background task workspaces (cancel/pause/retry) are a primary verb.)
+    expect(opts.length).toBeLessThanOrEqual(29);
     const values = opts.map(o => o.value);
     // Demoted clusters must NOT be on the browsable surface (they live in the HUD / a primary verb).
     for (const hidden of ['/self', '/tier', '/undo', '/checkpoint', '/edit', '/write', '/resume', '/output', '/index-ai']) {
