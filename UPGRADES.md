@@ -66,6 +66,44 @@ its commit; claims without a commit don't belong here.
   with licence verified, maintenance checked, and the exact code location it
   shaped; rejected alternatives documented.
 
+### Design language enforced structurally (§9)
+- ✅ **tui/design_tokens_test.go** — four CI gates: no raw colour literal
+  outside `styles.go`; every token must equal the hex DESIGN_LANGUAGE.md
+  publishes; shared tokens must match the Electron app's default `@theme`
+  block; each semantic style must be bound to the token its name promises
+  (the 9eefbda5 stall-tint bug class can't land silently again).
+
+### Version provenance (§10)
+- ✅ **`bimax --version` names semver / commit / clean-or-dirty / build time /
+  channel** — ldflags-stamped on release builds, Go embedded-VCS fallback for
+  dev builds, "unknown" never invented. v1.0.4 deliberately NOT claimed: a
+  release cut is a founder publishing action, not a build side-effect.
+
+### Fault injection (§12)
+- ✅ **src/core/fault.injection.ts** — BIMAX_FAULT-armed named failure sites
+  (ledger.append/rewrite, config.write, shell.spawn); disarmed = one env
+  check, arming is loud, never persisted. Found+fixed a real bug: a sync
+  spawn failure escaped startShellTask; now lands failed-resumable.
+
+### Verification matrix (§11) — run 2026-07-18 on this machine
+- ✅ Full TS suite, 170 files in 6 serial chunks (`--maxWorkers=2`,
+  coverage off): **1262 passed, 0 failed, 2 skipped** (browser E2E, gated on
+  `BIMAX_BROWSER_E2E=1` + real Chrome — deliberate).
+- ✅ Go TUI suite **with `-race`**: ok. PTY rig `npm run test:tui`: all
+  scenarios green. `go vet`: clean.
+- ✅ Full self-contained build (`build-release.sh`, 96MB), reinstalled to
+  `~/.local/bin/bimax` (rm+cp+codesign), `--version` provenance verified,
+  headless engine boot smoke green.
+- ✅ Live task-workspace demo: concurrent shell tasks, real SIGSTOP pause /
+  SIGCONT resume, cancellation, abrupt-exit restart → ledger reports both
+  interrupted tasks resumable, honest re-create, cleanup keeps live records.
+
+### Workaround audit (§14)
+- ✅ Repo-wide sweep for TODO/FIXME/HACK/TEMP/WORKAROUND/DEBT/REMOVE_AFTER:
+  **zero genuine markers in first-party code** — every hit is prose about the
+  concept (personas contract, the TODO-debt drive, its tests). Vendor XXX
+  markers are upstream (charmbracelet, golang.org/x).
+
 ## 2026-07-18 — overnight rebuild pass (commits 77a89465 → 9b35658d)
 
 ### Latency & truth-telling
