@@ -23,7 +23,10 @@ echo "[5/10] Self-contained host binary"
 echo "[6/10] Artifact identity"
 version="$(node -p "require('./package.json').version")"
 actual="$(./build/bimax --version)"
-[ "$actual" = "bimax $version" ] || { echo "version mismatch: expected bimax $version, got $actual" >&2; exit 1; }
+first_line="${actual%%$'\n'*}"
+[ "$first_line" = "bimax $version" ] || { echo "version mismatch: expected first line 'bimax $version', got '$first_line'" >&2; exit 1; }
+source_actual="$(node dist/index.js --version)"
+[ "$source_actual" = "$version" ] || { echo "source CLI version mismatch: expected '$version', got '$source_actual'" >&2; exit 1; }
 ./build/bimax --help >/dev/null
 
 echo "[7/10] Clean local install"

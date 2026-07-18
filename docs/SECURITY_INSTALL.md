@@ -85,10 +85,10 @@ spctl -a -vvv -t install BiMax.dmg      # must say "source=Notarized Developer I
 xcrun stapler validate BiMax.dmg
 ```
 
-**Current status:** the CLI archives are checksum-verified; independent minisign signing and macOS
-Developer ID signing/notarization are *wired* (config + release hooks above) but activate only when
-the signing credentials are supplied. Until a signed v1.0.1 is published, treat macOS builds as
-unsigned and verify checksums.
+**Current status:** the CLI archives are checksum-verified and receive GitHub artifact attestations.
+Independent minisign signing and macOS Developer ID signing/notarization are *wired* (config +
+release hooks above) but activate only when the signing credentials are supplied. The v1.0.4 macOS
+builds are published as an explicitly unsigned beta; verify checksums and the GitHub attestation.
 
 ## Uninstall — what each tier removes
 

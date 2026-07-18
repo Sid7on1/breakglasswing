@@ -264,7 +264,18 @@ function spawnProxy(): ChildProcess {
     if (/error|traceback|failed/i.test(s)) Logger.warn(`[Headroom proxy] ${s.slice(0, 300)}`);
   });
   child.on('exit', code => { _ready = false; if (code) Logger.warn(`[Headroom] proxy exited (code ${code}).`); });
+  unrefSidecarHandles(child);
   return child;
+}
+
+/**
+ * Keep the optional compressor sidecar from extending the parent engine's lifetime. The process
+ * exit hook below still terminates a sidecar we own, while unref lets short-lived callers such as
+ * `bimax --version` and the Jest release gate finish naturally once their own work is complete.
+ */
+export function unrefSidecarHandles(child: Pick<ChildProcess, 'stderr' | 'unref'>): void {
+  (child.stderr as (NodeJS.ReadableStream & { unref?: () => void }) | null)?.unref?.();
+  child.unref();
 }
 
 /**

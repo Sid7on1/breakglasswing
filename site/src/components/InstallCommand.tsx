@@ -32,7 +32,7 @@ export default function InstallCommand({ className = '' }: { className?: string 
   return (
     <div className={`install-command liquid-glass liquid-glass-command ${className}`}>
       <div className="install-command-meta">
-        <span><i aria-hidden /> Public beta · v1.0.3</span>
+        <span><i aria-hidden /> Public beta · v1.0.4</span>
         <span>macOS + Linux</span>
       </div>
       <div className="install-command-line">

@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   planProxyStartup, acquireProxyLock, readProxyLock, releaseProxyLock,
-  isPortFree, findFreePort,
+  isPortFree, findFreePort, unrefSidecarHandles,
 } from '../memory/headroomProxy';
 
 // The sidecar singleton must never let two engines race for :8788. These tests exercise the pure
@@ -85,5 +85,14 @@ describe('headroom proxy — cross-process singleton', () => {
     } finally {
       await new Promise<void>(r => srv.close(r));
     }
+  });
+
+  it('unrefs the sidecar and its stderr pipe so they cannot hold the parent open', () => {
+    const unref = jest.fn();
+    const stderrUnref = jest.fn();
+    const child = { unref, stderr: { unref: stderrUnref } } as unknown as Parameters<typeof unrefSidecarHandles>[0];
+    unrefSidecarHandles(child);
+    expect(stderrUnref).toHaveBeenCalledTimes(1);
+    expect(unref).toHaveBeenCalledTimes(1);
   });
 });
