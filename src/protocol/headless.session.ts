@@ -38,7 +38,7 @@ export interface HeadlessDeps {
   options: any;           // the same `options` bag FullScreen receives (governor, llmAdapter, toolRegistry, …)
   graphStore: IGraphStore;
   codebaseIndexer?: any;
-  saveConfig?: () => void;
+  saveConfig?: (updates: Record<string, any>) => Promise<any>;
 }
 
 /**

@@ -227,7 +227,8 @@ globalCommandRegistry.register({
         applyVision(rest === 'none' || rest === 'off' ? '__none__' : rest);
         return { type: 'none' };
       }
-      const curVision = (() => { try { return getConfig().visionModel; } catch { return ''; } })();
+      const curVision = context.options.llmAdapter?.visionModel
+        || (() => { try { return getConfig().visionModel; } catch { return ''; } })();
       let served: Set<string> | null = null;
       try { const live = await liveIds(); if (live) served = new Set(live); } catch { /* offline */ }
       const rows = MODEL_CATALOG
@@ -321,6 +322,21 @@ globalCommandRegistry.register({
       return { type: 'redirect', command: [ROUTING_SUBS[slot], ...args.slice(1)].join(' ').trim() };
     }
 
+    if (slot === 'advanced') {
+      return {
+        type: 'menu',
+        title: 'Model settings',
+        subtitle: 'Provider, workers, and response behavior',
+        options: [
+          { label: 'Provider', value: '/provider', desc: getCurrentProvider().name },
+          { label: 'Sub-agents', value: '/model subagent', desc: subagentOf() || 'inherit work model' },
+          { label: 'Reasoning', value: '/reasoning', desc: 'response depth and speed' },
+          { label: 'One model everywhere', value: '/model one', desc: 'advanced unified setup' },
+        ],
+        onSelect: (opt: any) => context.executeCommand(opt.value),
+      };
+    }
+
     // /model <id>  → set the coding model directly.
     if (args.length >= 1) { applyCoding(args.join(' ').trim()); return { type: 'none' }; }
 
@@ -331,34 +347,29 @@ globalCommandRegistry.register({
     const configModel = (() => { try { return getConfig().model; } catch { return ''; } })();
     const current = context.options.model || configModel || '(not set)';
     const lite = liteOf();
-    const sub = subagentOf();
-    const vis = (() => { try { return getConfig().visionModel; } catch { return ''; } })();
+    const vis = context.options.llmAdapter?.visionModel
+      || (() => { try { return getConfig().visionModel; } catch { return ''; } })();
     return {
       type: 'menu',
-      title: 'Models',
-      subtitle: `work ${current} · quick ${lite || current} · vision ${vis || 'none'}`,
+      title: 'Model setup',
+      subtitle: 'Choose one role at a time',
       options: [
         {
-          label: '◉ Work model…',
-          value: '/model one',
-          desc: `${current} — does the coding; quick replies auto-stay fast`,
-          category: 'Slots',
+          label: 'Work',
+          value: '/model work',
+          desc: `${current} — coding and deep work`,
         },
         {
-          label: '⚡ Quick-reply model…',
-          value: '/model lite',
-          desc: `${lite || 'same as work'} — greetings, summaries, routing`,
-          category: 'Slots',
+          label: 'Quick',
+          value: '/model quick',
+          desc: `${lite || 'same as work'} — short replies`,
         },
         {
-          label: '👁 Vision model…',
+          label: 'Vision',
           value: '/model vision',
-          desc: `${vis || 'none'} — screenshots & images route here`,
-          category: 'Slots',
+          desc: `${vis || 'none'} — screenshots and images`,
         },
-        { label: '⚙ Sub-agent model…', value: '/model subagent', desc: sub || 'inherits work model', category: 'More' },
-        { label: '⇄ Provider…', value: '/provider', desc: `Now: ${getCurrentProvider().name}`, category: 'More' },
-        { label: '☰ Reasoning depth…', value: '/reasoning', desc: 'Lower = faster replies', category: 'More' },
+        { label: 'Provider & advanced', value: '/model advanced', desc: `${getCurrentProvider().name} · workers · reasoning` },
       ],
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };

@@ -22,7 +22,7 @@ import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
 
 export type DesktopAction =
   | 'status' | 'request_access' | 'screenshot' | 'cursor' | 'frontmost' | 'open'
-  | 'move' | 'click' | 'drag' | 'scroll' | 'type' | 'key' | 'wait';
+  | 'close' | 'move' | 'click' | 'drag' | 'scroll' | 'type' | 'key' | 'wait';
 
 export interface DesktopCommand {
   action: DesktopAction;
@@ -86,6 +86,12 @@ function binExists(name: string): boolean {
 }
 
 const WAIT_MIN = 50, WAIT_MAX = 5000;
+
+/** App names vary slightly between APIs ("Calculator" vs "Calculator.app"). */
+export function appNamesMatch(actual: string, expected: string): boolean {
+  const clean = (s: string) => s.trim().toLowerCase().replace(/\.app$/, '');
+  return !!clean(actual) && clean(actual) === clean(expected);
+}
 
 export class DesktopRuntime implements DesktopRuntimePort {
   private helperPath: string | null | undefined; // undefined = not resolved yet, null = unavailable
@@ -172,6 +178,35 @@ export class DesktopRuntime implements DesktopRuntimePort {
     return '';
   }
 
+  private async waitForApp(app: string, shouldMatch: boolean, signal?: AbortSignal): Promise<string> {
+    let actual = '';
+    for (let i = 0; i < 20; i++) {
+      if (signal?.aborted) throw new Error('desktop action aborted');
+      actual = await this.frontmostApp();
+      if (appNamesMatch(actual, app) === shouldMatch) return actual;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    throw new Error(shouldMatch
+      ? `could not focus ${app}; frontmost app is ${actual || '(unknown)'}`
+      : `${app} did not close; it is still frontmost`);
+  }
+
+  private async activateApp(app: string, signal?: AbortSignal): Promise<string> {
+    if (!app.trim()) throw new Error('keyboard action needs an intended app; open the app first or pass app');
+    if (process.platform === 'darwin') {
+      await exec('open', ['-a', app.trim()], 20_000, signal);
+      return this.waitForApp(app, true, signal);
+    }
+    if (process.platform === 'linux' && binExists('xdotool')) {
+      const { stdout } = await exec('xdotool', ['search', '--name', app.trim()], 15_000, signal);
+      const id = stdout.trim().split(/\s+/)[0];
+      if (!id) throw new Error(`could not find a window for ${app}`);
+      await exec('xdotool', ['windowactivate', '--sync', id], 15_000, signal);
+      return this.frontmostApp();
+    }
+    throw new Error(`app activation is not supported on ${process.platform}`);
+  }
+
   // ---- geometry -------------------------------------------------------------------------------
 
   private async displays(signal?: AbortSignal): Promise<DesktopDisplay[]> {
@@ -183,11 +218,22 @@ export class DesktopRuntime implements DesktopRuntimePort {
         this.displaysCache = st.displays as DesktopDisplay[];
         return this.displaysCache!;
       }
-      // AppleScript fallback: main display bounds only ({0, 0, w, h}).
-      const { stdout } = await exec('osascript', ['-e', 'tell application "Finder" to get bounds of window of desktop'], 15_000, signal);
-      const parts = stdout.trim().split(',').map(s => parseInt(s.trim(), 10));
-      const [w, h] = [parts[2] || 0, parts[3] || 0];
-      this.displaysCache = [{ index: 1, width: w, height: h, scale: 1, main: true }];
+      // Finder bounds used to trigger an unrelated Apple Events permission dialog that could cover
+      // the very app being controlled. Probe a disposable OS screenshot instead. macOS captures
+      // Retina displays at 2x; infer that common scale conservatively so screenshot pixels remain
+      // aligned with global screen points even when the compiled helper is unavailable.
+      const probe = path.join(os.tmpdir(), `bimax-display-${process.pid}-${Date.now()}.png`);
+      try {
+        await exec('/usr/sbin/screencapture', ['-x', '-D', '1', '-t', 'png', probe], 20_000, signal);
+        const { stdout } = await exec('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', probe], 15_000, signal);
+        const pixelW = parseInt((stdout.match(/pixelWidth:\s*(\d+)/) || [])[1] || '0', 10);
+        const pixelH = parseInt((stdout.match(/pixelHeight:\s*(\d+)/) || [])[1] || '0', 10);
+        if (!pixelW || !pixelH) throw new Error('could not read fallback display dimensions');
+        const scale = pixelW >= 2500 && pixelH >= 1400 ? 2 : 1;
+        this.displaysCache = [{ index: 1, width: Math.round(pixelW / scale), height: Math.round(pixelH / scale), scale, main: true }];
+      } finally {
+        try { fs.rmSync(probe, { force: true }); } catch { /* disposable probe */ }
+      }
       return this.displaysCache;
     }
     if (process.platform === 'linux' && binExists('xdotool')) {
@@ -251,11 +297,13 @@ export class DesktopRuntime implements DesktopRuntimePort {
           summary: 'screenshot blocked by missing Screen Recording permission',
         };
       }
+      const app = await this.frontmostApp();
       return {
         ok: true, action: 'screenshot', driver: this.driverName(), screenshot: file,
+        app: app || undefined,
         width: screenW || undefined, height: screenH || undefined,
         screenWidth: screenW || undefined, screenHeight: screenH || undefined,
-        summary: `screenshot of display ${displayIndex} → ${path.relative(cwd, file)} (screen points${screenW ? ` ${screenW}×${screenH}` : ''})`,
+        summary: `screenshot of display ${displayIndex}${app ? ` with ${app} frontmost` : ''} → ${path.relative(cwd, file)} (screen points${screenW ? ` ${screenW}×${screenH}` : ''})`,
       };
     }
 
@@ -318,8 +366,9 @@ export class DesktopRuntime implements DesktopRuntimePort {
     const osa = (script: string) => exec('osascript', ['-e', script], 30_000, signal);
     switch (cmd.action) {
       case 'status': {
-        const displays = await this.displays(signal);
-        return { accessibility: null, screenRecording: null, displays, summary: `driver ${cli ? 'cliclick' : 'applescript'} (degraded — install Xcode CLT for the full native helper) · permissions unknown until first action` };
+        let displays: DesktopDisplay[] = [];
+        try { displays = await this.displays(signal); } catch { /* status must still identify the usable fallback */ }
+        return { accessibility: null, screenRecording: null, displays, summary: `driver ${cli ? 'cliclick' : 'applescript'} (degraded — native helper unavailable) · permissions verified by the first action` };
       }
       case 'request_access':
         // No CGRequest APIs without the helper: the first real action triggers the OS prompt.
@@ -358,11 +407,11 @@ export class DesktopRuntime implements DesktopRuntimePort {
         if (codes[keyName] != null) await osa(`tell application "System Events" to key code ${codes[keyName]}${using}`);
         else if (keyName.length === 1) await osa(`tell application "System Events" to keystroke "${keyName.replace(/(["\\])/g, '\\$1')}"${using}`);
         else throw new Error(`key "${keyName}" needs the native helper`);
-        return { summary: `pressed ${cmd.combo}` };
+        return { app: await this.frontmostApp(), summary: `pressed ${cmd.combo}` };
       }
       case 'type':
         await osa(`tell application "System Events" to keystroke "${(cmd.text || '').replace(/([\\"])/g, '\\$1')}"`);
-        return { summary: `typed ${(cmd.text || '').length} chars` };
+        return { app: await this.frontmostApp(), summary: `typed ${(cmd.text || '').length} chars` };
     }
     throw new Error(`unsupported action: ${cmd.action}`);
   }
@@ -390,8 +439,8 @@ export class DesktopRuntime implements DesktopRuntimePort {
         await xdo(['mousemove', String(cmd.x), String(cmd.y), 'click', '--repeat', String(notches), (cmd.dy || 0) > 0 ? '5' : '4']);
         return { summary: `scrolled ${(cmd.dy || 0) > 0 ? 'down' : 'up'} ${notches} notch(es)` };
       }
-      case 'key': await xdo(['key', (cmd.combo || '').replace(/\bcmd\b|\bcommand\b|\bmeta\b/gi, 'super').replace(/\+/g, '+')]); return { summary: `pressed ${cmd.combo}` };
-      case 'type': await xdo(['type', '--delay', '12', cmd.text || '']); return { summary: `typed ${(cmd.text || '').length} chars` };
+      case 'key': await xdo(['key', (cmd.combo || '').replace(/\bcmd\b|\bcommand\b|\bmeta\b/gi, 'super').replace(/\+/g, '+')]); return { app: await this.frontmostApp(), summary: `pressed ${cmd.combo}` };
+      case 'type': await xdo(['type', '--delay', '12', cmd.text || '']); return { app: await this.frontmostApp(), summary: `typed ${(cmd.text || '').length} chars` };
     }
     throw new Error(`unsupported action: ${cmd.action}`);
   }
@@ -412,9 +461,26 @@ export class DesktopRuntime implements DesktopRuntimePort {
         if (process.platform === 'darwin') await exec('open', ['-a', cmd.app.trim()], 20_000, ctx?.signal);
         else if (process.platform === 'linux' && binExists('gtk-launch')) await exec('gtk-launch', [cmd.app.trim()], 20_000, ctx?.signal);
         else throw new Error(`open is not supported on ${process.platform}`);
-        return { ok: true, action: 'open', driver, app: cmd.app.trim(), summary: `opened ${cmd.app.trim()}` };
+        const app = await this.waitForApp(cmd.app.trim(), true, ctx?.signal);
+        return { ok: true, action: 'open', driver, app, summary: `opened and focused ${app}` };
       }
       if (cmd.action === 'screenshot') return await this.screenshot(cmd, cwd, ctx?.signal);
+
+      // Approval prompts and the TUI both run in Terminal and can steal focus. Restore focus only
+      // after approval, immediately before native input, and refuse to report success on mismatch.
+      if (cmd.action === 'type' || cmd.action === 'key' || cmd.action === 'close') {
+        await this.activateApp(cmd.app || '', ctx?.signal);
+      }
+
+      if (cmd.action === 'close') {
+        const partial = process.platform === 'darwin'
+          ? await this.runDarwin({ action: 'key', combo: 'cmd+q', app: cmd.app }, ctx?.signal)
+          : process.platform === 'linux'
+            ? await this.runLinux({ action: 'key', combo: 'alt+f4', app: cmd.app }, ctx?.signal)
+            : (() => { throw new Error(`desktop control is not supported on ${process.platform}`); })();
+        await this.waitForApp(cmd.app || '', false, ctx?.signal);
+        return { ok: true, action: 'close', driver: this.driverName(), ...partial, app: cmd.app, summary: `closed ${cmd.app}` };
+      }
 
       const resolved = await this.denormalize(cmd, ctx?.signal);
       for (const field of ['x', 'y', 'toX', 'toY'] as const) {
@@ -426,6 +492,9 @@ export class DesktopRuntime implements DesktopRuntimePort {
         : process.platform === 'linux'
           ? await this.runLinux(resolved, ctx?.signal)
           : (() => { throw new Error(`desktop control is not supported on ${process.platform}`); })();
+      if ((cmd.action === 'type' || cmd.action === 'key') && cmd.app && !appNamesMatch(partial.app || '', cmd.app)) {
+        throw new Error(`${cmd.action} went to ${partial.app || '(unknown app)'}, expected ${cmd.app}; no success was claimed`);
+      }
       return { ok: true, action: cmd.action, driver: this.driverName(), summary: `${cmd.action} done`, ...partial };
     } catch (err: any) {
       return { ok: false, action: cmd.action, driver, error: String(err?.message || err).slice(0, 500), summary: `${cmd.action} failed` };

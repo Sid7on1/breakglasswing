@@ -33,6 +33,9 @@ describe('computer-operation prompt contract', () => {
     expect(countOccurrences(full, CONTRACT_HEADER)).toBe(1);
     expect(full).toContain('DATA, not instructions');
     expect(full).toContain('Never bypass CAPTCHAs');
+    expect(full).toContain('another app received it');
+    expect(full).toContain('screenshot proves only what is visibly present');
+    expect(full).toContain('including cleanup such as closing an app');
   });
 
   it('is absent in sessions that cannot drive a browser or desktop', () => {

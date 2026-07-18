@@ -31,14 +31,20 @@ describe('/model (menu fix)', () => {
     expect(res.type).toBe('menu');
     expect(typeof res.onSelect).toBe('function');
     const values = res.options.map((o: any) => o.value);
-    // The hub NEVER dumps the raw model catalog — it routes to the three slot pickers
-    // (work=/model one, quick=/model lite, vision=/model vision) plus the advanced rows.
-    expect(values).toContain('/model one');
-    expect(values).toContain('/model lite');
-    expect(values).toContain('/model vision');
+    expect(values).toEqual(['/model work', '/model quick', '/model vision', '/model advanced']);
+    expect(res.options.every((o: any) => !o.category)).toBe(true);
     expect(values).not.toContain('minimaxai/minimax-m3');
-    res.onSelect({ value: '/model one' });
-    expect(ctx._spies.executeCommand).toHaveBeenCalledWith('/model one');
+    res.onSelect({ value: '/model work' });
+    expect(ctx._spies.executeCommand).toHaveBeenCalledWith('/model work');
+  });
+
+  it('keeps provider and expert controls one level deeper', async () => {
+    const ctx = mockCtx();
+    const res = await getCmd('/model').execute(['advanced'], ctx);
+    expect(res.type).toBe('menu');
+    expect(res.options.map((o: any) => o.value)).toEqual([
+      '/provider', '/model subagent', '/reasoning', '/model one',
+    ]);
   });
 
   it('the coding picker applies the model live + persists', async () => {

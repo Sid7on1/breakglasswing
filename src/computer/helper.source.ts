@@ -62,6 +62,30 @@ let keyCodes: [String: CGKeyCode] = [
   "down": 125, "up": 126,
 ]
 
+func postKey(_ code: CGKeyCode, _ flags: CGEventFlags = []) {
+  let d = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true); d?.flags = flags; post(d)
+  let u = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false); u?.flags = flags; post(u)
+}
+
+// Text fields accept Unicode injection, but native apps such as Calculator listen for physical
+// key events. Use the real US-layout key codes for ASCII and fall back to Unicode only when a
+// character has no physical representation.
+func physicalKey(_ ch: Character) -> (CGKeyCode, CGEventFlags)? {
+  let s = String(ch)
+  let shifted: [String: String] = [
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
+    "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\\\",
+    ":": ";", "<": ",", ">": ".", "?": "/", "~": "\`"
+  ]
+  if let base = shifted[s], let code = keyCodes[base] { return (code, .maskShift) }
+  if s == "\\n" || s == "\\r" { return (keyCodes["return"]!, []) }
+  let lower = s.lowercased()
+  if let code = keyCodes[lower] {
+    return (code, s != lower ? .maskShift : [])
+  }
+  return nil
+}
+
 let args = CommandLine.arguments
 guard args.count >= 2 else { die("usage: bimax-desktop <command> [args]") }
 
@@ -156,8 +180,7 @@ case "key":
     }
   }
   guard let code = keyCodes[keyName] else { die("unknown key: " + keyName) }
-  let d = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true); d?.flags = flags; post(d)
-  let u = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false); u?.flags = flags; post(u)
+  postKey(code, flags)
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
 
 case "type":
@@ -165,15 +188,18 @@ case "type":
   guard let data = Data(base64Encoded: args[2]), let text = String(data: data, encoding: .utf8) else {
     die("type argument must be base64 UTF-8")
   }
-  for chunk in text.map({ String($0) }).chunked(20) {
-    let s = chunk.joined()
-    let units = Array(s.utf16)
-    let d = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
-    d?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-    post(d)
-    let u = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
-    u?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
-    post(u)
+  for ch in text {
+    if let (code, flags) = physicalKey(ch) {
+      postKey(code, flags)
+    } else {
+      let units = Array(String(ch).utf16)
+      let d = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)
+      d?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+      post(d)
+      let u = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
+      u?.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+      post(u)
+    }
   }
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
 
@@ -189,4 +215,4 @@ extension Array {
 `;
 
 /** Bump when the protocol changes so stale cached binaries are never reused. */
-export const DESKTOP_HELPER_VERSION = 1;
+export const DESKTOP_HELPER_VERSION = 2;

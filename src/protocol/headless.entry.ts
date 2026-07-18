@@ -63,6 +63,7 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     options,
     graphStore,
     codebaseIndexer,
+    saveConfig,
   });
 
   // Unattended crash recovery: only recent, single-session, outcome-bound assignments running
@@ -228,7 +229,7 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   // transcript menus. Sensitive/engine-internal keys (API keys, workspaceRoot,
   // dangerouslySkipPermissions, onboarding flags) stay OFF the wire on purpose.
   const CONFIG_WIRE_KEYS = [
-    'model', 'liteModel', 'fallbackModel', 'subagentModel',
+    'model', 'liteModel', 'visionModel', 'fallbackModel', 'subagentModel',
     'temperature', 'topP', 'maxTokens', 'timeout',
     'reasoningEffort', 'contextMode', 'contextWindowTokens', 'parallelToolCalls',
     'maxToolIterations', 'maxSubAgents',

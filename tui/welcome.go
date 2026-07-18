@@ -10,11 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Compact wordmark: the dual-orbit glyph mirrors the desktop icon without taking over the terminal.
-var logoLines = []string{
-	"  ◜◉◝  BIMAX",
-	"  ◟ ◞  two minds, one workspace",
-}
+const logoLine = "  BIMAX"
 
 // gradientLine sweeps the wordmark left → right from the phosphor accent into its lighter shimmer
 // and back — depth within the one signal color, never a second hue. Spaces are skipped so the
@@ -52,9 +48,8 @@ func shortPath(p string) string {
 
 // showWelcome injects the landing banner at the top of the (freshly cleared) screen, once.
 // Design: NO box — a full-width bordered rectangle on an empty screen read as stark and broken.
-// Instead: the gradient wordmark + version, then the three model slots in plain words (work /
-// quick / vision) so "which model does what" is answered before the first prompt, then cwd and
-// one line of key hints. Left-aligned, six rows of quiet metadata, content-first.
+// Instead: a one-line wordmark, only the model roles that affect the user's next turn, cwd, and
+// one plain-language action hint. No slogan, duplicate model explanation, or keybinding wall.
 func (m *model) showWelcome() {
 	if m.welcomed {
 		return
@@ -63,11 +58,10 @@ func (m *model) showWelcome() {
 
 	var b strings.Builder
 	if version != "dev" {
-		fmt.Fprintf(&b, "%s %s\n", gradientLine(logoLines[0]), metaVal.Render("v"+version))
+		fmt.Fprintf(&b, "%s %s\n\n", gradientLine(logoLine), metaVal.Render("v"+version))
 	} else {
-		fmt.Fprintf(&b, "%s\n", gradientLine(logoLines[0]))
+		fmt.Fprintf(&b, "%s\n\n", gradientLine(logoLine))
 	}
-	fmt.Fprintf(&b, "%s\n\n", gradientLine(logoLines[1]))
 
 	work := shortModel(m.fCoding)
 	if work == "" {
@@ -75,12 +69,9 @@ func (m *model) showWelcome() {
 		// the wizard (which also opens automatically when there is no key at all).
 		fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("model "), warnStyle.Render("not chosen yet — run /setup"))
 	} else {
-		fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("work  "), metaVal.Render(work), tipStyle.Render("· deep work"))
-		if q := shortModel(m.fLite); q != "" && q != work {
-			fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("quick "), metaVal.Render(q), tipStyle.Render("· instant small replies"))
-		}
+		fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("work  "), metaVal.Render(work))
 		if v := shortModel(m.fVision); v != "" {
-			fmt.Fprintf(&b, "  %s %s %s\n", metaKey.Render("vision"), metaVal.Render(v), tipStyle.Render("· sees screenshots"))
+			fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("vision"), metaVal.Render(v))
 		}
 	}
 
@@ -98,8 +89,7 @@ func (m *model) showWelcome() {
 		fmt.Fprintf(&b, "  %s %s\n", metaKey.Render("guard "), warnStyle.Render("bypassed — no approval prompts"))
 	}
 
-	fmt.Fprintf(&b, "\n  %s\n  %s", tipStyle.Render("Describe an outcome — Bimax explores, builds, and verifies."),
-		tipStyle.Render("/model models · /help commands · Shift+Tab modes · Ctrl+F search"))
+	fmt.Fprintf(&b, "\n  %s", tipStyle.Render("Type a task · /help · /model"))
 
 	m.append("\n" + b.String() + "\n")
 }

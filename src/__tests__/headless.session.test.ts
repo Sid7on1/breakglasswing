@@ -1,5 +1,6 @@
 import { cliEvents } from '../cli/events';
 import { HeadlessSession } from '../protocol/headless.session';
+import '../cli/commands/meta';
 
 // The headless session must honor /tier identically to Ink's FullScreen: a set_tier event pins the
 // model tier and reflects it in the footer via a model_tier emit. (Routing itself is exercised at
@@ -51,5 +52,19 @@ describe('HeadlessSession — set_tier routing parity', () => {
     expect(messages).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: 'assistant', content: 'Coordinator continued the outcome.' }),
     ]));
+  });
+
+  it('persists slash-command settings through the headless dependency', async () => {
+    const saveConfig = jest.fn().mockResolvedValue({});
+    const applyConfig = jest.fn();
+    const session = new HeadlessSession({
+      personas: {},
+      options: { model: 'old/model', llmAdapter: { applyConfig } },
+      graphStore: {} as any,
+      saveConfig,
+    });
+    await session.dispatch('/model new/model');
+    expect(applyConfig).toHaveBeenCalledWith({ model: 'new/model' });
+    expect(saveConfig).toHaveBeenCalledWith({ model: 'new/model' });
   });
 });

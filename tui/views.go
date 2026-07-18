@@ -213,11 +213,14 @@ func (m model) menuView() string {
 		fmt.Fprintf(&b, "%s\n", tb.String())
 	}
 
-	b.WriteString(searchHdr.Render("🔍 "))
-	if m.menuFilter == "" {
-		fmt.Fprintf(&b, "%s\n", subtleStyle.Render("Type to search…"))
-	} else {
-		fmt.Fprintf(&b, "%s\n", searchCur.Render(m.menuFilter))
+	showSearch := len(m.menuOpts) > menuMaxVisible || m.menuFilter != ""
+	if showSearch {
+		b.WriteString(searchHdr.Render("🔍 "))
+		if m.menuFilter == "" {
+			fmt.Fprintf(&b, "%s\n", subtleStyle.Render("Type to search…"))
+		} else {
+			fmt.Fprintf(&b, "%s\n", searchCur.Render(m.menuFilter))
+		}
 	}
 
 	if len(opts) == 0 {
@@ -261,9 +264,15 @@ func (m model) menuView() string {
 	if end < len(opts) {
 		fmt.Fprintf(&b, "  %s\n", subtleStyle.Render(fmt.Sprintf("↓ %d more", len(opts)-end)))
 	}
-	hints := "↑↓ move · enter select · esc close · type to search"
+	hints := "↑↓ move · enter select · esc close"
+	if showSearch {
+		hints += " · type to search"
+	}
 	if len(m.menuTabs) > 0 {
-		hints = "↑↓ move · ←→ tabs · enter select · esc close · type to search"
+		hints = "↑↓ move · ←→ tabs · enter select · esc close"
+		if showSearch {
+			hints += " · type to search"
+		}
 	}
 	fmt.Fprintf(&b, "%s\n", subtleStyle.Render(hints))
 	return strings.TrimRight(b.String(), "\n")

@@ -288,6 +288,9 @@ type model struct {
 	// `ready` arrives first and rendering there showed "not chosen yet" to configured users. If no
 	// snapshot lands by this deadline (old engine), the tick shows the banner anyway.
 	welcomeBy time.Time
+	// Exact consecutive system messages can arrive from both the command result and a live config
+	// event. Keep one copy in scrollback; reset on any user/assistant message.
+	lastSystemContent string
 
 	// footer state (mirrors Ink's Footer.tsx)
 	fTier      string         // "lite" | "heavy"

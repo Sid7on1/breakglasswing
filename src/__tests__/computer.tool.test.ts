@@ -1,4 +1,4 @@
-import { scaleNormalizedPoint, DesktopRuntimePort, DesktopResult } from '../computer/desktop.runtime';
+import { appNamesMatch, scaleNormalizedPoint, DesktopRuntimePort, DesktopResult } from '../computer/desktop.runtime';
 import { screenshotFromToolResult } from '../core/multimodal';
 import { IGovernor } from '../core/interfaces';
 import { createComputerTool } from '../tools/implementations/computer.tool';
@@ -8,7 +8,7 @@ const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) 
 function fakeRuntime(overrides: Partial<DesktopResult> = {}): DesktopRuntimePort {
   return {
     run: jest.fn().mockImplementation(async (cmd: any): Promise<DesktopResult> => ({
-      ok: true, action: cmd.action, driver: 'fake', summary: `${cmd.action} done`, ...overrides,
+      ok: true, action: cmd.action, driver: 'fake', app: cmd.app, summary: `${cmd.action} done`, ...overrides,
     })),
     quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true, accessibility: null, screenRecording: null }),
     frontmostApp: jest.fn().mockResolvedValue('Notes'),
@@ -24,6 +24,11 @@ describe('ComputerTool', () => {
     expect(scaleNormalizedPoint(1000, 956)).toBe(956);
     expect(scaleNormalizedPoint(-50, 1470)).toBe(0);
     expect(scaleNormalizedPoint(2000, 1470)).toBe(1470);
+  });
+
+  it('compares app names without case or the .app suffix', () => {
+    expect(appNamesMatch('Calculator', 'calculator.app')).toBe(true);
+    expect(appNamesMatch('Terminal', 'Calculator')).toBe(false);
   });
 
   it('gates acting verbs with the frontmost app as the grant scope, leaves observation free', async () => {
@@ -48,6 +53,26 @@ describe('ComputerTool', () => {
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       action: 'open', app: 'Calculator',
     }));
+  });
+
+  it('locks later keyboard input and cleanup to the most recently opened app', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'open', app: 'Calculator' }, { cwd: process.cwd() });
+    await tool.execute({ action: 'type', text: '2+2' }, { cwd: process.cwd() });
+    await tool.execute({ action: 'key', combo: 'return' }, { cwd: process.cwd() });
+    await tool.execute({ action: 'close' }, { cwd: process.cwd() });
+
+    const calls = (runtime.run as jest.Mock).mock.calls.map(([cmd]) => cmd);
+    expect(calls.slice(1)).toEqual([
+      expect.objectContaining({ action: 'type', app: 'Calculator' }),
+      expect.objectContaining({ action: 'key', app: 'Calculator' }),
+      expect.objectContaining({ action: 'close', app: 'Calculator' }),
+    ]);
+    const approvals = (governor.approveTaskExecution as jest.Mock).mock.calls
+      .filter(([kind]) => kind === 'COMPUTER_CONTROL')
+      .map(([, payload]) => payload);
+    expect(approvals.every((payload: any) => payload.app === 'Calculator')).toBe(true);
   });
 
   it('flags high-impact intent (send/purchase/delete wording) so the governor always prompts', async () => {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -798,6 +799,9 @@ func TestInteractiveMenu(t *testing.T) {
 	if !strings.Contains(m.menuView(), "Palette") || !strings.Contains(m.menuView(), "/git") {
 		t.Fatal("menu not rendered")
 	}
+	if strings.Contains(stripANSI(m.menuView()), "Type to search") {
+		t.Fatal("small menus should not spend a row on an idle search prompt")
+	}
 
 	// Navigate down and select → a menuSelect carrying the option value + menu id is sent, so the
 	// engine can run that menu's onSelect (not dispatch the value as a chat turn).
@@ -812,6 +816,28 @@ func TestInteractiveMenu(t *testing.T) {
 	_ = json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &sent)
 	if sent["t"] != "menuSelect" || sent["value"] != "/diff" || sent["id"] != "menu-1" {
 		t.Fatalf("selecting the 2nd option should send menuSelect /diff (id menu-1), got %v", sent)
+	}
+}
+
+func TestLargeMenuKeepsSearchPrompt(t *testing.T) {
+	m, _ := newTestModel()
+	m.menuTitle = "Many choices"
+	for i := 0; i < menuMaxVisible+1; i++ {
+		m.menuOpts = append(m.menuOpts, menuOption{Label: fmt.Sprintf("Option %d", i), Value: fmt.Sprint(i)})
+	}
+	if !strings.Contains(stripANSI(m.menuView()), "Type to search") {
+		t.Fatal("large menus should advertise search")
+	}
+}
+
+func TestConsecutiveDuplicateSystemMessageRendersOnce(t *testing.T) {
+	m, _ := newTestModel()
+	msg := MessageEntry{Role: "system", Content: "Vision model → vision/model"}
+	m.renderMessage(msg)
+	m.renderMessage(msg)
+	joined := strings.Join(m.lines, "\n")
+	if strings.Count(stripANSI(joined), msg.Content) != 1 {
+		t.Fatalf("duplicate system message was rendered: %q", joined)
 	}
 }
 

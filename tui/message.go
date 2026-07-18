@@ -153,6 +153,7 @@ func (m *model) renderMessage(me MessageEntry) {
 	}
 	switch me.Role {
 	case "user":
+		m.lastSystemContent = ""
 		// A new turn begins — clear any tool stragglers so this turn's tools start from a clean slate.
 		m.turnTools = nil
 		// Reset the per-turn reasoning clock so "Thought for Ns" measures THIS turn, and drop any
@@ -170,6 +171,7 @@ func (m *model) renderMessage(me MessageEntry) {
 		}
 		m.append(caretStyle.Render("❯ ") + userStyle.Render(me.Content))
 	case "assistant":
+		m.lastSystemContent = ""
 		m.histTokens += len([]rune(me.Content)) / 4
 		if m.stream != "" {
 			// Streamed turn: the closed blocks are already in scrollback (committed progressively as
@@ -208,6 +210,10 @@ func (m *model) renderMessage(me MessageEntry) {
 		b.WriteString(md)
 		m.append(b.String())
 	default: // system
+		if me.Content != "" && me.Content == m.lastSystemContent {
+			return
+		}
+		m.lastSystemContent = me.Content
 		// A finished sub-agent posts its ENTIRE report (hundreds of lines) as a success message.
 		// Committing that wall to scrollback buries the parent's synthesized answer, so collapse it to
 		// a single marker line — the full output stays live in the sub-agent panel (Ctrl+A), and the

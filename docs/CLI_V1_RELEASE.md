@@ -16,7 +16,11 @@ and Vision model slots introduced in v1.0.3 and hardens the execution layer unde
 - **General failure memory:** repeated tool failures have per-class retry budgets, so the agent must
   change strategy instead of looping indefinitely.
 - **Native computer use:** the vision slot now receives screenshots correctly and first-party
-  desktop control is available without an MCP dependency.
+  desktop control is available without an MCP dependency. Keyboard input is locked to its intended
+  app after approval prompts, screenshots name the frontmost app, and requested cleanup can quit and
+  verify-close native apps instead of silently leaving them open.
+- **Honest, compact model UI:** Work, Quick, and Vision choices persist from the Go TUI, the model
+  picker keeps advanced controls one level deeper, and duplicate setup messages are collapsed.
 - **Truthful diagnostics:** stream preambles no longer corrupt provider/key latency measurements;
   `bimax --version` reports commit, tree state, build time, and channel provenance.
 - **Fault injection and structural gates:** ledger/config/spawn failures have tested recovery paths,
@@ -28,7 +32,7 @@ and Vision model slots introduced in v1.0.3 and hardens the execution layer unde
 
 1. TypeScript production build.
 2. Protocol v3 mirror (18 message tags, byte-identical generated contract).
-3. 170 engine suites and 1,271 assertions, including real Chromium interaction.
+3. 170 engine suites and 1,275 assertions, including real Chromium interaction.
 4. Go TUI tests.
 5. Self-contained host binary build.
 6. Artifact version and help identity.
