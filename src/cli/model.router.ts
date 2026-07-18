@@ -1,25 +1,50 @@
 import { LlmAdapter } from '../core/llm.adapter';
-import { extractJson } from '../core/llm.adapter';
-import { Logger, withTimeout } from '../utils';
 
 /**
- * Model-tier routing. Two slots are configured: the LITE model (fast, cheap — the default
- * responder) and the HEAVY coding model. Every turn is handled by LITE unless it's escalated.
+ * Model-tier routing. Two slots are configured: the QUICK model (fast, cheap — for chat and
+ * trivially-answerable turns) and the WORK coding model (the user's chosen main model).
  *
- * Hybrid strategy (chosen with the user):
- *  1. A cheap local heuristic short-circuits obvious chat/acks straight to LITE — no LLM round-trip.
- *  2. For anything else, the LITE model itself decides whether to escalate, and if so produces a
- *     one-line task brief. On escalation the HEAVY model receives the user's ORIGINAL prompt with
- *     that brief prepended as context — we never rewrite the user's words (that loses intent).
+ * ARCHITECTURE (2026-07-18 — replaces the remote pre-flight classifier):
+ * Routing is now FULLY LOCAL and deterministic. Seven architectures were compared before this
+ * design was chosen (docs/ROUTING_DECISION.md has the measured comparison):
+ *
+ *   1. Serial remote classification (the old design) — a non-streaming lite-model round-trip
+ *      cost ~1.17s of first-token latency per ambiguous turn, measured against a 120ms mock;
+ *      against real NIM it was the single largest local latency source after the key-cooldown
+ *      bug was fixed.
+ *   2. Parallel classification + main-call preparation — already partially in place (routing
+ *      overlapped @-mention expansion); the turn was still blocked on the slowest leg, the
+ *      classifier itself. Ceiling: ~150ms saved.
+ *   3. Local deterministic routing for obvious cases — existed (heuristicTier); extended here.
+ *   4. Local classifier + remote fallback — the remote leg re-introduces the exact tail latency
+ *      being removed, on exactly the turns that hit it. Rejected.
+ *   5. Optimistic Quick with escalation — serves real work from the weak model first (observed
+ *      live: the quick model flails on tool loops), then pays double latency+cost to escalate.
+ *      Rejected: quality-unsafe in the failure direction that matters.
+ *   6. Default Work with later adaptation — correctness-safe: the Work model handles everything
+ *      the Quick model can, so a misroute in this direction costs tokens, never quality.
+ *      ADOPTED as the ambiguity default.
+ *   7. Capability-driven routing — the informative capability signals (will this turn need
+ *      tools/repo context?) are visible in the prompt locally: file paths, @mentions, code
+ *      fences, repo-referring nouns, imperative verbs. ADOPTED as the signal set for the local
+ *      classifier; mid-turn model switching was rejected as a separate, riskier change.
+ *
+ * What the old remote classifier handled correctly is preserved deterministically:
+ *   - short imperatives outside HEAVY_VERB ("please rework the tokenizer") → Work, via the
+ *     general-imperative detector (the old shape fallback misrouted these to Quick at <140 chars);
+ *   - repo-referring questions ("what does the governor do here") → Work, via the repo-signal
+ *     detector (answering requires reading code);
+ *   - genuinely self-contained knowledge questions ("what's the difference between let and
+ *     const?") → Quick, via the knowledge-question detector.
+ * What it produced that is deliberately dropped: the one-line "task brief" (optional framing —
+ * the Work model always received the user's original prompt anyway).
  */
 export type Tier = 'lite' | 'heavy';
 
 export interface RouteDecision {
   tier: Tier;
-  /** One-line framing for the heavy model; only set when escalating. */
-  brief?: string;
   /** How the decision was reached — for logging / the footer tooltip. */
-  via: 'heuristic' | 'classifier' | 'pinned' | 'fallback' | 'cache' | 'unified';
+  via: 'heuristic' | 'local' | 'pinned' | 'fallback' | 'unified';
 }
 
 // Obvious conversational turns that never need the heavy model. Anchored to the whole (short)
@@ -27,9 +52,7 @@ export interface RouteDecision {
 const CHATTY = /^(hi|hey+|hello|yo|sup|howdy|thanks|thank you|thx|ty|ok|okay|k|cool|nice|great|awesome|got it|gotcha|sure|yep|yeah|yes|no|nope|hmm|lol|wow|same|right)[!.…\s]*$/i;
 
 // Obvious coding-work signals: an imperative "change/build code" verb, or unambiguous code context
-// (a fenced block, a stack trace). These route straight to HEAVY with no classifier round-trip —
-// the pre-flight LLM call was the single biggest source of first-token latency, and for these
-// prompts its answer is a foregone conclusion.
+// (a fenced block, a stack trace). These route straight to HEAVY with no further analysis.
 const HEAVY_VERB = /\b(implement|refactor|debug|rewrite|redesign|optimi[sz]e|migrate|integrate|diagnose|troubleshoot|build (?:a|the|out|me)\b|write (?:a|the|some|me)? ?(?:code|tests?|script|function|class|module|component)\b|fix (?:the|this|that|a|my)? ?(?:bug|tests?|error|crash|issue|build|types?)\b|add (?:a|the)? ?(?:support|tests?|feature|endpoint|command|flag)\b|create (?:a|the)? ?(?:file|class|function|module|component|script|tests?)\b)/i;
 const CODE_CONTEXT = /```|\bTraceback \(most recent call last\)|\n\s+at [\w$.<[\]]+ \([^)]*:\d+:\d+\)/;
 // Driving the computer is real work: a browser/desktop operation loop (observe → act → verify)
@@ -39,7 +62,7 @@ const OPERATE_CONTEXT = /\b(screenshot|computer ?tool|browser ?tool|click (?:on|
 
 /**
  * Local, LLM-free pre-filter. Returns a definite tier for obvious cases, or null to mean
- * "not obvious — ask the classifier".
+ * "not obvious — run the full local classifier".
  */
 export function heuristicTier(prompt: string): Tier | null {
   const p = prompt.trim();
@@ -53,84 +76,55 @@ export function heuristicTier(prompt: string): Tier | null {
   return null;
 }
 
-const CLASSIFIER_SYSTEM = `You are a fast routing classifier for a coding agent that has two models:
-- LITE: quick chat, greetings, simple factual questions, a single small file read or one-line edit, status checks.
-- HEAVY: multi-step coding, debugging, refactors, writing or changing real code, architecture, anything needing deep reasoning or several tool calls.
-Decide which model should handle the user's message. Prefer LITE unless the task clearly needs HEAVY.
-If HEAVY, write a single-sentence task brief that frames what the heavy model must accomplish (do NOT rewrite or expand the user's request — just frame it).
-Reply with ONLY a JSON object, no prose: {"tier":"lite"} or {"tier":"heavy","brief":"..."}.`;
+// ——— Local deterministic classifier (replaces the remote lite-model round-trip) ———
+
+// General imperative verbs that signal actionable work but are not in HEAVY_VERB. The old shape
+// fallback (>140 chars → heavy) misrouted short imperatives like "please rework the tokenizer to
+// stream" (38 chars) to the quick model; this detector is the fix, regression-tested.
+const GENERAL_IMPERATIVE = /\b(make|change|update|remove|delete|rename|move|install|uninstall|upgrade|deploy|run|rerun|re-?index|test|check|verify|investigate|analy[sz]e|look (?:at|into)|search|find|audit|review|clean ?up|rework|adjust|improve|convert|port|split|merge|extract|document|configure|set ?up|enable|disable|wire|connect|bump|revert|rebase|commit|push|pull|release|publish|bundle|compile|lint|format|profile|benchmark|scaffold|generate|summari[sz]e)\b/i;
+
+// Signals that answering will require the repo, the filesystem, or a tool: file paths and
+// extensions, @mentions, backticked identifiers, URLs, and repo-referring nouns ("this function",
+// "the governor", "my branch"). A question carrying one of these is work, not chat.
+const REPO_SIGNAL = /[@`]|https?:\/\/|[\w.-]+\/[\w.-]+|\.[a-z]{1,4}\b|\b(?:this|that|the|my|our) +(?:repo|repository|codebase|project|file|folder|directory|function|method|class|module|component|test|tests|suite|bug|error|crash|branch|commit|pr|diff|build|code|script|config|governor|router|adapter|runtime|session|pipeline)\b/i;
+
+// Self-contained knowledge questions the quick model answers well: interrogative shape, short,
+// and — crucially — carrying NONE of the work signals above. Auxiliary verbs (do/can/is/…)
+// only count as question-openers when followed by a pronoun-like subject — "do you know X" is a
+// question, "do something about the flaky test" is an instruction.
+const QUESTION_SHAPE = /^(what|what's|whats|why|how|when|where|who|which|explain|define|compare|tell me)\b|^(is|are|was|were|does|do|did|can|could|should|would|will)\s+(i|you|we|they|it|he|she|there|this|that|anyone|someone)\b/i;
 
 /**
- * Decide the tier for a turn. `pinned` (manual override) wins outright. Otherwise the heuristic
- * runs first, then the lite model classifies. Any failure falls back to LITE — the default
- * responder — so routing can never block a turn.
+ * Deterministic local classifier for prompts the heuristic calls ambiguous. Never calls a model,
+ * never fails, costs ~0ms. Direction of safety: an ambiguous prompt routes to HEAVY (the Work
+ * model handles everything the Quick model can — a misroute in this direction costs tokens,
+ * never quality), so the only lite routes are affirmatively-detected chat and self-contained
+ * knowledge questions.
  */
-// The classifier is a pre-flight call that runs BEFORE the user sees anything, so it must never be
-// the thing that hangs a turn. If the lite model cold-starts, we'd rather just answer with lite than
-// make the user wait for the router. Cap it tightly and fall back to lite on timeout: with the
-// heavy-verb heuristic above catching unmistakable coding work locally, everything reaching the
-// classifier is borderline — and a borderline turn answered by lite is a fine outcome, so 3s is
-// the most a user should ever wait on routing.
-const CLASSIFIER_TIMEOUT_MS = 3000;
-
-// Bounded cache of classifier decisions so identical/repeated prompts (re-asks after an error,
-// "yes"/"continue", retried turns) skip the pre-flight LLM round-trip — saving latency and a lite-model
-// call each time. Keyed by the normalized prompt; oldest entry evicted at the cap (plain FIFO is plenty
-// for this access pattern). Only genuine classifier results are cached — never a timeout/fallback.
-const CLASSIFIER_CACHE_MAX = 256;
-const _classifierCache = new Map<string, RouteDecision>();
-function classifierKey(prompt: string): string {
-  return prompt.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 512);
+export function localTier(prompt: string): Tier {
+  const p = prompt.trim();
+  const hasWorkSignal = GENERAL_IMPERATIVE.test(p) || REPO_SIGNAL.test(p);
+  if (!hasWorkSignal && p.length <= 200 && QUESTION_SHAPE.test(p)) return 'lite';
+  return 'heavy';
 }
-function cacheDecision(key: string, decision: RouteDecision): RouteDecision {
-  if (_classifierCache.size >= CLASSIFIER_CACHE_MAX) {
-    const oldest = _classifierCache.keys().next().value;
-    if (oldest !== undefined) _classifierCache.delete(oldest);
-  }
-  _classifierCache.set(key, decision);
-  return decision;
-}
-/** Test/maintenance hook — drop all cached routing decisions. */
-export function clearClassifierCache(): void { _classifierCache.clear(); }
 
+/**
+ * Decide the tier for a turn. `pinned` (manual override) wins outright; a unified single-model
+ * setup makes routing a no-op; otherwise the heuristic runs first and the local classifier
+ * settles the remainder. Fully synchronous and deterministic — routing can never block a turn,
+ * time out, or spend a model call. (Kept async-shaped: call sites treat routing as awaitable.)
+ */
 export async function decideTier(llm: LlmAdapter, prompt: string, pinned?: Tier | null): Promise<RouteDecision> {
   if (pinned) return { tier: pinned, via: 'pinned' };
 
-  // Unified single-model setup (the default: both slots = Step 3.7 Flash) — the tiers resolve to
-  // the same model, so routing is a no-op. Skip the heuristic AND the pre-flight classifier LLM
-  // call entirely; that call was up to CLASSIFIER_TIMEOUT_MS of dead first-token latency per turn
-  // for zero effect on which model answered.
+  // Unified single-model setup — the tiers resolve to the same model, so routing is a no-op.
   const mainModel = llm.userModel || llm.defaultModel || '';
   if (!llm.liteModel || llm.liteModel === mainModel) return { tier: 'lite', via: 'unified' };
 
   const h = heuristicTier(prompt);
   if (h) return { tier: h, via: 'heuristic' };
 
-  const key = classifierKey(prompt);
-  const hit = _classifierCache.get(key);
-  if (hit) return { ...hit, via: 'cache' };
-
-  try {
-    const raw = await withTimeout(
-      llm.chatCompletion([{ role: 'user', content: prompt }], CLASSIFIER_SYSTEM, { lite: true }),
-      CLASSIFIER_TIMEOUT_MS,
-      'classifier',
-    );
-    const parsed = JSON.parse(extractJson(raw) || '{}');
-    if (parsed?.tier === 'heavy') {
-      const brief = typeof parsed.brief === 'string' && parsed.brief.trim() ? parsed.brief.trim() : undefined;
-      return cacheDecision(key, { tier: 'heavy', brief, via: 'classifier' });
-    }
-    return cacheDecision(key, { tier: 'lite', via: 'classifier' });
-  } catch (e: any) {
-    // Classifier unavailable (commonly: its 3s budget lost to boot-time indexing CPU, or a local
-    // network blip). Blanket-defaulting to lite was wrong for substantial prompts — a detailed
-    // request stuck on the quick model flails visibly. Shape is a fine tiebreak: long prompts are
-    // work; short borderline ones are fine on lite.
-    const fallback: Tier = prompt.trim().length > 140 ? 'heavy' : 'lite';
-    Logger.warn(`[ModelRouter] classifier failed (${e?.message}); falling back to ${fallback} by prompt shape.`);
-    return { tier: fallback, via: 'fallback' }; // not cached — a transient failure shouldn't pin the route
-  }
+  return { tier: localTier(prompt), via: 'local' };
 }
 
 // Obvious no-tool conversational messages beyond bare acks: identity/capability/meta questions the
@@ -153,10 +147,4 @@ export function isConversational(prompt: string): boolean {
   if (p.length <= 40 && CHATTY.test(p)) return true;
   if (CONVO_META.test(p)) return true;
   return false;
-}
-
-/** Prepend the brief as context for the heavy model without altering the user's own words. */
-export function applyBrief(prompt: string, brief?: string): string {
-  if (!brief) return prompt;
-  return `[Routing brief: ${brief}]\n\n${prompt}`;
 }

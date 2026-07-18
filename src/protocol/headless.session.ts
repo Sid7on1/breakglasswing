@@ -3,7 +3,7 @@ import { AgentPersona } from '../cli/personas/base.persona';
 import { routeQuery } from '../cli/agentRouter';
 import { expandAtMentions, expandFileAtMentions } from '../cli/atMention';
 import { globalCommandRegistry } from '../cli/commands/registry';
-import { decideTier, applyBrief, Tier, isConversational } from '../cli/model.router';
+import { decideTier, Tier, isConversational } from '../cli/model.router';
 import { getEpistemicLedger } from '../mind/epistemic.ledger';
 import {
   recordTurn, beginTurnTimeline, markRouted, markAssembled, markFirstVisibleToken, endTurnTimeline,
@@ -122,8 +122,8 @@ export class HeadlessSession {
     // claims open on edits and resolve when a build/test run names the touched files.
     const beforeLedger = (() => { try { return getEpistemicLedger().stats(); } catch { return null; } })();
     if (!opts.autonomous) cliEvents.emit('message', this.msg('user', query));
-    // Show activity IMMEDIATELY — @-mention expansion + decideTier (an LLM classifier call) below can
-    // take 10-15s, during which the front-end would otherwise sit silent after the user's message.
+    // Show activity IMMEDIATELY — @-mention expansion below can take a moment, during which the
+    // front-end would otherwise sit silent after the user's message. (Routing itself is local now.)
     cliEvents.emit('spinner_state', 'thinking', 'Thinking…');
 
     const active = (conversational || opts.autonomous)
@@ -205,10 +205,10 @@ export class HeadlessSession {
    * feeds the perf timeline and the wire) and marks the routing/assembly phase boundaries.
    */
   private async runFullHarness(active: AgentPersona, query: string, autonomous: boolean, onToken: (t: string) => void): Promise<void> {
-    // Kick routing off FIRST — it only needs the raw query — so the classifier (when the local
-    // heuristic can't decide) overlaps with @-mention expansion instead of stacking a serial round-trip.
+    // Routing is local and deterministic (no model call) — it resolves in ~0ms. Kicked off before
+    // @-mention expansion purely so the decision is ready the moment expansion completes.
     const tierPromise = decideTier(this.deps.options.llmAdapter, query, this.pinnedTier)
-      .catch(() => ({ tier: 'lite' as const, via: 'fallback' as const, brief: undefined }));
+      .catch(() => ({ tier: 'lite' as const, via: 'fallback' as const }));
 
     let agentQuery = query;
     try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
@@ -219,7 +219,6 @@ export class HeadlessSession {
       const decision = await tierPromise;
       useLite = decision.tier === 'lite';
       cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
-      if (!useLite) agentQuery = applyBrief(agentQuery, decision.brief);
     } catch { /* routing is best-effort; fall back to lite */ }
     markRouted();
 

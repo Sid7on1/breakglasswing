@@ -1,4 +1,4 @@
-import { heuristicTier, decideTier, applyBrief, clearClassifierCache, isConversational } from '../cli/model.router';
+import { heuristicTier, localTier, decideTier, isConversational } from '../cli/model.router';
 
 describe('model.router — heuristicTier', () => {
   it('short-circuits obvious chat/acks to lite (no LLM)', () => {
@@ -24,7 +24,7 @@ describe('model.router — heuristicTier', () => {
     expect(heuristicTier('crash:\nTypeError: boom\n    at run (/app/src/main.ts:10:3)')).toBe('heavy');
   });
 
-  it('leaves ambiguous prompts to the classifier', () => {
+  it('leaves ambiguous prompts to the local classifier', () => {
     expect(heuristicTier('please rework the tokenizer to stream')).toBeNull();
     expect(heuristicTier('what does the governor do here')).toBeNull();
   });
@@ -34,43 +34,79 @@ describe('model.router — heuristicTier', () => {
   });
 });
 
-// The mocks carry DISTINCT coding/lite models so the heuristic + classifier paths are exercised;
-// when the two slots resolve to the same model, decideTier short-circuits via 'unified' (tested below).
-describe('model.router — decideTier', () => {
-  const fakeLlm = (reply: string) => ({ userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
+// The deterministic local classifier that replaced the remote lite-model round-trip. The historical
+// failures of BOTH prior implementations are pinned here (anti-oscillation):
+//  A. remote classifier — a malformed-but-200 response crashed at choices[0], cooled the sole API
+//     key, and cost ~4s/turn (fixed separately; the round-trip itself still cost ~1.17s/turn);
+//  B. shape fallback (>140 chars → heavy) — misrouted short imperatives to the quick model.
+describe('model.router — localTier (deterministic classifier)', () => {
+  it("B's historical failure: short imperatives are work, not chat", () => {
+    expect(localTier('please rework the tokenizer to stream')).toBe('heavy'); // 38 chars — B sent this to lite
+    expect(localTier('update the readme')).toBe('heavy');
+    expect(localTier('clean up the imports')).toBe('heavy');
+  });
 
-  it('a manual pin wins outright, no classifier call', async () => {
-    const llm = fakeLlm('{"tier":"lite"}');
+  it('repo-referring questions need code access → heavy', () => {
+    expect(localTier('what does the governor do here')).toBe('heavy');
+    expect(localTier('why is my branch behind')).toBe('heavy');
+    expect(localTier('what does src/index.ts export')).toBe('heavy');
+  });
+
+  it('self-contained knowledge questions stay on the quick model', () => {
+    expect(localTier('what is the difference between tcp and udp?')).toBe('lite');
+    expect(localTier('explain big-O notation')).toBe('lite');
+    expect(localTier('when was ipv6 standardized?')).toBe('lite');
+    // "http/2" carries a path-like token, which reads as a work signal → heavy. Accepted: the
+    // safe misroute direction (costs tokens, never quality).
+    expect(localTier('when was http/2 standardized?')).toBe('heavy');
+  });
+
+  it('ambiguity defaults to heavy — misroutes cost tokens, never quality', () => {
+    expect(localTier('stream test')).toBe('heavy');
+    expect(localTier('the deployment situation')).toBe('heavy');
+  });
+
+  it('a long question is work even in question shape', () => {
+    expect(localTier('how would you ' + 'x'.repeat(220) + '?')).toBe('heavy');
+  });
+});
+
+describe('model.router — decideTier (fully local, never calls a model)', () => {
+  const fakeLlm = () => ({ userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn() }) as any;
+
+  it('a manual pin wins outright', async () => {
+    const llm = fakeLlm();
     const d = await decideTier(llm, 'refactor everything', 'heavy');
     expect(d).toEqual({ tier: 'heavy', via: 'pinned' });
     expect(llm.chatCompletion).not.toHaveBeenCalled();
   });
 
-  it('obvious chat resolves via heuristic without the classifier', async () => {
-    const llm = fakeLlm('{"tier":"heavy"}');
+  it('obvious chat resolves via heuristic', async () => {
+    const llm = fakeLlm();
     const d = await decideTier(llm, 'hi', null);
-    expect(d.tier).toBe('lite');
-    expect(d.via).toBe('heuristic');
+    expect(d).toEqual({ tier: 'lite', via: 'heuristic' });
     expect(llm.chatCompletion).not.toHaveBeenCalled();
   });
 
-  it('escalates via the lite classifier and carries the brief', async () => {
-    const llm = fakeLlm('```json\n{"tier":"heavy","brief":"refactor the tokenizer"}\n```');
+  it('ambiguous prompts resolve via the local classifier — NO model call ever', async () => {
+    const llm = fakeLlm();
     const d = await decideTier(llm, 'please rework the tokenizer to stream', null);
-    expect(d.tier).toBe('heavy');
-    expect(d.brief).toBe('refactor the tokenizer');
-    expect(d.via).toBe('classifier');
+    expect(d).toEqual({ tier: 'heavy', via: 'local' });
+    expect(llm.chatCompletion).not.toHaveBeenCalled();
   });
 
-  it('falls back to lite if the classifier throws', async () => {
+  it("A's historical failure cannot recur: routing never touches the provider path", async () => {
+    // The old remote classifier's malformed response crashed routing and cooled the API key.
+    // chatCompletion throwing must be irrelevant now — routing never invokes it.
     const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
     const d = await decideTier(llm, 'do something ambiguous and long enough to pass the heuristic', null);
-    expect(d).toEqual({ tier: 'lite', via: 'fallback' });
+    expect(d.tier).toBe('heavy'); // imperative "do something" → work
+    expect(llm.chatCompletion).not.toHaveBeenCalled();
   });
 });
 
 describe('model.router — unified single-model short-circuit', () => {
-  it('skips heuristic AND classifier when both slots resolve to the same model', async () => {
+  it('skips all classification when both slots resolve to the same model', async () => {
     const llm = { userModel: 'stepfun-ai/step-3.7-flash', liteModel: 'stepfun-ai/step-3.7-flash', chatCompletion: jest.fn() } as any;
     const d = await decideTier(llm, 'refactor the parser to support async', null); // heavy-verb prompt — still unified
     expect(d).toEqual({ tier: 'lite', via: 'unified' });
@@ -88,41 +124,6 @@ describe('model.router — unified single-model short-circuit', () => {
     const llm = { userModel: 'same/model', liteModel: 'same/model', chatCompletion: jest.fn() } as any;
     const d = await decideTier(llm, 'anything', 'heavy');
     expect(d).toEqual({ tier: 'heavy', via: 'pinned' });
-  });
-});
-
-describe('model.router — classifier cache', () => {
-  const fakeLlm = (reply: string) => ({ userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockResolvedValue(reply) }) as any;
-  beforeEach(() => clearClassifierCache());
-
-  it('serves a repeated prompt from cache without re-calling the classifier', async () => {
-    const llm = fakeLlm('{"tier":"heavy","brief":"rework streaming"}');
-    const p = 'rework the streaming pipeline end to end';
-    const first = await decideTier(llm, p, null);
-    const second = await decideTier(llm, p, null);
-    expect(first.via).toBe('classifier');
-    expect(second.via).toBe('cache');
-    expect(second.tier).toBe('heavy');
-    expect(second.brief).toBe('rework streaming');
-    expect(llm.chatCompletion).toHaveBeenCalledTimes(1); // second hit skipped the LLM
-  });
-
-  it('normalizes whitespace/case so trivially-different prompts share a cache entry', async () => {
-    const llm = fakeLlm('{"tier":"lite"}');
-    await decideTier(llm, 'Reindex   The Project', null);
-    const again = await decideTier(llm, 'reindex the project', null);
-    expect(again.via).toBe('cache');
-    expect(llm.chatCompletion).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not cache a fallback (transient failure must not pin the route)', async () => {
-    const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn().mockRejectedValue(new Error('boom')) } as any;
-    const p = 'an ambiguous request long enough to pass the heuristic gate';
-    const a = await decideTier(llm, p, null);
-    const b = await decideTier(llm, p, null);
-    expect(a.via).toBe('fallback');
-    expect(b.via).toBe('fallback');
-    expect(llm.chatCompletion).toHaveBeenCalledTimes(2); // retried, not served stale from cache
   });
 });
 
@@ -148,22 +149,11 @@ describe('model.router — isConversational (lite conversation lane gate)', () =
     }
   });
 
-  it('no hidden classifier call for a locally obvious greeting (the P0-3 gate)', async () => {
-    // Distinct slot models so decideTier would normally reach the classifier — the greeting must
-    // still resolve locally with zero chatCompletion calls.
+  it('no model call for a locally obvious greeting (the P0-3 gate)', async () => {
     const llm = { userModel: 'big/coding-model', liteModel: 'small/lite-model', chatCompletion: jest.fn() } as any;
     expect(isConversational('hi')).toBe(true);
     const d = await decideTier(llm, 'hi', null);
     expect(d.via).toBe('heuristic');
     expect(llm.chatCompletion).not.toHaveBeenCalled();
-  });
-});
-
-describe('model.router — applyBrief', () => {
-  it('prepends the brief without altering the original prompt', () => {
-    expect(applyBrief('add a route', 'wire up /health')).toBe('[Routing brief: wire up /health]\n\nadd a route');
-  });
-  it('returns the prompt unchanged when there is no brief', () => {
-    expect(applyBrief('add a route')).toBe('add a route');
   });
 });
