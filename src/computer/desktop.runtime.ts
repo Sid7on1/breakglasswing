@@ -4,8 +4,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
-import { openClient } from '../mcp/client';
+import { openClient, isDeadConnectionError } from '../mcp/client';
 import { withTimeout } from '../utils/withTimeout';
+import { cliEvents } from '../cli/events';
 
 /**
  * Offline/development fallback for Bimax Computer Use.
@@ -86,6 +87,8 @@ export interface DesktopRuntimePort {
   /** Value-safe label/role for the fresh semantic handle an action is about to use. */
   describeTarget?(cmd: DesktopCommand): { label?: string; role?: string; value?: string } | null;
   dispose?(): Promise<void>;
+  /** Best-effort: start any lazy cold-start work now so it overlaps with human decision time. */
+  warm?(): void;
 }
 
 /** Pure: 0–1000 normalized → screen points (clamped). Exported for tests. */
@@ -554,6 +557,14 @@ function mcpStructured(result: any): any {
 
 interface ComputerTarget { app: string; pid: number; windowId?: number }
 
+// Cold start (spawn the native sidecar + MCP handshake + start_session) and a steady-state RPC are
+// different operations with different failure modes — a cold start doing real process/IPC work can
+// legitimately take much longer than any single tool call. Budgeting them together made the FIRST
+// gated action of a session race a clock that silently included both, so a slow-but-alive boot was
+// indistinguishable from a hang. They now get separate, honestly-labeled budgets.
+const COLD_START_TIMEOUT_MS = 45_000;
+const RPC_TIMEOUT_MS = 30_000;
+
 /**
  * Bimax Computer Use — a long-lived, private MCP connection to the embedded native sidecar.
  *
@@ -598,11 +609,21 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     } catch { /* process teardown is best-effort */ }
   }
 
+  /** Start (or join) the sidecar spawn/handshake without waiting on it — lets boot time overlap
+   * with human read/decision time (e.g. an approval prompt) instead of starting after Enter. */
+  public warm(): void {
+    if (this.driverPath()) this.client().catch(() => { /* real error surfaces on the next call() */ });
+  }
+
   private async client(): Promise<any> {
     const driver = this.driverPath();
     if (!driver) throw new Error('embedded Bimax Computer Use driver is unavailable');
     if (!this.clientPromise) {
-      this.clientPromise = (async () => {
+      cliEvents.emit('status', 'Starting native driver…');
+      // Every teardown below is identity-guarded (clientPromise === promise): a late failure or
+      // close event from a SUPERSEDED connection must never destroy its healthy replacement —
+      // unconditional nulling here would strand duplicate live sidecars behind a respawn loop.
+      const promise: Promise<any> = withTimeout<any>((async () => {
         const client = await openClient({
           name: 'bimax-computer-use',
           command: driver,
@@ -617,20 +638,45 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         });
         await client.callTool({ name: 'start_session', arguments: { session: this.session } });
         return client;
-      })().catch(err => {
-        this.clientPromise = null;
-        throw err;
-      });
+      })(), COLD_START_TIMEOUT_MS, 'Bimax Computer Use driver start')
+        .then(client => {
+          // Detect a crashed/exited sidecar the moment it happens rather than waiting for the
+          // next action to hang out a full RPC timeout before discovering the connection is dead.
+          client.onclose = () => { if (this.clientPromise === promise) this.clientPromise = null; };
+          cliEvents.emit('status', 'Native driver ready');
+          return client;
+        })
+        .catch(err => {
+          if (this.clientPromise === promise) this.clientPromise = null;
+          throw err;
+        });
+      this.clientPromise = promise;
     }
     return this.clientPromise;
   }
 
   private async call(name: string, args: Record<string, unknown> = {}): Promise<any> {
+    const promise = this.client();
+    const client = await promise;
+    cliEvents.emit('status', `Running ${name}…`);
     const result = await withTimeout<any>(
-      (await this.client()).callTool({ name, arguments: args }),
-      30_000,
+      client.callTool({ name, arguments: args }),
+      RPC_TIMEOUT_MS,
       `Bimax Computer Use '${name}'`,
-    );
+    ).catch((err: any) => {
+      // A wedged/crashed sidecar leaves clientPromise resolved-but-dead, and nothing else clears
+      // it — but only a dead transport or our own timeout condemns the CONNECTION. An app-level
+      // RPC rejection from a healthy sidecar must not cost the whole session (element caches,
+      // plus a fresh cold start) on the next action.
+      if (isDeadConnectionError(err) || String(err?.message || '').includes('timed out after')) {
+        if (this.clientPromise === promise) this.clientPromise = null;
+        // Close the condemned client: a timed-out action could otherwise still land on the
+        // user's desktop later, unsupervised, and an unclosed client leaks the sidecar process.
+        try { Promise.resolve(client.close?.()).catch(() => { /* best-effort teardown */ }); }
+        catch { /* best-effort teardown */ }
+      }
+      throw err;
+    });
     const data = bimaxBrand(mcpStructured(result));
     if (result?.isError) {
       const detail = bimaxBrand(mcpText(result)).trim();

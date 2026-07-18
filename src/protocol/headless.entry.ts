@@ -87,9 +87,15 @@ export async function startHeadless(container: any, config: any): Promise<void> 
       else cliEvents.emit('status', 'Automatic assignment recovery deferred because the current turn stayed busy; use /subagents resume later.');
       return;
     }
+    // `activeSessionId()` is '' on every fresh boot — a brand-new terminal is indistinguishable
+    // from "picking the same session back up" by process state alone, so treating '' as a pass
+    // here silently hijacked EVERY new chat onto whatever old session left a crashed sub-agent
+    // behind: it dispatched a full /resume (replaying that session's transcript into the new
+    // terminal and rebinding the recorder so every later turn kept appending to the old thread).
+    // Automatic recovery is only safe when the CURRENT session already is the crashed one.
     const activeSession = outcomeManager.activeSessionId();
-    if (activeSession && activeSession !== plan.sessionId) {
-      cliEvents.emit('status', `Interrupted work belongs to ${plan.sessionId}; current task was left untouched. Resume that session, then run /subagents resume.`);
+    if (activeSession !== plan.sessionId) {
+      cliEvents.emit('status', `${plan.agents.length} interrupted assignment(s) from a previous session (${plan.sessionId}) can be recovered — run /resume ${plan.sessionId} then /subagents resume to pick them back up.`);
       return;
     }
     recoveryStarted = true;

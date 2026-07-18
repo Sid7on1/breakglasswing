@@ -692,6 +692,15 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqScroll = 0
 		m.reqIsMulti = o.IsMulti
 		m.reqSelected = make(map[int]bool)
+		// The turn-complete bell (events.go) never fires mid-turn: a multi-step gated task (e.g.
+		// ComputerTool's open→observe→type→observe→key→close) needs several APPROVALS deep into one
+		// long-running turn, each arriving after minutes of model reasoning between steps. Without
+		// an audible cue here, only the FIRST approval — the one that lands while the user is still
+		// watching right after they submit — ever gets noticed; later ones sit silently,
+		// indistinguishable from the whole thing hanging.
+		if m.bell {
+			fmt.Print("\a")
+		}
 		// Masking is a wire contract (request.masked); the question-text regex stays only as a
 		// safety net for engines older than the flag — a secret should never hinge on wording.
 		m.reqMasked = o.Kind == "input" && (o.Masked || secretRE.MatchString(o.Question))

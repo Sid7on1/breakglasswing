@@ -9,10 +9,20 @@ mock provider and asserts the properties users actually feel:
   5. interrupt     — Esc shows "Stopping…" fast, turn ends, follow-up turn streams, Ctrl+C quits
   6. sigterm       — kill(1) exits promptly with the terminal restored
   7. keyless       — first run auto-opens the provider picker; a keyless turn fails loudly
+  8. approval-enter — a ComputerTool approval renders, Enter picks the default Yes, the engine
+                      resolves it, and the suspended tool call resumes exactly once
+  9. approval-deny  — ↓ + Enter picks No; the governor vetoes and the tool never runs
+ 10. approval-grant — "allow app for this session" is honored: the second identical action is
+                      auto-approved with NO second prompt
+ 11. approval-esc   — Esc during an approval resolves it safely (No) instead of freezing the TUI
+
+The approval scenarios drive the REAL engine + governor + protocol + TUI keyboard path; the only
+mocked piece is the model (MOCK_TOOL_CALLS scripts the tool call). The target app is nonexistent,
+so the desktop is never actually touched.
 
 Requires: built engine (dist/) + TUI (tui/bimax-tui), python3, pyte (pip install pyte).
 Run:  python3 scripts/tui-regression.py            (or: npm run test:tui)
-Exit: 0 all green, 1 otherwise. ~90s wall time.
+Exit: 0 all green, 1 otherwise. ~2.5min wall time.
 """
 import base64
 import json
@@ -199,6 +209,104 @@ def scenario_sigterm():
     check("cursor restored", not mode_left_on(recs, "\x1b[?25l", "\x1b[?25h"))
 
 
+APPROVAL_PORT = MOCK_PORT + 1
+DOWN = "\x1b[B"
+# A gated ComputerTool action against an app that cannot exist: the FULL approval pipeline runs
+# (governor -> protocol request -> TUI overlay -> keyboard -> reply -> resolver -> tool resumes),
+# then the runtime fails fast on the missing app — the desktop is never actually touched.
+OPEN_CALL = {"name": "ComputerTool", "arguments": {"action": "open", "app": "BimaxRegressionApp"}}
+
+
+def approval_capture(tool_calls, actions, timeout):
+    """Run the TUI against a dedicated mock provider that scripts `tool_calls`, then replies."""
+    env = dict(os.environ, MOCK_REPLY=unique_reply(30), MOCK_TOKEN_MS="8", MOCK_TTFT_MS="80",
+               MOCK_TOOL_CALLS=json.dumps(tool_calls))
+    mock = subprocess.Popen(["node", os.path.join(ROOT, "scripts", "mock-provider.mjs"), str(APPROVAL_PORT)],
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.8)
+    try:
+        return run_capture(actions, timeout=timeout,
+                           env={"BGW_BASE_URL": f"http://127.0.0.1:{APPROVAL_PORT}/v1"})
+    finally:
+        mock.send_signal(signal.SIGTERM)
+        try:
+            mock.wait(timeout=5)
+        except Exception:
+            mock.kill()
+
+
+def scenario_approval_enter():
+    print("· approval-enter")
+    recs, ex = approval_capture(
+        [OPEN_CALL],
+        [{"at": 4.5, "send": "open the test app\r"},
+         {"at": 10.0, "send": "\r"},                       # Enter on the highlighted default (Yes)
+         {"at": 18.0, "send": "/exit\r"}], timeout=26)
+    raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    check("approval overlay rendered with the intended app",
+          "Allow? open in ComputerTool @ BimaxRegressionApp" in raw)
+    check("Enter resolved the default choice", "→ Yes" in raw)
+    check("engine resolver received the approval", "Approved: COMPUTER_CONTROL" in raw)
+    # The label and its (args) are two separately-styled runs — ANSI codes sit between them in the
+    # raw stream, so the lifecycle line is only contiguous after stripping styling.
+    clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", raw)
+    check("suspended tool call resumed (tool lifecycle in transcript)", "Computer(open" in clean)
+    # The turn CONTINUED after the tool: the follow-up mock reply streamed. This is the "resumed
+    # exactly once" signal — a double-resume would emit a second tool call/approval, a zero-resume
+    # would never reach the reply.
+    check("turn continued to the follow-up reply", re.search(r"word0\d\d", raw) is not None)
+    hist, vis = emulate(recs)
+    check("permission UI cleared after Enter", not any("1) Yes" in l for l in vis))
+    check("only one approval was asked", "".join(hist + vis).count("Allow? open in ComputerTool") <= 1)
+    check("clean exit", ex and ex.get("exit") == 0, str(ex))
+
+
+def scenario_approval_deny():
+    print("· approval-deny")
+    recs, ex = approval_capture(
+        [OPEN_CALL],
+        [{"at": 4.5, "send": "open the test app\r"},
+         {"at": 10.0, "send": DOWN}, {"at": 10.4, "send": "\r"},   # ↓ to "No", Enter
+         {"at": 18.0, "send": "/exit\r"}], timeout=26)
+    raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    check("denial resolved via keyboard", "→ No" in raw)
+    check("governor vetoed", "denied" in raw)
+    check("no approval was granted", "Approved: COMPUTER_CONTROL" not in raw)
+    check("turn survived the veto (follow-up reply streamed)", re.search(r"word0\d\d", raw) is not None)
+    check("clean exit", ex and ex.get("exit") == 0, str(ex))
+
+
+def scenario_approval_grant():
+    print("· approval-grant")
+    recs, ex = approval_capture(
+        [OPEN_CALL, OPEN_CALL],
+        [{"at": 4.5, "send": "open the test app twice\r"},
+         {"at": 10.0, "send": DOWN}, {"at": 10.3, "send": DOWN}, {"at": 10.6, "send": "\r"},  # grant option
+         {"at": 22.0, "send": "/exit\r"}], timeout=30)
+    raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    check("session grant option selected", "for this session" in raw and "→ Allow app" in raw)
+    check("second identical action auto-approved by the grant", "Approved (session grant" in raw)
+    hist, vis = emulate(recs)
+    check("no second approval prompt", "".join(hist + vis).count("Allow? open in ComputerTool") <= 1)
+    check("clean exit", ex and ex.get("exit") == 0, str(ex))
+
+
+def scenario_approval_esc():
+    print("· approval-esc")
+    recs, ex = approval_capture(
+        [OPEN_CALL],
+        [{"at": 4.5, "send": "open the test app\r"},
+         {"at": 10.0, "send": ESC},                        # cancel the pending approval
+         {"at": 18.0, "send": "/exit\r"}], timeout=26)
+    raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    check("Esc resolved the approval safely (No)", "→ No" in raw)
+    check("resolver cleared — turn continued instead of freezing",
+          re.search(r"word0\d\d", raw) is not None)
+    hist, vis = emulate(recs)
+    check("permission UI cleared after Esc", not any("1) Yes" in l for l in vis))
+    check("clean exit (TUI not frozen)", ex and ex.get("exit") == 0, str(ex))
+
+
 def scenario_keyless():
     print("· keyless first run")
     fresh = tempfile.mkdtemp(prefix="bimax-fresh-")
@@ -233,7 +341,9 @@ def main():
     time.sleep(0.8)
     try:
         for fn in (scenario_startup, scenario_streaming, scenario_resize_widen,
-                   scenario_resize_narrow, scenario_interrupt, scenario_sigterm, scenario_keyless):
+                   scenario_resize_narrow, scenario_interrupt, scenario_sigterm, scenario_keyless,
+                   scenario_approval_enter, scenario_approval_deny, scenario_approval_grant,
+                   scenario_approval_esc):
             fn()
     finally:
         mock.send_signal(signal.SIGTERM)

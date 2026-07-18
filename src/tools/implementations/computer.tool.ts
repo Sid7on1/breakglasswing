@@ -64,14 +64,22 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
       if (GATED_ACTIONS.has(effectiveArgs.action)) {
         // Scope the approval to the app that will RECEIVE the input so the governor can offer
         // (and honor) a session grant for exactly that app — and hard-deny sensitive targets.
-        const app = intendedApp
-          ? intendedApp
-          : await runtime.frontmostApp();
+        // 'open' is the odd one out: it targets an app that is NOT yet frontmost (that's the whole
+        // point), so falling back to frontmostApp() for it showed the WRONG app in the prompt —
+        // e.g. "Allow? open in ComputerTool @ <terminal>" when the model opened by bundleId only,
+        // confusingly naming whatever happened to still be focused instead of what's being opened.
+        const app = effectiveArgs.action === 'open'
+          ? (effectiveArgs.app?.trim() || effectiveArgs.bundleId?.trim() || 'application')
+          : intendedApp || await runtime.frontmostApp();
         const semanticTarget = runtime.describeTarget?.(effectiveArgs) || undefined;
         const impact = classifyDesktopActionImpact(effectiveArgs.action, {
           text: effectiveArgs.text, combo: effectiveArgs.combo, app: effectiveArgs.app,
           label: semanticTarget?.label, role: semanticTarget?.role, value: semanticTarget?.value,
         });
+        // The sidecar's first-use spawn/handshake can take real wall-clock time; kick it off now
+        // so it overlaps with the human reading/deciding on the approval prompt instead of starting
+        // only after Enter, where it would otherwise sit behind an undifferentiated spinner.
+        runtime.warm?.();
         await governor.approveTaskExecution('COMPUTER_CONTROL', {
           tool: 'ComputerTool', action: effectiveArgs.action, app: app || undefined,
           highImpact: impact.high || undefined, impactReason: impact.reason,

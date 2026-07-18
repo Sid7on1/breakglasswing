@@ -13,12 +13,25 @@
 //   MOCK_TOKENS        number of tokens in the reply (default 40)
 //   MOCK_REPLY         fixed reply text (overrides MOCK_TOKENS; split on spaces)
 //   MOCK_THINK         when "1", prefix the reply with a <think>…</think> block
+//   MOCK_TOOL_CALL     JSON {"name": "...", "arguments": {...}} — the FIRST request gets a
+//                      single tool_calls delta (finish_reason "tool_calls") for this call
+//                      instead of a text reply. Every later request (the follow-up turn after
+//                      the tool result comes back) gets a normal short text reply, so the agent
+//                      loop actually finishes instead of looping. Used to drive real approval
+//                      prompts (e.g. ComputerTool) through the PTY harness deterministically.
+//   MOCK_TOOL_CALLS    JSON array of the same shape — pops one tool call per request, in order,
+//                      so a multi-step agentic task (open → type → key → close) can be scripted
+//                      as a sequence of real approval round-trips. Once exhausted, falls through
+//                      to a normal text reply. Takes priority over MOCK_TOOL_CALL.
 //
 // Per-request overrides via the model name suffix, e.g. "mock?ttft=500&tok=5&n=200".
 import http from 'node:http';
 
 const PORT = parseInt(process.argv[2] || '8901', 10);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let toolCallFired = false;
+let toolCallQueue = null;
+try { if (process.env.MOCK_TOOL_CALLS) toolCallQueue = JSON.parse(process.env.MOCK_TOOL_CALLS); } catch { toolCallQueue = null; }
 
 function tokensFor(opts) {
   if (opts.reply) return opts.reply.match(/\S+\s*/g) || [];
@@ -55,6 +68,33 @@ const server = http.createServer(async (req, res) => {
   const id = 'chatcmpl-mock';
   const chunk = (delta, finish = null) =>
     `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: 0, model: 'mock', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+
+  // Pop one scripted tool call per request (queue mode), or fire the single one-shot call on the
+  // first request only. Either way, once exhausted every later request falls through to plain
+  // text so the agent loop actually finishes instead of looping forever.
+  let toolCall = null;
+  if (toolCallQueue && toolCallQueue.length > 0) {
+    toolCall = toolCallQueue.shift();
+  } else if (process.env.MOCK_TOOL_CALL && !toolCallFired) {
+    toolCallFired = true;
+    try { toolCall = JSON.parse(process.env.MOCK_TOOL_CALL); } catch { toolCall = null; }
+  }
+
+  if (toolCall) {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.write(chunk({ role: 'assistant', content: '' }));
+    await sleep(opts.ttft);
+    res.write(chunk({
+      tool_calls: [{
+        index: 0, id: `call_mock_${Date.now()}`, type: 'function',
+        function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments || {}) },
+      }],
+    }));
+    res.write(chunk({}, 'tool_calls'));
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
 
   if (parsed.stream === false) {
     const text = (opts.think ? '' : '') + toks.join('');

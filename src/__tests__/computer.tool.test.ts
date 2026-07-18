@@ -55,6 +55,21 @@ describe('ComputerTool', () => {
     }));
   });
 
+  it('scopes an open-by-bundleId action to the bundle id, never the stale frontmost app', async () => {
+    // Regression: intendedApp only looked at args.app, so open-by-bundleId fell through to
+    // frontmostApp() — the approval prompt named whatever app was still focused (e.g. the
+    // terminal) instead of what was actually about to be opened. Live-PTY repro against the
+    // packaged binary reproduced this verbatim: "Allow? open in ComputerTool @ ghostty" when the
+    // model opened Calculator by bundle id alone.
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'open', bundleId: 'com.apple.calculator' }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'open', app: 'com.apple.calculator',
+    }));
+    expect(runtime.frontmostApp).not.toHaveBeenCalled();
+  });
+
   it('locks later keyboard input and cleanup to the most recently opened app', async () => {
     const runtime = fakeRuntime();
     const tool = createComputerTool(governor, runtime);
