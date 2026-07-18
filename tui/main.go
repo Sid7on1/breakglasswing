@@ -4,13 +4,61 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// version is stamped by the release build (-ldflags "-X main.version=…"); "dev" otherwise.
-var version = "dev"
+// Build provenance (§10): a build must be able to say exactly what it is. The release build stamps
+// all of these via -ldflags -X (scripts/lib-build.sh); a plain `go build` leaves them empty and
+// versionString() falls back to the VCS metadata Go embeds automatically (vcs.revision/time/
+// modified) — so even a dev build names its commit and whether the tree was dirty.
+var (
+	version   = "dev" // semver of a cut release; "dev" otherwise
+	channel   = "dev" // "release" only when built by release.sh; "dev" for local builds
+	commit    = ""    // git short hash
+	buildTime = ""    // RFC3339
+	dirty     = ""    // "true" when built from a modified tree
+)
+
+// versionString assembles the provenance line. Never guesses: any field it cannot determine is
+// reported as "unknown" rather than omitted or invented.
+func versionString() string {
+	c, ts, d := commit, buildTime, dirty
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if c == "" && len(s.Value) >= 8 {
+					c = s.Value[:8]
+				}
+			case "vcs.time":
+				if ts == "" {
+					ts = s.Value
+				}
+			case "vcs.modified":
+				if d == "" {
+					d = s.Value
+				}
+			}
+		}
+	}
+	if c == "" {
+		c = "unknown"
+	}
+	if ts == "" {
+		ts = "unknown"
+	}
+	tree := "clean"
+	switch d {
+	case "true":
+		tree = "dirty"
+	case "":
+		tree = "unknown-tree"
+	}
+	return fmt.Sprintf("bimax %s\ncommit:  %s (%s)\nbuilt:   %s\nchannel: %s", version, c, tree, ts, channel)
+}
 
 // BiMax TUI — a Bubble Tea front-end that spawns the headless Node engine and drives it over the
 // NDJSON stdio protocol. The engine (all 16k LOC of it) is reused verbatim; this binary only
@@ -21,7 +69,7 @@ func main() {
 	for _, a := range os.Args[1:] {
 		switch a {
 		case "--version", "-v":
-			fmt.Println("bimax", version)
+			fmt.Println(versionString())
 			return
 		case "--help", "-h":
 			fmt.Println("bimax — build software with an agent team")

@@ -1481,3 +1481,14 @@ func TestSlashExitQuitsLocally(t *testing.T) {
 		}
 	}
 }
+
+// §10: the provenance line must always name every field — falling back to "unknown", never
+// omitting or inventing. (Release builds stamp via ldflags; dev builds read Go's embedded VCS.)
+func TestVersionStringProvenance(t *testing.T) {
+	s := versionString()
+	for _, want := range []string{"bimax ", "commit:", "built:", "channel:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("versionString missing %q in:\n%s", want, s)
+		}
+	}
+}

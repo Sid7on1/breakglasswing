@@ -17,7 +17,15 @@ bimax_sweep_bunbuild() { rm -f .*.bun-build 2>/dev/null || true; }
 # compile (no --target). release mode adds -s -w -trimpath; dev keeps symbols for local debugging.
 build_bimax() {
   local goos="$1" goarch="$2" outfile="$3" mode="$4" bun_target="${5:-}"
-  local version ldflags; version="$(bimax_version)"; ldflags="-X main.version=${version}"
+  local version ldflags; version="$(bimax_version)"
+  # Provenance stamps (§10): commit, build time, tree dirtiness, and channel land in the binary so
+  # `bimax --version` reports exactly what it is. Channel is "release" only for release builds.
+  local commit dirty btime chan
+  commit="$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then dirty=true; else dirty=false; fi
+  btime="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [ "$mode" = release ]; then chan=release; else chan=dev; fi
+  ldflags="-X main.version=${version} -X main.commit=${commit} -X main.dirty=${dirty} -X main.buildTime=${btime} -X main.channel=${chan}"
   local goflags=() env_prefix=()
   if [ "$mode" = release ]; then ldflags="-s -w ${ldflags}"; goflags+=(-trimpath); fi
   if [ -n "$goos" ]; then env_prefix=(env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch"); fi
