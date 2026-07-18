@@ -42,7 +42,7 @@ export interface TurnTimeline {
   routedMs?: number;         // routing/tier decision complete
   assembledMs?: number;      // context assembly complete (about to call the provider path)
   providerReqMs?: number;    // provider request left the engine
-  firstRawChunkMs?: number;  // provider's first raw chunk arrived
+  firstRawChunkMs?: number;  // provider's first meaningful payload arrived (empty SSE preambles ignored)
   firstVisibleMs?: number;   // first visible token emitted to the user
   completeMs?: number;       // turn complete
 }
@@ -50,8 +50,8 @@ export interface TurnTimeline {
 /** Derived split of a completed timeline. */
 export interface TurnBreakdown {
   overheadMs: number;      // Bimax work before the provider request (routing + context assembly)
-  providerWaitMs: number;  // provider request → first raw chunk (provider queue/compute)
-  renderMs: number;        // first raw chunk → first visible token (our filter/emit latency)
+  providerWaitMs: number;  // provider request → first meaningful payload (provider queue/compute)
+  renderMs: number;        // first meaningful payload → first visible token (filter/emit latency)
   totalMs: number;
   lane: TurnLane;
   model?: string;
@@ -79,7 +79,7 @@ export function markRouted(): void { setDurationOnce('routedMs'); }
 export function markAssembled(): void { setDurationOnce('assembledMs'); }
 /** Provider request left the engine. First streaming call of the turn wins (later tool rounds ignored). */
 export function markProviderRequest(): void { setDurationOnce('providerReqMs'); }
-/** Provider's first raw chunk. First wins. */
+/** Provider's first meaningful payload (content/reasoning/tool call/finish). First wins. */
 export function markFirstRawChunk(): void { setDurationOnce('firstRawChunkMs'); }
 /** First visible token shown to the user. First wins. */
 export function markFirstVisibleToken(): void { setDurationOnce('firstVisibleMs'); }

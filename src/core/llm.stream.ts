@@ -96,6 +96,26 @@ export function applyCacheBreakpoints(messages: any[]): any[] {
 export interface ToolCallSlot { id: string; name: string; args: string; }
 
 /**
+ * Whether a streamed completion chunk contains provider output that can advance the turn.
+ *
+ * OpenAI-compatible servers commonly emit an initial `{ role: "assistant" }` delta before they
+ * have generated any content. Treating that transport preamble as the first token makes a slow
+ * model look fast, teaches the key picker the wrong latency, and moves the real model wait into
+ * `/perf`'s render bucket. Usage-only frames are bookkeeping too. Content, reasoning, tool-call
+ * fragments, and a terminal finish reason are the first meaningful payloads.
+ */
+export function hasMeaningfulStreamPayload(chunk: any): boolean {
+  const choice = chunk?.choices?.[0];
+  if (!choice) return false;
+  const delta = choice.delta;
+  if (typeof delta?.content === 'string' && delta.content.length > 0) return true;
+  if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content.length > 0) return true;
+  if (typeof delta?.reasoning === 'string' && delta.reasoning.length > 0) return true;
+  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) return true;
+  return choice.finish_reason !== undefined && choice.finish_reason !== null;
+}
+
+/**
  * Apply ONE streaming `delta.tool_calls[]` entry to an index-keyed accumulator and return its index.
  *
  * The OpenAI streaming contract keys tool-call fragments by `index`: the first delta for an index

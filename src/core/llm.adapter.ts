@@ -11,14 +11,14 @@ import { globalTelemetry } from '../telemetry/telemetry';
 // and tests (which import these from ./llm.adapter) keep working unchanged.
 import {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
-  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy,
+  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy, hasMeaningfulStreamPayload,
 } from './llm.stream';
 import type { ToolCallSlot } from './llm.stream';
 import { markProviderRequest, markFirstRawChunk } from '../telemetry/perf';
 import { attributeSlowWait, SLOW_WAIT_THRESHOLD_MS } from '../telemetry/netprobe';
 export {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
-  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy,
+  ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy, hasMeaningfulStreamPayload,
 };
 export type { ToolCallSlot };
 
@@ -670,8 +670,11 @@ export class LlmAdapter implements LLMProvider {
 
       // Perf: mark the exact instant the provider request leaves the engine. Everything before this
       // point is Bimax overhead (routing, context assembly); everything between here and the first
-      // raw chunk is provider wait. No-op when no turn timeline is active (classifier/critic/sub-agent
-      // calls, tests) and idempotent within a turn (only the first streaming call of a turn counts).
+      // meaningful payload is provider wait. The wall-clock twin also feeds per-key latency, so it
+      // deliberately starts BEFORE create(): some providers hold response headers while queued.
+      // No-op when no turn timeline is active (classifier/critic/sub-agent calls, tests) and
+      // idempotent within a turn (only the first streaming call of a turn counts).
+      const requestStartMs = Date.now();
       markProviderRequest();
       // NIM's per-key queue holds the RESPONSE HEADERS until the request is granted, so a hung key
       // stalls create() itself — before the stream iterator our chunk watchdog guards even exists.
@@ -751,7 +754,7 @@ export class LlmAdapter implements LLMProvider {
       const dbgDeltaKeys = new Set<string>();
 
       const iterator = stream[Symbol.asyncIterator]();
-      let receivedFirstChunk = false;
+      let receivedFirstPayload = false;
       // First-token budget. Reasoning/cold-start models legitimately take minutes, but a PLAIN
       // model (llama et al) answering in >1min means the provider is queueing/hanging THIS KEY
       // server-side. When the pool can rotate (2+ keys), give plain models a tight budget so a
@@ -761,21 +764,23 @@ export class LlmAdapter implements LLMProvider {
       if (!process.env.BGW_FIRST_CHUNK_TIMEOUT_MS && !knownReasoner && !capsSayReasoner && this.apiKeyManager.size() > 1) {
         firstBudgetMs = Math.min(firstBudgetMs, 60_000);
       }
-      const requestStartMs = Date.now();
       while (true) {
         const nextPromise = iterator.next();
         // Guard against a silently stalled stream. The first chunk (time-to-first-token) gets a
         // longer budget than later chunks: a cold start is a legitimate long pause, a mid-stream
         // gap is not. The timer MUST be cleared once the chunk arrives, or every chunk leaks a
         // timer (and a later unhandled rejection) — a long reasoning stream would spawn hundreds.
-        const chunkTimeoutMs = receivedFirstChunk ? this.streamReadTimeoutMs : firstBudgetMs;
-        const phase = receivedFirstChunk ? 'mid-stream' : 'first token';
+        // Empty role/usage preambles do not consume the first-token phase. Use an absolute deadline,
+        // though, so a server cannot keep the request alive forever by dripping empty frames.
+        const firstPayloadRemaining = Math.max(1, firstBudgetMs - (Date.now() - requestStartMs));
+        const chunkTimeoutMs = receivedFirstPayload ? this.streamReadTimeoutMs : firstPayloadRemaining;
+        const phase = receivedFirstPayload ? 'mid-stream' : 'first token';
         let timeoutHandle: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<any>((_, reject) => {
           timeoutHandle = setTimeout(() => {
             // Never assert "provider cold/slow" without evidence: probe the origin in the
             // background so /perf can attribute this stall (provider-side vs DNS vs network path).
-            if (!receivedFirstChunk) attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', chunkTimeoutMs, true);
+            if (!receivedFirstPayload) attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', Date.now() - requestStartMs, true);
             reject(new Error(`LLM stream timeout: model '${model}' sent no ${phase} for ${Math.round(chunkTimeoutMs / 1000)}s — not a tool error (run /perf for network-path evidence)`));
           }, chunkTimeoutMs);
         });
@@ -796,8 +801,13 @@ export class LlmAdapter implements LLMProvider {
           clearTimeout(timeoutHandle!);
         }
         if (result.done) break;
-        if (!receivedFirstChunk) {
-          markFirstRawChunk(); // perf: provider's first byte → separates provider wait from render
+        const chunk = result.value;
+        // Many OpenAI-compatible streams open with an empty role-only delta. It proves the socket is
+        // alive, but says nothing about model latency. Only the first meaningful payload teaches the
+        // key picker and closes /perf's provider-wait phase; otherwise slow keys look instant and the
+        // model's wait is mislabeled as UI render time.
+        if (!receivedFirstPayload && hasMeaningfulStreamPayload(chunk)) {
+          markFirstRawChunk(); // perf: first meaningful provider payload, not an SSE preamble
           const waitedMs = Date.now() - requestStartMs;
           // Latency feedback: teach the key picker which keys answer fast (NIM queues per-key).
           this.apiKeyManager.reportKeyLatency(kr.idx!, waitedMs);
@@ -806,10 +816,8 @@ export class LlmAdapter implements LLMProvider {
           if (waitedMs > SLOW_WAIT_THRESHOLD_MS) {
             attributeSlowWait(kr.baseURL || 'https://integrate.api.nvidia.com/v1', waitedMs, false);
           }
+          receivedFirstPayload = true;
         }
-        receivedFirstChunk = true;
-
-        const chunk = result.value;
         if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
 
         if (debugStream) {

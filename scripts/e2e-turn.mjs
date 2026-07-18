@@ -17,6 +17,17 @@ const PROMPT = args[0] || 'hi';
 const RUNS = parseInt((process.argv.find((a) => a.startsWith('--runs=')) || '=1').split('=')[1], 10);
 const JSON_OUT = process.argv.includes('--json');
 
+// The bundled mock emits plain answer content. Its deliberately-generic model id is unknown to the
+// production capability table, whose safe default buffers a short preamble in case it is untagged
+// reasoning. Warn instead of silently benchmarking that safety buffer as engine/provider latency.
+if (
+  process.env.BGW_MODEL === 'mock' &&
+  !process.env.BGW_CAP_PLAIN_CONTENT &&
+  /127\.0\.0\.1|localhost/.test(process.env.BGW_BASE_URL || '')
+) {
+  console.error('[benchmark] mock is plain content; set BGW_CAP_PLAIN_CONTENT=true for TTFT measurements (omit it only to test unknown-model safety buffering).');
+}
+
 function pct(sorted, q) { return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0; }
 
 async function oneRun(runIdx) {

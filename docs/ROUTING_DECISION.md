@@ -89,4 +89,30 @@ First visible token, input→token, ms:
   processes drop ~270ms of that (client + caches already built).
 
 Reproduce: `node scripts/mock-provider.mjs 8901` then
-`BGW_BASE_URL=http://127.0.0.1:8901/v1 BGW_API_KEY=mock BGW_MODEL=mock node scripts/e2e-turn.mjs "stream test" --runs=20`.
+`BGW_BASE_URL=http://127.0.0.1:8901/v1 BGW_API_KEY=mock BGW_MODEL=mock BGW_CAP_PLAIN_CONTENT=true node scripts/e2e-turn.mjs "stream test" --runs=20`.
+
+## Follow-up measurement correction — 2026-07-18
+
+The routing conclusion above remains valid (the serial classifier was removed and A≈B≈C still
+shows local routing costs approximately zero), but the original residual-cost interpretation mixed
+two different effects:
+
+1. OpenAI-compatible streams begin with an empty `{role:"assistant"}` delta. BiMax counted that as
+   provider output, so `/perf` put the mock's real 120ms generation wait in the render bucket and
+   taught per-key latency from the empty preamble. First-payload detection now ignores role-only and
+   usage-only frames; content, reasoning, tool-call fragments, or finish are meaningful payloads.
+2. The model id `mock` is intentionally unknown to the capability table. Without
+   `BGW_CAP_PLAIN_CONTENT=true`, the safety filter buffers its leading text until it can rule out
+   opener-less reasoning. The ~402ms warm first-visible result therefore measured the unknown-model
+   safety buffer, not a prompt-assembly floor. The local mock emits plain content, so the capability
+   override belongs in the benchmark command above.
+
+Four warm-process full turns against the same documented mock cadence (120ms TTFT, 25ms/token):
+
+| configuration | warm BiMax overhead | provider wait | payload→visible | warm first visible |
+|---|---:|---:|---:|---:|
+| `mock`, capability undeclared | ~10ms | ~125–126ms | ~258–262ms | ~394ms |
+| `mock` + `BGW_CAP_PLAIN_CONTENT=true` | ~10–12ms | ~127ms | ~0ms | ~137–138ms |
+
+This closes the proposed prompt-assembly-cache follow-up: steady-state assembly is already about
+10ms on this workload, so a cache would add invalidation risk without addressing the measured floor.

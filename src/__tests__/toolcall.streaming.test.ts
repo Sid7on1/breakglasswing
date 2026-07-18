@@ -1,4 +1,21 @@
-import { applyToolCallDelta, ToolCallSlot } from '../core/llm.adapter';
+import { applyToolCallDelta, hasMeaningfulStreamPayload, ToolCallSlot } from '../core/llm.adapter';
+
+describe('hasMeaningfulStreamPayload — first-token attribution', () => {
+  it('ignores transport preambles and usage-only frames', () => {
+    expect(hasMeaningfulStreamPayload({ choices: [{ delta: { role: 'assistant' }, finish_reason: null }] })).toBe(false);
+    expect(hasMeaningfulStreamPayload({ choices: [], usage: { prompt_tokens: 10 } })).toBe(false);
+  });
+
+  it.each([
+    { choices: [{ delta: { content: 'hello' }, finish_reason: null }] },
+    { choices: [{ delta: { reasoning_content: 'thinking' }, finish_reason: null }] },
+    { choices: [{ delta: { reasoning: 'thinking' }, finish_reason: null }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0 }] }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ])('accepts content, reasoning, tool calls, and terminal frames', (chunk) => {
+    expect(hasMeaningfulStreamPayload(chunk)).toBe(true);
+  });
+});
 
 // Drive a sequence of streaming tool_call deltas through the accumulator and return the finished calls.
 function accumulate(deltas: any[]): ToolCallSlot[] {

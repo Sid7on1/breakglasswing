@@ -23,7 +23,7 @@ export function renderPerf(s: PerfSnapshot): string {
     '',
     `  Bimax overhead (ours):      p50 ${ms(s.overheadP50)} · p95 ${ms(s.overheadP95)}`,
     `  Provider wait (theirs):     p50 ${ms(s.providerWaitP50)} · p95 ${ms(s.providerWaitP95)}`,
-    `  Render (raw→visible):       p95 ${ms(s.renderP95)}`,
+    `  Render (payload→visible):   p95 ${ms(s.renderP95)}`,
     `  Greeting-lane overhead:     p95 ${ms(s.liteOverheadP95)}`,
   ];
   if (s.lastTurn) {

@@ -66,6 +66,7 @@ export function describeAttribution(a: WaitAttribution): string {
     case 'network-path': return 'the network path to the provider failed — not a provider delay';
     case 'network-slow': return 'the network path itself was slow — attribution split between network and provider';
     case 'unknown': return 'attribution inconclusive — no phase produced usable evidence';
+    default: return 'attribution inconclusive — no phase produced usable evidence';
   }
 }
 
