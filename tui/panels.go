@@ -415,3 +415,174 @@ func (m model) compactMapView() string {
 	}
 	return line
 }
+
+// taskStateIcon maps the 16-state machine to a compact glyph + style. Active states get the live
+// spinner (rendered by the caller so animation stays centralized); this returns the static ones.
+func taskStateIcon(state string) (glyph string, active bool) {
+	switch state {
+	case "queued":
+		return "·", false
+	case "paused":
+		return "⏸", false
+	case "waiting-user":
+		return "⚑", false
+	case "cancelled":
+		return "⏹", false
+	case "completed":
+		return "✓", false
+	case "failed", "failed-resumable":
+		return "✗", false
+	default:
+		// starting/running/streaming/waiting-model/waiting-tool/waiting-browser/retrying/
+		// recovering/cancelling — all live, all animated.
+		return "", true
+	}
+}
+
+func taskTerminal(state string) bool {
+	switch state {
+	case "cancelled", "completed", "failed", "failed-resumable":
+		return true
+	}
+	return false
+}
+
+func fmtTaskElapsed(ms int64) string {
+	s := ms / 1000
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	if s < 3600 {
+		return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	}
+	return fmt.Sprintf("%dh%02dm", s/3600, (s%3600)/60)
+}
+
+// taskActions returns the HONEST action hints for one task — exactly what the engine's capability
+// flags and state admit, nothing more. The same set the keyboard handler accepts.
+func taskActions(t TaskStrip) []string {
+	var a []string
+	if t.CanCancel && !taskTerminal(t.State) && t.State != "cancelling" {
+		a = append(a, "c cancel")
+	}
+	if t.CanPause && (t.State == "running" || t.State == "streaming") {
+		a = append(a, "p pause")
+	}
+	if t.State == "paused" && t.CanResume {
+		a = append(a, "r resume")
+	}
+	if t.State == "failed-resumable" {
+		a = append(a, "r retry")
+	}
+	if taskTerminal(t.State) {
+		a = append(a, "d dismiss")
+	}
+	return a
+}
+
+// taskPanel is the pinned task-workspace strip: background shell commands, the live browser
+// session, builds — each with live state from the 16-state machine and an honest action set.
+// Unfocused it is a calm one-line-per-task monitor; Ctrl+E focuses it (↑/↓ select, enter inspect
+// via /tasks show, c/p/r/d act). It shows while any task is live or demands attention, and
+// retires once everything is dismissed — never dead chrome. On very narrow terminals it degrades
+// to a one-line summary instead of overflowing the border.
+func (m model) taskPanel() string {
+	if len(m.fTasks) == 0 {
+		return ""
+	}
+	live, attention := 0, 0
+	for _, t := range m.fTasks {
+		if !taskTerminal(t.State) {
+			live++
+		}
+		if t.Attention {
+			attention++
+		}
+	}
+	// Terminal tasks without attention don't keep chrome alive (mirror subAgentPanel's retire rule).
+	if live == 0 && attention == 0 && !m.tkFocus {
+		return ""
+	}
+	// Narrow-terminal degradation: below ~48 cols a bordered multi-row panel would wrap and ghost
+	// the inline renderer — collapse to one plain summary line instead.
+	if m.width < 48 {
+		s := fmt.Sprintf("◍ %d task", live)
+		if live != 1 {
+			s += "s"
+		}
+		if attention > 0 {
+			s += fmt.Sprintf(" · %d need attention", attention)
+		}
+		return dimStyle.Render(clip(s+" — /tasks", m.width-2))
+	}
+
+	textW := m.width - 7
+	if textW < 16 {
+		textW = 16
+	}
+	titleText := fmt.Sprintf("Tasks (%d live/%d)", live, len(m.fTasks))
+	hintText := ""
+	if m.tkFocus {
+		hintText = "  ↑/↓ select · enter inspect · esc release"
+	} else {
+		hintText = "  Ctrl+E to control"
+	}
+	title := todoTitle.Render(titleText)
+	if hintText != "" && len(titleText)+len(hintText) <= textW {
+		title += subtleStyle.Render(hintText)
+	}
+
+	const maxShow = 6
+	var b strings.Builder
+	b.WriteString(title + "\n")
+	for i, t := range m.fTasks {
+		if i >= maxShow {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  … +%d more", len(m.fTasks)-maxShow)) + "\n")
+			break
+		}
+		cursor := "  "
+		if m.tkFocus && i == m.tkSel {
+			cursor = userStyle.Render("❯ ")
+		}
+		var glyph string
+		if icon, active := taskStateIcon(t.State); active {
+			glyph = saSpin.Render(m.saSpinner())
+		} else {
+			switch t.State {
+			case "completed":
+				glyph = okStyle.Render(icon)
+			case "failed", "failed-resumable":
+				glyph = errStyle.Render(icon)
+			case "waiting-user":
+				glyph = saVerb.Render(icon)
+			default:
+				glyph = dimStyle.Render(icon)
+			}
+		}
+		pin := ""
+		if t.Pinned {
+			pin = subtleStyle.Render(" ⚲")
+		}
+		att := ""
+		if t.Attention {
+			att = errStyle.Render(" !")
+		}
+		// <glyph> <title> — <state> · <kind> · <elapsed>. Only the title is clipped; the state/
+		// elapsed suffix always survives so the row stays informative at any width.
+		suffix := dimStyle.Render(fmt.Sprintf(" — %s · %s · %s", t.State, t.Kind, fmtTaskElapsed(t.ElapsedMs)))
+		budget := clampInt(textW-30, 10, 60)
+		row := cursor + glyph + " " + saVerb.Render(clip(t.Title, budget)) + suffix + pin + att
+		b.WriteString(row + "\n")
+		// The selected row (focused) reveals its last event + honest action keys; unfocused rows
+		// stay one line each so the panel is a monitor, not a wall.
+		if m.tkFocus && i == m.tkSel {
+			if t.LastEvent != "" {
+				b.WriteString("     " + dimStyle.Render(clip(t.LastEvent, textW-6)) + "\n")
+			}
+			if acts := taskActions(t); len(acts) > 0 {
+				b.WriteString("     " + subtleStyle.Render(clip(strings.Join(acts, " · "), textW-6)) + "\n")
+			}
+		}
+	}
+	return todoPanel.Width(textW).Render(strings.TrimRight(b.String(), "\n"))
+}

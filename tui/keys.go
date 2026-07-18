@@ -274,6 +274,68 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Task panel focus (Ctrl+E): ↑/↓ select a task, enter inspects it (/tasks show), and the
+	// action keys drive EXACTLY the engine's honest capability set — c cancel, p pause (only where
+	// a real SIGSTOP exists), r resume/retry, d dismiss a finished task. Esc releases.
+	if m.tkFocus && len(m.fTasks) > 0 {
+		t := m.fTasks[m.tkSel]
+		send := func(verb string) (model, tea.Cmd) {
+			m.engine.Send(encodeInput("/tasks " + verb + " " + t.ID))
+			m.status = "/tasks " + verb + " " + t.ID
+			m.relayout()
+			return m, nil
+		}
+		switch msg.String() {
+		case "up":
+			if m.tkSel > 0 {
+				m.tkSel--
+			}
+			m.relayout()
+			return m, nil
+		case "down":
+			if m.tkSel < len(m.fTasks)-1 {
+				m.tkSel++
+			}
+			m.relayout()
+			return m, nil
+		case "enter":
+			return send("show")
+		case "c":
+			if t.CanCancel && !taskTerminal(t.State) && t.State != "cancelling" {
+				return send("cancel")
+			}
+			m.status = "Task is " + t.State + " — nothing to cancel"
+			return m, nil
+		case "p":
+			if t.CanPause && (t.State == "running" || t.State == "streaming") {
+				return send("pause")
+			}
+			// Honest refusal, mirroring the engine: never fake a pause the process can't do.
+			m.status = "This task has no real pause — cancel is available"
+			return m, nil
+		case "r":
+			if t.State == "paused" && t.CanResume {
+				return send("resume")
+			}
+			if t.State == "failed-resumable" {
+				return send("retry")
+			}
+			m.status = "Task is " + t.State + " — nothing to resume/retry"
+			return m, nil
+		case "d":
+			if taskTerminal(t.State) {
+				return send("close")
+			}
+			m.status = "Task is still " + t.State + " — cancel it first"
+			return m, nil
+		case "esc":
+			m.tkFocus = false
+			m.status = "Task panel: focus released"
+			m.relayout()
+			return m, nil
+		}
+	}
+
 	// Input history: up/down at the first/last line recalls past submissions. Mid-text they move
 	// the cursor between lines (textarea), so only intercept at the boundaries.
 	switch msg.String() {
@@ -430,6 +492,25 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+p":
 		// Preview the full text behind the paste chips currently in the input.
 		m.pastePreview()
+		return m, nil
+	case "ctrl+e":
+		// Focus the task-workspace panel: ↑/↓ select, enter inspects, c/p/r/d act (honest action
+		// set only). No-op when no tasks are on the board. (Steals the textarea's line-end chord —
+		// same precedent as Ctrl+A for sub-agents.)
+		if len(m.fTasks) == 0 {
+			m.status = "No background tasks — long shell work runs with background: true"
+			return m, nil
+		}
+		m.tkFocus = !m.tkFocus
+		if m.tkFocus {
+			if m.tkSel >= len(m.fTasks) {
+				m.tkSel = 0
+			}
+			m.status = "Tasks focused — ↑/↓ select · enter inspect · c/p/r/d act · esc release"
+		} else {
+			m.status = "Task panel: focus released"
+		}
+		m.relayout()
 		return m, nil
 	case "ctrl+g":
 		// Command palette: prefill "/" and surface the slash-command dropdown (type to filter).

@@ -154,6 +154,15 @@ func (m *model) handleEvent(o Outbound) {
 			m.ctxSaved = s.CompressionSaved
 			m.fWorkspace = s.Workspace
 			m.fComputer = s.Computer
+			m.fTasks = s.Tasks
+			// Keep the selection valid as the strip shrinks; release focus when it empties so the
+			// panel's stolen keys (↑/↓/enter/c/p/r) go back to the input.
+			if m.tkSel >= len(m.fTasks) {
+				m.tkSel = 0
+			}
+			if len(m.fTasks) == 0 {
+				m.tkFocus = false
+			}
 			// First snapshot after `ready`: the model slots are now known — render the banner with
 			// them (idempotent; no-op once welcomed).
 			if !m.welcomeBy.IsZero() {

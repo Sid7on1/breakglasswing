@@ -188,6 +188,12 @@ type model struct {
 	saExpanded    map[string]bool // taskId → is this agent's card expanded
 	saFocus       bool            // panel has keyboard focus (ctrl+a); ↑/↓ select, enter expand
 
+	// task workspaces (ui_snapshot.tasks): background shell/browser/build tasks with an honest
+	// action set. Rendered as a pinned bottom panel; Ctrl+E focuses it for keyboard actions.
+	fTasks  []TaskStrip
+	tkFocus bool // task panel has keyboard focus (ctrl+e); ↑/↓ select, action keys act
+	tkSel   int  // selected task row while focused
+
 	// pending approval (from a `request` message)
 	reqOpen     bool
 	reqID       int
@@ -833,18 +839,24 @@ func (m model) belowSections() []string {
 			td = ""
 		}
 		sa := m.subAgentPanel()
+		tk := m.taskPanel()
 		cm := m.compactMapView()
 		hl := m.healthLineView() // ambient repo-health: only non-empty when a drive is off setpoint
 
 		// Add a blank spacer above the pinned panels so they don't stick directly to the transcript
 		// or working indicators.
-		if td != "" || oc != "" || sa != "" || cm != "" || hl != "" {
+		if td != "" || oc != "" || sa != "" || tk != "" || cm != "" || hl != "" {
 			s = append(s, "")
 		}
 
 		// Pin the live sub-agent coverage panel while any sub-agent is running, above the task list.
 		if sa != "" {
 			s = append(s, sa)
+		}
+		// Task workspaces (background shell/browser/build work) — below sub-agents, above the todo
+		// checklist: it is runtime posture, not conversation content.
+		if tk != "" {
+			s = append(s, tk)
 		}
 		if oc != "" {
 			s = append(s, oc)

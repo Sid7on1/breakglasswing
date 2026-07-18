@@ -131,6 +131,27 @@ type UiSnapshot struct {
 	// Computer-use posture (v3 additive): live browser session + desktop driver + taint state.
 	// nil on older engines — every consumer must nil-check.
 	Computer *ComputerStrip `json:"computer"`
+	// Task workspaces (v3 additive): live + recent background tasks (shell, browser, builds) for
+	// the pinned task panel. nil/empty on older engines and when nothing is running.
+	Tasks []TaskStrip `json:"tasks"`
+}
+
+// TaskStrip mirrors UiSnapshotTask (src/protocol/ui.snapshot.ts): one live/recent task workspace.
+// The can* flags are HONEST capabilities from the engine (pause exists only where a real SIGSTOP
+// does) — the panel offers exactly these actions and nothing more.
+type TaskStrip struct {
+	ID        string  `json:"id"`
+	Kind      string  `json:"kind"`  // shell | browser | subagent | build | test | generic
+	Title     string  `json:"title"`
+	State     string  `json:"state"` // the 16-state machine in execution.ledger.ts
+	ElapsedMs int64   `json:"elapsedMs"`
+	Attention bool    `json:"attention"`
+	Pinned    bool    `json:"pinned"`
+	LastEvent string  `json:"lastEvent,omitempty"`
+	Progress  float64 `json:"progress,omitempty"` // 0..1 where measurable; 0 = unknown
+	CanPause  bool    `json:"canPause"`
+	CanResume bool    `json:"canResume"`
+	CanCancel bool    `json:"canCancel"`
 }
 
 // ComputerStrip mirrors UiSnapshotComputer (src/protocol/ui.snapshot.ts): the live automated
