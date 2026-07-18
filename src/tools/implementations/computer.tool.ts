@@ -6,7 +6,7 @@ import { getTaintTracker } from '../../mind/taint';
 import { buildTool, BuiltTool } from '../tool.factory';
 
 /** Acting verbs face the governor; observation (screenshot/cursor/status/…) is approval-free. */
-const GATED_ACTIONS = new Set(['click', 'drag', 'type', 'key', 'open', 'close']);
+const GATED_ACTIONS = new Set(['click', 'drag', 'type', 'key', 'set_value', 'open', 'close']);
 
 export function createComputerTool(
   governor: IGovernor,
@@ -20,7 +20,9 @@ export function createComputerTool(
     name: 'ComputerTool',
     description: `See and control the user's real desktop — native screenshots, mouse, and keyboard (first-party OS driver, no external server).
 
-Use BrowserTool for anything inside a web page; ComputerTool is for native apps and cross-app work. Work the loop: screenshot → act → screenshot to verify. Coordinates are GLOBAL SCREEN POINTS matching the screenshot pixels exactly (Retina captures are pre-scaled), and every coordinate action also accepts normalized=true for the 0–1000 space scaled to the main display. Actions: screenshot (display n) · click/move/drag/scroll · type (unicode text) · key (combos like "cmd+shift+t", "return", "ctrl+c") · cursor · frontmost · open (launch/focus an app by name) · close (quit the intended app) · wait (let UI settle) · status (driver + Accessibility/Screen Recording permissions + displays) · request_access (trigger the macOS permission prompts). Keyboard actions stay locked to the most recently opened app; if focus cannot be restored, the action fails. On first use run status; if permissions are missing run request_access and tell the user what to approve.
+Use BrowserTool for ordinary websites; ComputerTool is Bimax's native app and cross-app runtime. Its primary loop is open → observe → semantic action → observe. observe returns one window's accessibility tree AND its screenshot from the same instant, with pid/windowId and fresh elementIndex/elementToken handles. Prefer elementToken or elementIndex for click/type/key/set_value; use window-local screenshot pixels only when the tree is missing or visibly wrong. Handles expire after the next observe. Every action result is delivery evidence, not success evidence: observe again and verify the requested state before replying.
+
+Actions: status/request_access · apps/windows discovery · open · observe/screenshot · click/type/key/set_value/drag/scroll · cursor/frontmost/move · close/wait. open returns pid/windowId and keeps that window as the default target. Actions may also name pid/windowId explicitly. deliveryMode defaults to background (no focus steal); foreground is an explicit last-resort retry only after a background action plus fresh observation proved a no-op. screenshot observes the selected native window when one exists and otherwise uses the full display fallback.
 
 Security: acting (click/drag/type/key/open/close) is governor-gated per intended app with session grants; sensitive targets (password managers, system security settings, wallets) are always denied; screenshots carry untrusted screen content and taint the session like WebFetch.`,
     isDestructive: false,
@@ -28,7 +30,7 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['screenshot', 'click', 'move', 'drag', 'scroll', 'type', 'key', 'cursor', 'frontmost', 'open', 'close', 'wait', 'status', 'request_access'] },
+        action: { type: 'string', enum: ['status', 'request_access', 'apps', 'windows', 'open', 'observe', 'screenshot', 'click', 'type', 'key', 'set_value', 'drag', 'scroll', 'cursor', 'frontmost', 'move', 'close', 'wait'] },
         x: { type: 'number' }, y: { type: 'number' },
         toX: { type: 'number', description: 'drag: destination x.' }, toY: { type: 'number', description: 'drag: destination y.' },
         dx: { type: 'number', description: 'scroll: horizontal pixels (positive = right).' },
@@ -37,7 +39,19 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
         count: { type: 'number', description: 'click: 1 (default), 2 = double, 3 = triple.' },
         text: { type: 'string', description: 'type: literal text, full unicode.' },
         combo: { type: 'string', description: 'key: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
-        app: { type: 'string', description: 'open/close/type/key: intended application name (e.g. "Notes"). Keyboard actions default to the most recently opened app.' },
+        app: { type: 'string', description: 'Intended application name (e.g. "Notes"). Actions default to the most recently opened app.' },
+        bundleId: { type: 'string', description: 'open: exact macOS bundle id; preferred when known.' },
+        pid: { type: 'number', description: 'Target process id returned by open/apps/windows.' },
+        windowId: { type: 'number', description: 'Target window id returned by open/windows.' },
+        elementIndex: { type: 'number', description: 'Fresh semantic handle from the latest observe of this exact pid/window.' },
+        elementToken: { type: 'string', description: 'Opaque fresh semantic handle from observe; preferred over elementIndex.' },
+        query: { type: 'string', description: 'observe: filter the rendered accessibility tree while keeping element identity stable.' },
+        maxElements: { type: 'number', description: 'observe: accessibility-tree budget, 1–2000.' },
+        includeScreenshot: { type: 'boolean', description: 'observe: false for a cheap tree-only verification refresh.' },
+        value: { type: 'string', description: 'set_value: new native control value.' },
+        deliveryMode: { type: 'string', enum: ['background', 'foreground'], description: 'background first; foreground only after a verified no-op.' },
+        session: { type: 'string', description: 'Optional stable Bimax cursor/session identity.' },
+        newInstance: { type: 'boolean', description: 'open: request an isolated app instance when supported.' },
         display: { type: 'number', description: 'screenshot: display index, 1 = main.' },
         ms: { type: 'number', description: 'wait: 50-5000 milliseconds.' },
         normalized: { type: 'boolean', description: 'Interpret coordinates as 0–1000 normalized space scaled to the main display.' },
@@ -45,15 +59,19 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
       required: ['action'],
     },
     execute: async (args: DesktopCommand, context?: any) => {
-      const intendedApp = args.app?.trim() || (['type', 'key', 'close'].includes(args.action) ? targetApp : '');
+      const intendedApp = args.app?.trim() || (['click', 'drag', 'scroll', 'type', 'key', 'set_value', 'close'].includes(args.action) ? targetApp : '');
       const effectiveArgs: DesktopCommand = intendedApp ? { ...args, app: intendedApp } : args;
       if (GATED_ACTIONS.has(effectiveArgs.action)) {
         // Scope the approval to the app that will RECEIVE the input so the governor can offer
         // (and honor) a session grant for exactly that app — and hard-deny sensitive targets.
-        const app = ['open', 'close', 'type', 'key'].includes(effectiveArgs.action) && intendedApp
+        const app = intendedApp
           ? intendedApp
           : await runtime.frontmostApp();
-        const impact = classifyDesktopActionImpact(effectiveArgs.action, { text: effectiveArgs.text, combo: effectiveArgs.combo, app: effectiveArgs.app });
+        const semanticTarget = runtime.describeTarget?.(effectiveArgs) || undefined;
+        const impact = classifyDesktopActionImpact(effectiveArgs.action, {
+          text: effectiveArgs.text, combo: effectiveArgs.combo, app: effectiveArgs.app,
+          label: semanticTarget?.label, role: semanticTarget?.role, value: semanticTarget?.value,
+        });
         await governor.approveTaskExecution('COMPUTER_CONTROL', {
           tool: 'ComputerTool', action: effectiveArgs.action, app: app || undefined,
           highImpact: impact.high || undefined, impactReason: impact.reason,

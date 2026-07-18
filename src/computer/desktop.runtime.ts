@@ -4,15 +4,16 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
+import { openClient } from '../mcp/client';
+import { withTimeout } from '../utils/withTimeout';
 
 /**
- * First-party native desktop control — screenshots, mouse, keyboard on the real OS.
+ * Offline/development fallback for Bimax Computer Use.
  *
- * No MCP server and no third-party binary: on macOS the driver is a small Swift helper whose
- * source ships INSIDE BiMax (helper.source.ts), compiled once with the system toolchain and
- * cached under ~/.bimax/native keyed by source hash. Degradation ladder when swiftc is absent:
- * cliclick (if installed) → AppleScript System Events (click/keys only). On Linux the driver is
- * xdotool. Screenshots always come from the OS capture tool (screencapture / grim / import…).
+ * On macOS this is a small in-repo Swift helper (helper.source.ts), compiled once with the system
+ * toolchain and cached under ~/.bimax/native by source hash. Degradation ladder when swiftc is
+ * absent: cliclick → AppleScript System Events. On Linux the fallback is xdotool. Shipped builds
+ * normally use BimaxComputerRuntime below, backed by the pinned native sidecar.
  *
  * Coordinate contract: everything is GLOBAL SCREEN POINTS. Retina screenshots are downscaled to
  * point resolution before the model sees them, so "click where the pixel is" is always correct.
@@ -21,8 +22,9 @@ import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
  */
 
 export type DesktopAction =
-  | 'status' | 'request_access' | 'screenshot' | 'cursor' | 'frontmost' | 'open'
-  | 'close' | 'move' | 'click' | 'drag' | 'scroll' | 'type' | 'key' | 'wait';
+  | 'status' | 'request_access' | 'apps' | 'windows' | 'observe' | 'screenshot'
+  | 'cursor' | 'frontmost' | 'open' | 'close' | 'move' | 'click' | 'drag'
+  | 'scroll' | 'type' | 'key' | 'set_value' | 'wait';
 
 export interface DesktopCommand {
   action: DesktopAction;
@@ -34,6 +36,18 @@ export interface DesktopCommand {
   text?: string;
   combo?: string;
   app?: string;
+  bundleId?: string;
+  pid?: number;
+  windowId?: number;
+  elementIndex?: number;
+  elementToken?: string;
+  query?: string;
+  maxElements?: number;
+  includeScreenshot?: boolean;
+  value?: string;
+  deliveryMode?: 'background' | 'foreground';
+  session?: string;
+  newInstance?: boolean;
   display?: number;
   ms?: number;
   /** Interpret coordinates in the 0–1000 normalized space and scale to the main display. */
@@ -55,6 +69,12 @@ export interface DesktopResult {
   accessibility?: boolean | null;
   screenRecording?: boolean | null;
   displays?: DesktopDisplay[];
+  pid?: number;
+  windowId?: number;
+  elements?: unknown[];
+  tree?: string;
+  degraded?: boolean;
+  details?: unknown;
   summary: string;
 }
 
@@ -63,6 +83,9 @@ export interface DesktopRuntimePort {
   /** Cheap, non-spawning snapshot for the /computer hub: driver tier + last-known permissions. */
   quickStatus(): { driver: string; ready: boolean; accessibility: boolean | null; screenRecording: boolean | null };
   frontmostApp(): Promise<string>;
+  /** Value-safe label/role for the fresh semantic handle an action is about to use. */
+  describeTarget?(cmd: DesktopCommand): { label?: string; role?: string; value?: string } | null;
+  dispose?(): Promise<void>;
 }
 
 /** Pure: 0–1000 normalized → screen points (clamped). Exported for tests. */
@@ -502,4 +525,344 @@ export class DesktopRuntime implements DesktopRuntimePort {
   }
 }
 
-export const globalDesktopRuntime: DesktopRuntimePort = new DesktopRuntime();
+/** Replace upstream implementation names in anything that can reach the model or user. */
+function bimaxBrand<T>(value: T): T {
+  if (typeof value === 'string') {
+    return value
+      .replace(/cua-driver-rs/gi, 'Bimax Computer Use')
+      .replace(/cua[ -]driver/gi, 'Bimax Computer Use') as T;
+  }
+  if (Array.isArray(value)) return value.map(bimaxBrand) as T;
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as any).map(([k, v]) => [k, bimaxBrand(v)])) as T;
+  }
+  return value;
+}
+
+function mcpText(result: any): string {
+  return (result?.content || [])
+    .filter((part: any) => part?.type === 'text')
+    .map((part: any) => String(part.text || ''))
+    .join('\n');
+}
+
+function mcpStructured(result: any): any {
+  if (result?.structuredContent && typeof result.structuredContent === 'object') return result.structuredContent;
+  const text = mcpText(result).replace(/^✅[^\n]*\n?/, '').trim();
+  try { return JSON.parse(text); } catch { return text ? { message: text } : {}; }
+}
+
+interface ComputerTarget { app: string; pid: number; windowId?: number }
+
+/**
+ * Bimax Computer Use — a long-lived, private MCP connection to the embedded native sidecar.
+ *
+ * The sidecar is derived from trycua/cua 0.8.3 (MIT) but no Cua surface leaks into Bimax: the
+ * executable path, session, tool schema, diagnostics, output and fallback are all Bimax-owned.
+ * Keeping one live connection is essential because accessibility element tokens are scoped to the
+ * observation that created them; spawning a process per action would silently discard that cache.
+ */
+export class BimaxComputerRuntime implements DesktopRuntimePort {
+  private readonly fallback = new DesktopRuntime();
+  private clientPromise: Promise<any> | null = null;
+  private target: ComputerTarget | null = null;
+  private indexedElements = new Map<string, { label?: string; role?: string; value?: string }>();
+  private readonly session = `bimax-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  private lastStatus = { accessibility: null as boolean | null, screenRecording: null as boolean | null };
+
+  private driverPath(): string | null {
+    const configured = process.env.BIMAX_COMPUTER_USE_DRIVER?.trim();
+    return configured && fs.existsSync(configured) ? configured : null;
+  }
+
+  public quickStatus() {
+    const path = this.driverPath();
+    if (!path) return this.fallback.quickStatus();
+    return { driver: 'bimax-computer-use 0.8.3', ready: true, ...this.lastStatus };
+  }
+
+  public describeTarget(cmd: DesktopCommand) {
+    const key = cmd.elementToken ? `token:${cmd.elementToken}`
+      : cmd.elementIndex != null ? `index:${Math.floor(cmd.elementIndex)}` : '';
+    return key ? this.indexedElements.get(key) || null : null;
+  }
+
+  public async dispose(): Promise<void> {
+    const pending = this.clientPromise;
+    this.clientPromise = null;
+    if (!pending) return;
+    try {
+      const client = await pending;
+      await client.callTool({ name: 'end_session', arguments: { session: this.session } });
+      await client.close?.();
+    } catch { /* process teardown is best-effort */ }
+  }
+
+  private async client(): Promise<any> {
+    const driver = this.driverPath();
+    if (!driver) throw new Error('embedded Bimax Computer Use driver is unavailable');
+    if (!this.clientPromise) {
+      this.clientPromise = (async () => {
+        const client = await openClient({
+          name: 'bimax-computer-use',
+          command: driver,
+          args: ['mcp', '--embedded', '--host-bundle-id', 'ai.bimax.cli'],
+          forceScrubEnv: true,
+          env: {
+            CUA_DRIVER_EMBEDDED: '1',
+            CUA_DRIVER_HOST_BUNDLE_ID: 'ai.bimax.cli',
+            CUA_DRIVER_RS_TELEMETRY_ENABLED: '0',
+            CUA_TELEMETRY_ENABLED: '0',
+          },
+        });
+        await client.callTool({ name: 'start_session', arguments: { session: this.session } });
+        return client;
+      })().catch(err => {
+        this.clientPromise = null;
+        throw err;
+      });
+    }
+    return this.clientPromise;
+  }
+
+  private async call(name: string, args: Record<string, unknown> = {}): Promise<any> {
+    const result = await withTimeout<any>(
+      (await this.client()).callTool({ name, arguments: args }),
+      30_000,
+      `Bimax Computer Use '${name}'`,
+    );
+    const data = bimaxBrand(mcpStructured(result));
+    if (result?.isError) {
+      const detail = bimaxBrand(mcpText(result)).trim();
+      throw new Error(detail || `${name} failed`);
+    }
+    return data;
+  }
+
+  private targetFor(cmd: DesktopCommand): ComputerTarget | null {
+    const pid = Number(cmd.pid || this.target?.pid || 0);
+    if (!pid) return null;
+    return {
+      app: cmd.app?.trim() || this.target?.app || '',
+      pid,
+      windowId: Number(cmd.windowId || this.target?.windowId || 0) || undefined,
+    };
+  }
+
+  private screenshotPath(cwd: string): string {
+    const dir = path.join(cwd, '.bimax', 'computer');
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `window-${Date.now()}.png`);
+  }
+
+  private async refreshTargetWindow(target: ComputerTarget): Promise<ComputerTarget> {
+    const data = await this.call('list_windows', { pid: target.pid });
+    const windows = Array.isArray(data?.windows) ? data.windows : [];
+    const window = windows.find((w: any) => Number(w.window_id) === target.windowId) || windows[0];
+    return { ...target, windowId: Number(window?.window_id || 0) || undefined };
+  }
+
+  public async frontmostApp(): Promise<string> {
+    if (!this.driverPath()) return this.fallback.frontmostApp();
+    try {
+      const data = await this.call('list_apps');
+      const active = (Array.isArray(data?.apps) ? data.apps : []).find((app: any) => app.active);
+      return String(active?.name || '');
+    } catch {
+      return this.fallback.frontmostApp();
+    }
+  }
+
+  public async run(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
+    if (!this.driverPath()) return this.fallback.run(cmd, ctx);
+    const cwd = ctx?.cwd || process.cwd();
+    const driver = 'bimax-computer-use 0.8.3';
+    try {
+      if (ctx?.signal?.aborted) throw new Error('computer action aborted');
+      const target = this.targetFor(cmd);
+      const session = cmd.session || this.session;
+
+      switch (cmd.action) {
+        case 'status': {
+          const data = await this.call('health_report');
+          const checks = Array.isArray(data?.checks) ? data.checks : [];
+          const ax = checks.find((c: any) => c.name === 'tcc_accessibility');
+          const screen = checks.find((c: any) => c.name === 'tcc_screen_recording');
+          this.lastStatus = {
+            accessibility: ax ? ax.status === 'pass' : null,
+            screenRecording: screen ? screen.status === 'pass' : null,
+          };
+          return { ok: data?.overall !== 'failed', action: cmd.action, driver, ...this.lastStatus, details: data, summary: `Bimax Computer Use ${data?.overall || 'ready'}` };
+        }
+        case 'request_access': {
+          const data = await this.call('check_permissions', { prompt: true });
+          this.lastStatus = { accessibility: !!data?.accessibility, screenRecording: !!data?.screen_recording };
+          return { ok: true, action: cmd.action, driver, ...this.lastStatus, details: data, summary: 'Bimax Computer Use permission check completed' };
+        }
+        case 'apps': {
+          const data = await this.call('list_apps');
+          return { ok: true, action: cmd.action, driver, details: data, summary: `found ${data?.apps?.length || 0} applications` };
+        }
+        case 'windows': {
+          const data = await this.call('list_windows', target?.pid ? { pid: target.pid } : {});
+          return { ok: true, action: cmd.action, driver, pid: target?.pid, details: data, summary: `found ${data?.windows?.length || 0} windows${target?.app ? ` for ${target.app}` : ''}` };
+        }
+        case 'open': {
+          if (!cmd.app?.trim() && !cmd.bundleId?.trim()) throw new Error('open needs app or bundleId');
+          const data = await this.call('launch_app', {
+            ...(cmd.bundleId?.trim() ? { bundle_id: cmd.bundleId.trim() } : { name: cmd.app!.trim() }),
+            ...(cmd.newInstance ? { creates_new_application_instance: true } : {}),
+          });
+          const window = Array.isArray(data?.windows) ? data.windows[0] : undefined;
+          this.target = {
+            app: String(data?.name || cmd.app || cmd.bundleId || ''),
+            pid: Number(data?.pid || 0),
+            windowId: Number(window?.window_id || 0) || undefined,
+          };
+          if (!this.target.pid) throw new Error(`opened ${this.target.app || 'application'} but received no target pid`);
+          if (!this.target.windowId) this.target = await this.refreshTargetWindow(this.target);
+          return { ok: true, action: cmd.action, driver, app: this.target.app, pid: this.target.pid, windowId: this.target.windowId, details: data, summary: `opened ${this.target.app} as pid ${this.target.pid}${this.target.windowId ? ` window ${this.target.windowId}` : ''}` };
+        }
+        case 'observe':
+        case 'screenshot': {
+          if (!target?.windowId) {
+            if (cmd.action === 'screenshot') return this.fallback.run(cmd, ctx);
+            throw new Error('observe needs pid + windowId; open or select an application window first');
+          }
+          const screenshot = this.screenshotPath(cwd);
+          const data = await this.call('get_window_state', {
+            pid: target.pid,
+            window_id: target.windowId,
+            session,
+            include_screenshot: cmd.includeScreenshot !== false,
+            screenshot_out_file: screenshot,
+            ...(cmd.query ? { query: cmd.query } : {}),
+            ...(cmd.maxElements ? { max_elements: Math.max(1, Math.min(2000, Math.floor(cmd.maxElements))) } : {}),
+          });
+          const elements = Array.isArray(data?.elements) ? data.elements : [];
+          const degraded = !elements.some((element: any) =>
+            !['AXMenuBar', 'AXMenuBarItem', 'AXMenu', 'AXMenuItem'].includes(String(element?.role || '')));
+          this.indexedElements.clear();
+          for (const element of elements as any[]) {
+            const safe = { label: element?.label, role: element?.role, value: element?.value };
+            if (element?.element_token) this.indexedElements.set(`token:${element.element_token}`, safe);
+            if (element?.element_index != null) this.indexedElements.set(`index:${Number(element.element_index)}`, safe);
+          }
+          return {
+            ok: true, action: cmd.action, driver, app: target.app, pid: target.pid,
+            windowId: target.windowId, screenshot: data?.screenshot_file_path || screenshot,
+            width: data?.screenshot_width, height: data?.screenshot_height,
+            elements, tree: data?.tree_markdown, degraded,
+            summary: degraded
+              ? `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: semantic tree is degraded; use the attached window screenshot and pixel addressing`
+              : `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: ${elements.length} indexed UI elements + screenshot`,
+          };
+        }
+        case 'cursor': {
+          const data = await this.call('get_cursor_position');
+          return { ok: true, action: cmd.action, driver, x: data?.x, y: data?.y, details: data, summary: `cursor at ${data?.x},${data?.y}` };
+        }
+        case 'frontmost': {
+          const app = await this.frontmostApp();
+          return { ok: true, action: cmd.action, driver, app, summary: `frontmost app: ${app || '(unknown)'}` };
+        }
+        case 'click': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const args: any = { pid: target.pid, session, delivery_mode: cmd.deliveryMode || 'background', button: cmd.button || 'left' };
+          if (target.windowId) args.window_id = target.windowId;
+          if (cmd.elementToken) args.element_token = cmd.elementToken;
+          else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
+          else { args.x = cmd.x; args.y = cmd.y; }
+          if (cmd.count) args.count = Math.floor(cmd.count);
+          const data = await this.call('click', args);
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `click delivered to ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'type': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const args: any = { pid: target.pid, text: cmd.text || '', session, delivery_mode: cmd.deliveryMode || 'background' };
+          if (target.windowId) args.window_id = target.windowId;
+          if (cmd.elementToken) args.element_token = cmd.elementToken;
+          else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
+          else if (cmd.x != null && cmd.y != null) { args.x = cmd.x; args.y = cmd.y; }
+          const data = await this.call('type_text', args);
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `typed ${(cmd.text || '').length} characters into ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'key': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const keys = (cmd.combo || '').split('+').map(k => k.trim().toLowerCase()).filter(Boolean);
+          if (!keys.length) throw new Error('key needs combo');
+          const common: any = { pid: target.pid, session, delivery_mode: cmd.deliveryMode || 'background' };
+          if (target.windowId) common.window_id = target.windowId;
+          if (cmd.elementToken) common.element_token = cmd.elementToken;
+          else if (cmd.elementIndex != null) common.element_index = Math.floor(cmd.elementIndex);
+          const data = keys.length > 1
+            ? await this.call('hotkey', { ...common, keys })
+            : await this.call('press_key', { ...common, key: keys[0] });
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `pressed ${cmd.combo} in ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'set_value': {
+          if (!target) throw new Error('set_value needs a target pid');
+          if (cmd.value == null) throw new Error('set_value needs value');
+          const data = await this.call('set_value', {
+            pid: target.pid, window_id: target.windowId, session, value: cmd.value,
+            ...(cmd.elementToken ? { element_token: cmd.elementToken } : { element_index: cmd.elementIndex }),
+          });
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `value delivered to ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'drag': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const data = await this.call('drag', {
+            pid: target.pid, window_id: target.windowId, session,
+            from_x: cmd.x, from_y: cmd.y, to_x: cmd.toX, to_y: cmd.toY,
+            delivery_mode: cmd.deliveryMode || 'background', button: cmd.button || 'left',
+          });
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `drag delivered to ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'scroll': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const direction = Math.abs(cmd.dx || 0) > Math.abs(cmd.dy || 0)
+            ? ((cmd.dx || 0) >= 0 ? 'right' : 'left')
+            : ((cmd.dy || 0) >= 0 ? 'down' : 'up');
+          const args: any = { pid: target.pid, direction, amount: Math.max(1, Math.min(50, Math.round(Math.abs((cmd.dy || cmd.dx || 120) / 40)))), session, delivery_mode: cmd.deliveryMode || 'background' };
+          if (target.windowId) args.window_id = target.windowId;
+          if (cmd.elementToken) args.element_token = cmd.elementToken;
+          else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
+          else if (cmd.x != null && cmd.y != null) { args.x = cmd.x; args.y = cmd.y; }
+          const data = await this.call('scroll', args);
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, summary: `scrolled ${direction} in ${target.app || `pid ${target.pid}`}; verify with a fresh observe` };
+        }
+        case 'close': {
+          if (!target) return this.fallback.run(cmd, ctx);
+          const keys = process.platform === 'darwin' ? ['cmd', 'q'] : ['alt', 'f4'];
+          await this.call('hotkey', { pid: target.pid, window_id: target.windowId, session, keys, delivery_mode: 'background' });
+          await new Promise(resolve => setTimeout(resolve, 350));
+          const windows = await this.call('list_windows', { pid: target.pid });
+          if (Array.isArray(windows?.windows) && windows.windows.length > 0) {
+            throw new Error(`${target.app || `pid ${target.pid}`} did not close after the cooperative quit shortcut`);
+          }
+          this.target = null;
+          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, summary: `closed ${target.app || `pid ${target.pid}`} and verified that its windows disappeared` };
+        }
+        case 'move': {
+          if (cmd.x == null || cmd.y == null) throw new Error('move needs x and y');
+          const data = await this.call('move_cursor', { x: cmd.x, y: cmd.y, session });
+          return { ok: true, action: cmd.action, driver, x: cmd.x, y: cmd.y, details: data, summary: `moved Bimax cursor to ${cmd.x},${cmd.y}` };
+        }
+        case 'wait': {
+          const ms = Math.max(WAIT_MIN, Math.min(WAIT_MAX, Math.floor(cmd.ms || 500)));
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, ms);
+            ctx?.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('computer wait aborted')); }, { once: true });
+          });
+          return { ok: true, action: cmd.action, driver, summary: `waited ${ms}ms` };
+        }
+        default:
+          return { ok: false, action: cmd.action, driver, error: `unsupported computer action: ${String(cmd.action)}`, summary: `${cmd.action} failed` };
+      }
+    } catch (err: any) {
+      return { ok: false, action: cmd.action, driver, error: bimaxBrand(String(err?.message || err)).slice(0, 1000), summary: `${cmd.action} failed` };
+    }
+  }
+}
+
+export const globalDesktopRuntime: DesktopRuntimePort = new BimaxComputerRuntime();

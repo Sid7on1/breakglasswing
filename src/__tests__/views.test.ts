@@ -85,4 +85,12 @@ describe('MCP child env (v2 threat model cut #4)', () => {
     const env = mcpChildEnv({ name: 's', command: 'node' } as any);
     expect(env.BGW_FAKE_MCP_SECRET).toBe('sk-leaky');
   });
+
+  it('trusted embedded runtimes can make environment scrubbing non-overridable', () => {
+    process.env.BGW_FAKE_MCP_SECRET = 'sk-leaky';
+    process.env.BIMAX_MCP_ENV_INHERIT = '1';
+    const env = mcpChildEnv({ name: 'embedded', command: 'driver', forceScrubEnv: true } as any);
+    expect(env.BGW_FAKE_MCP_SECRET).toBeUndefined();
+    expect(env.PATH).toBe(process.env.PATH);
+  });
 });

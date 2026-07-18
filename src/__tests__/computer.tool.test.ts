@@ -87,6 +87,16 @@ describe('ComputerTool', () => {
     expect(payload.impactReason).toBeTruthy();
   });
 
+  it('classifies a fresh semantic target before asking the governor', async () => {
+    const runtime = fakeRuntime();
+    runtime.describeTarget = jest.fn().mockReturnValue({ label: 'Delete account', role: 'AXButton' });
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'click', app: 'Settings', pid: 12, windowId: 9, elementToken: 'fresh' }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'click', highImpact: true, impactReason: expect.stringContaining('Delete'),
+    }));
+  });
+
   it('does not act when the governor vetoes', async () => {
     const veto = { approveTaskExecution: jest.fn().mockRejectedValue(new Error('vetoed')) } as unknown as IGovernor;
     const runtime = fakeRuntime();

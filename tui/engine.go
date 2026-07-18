@@ -15,7 +15,8 @@ import (
 
 // hasEmbeddedEngine reports whether a real compiled engine was baked in (release build). The dev
 // build leaves embeddedEngine nil; we also guard against a stray tiny placeholder.
-func hasEmbeddedEngine() bool { return len(embeddedEngine) > 1<<20 }
+func hasEmbeddedEngine() bool      { return len(embeddedEngine) > 1<<20 }
+func hasEmbeddedComputerUse() bool { return len(embeddedComputerUse) > 1<<20 }
 
 func engineCacheRoots() []string {
 	roots := make([]string, 0, 3)
@@ -60,6 +61,37 @@ func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, erro
 func extractEmbeddedEngine() (string, error) {
 	sum := sha256.Sum256(embeddedEngine)
 	return extractEmbeddedEngineFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
+}
+
+func extractEmbeddedComputerUseFromRoots(roots []string, suffix string) (string, error) {
+	var lastErr error
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		dir := filepath.Join(root, "bimax")
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		path := filepath.Join(dir, "bimax-computer-use-"+suffix)
+		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedComputerUse)) {
+			return path, nil
+		}
+		if err := os.WriteFile(path, embeddedComputerUse, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("no writable computer-use cache directory: %w", lastErr)
+}
+
+func extractEmbeddedComputerUse() (string, error) {
+	sum := sha256.Sum256(embeddedComputerUse)
+	return extractEmbeddedComputerUseFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
 }
 
 // ResolveRoot picks the directory the engine subprocess STARTS in. For the shipped binary that's the
@@ -160,6 +192,18 @@ func StartEngine(repoRoot string) (*Engine, error) {
 	}
 	c.Dir = repoRoot
 	c.Env = append(os.Environ(), "BIMAX_HEADLESS=1")
+	// The native sidecar is an implementation detail: the engine only sees the Bimax-owned path and
+	// contract. Telemetry is disabled at the process boundary before the sidecar can ever start.
+	if override := os.Getenv("BIMAX_COMPUTER_USE_DRIVER"); override != "" {
+		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+override)
+	} else if hasEmbeddedComputerUse() {
+		driverPath, extractErr := extractEmbeddedComputerUse()
+		if extractErr != nil {
+			return nil, extractErr
+		}
+		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+driverPath)
+	}
+	c.Env = append(c.Env, "CUA_DRIVER_RS_TELEMETRY_ENABLED=0", "CUA_TELEMETRY_ENABLED=0")
 	// The engine must START in repoRoot so the dev runner (`tsx src/index.ts`) resolves, but the
 	// user's actual project is wherever they launched the TUI. Pass that through so the engine can
 	// chdir into it — otherwise the dev build always treats the repo as the project (e.g. the codebase

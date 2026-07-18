@@ -1,6 +1,6 @@
 {
   "name": "bimax",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "BiMax — Autonomous AI agent for your terminal",
   "bin": {
     "bimax": "bin/bimax.js"
@@ -22,6 +22,7 @@
     "app:dist:win": "npm --prefix app run dist:win",
     "test:leaks": "jest --coverage=false --detectOpenHandles",
     "test:tui": "python3 scripts/tui-regression.py",
+    "test:computer": "tsx scripts/smoke-computer-use.ts",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",

@@ -11,7 +11,8 @@ bimax_version() { echo "${BIMAX_VERSION:-$(node -p "require('./package.json').ve
 # interrupted; run before and after a build so they never pile up in the repo root (gitignored too).
 bimax_sweep_bunbuild() { rm -f .*.bun-build 2>/dev/null || true; }
 
-# Build one target: compile the engine, then the Go binary with it embedded.
+# Build one target: stage the native computer-use driver, compile the engine, then embed both in
+# the Go binary. The release remains one self-contained executable on disk.
 #   build_bimax <goos> <goarch> <outfile> <mode:dev|release> [bun-target]
 # Empty goos/goarch → host-native build (no cross-compile env). Empty bun-target → host engine
 # compile (no --target). release mode adds -s -w -trimpath; dev keeps symbols for local debugging.
@@ -31,7 +32,10 @@ build_bimax() {
   if [ -n "$goos" ]; then env_prefix=(env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch"); fi
   mkdir -p build tui/embed
 
-  echo "[1/2] engine → standalone binary (bun --compile, CJS${bun_target:+, ${bun_target}}) …"
+  echo "[0/3] native Bimax Computer Use sidecar (pinned + checksum verified) …"
+  scripts/stage-computer-use-driver.sh "$goos" "${goarch/amd64/x64}"
+
+  echo "[1/3] engine → standalone binary (bun --compile, CJS${bun_target:+, ${bun_target}}) …"
   # --format=cjs is required: the engine is CommonJS, and Bun's default ESM bundling mangles the
   # web-tree-sitter Emscripten glue (surfaces as 'ReferenceError: _a is not defined' at boot).
   if [ -n "$bun_target" ]; then
@@ -40,7 +44,7 @@ build_bimax() {
     bun build src/index.ts --compile --format=cjs --outfile tui/embed/bimax-engine
   fi
 
-  echo "[2/2] Go binary with the engine embedded → ${outfile} …"
+  echo "[2/3] Go binary with engine + Bimax Computer Use embedded → ${outfile} …"
   # Guard empty-array expansion: macOS's bash 3.2 treats "${arr[@]}" as unbound under `set -u`.
   ( cd tui && ${env_prefix[@]+"${env_prefix[@]}"} go build -tags embedengine ${goflags[@]+"${goflags[@]}"} -ldflags "$ldflags" -o "../$outfile" . )
 }

@@ -6,3 +6,4 @@ package main
 // source (npx tsx) or whatever $BIMAX_ENGINE_CMD points at. This lets a fresh clone `go build`
 // without first producing the 85 MB compiled engine (which is never committed).
 var embeddedEngine []byte = nil
+var embeddedComputerUse []byte = nil

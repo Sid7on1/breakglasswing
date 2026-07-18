@@ -101,7 +101,7 @@ export interface UiSnapshotGit {
 export interface UiSnapshotComputer {
   /** URL of the live automated page, or null when no browser session is open. */
   browserUrl: string | null;
-  /** Desktop control posture. 'connected' = the first-party native driver (ComputerTool) is
+  /** Desktop control posture. 'connected' = Bimax Computer Use (ComputerTool) is
    * ready on this platform (or the legacy open-computer-use MCP companion is connected). */
   desktop: 'connected' | 'configured' | 'not-installed';
   /** Desktop tool count: 1 for the native ComputerTool, plus any legacy MCP companion tools. */

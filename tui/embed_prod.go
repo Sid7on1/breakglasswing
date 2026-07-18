@@ -4,9 +4,11 @@ package main
 
 import _ "embed"
 
-// Release build (`go build -tags embedengine`): the bun-compiled, self-contained engine binary
-// is baked into the Go binary. The result is ONE shippable file with no Node/Bun on the host.
-// Produced by build-release.sh, which runs `bun build --compile` into embed/bimax-engine first.
+// Release build (`go build -tags embedengine`): the bun-compiled engine and the pinned native
+// Bimax Computer Use sidecar are baked into the Go binary. The result remains ONE shippable file.
 //
 //go:embed embed/bimax-engine
 var embeddedEngine []byte
+
+//go:embed embed/bimax-computer-use
+var embeddedComputerUse []byte

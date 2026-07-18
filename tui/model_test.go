@@ -1518,3 +1518,11 @@ func TestVersionStringProvenance(t *testing.T) {
 		}
 	}
 }
+
+func TestBundledThirdPartyNotice(t *testing.T) {
+	for _, want := range []string{"Bimax Computer Use", "MIT License", "Copyright (c) 2025 Cua AI, Inc."} {
+		if !strings.Contains(thirdPartyNotices, want) {
+			t.Errorf("third-party notices missing %q", want)
+		}
+	}
+}

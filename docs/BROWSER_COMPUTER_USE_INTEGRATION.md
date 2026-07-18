@@ -237,3 +237,37 @@ legacy status (still usable if configured; `/computer` offers removal).
 5. Emit ui_snapshot refreshes on browser navigation / MCP connect (today the computer block
    refreshes on the existing config/goal/graph triggers and on demand via /computer).
 
+## Phase 4 (implemented 2026-07-18): Bimax Computer Use
+
+The global-coordinate Swift driver remains the offline/development fallback. Shipped builds now use
+**Bimax Computer Use**, a Bimax-owned semantic runtime backed by a pinned MIT-licensed native
+sidecar derived from `trycua/cua` 0.8.3 (source commit
+`9a29c8dde15591713ddf8657050201894da3c2d8`). Attribution and the full upstream MIT text are in
+`THIRD_PARTY_NOTICES.md`.
+
+- `scripts/stage-computer-use-driver.sh` selects the exact macOS/Linux artifact for each release
+  target, verifies a hard-coded SHA-256 from the upstream release, and stages only the driver
+  executable. No unversioned installer or network-fetched script is executed.
+- `tui/embed_prod.go` embeds the staged sidecar beside the Bun engine. The public release is still
+  one Bimax executable; the Go host extracts both content-addressed binaries into the Bimax cache
+  and passes `BIMAX_COMPUTER_USE_DRIVER` only to the private engine process.
+- Upstream telemetry is forcibly disabled in the Go host and again in the scrubbed MCP child
+  environment. The user never receives a separate upstream command, config step, or MCP server.
+- `BimaxComputerRuntime` maintains one long-lived embedded MCP connection so semantic element
+  tokens survive from observation to action. Bimax owns the external action names and maps them to
+  PID/window-scoped native operations.
+- `open` returns and remembers `pid`/`windowId`; `observe` returns the same-instant window screenshot
+  plus accessibility elements/tokens; semantic actions default to background delivery; close sends
+  a cooperative quit and verifies the target's windows disappeared.
+- A semantic tree containing only menu chrome is explicitly marked `degraded`; the model receives
+  the clean window-only screenshot and must use pixel grounding. It never treats an empty or noisy
+  accessibility tree as proof of the requested result.
+- The Governor now permits read-only ordinary System Settings work such as checking Storage while
+  still hard-denying credential/security panes. Labels cached from the fresh semantic observation
+  feed high-impact classification before approval, so controls such as Delete/Grant/Submit always
+  receive a fresh Yes/No.
+- `npm run test:computer` is a manual GUI smoke. It clears Calculator state, enters the standard
+  expression through PID-targeted input, captures fresh window evidence, closes cooperatively, and
+  fails if screenshot evidence is missing. On the validation host the final screenshot visibly read
+  `216,174`; Calculator's current macOS accessibility tree exposed menu chrome only, correctly
+  reported as degraded instead of inventing a semantic value.

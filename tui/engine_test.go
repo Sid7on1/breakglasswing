@@ -32,6 +32,29 @@ func TestEmbeddedEngineFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
 	}
 }
 
+func TestEmbeddedComputerUseFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
+	original := embeddedComputerUse
+	embeddedComputerUse = []byte("test embedded computer use")
+	t.Cleanup(func() { embeddedComputerUse = original })
+
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := filepath.Join(root, "fallback")
+	got, err := extractEmbeddedComputerUseFromRoots([]string{blocked, fallback}, "test")
+	if err != nil {
+		t.Fatalf("fallback extraction failed: %v", err)
+	}
+	if want := filepath.Join(fallback, "bimax", "bimax-computer-use-test"); got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded computer use" {
+		t.Fatalf("extracted computer use = %q, err=%v", data, err)
+	}
+}
+
 // Integration test: spawn the real headless engine, drive it the way the Bubble Tea model does,
 // and assert the Go side decodes the handshake and a structured command result. Proves the
 // Go↔Node protocol boundary end-to-end (no TTY needed).

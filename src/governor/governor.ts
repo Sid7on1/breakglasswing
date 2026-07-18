@@ -20,7 +20,7 @@ export interface ToolPermissionRule {
 
 /**
  * Targets computer control must never touch, regardless of grants, rules, or mode: credential
- * stores, OS security surfaces, and asset wallets. Matched against the app/window name a desktop
+ * stores, explicit OS security surfaces, and asset wallets. Matched against the app/window name a desktop
  * action names (and the browser host when one obviously identifies a credential manager). The
  * list is deliberately short and high-confidence — everything else still faces the normal
  * approval ladder.
@@ -28,7 +28,11 @@ export interface ToolPermissionRule {
 const SENSITIVE_COMPUTER_TARGETS: RegExp[] = [
   /keychain/i,
   /1password|lastpass|bitwarden|dashlane|keepass|keeper/i,
-  /system settings|system preferences/i,
+  // Do not ban the whole Settings app: read-only tasks such as checking Storage, Displays, or
+  // About are legitimate. Only explicit credential/security panes hit the hard floor; mutating
+  // settings controls are separately classified high-impact and require a fresh Yes/No.
+  /(?:system settings|system preferences).*(?:privacy|security|password|touch id|login|users?\s*&\s*groups?|profiles?|device management)/i,
+  /(?:privacy\s*&\s*security|touch id\s*&\s*password|login password|device management)/i,
   /passwords?\.app/i,
   /\bwallet\b|metamask|ledger live|trezor/i,
 ];
@@ -103,7 +107,7 @@ export class Governor implements IGovernor {
       const target = `${payload?.app || ''} ${payload?.host || ''}`.trim();
       if (isSensitiveComputerTarget(target)) {
         throw new GovernorVetoError(
-          `Computer control is not allowed on sensitive targets (credential managers, system security settings, wallets): ${target}. Do it manually if it is genuinely needed.`
+          `Computer control is not allowed on sensitive targets (credential managers, security/credential settings, wallets): ${target}. Do it manually if it is genuinely needed.`
         );
       }
     }

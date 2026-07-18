@@ -31,7 +31,7 @@ const MCP_ENV_BASELINE = [
 export function mcpChildEnv(spec: McpServerSpec): Record<string, string> {
   // Escape hatch for setups that rely on globally-exported keys instead of declaring them
   // per-server. Explicit and loud — inheriting everything is the insecure legacy behavior.
-  if (process.env.BIMAX_MCP_ENV_INHERIT === '1') {
+  if (!spec.forceScrubEnv && process.env.BIMAX_MCP_ENV_INHERIT === '1') {
     return { ...process.env as Record<string, string>, ...(spec.env || {}) };
   }
   const out: Record<string, string> = {};

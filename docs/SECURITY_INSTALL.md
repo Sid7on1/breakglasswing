@@ -20,6 +20,14 @@ fail-closed**:
 
 Nothing partially verified is ever executed, and the old binary is preserved until the new one runs.
 
+The single Bimax executable also contains the native **Bimax Computer Use** sidecar. Release builds
+pin its upstream 0.8.3 platform archive and verify that archive against a hard-coded SHA-256 before
+embedding it; the outer Bimax archive checksum therefore covers both engine and computer-use code.
+The sidecar is extracted content-addressed into the Bimax cache, is not added to `PATH`, receives a
+scrubbed environment, and has upstream telemetry disabled. See `THIRD_PARTY_NOTICES.md` for source
+and license attribution; the same notice is bundled into the executable and can be printed with
+`bimax --third-party-notices`.
+
 ## Verify a download yourself
 
 ```bash
@@ -88,7 +96,7 @@ xcrun stapler validate BiMax.dmg
 **Current status:** the CLI archives are checksum-verified in the private source workflow, archived
 as CI artifacts, and promoted to the separate public binary repository without exposing source.
 Independent minisign signing and macOS Developer ID signing/notarization are *wired* (config +
-release hooks above) but activate only when the signing credentials are supplied. The v1.0.4 macOS
+release hooks above) but activate only when the signing credentials are supplied. The v1.0.5 macOS
 builds are published as an explicitly unsigned beta; verify the attached checksums.
 
 ## Uninstall — what each tier removes

@@ -34,7 +34,9 @@ describe('computer-use safety ladder', () => {
     it('recognizes credential managers, system security surfaces, and wallets', () => {
       expect(isSensitiveComputerTarget('1Password')).toBe(true);
       expect(isSensitiveComputerTarget('Keychain Access')).toBe(true);
-      expect(isSensitiveComputerTarget('System Settings')).toBe(true);
+      expect(isSensitiveComputerTarget('System Settings')).toBe(false);
+      expect(isSensitiveComputerTarget('System Settings Privacy & Security')).toBe(true);
+      expect(isSensitiveComputerTarget('System Settings Storage')).toBe(false);
       expect(isSensitiveComputerTarget('Ledger Live')).toBe(true);
       expect(isSensitiveComputerTarget('my.wallet.example')).toBe(true);
       expect(isSensitiveComputerTarget('Safari')).toBe(false);

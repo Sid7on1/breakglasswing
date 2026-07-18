@@ -71,10 +71,14 @@ func main() {
 		case "--version", "-v":
 			fmt.Println(versionString())
 			return
+		case "--third-party-notices":
+			fmt.Println(thirdPartyNotices)
+			return
 		case "--help", "-h":
 			fmt.Println("bimax — build software with an agent team")
 			fmt.Println("usage: bimax            open Bimax in the current project")
 			fmt.Println("       bimax --version  print the version and exit")
+			fmt.Println("       bimax --third-party-notices  print bundled licenses")
 			fmt.Println("       bimax --no-anim  reduce motion (freeze spinner/shimmer)")
 			fmt.Println()
 			fmt.Println("env:   NO_COLOR=1              plain output, no color")

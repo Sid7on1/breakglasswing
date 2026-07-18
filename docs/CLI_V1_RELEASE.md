@@ -1,9 +1,9 @@
-# Bimax CLI v1.0.4 public beta
+# Bimax CLI v1.0.5 public beta
 
 Date: 2026-07-18
 
-`v1.0.4` is the Phase 2 reliability and performance release. It keeps the dedicated Work, Quick,
-and Vision model slots introduced in v1.0.3 and hardens the execution layer underneath them.
+`v1.0.5` replaces the global-coordinate desktop controller in shipped builds with Bimax Computer
+Use: PID/window-scoped native observation and action, embedded inside the existing single-file CLI.
 
 ## Highlights
 
@@ -15,10 +15,17 @@ and Vision model slots introduced in v1.0.3 and hardens the execution layer unde
   cancellable, honestly resumable after a crash, and visible in the TUI task panel.
 - **General failure memory:** repeated tool failures have per-class retry budgets, so the agent must
   change strategy instead of looping indefinitely.
-- **Native computer use:** the vision slot now receives screenshots correctly and first-party
-  desktop control is available without an MCP dependency. Keyboard input is locked to its intended
-  app after approval prompts, screenshots name the frontmost app, and requested cleanup can quit and
-  verify-close native apps instead of silently leaving them open.
+- **Bimax Computer Use:** `open` returns a PID/window identity; `observe` captures that exact window
+  with its fresh accessibility handles; native actions route to that PID without stealing focus;
+  cleanup cooperatively quits and verifies that the window disappeared.
+- **Truthful visual fallback:** when an app exposes only menu chrome through accessibility, the
+  observation is marked degraded and the clean window-only screenshot becomes the grounding source.
+  The model cannot treat an empty tree or an unverified action as the requested result.
+- **Settings without the blanket veto:** read-only ordinary panes such as Storage are operable.
+  Credential/security panes remain hard-denied, and fresh semantic labels feed high-impact approval
+  checks for Delete/Grant/Submit-style controls.
+- **Private and self-contained:** the pinned MIT native sidecar is SHA-256 verified during the build,
+  embedded inside the one Bimax executable, hidden from `PATH`, and run with upstream telemetry off.
 - **Honest, compact model UI:** Work, Quick, and Vision choices persist from the Go TUI, the model
   picker keeps advanced controls one level deeper, and duplicate setup messages are collapsed.
 - **Truthful diagnostics:** stream preambles no longer corrupt provider/key latency measurements;
@@ -32,7 +39,7 @@ and Vision model slots introduced in v1.0.3 and hardens the execution layer unde
 
 1. TypeScript production build.
 2. Protocol v3 mirror (18 message tags, byte-identical generated contract).
-3. 170 engine suites and 1,275 assertions, including real Chromium interaction.
+3. Engine suites, including the Bimax Computer Use adapter/safety contract and real Chromium interaction.
 4. Go TUI tests.
 5. Self-contained host binary build.
 6. Artifact version and help identity.
@@ -49,14 +56,14 @@ promotes the verified assets to the separate public `Sid7on1/bimax-releases` rep
 credentials are configured, the workflow also signs, notarizes, and repackages the two macOS
 binaries. The attached `SHA256SUMS` is always authoritative for the published release.
 
-Use the attached `SHA256SUMS` file for the exact v1.0.4 archive digests.
+Use the attached `SHA256SUMS` file for the exact v1.0.5 archive digests.
 
 ## Publish checklist
 
 - Commit the verified CLI/TUI source and this evidence on the release branch.
 - Merge or select that commit as the release target.
 - Optionally add the five Apple credential secrets documented in `docs/INSTALL.md`.
-- Create tag `v1.0.4`; the private-source workflow builds, checksums, and archives all five release
+- Create tag `v1.0.5`; the private-source workflow builds, checksums, and archives all five release
   assets. With Apple credentials it also signs and notarizes the macOS binaries.
 - Run `scripts/publish-public-release.sh` to promote or replace the verified assets in the public
   `Sid7on1/bimax-releases` release while keeping source and history private.

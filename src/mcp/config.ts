@@ -16,6 +16,8 @@ export interface McpServerSpec {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Internal trusted runtimes can forbid the legacy full-parent-env escape hatch. */
+  forceScrubEnv?: boolean;
   // Remote transport:
   url?: string;
   type?: 'http' | 'sse' | 'stdio';

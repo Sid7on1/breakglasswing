@@ -6,9 +6,9 @@ import { getTaintTracker } from '../../mind/taint';
 
 // /computer — the truthful status hub for computer use: what BiMax can currently OBSERVE and ACT
 // on (browser + native desktop), whether the active model can actually see screenshots, and which
-// session grants are standing. Desktop control is FIRST-PARTY (ComputerTool + the in-repo Swift
-// helper) — the old open-computer-use MCP companion is legacy and only surfaces here when it is
-// still configured, with removal as the suggested action.
+// session grants are standing. The user-facing runtime is Bimax Computer Use (semantic native
+// sidecar in shipped builds, in-repo Swift fallback in dev) — the old user-configured
+// open-computer-use MCP companion is legacy and only surfaces here with a removal action.
 
 const LEGACY_DESKTOP_SERVER = 'open-computer-use';
 
@@ -35,7 +35,8 @@ globalCommandRegistry.register({
     }
 
     if (sub === 'perms') {
-      // Trigger the OS permission prompts, then report the live verdict.
+      // Probe the responsible host's OS grants and report the live verdict. Embedded macOS drivers
+      // cannot grant themselves permission; the result points to the exact Settings pane.
       const req = await globalDesktopRuntime.run({ action: 'request_access' });
       const st = await globalDesktopRuntime.run({ action: 'status' });
       const level = st.ok && st.accessibility !== false && st.screenRecording !== false ? 'success' : 'info';
@@ -84,7 +85,7 @@ globalCommandRegistry.register({
       category: 'Capabilities',
     });
 
-    // Desktop control: first-party (ComputerTool + in-repo native driver). quickStatus never
+    // Desktop control: Bimax-owned ComputerTool + embedded native sidecar (Swift fallback). quickStatus never
     // spawns or compiles — permissions show as "unknown" until the first real probe.
     const desktop = globalDesktopRuntime.quickStatus();
     const permBits = [
@@ -137,7 +138,7 @@ globalCommandRegistry.register({
     return {
       type: 'menu',
       title: 'Computer use',
-      subtitle: 'Watching is free · acting asks per app/domain · sensitive apps always denied',
+      subtitle: 'Watching is free · acting asks per app/domain · credentials and wallets stay denied',
       options,
       onSelect: (opt: any) => context.executeCommand(opt.value),
     };
