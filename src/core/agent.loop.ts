@@ -551,6 +551,23 @@ export class AgentLoop {
             const endTime = new Date();
             const durationMs = endTime.getTime() - entry.startTime.getTime();
             globalTelemetry.recordToolCall(tc.name, durationMs);
+            // Generalized failure memory (docs/RESEARCH_LEDGER.md): consecutive identical failures
+            // of the SAME action exhaust a per-operation-class retry budget, and the model is told
+            // to change strategy instead of looping. BrowserTool is excluded — its runtime has a
+            // page-state-aware loop detector that sees URL/element state this layer can't.
+            if (tc.name !== 'BrowserTool') try {
+              const { getFailureMemory } = require('./failure.memory');
+              const verdict = getFailureMemory().report(
+                { tool: tc.name, args: tc.args || '{}' },
+                {
+                  ok: !isError && typed?.status !== 'error',
+                  errorClass: typed?.errorClass,
+                  exitCode: typed?.exitCode,
+                  resultSample: isError ? result.slice(0, 500) : undefined,
+                },
+              );
+              if (verdict.exhausted && verdict.note) result = `${result}\n\n⟳ ${verdict.note}`;
+            } catch { /* failure memory is an observer — never breaks execution */ }
             // Mind layer: feed the self-model (learned failure rates → routing hints) and the
             // habit miner (recurring tool sequences → compiled habits). Both are best-effort
             // observers — they must never be able to break tool execution. During a replay

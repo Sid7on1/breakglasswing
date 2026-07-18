@@ -124,6 +124,22 @@ export interface UiSnapshotTools {
   graphReady: boolean;
 }
 
+/** One live/recent task workspace for the front-end task panel (task.registry.ts). */
+export interface UiSnapshotTask {
+  id: string;
+  kind: string;       // 'shell' | 'browser' | 'subagent' | 'build' | 'test' | 'generic'
+  title: string;
+  state: string;      // TaskState — the 16-state machine in execution.ledger.ts
+  elapsedMs: number;
+  attention: boolean;
+  pinned: boolean;
+  lastEvent?: string;
+  progress?: number;  // 0..1 where measurable
+  canPause: boolean;  // honest capability flags — the TUI only offers what's real
+  canResume: boolean;
+  canCancel: boolean;
+}
+
 export interface UiSnapshot {
   models: { coding: string; lite: string; vision?: string };
   goalCount: number;
@@ -155,6 +171,8 @@ export interface UiSnapshot {
   tools?: UiSnapshotTools;
   // v3 additive: computer-use capability/safety posture for the desktop app's Runtime lane.
   computer?: UiSnapshotComputer;
+  // v3 additive: task workspaces (live + recent terminal tasks awaiting close) for the task panel.
+  tasks?: UiSnapshotTask[];
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -340,7 +358,22 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* registry posture best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer };
+  let tasks: UiSnapshotTask[] | undefined;
+  try {
+    const { getTaskRegistry } = require('../core/task.registry');
+    const list = getTaskRegistry().list() as any[];
+    if (list.length) {
+      tasks = list.slice(0, 12).map((t) => ({
+        id: t.id, kind: t.kind, title: t.title, state: t.state,
+        elapsedMs: (t.endedAt || Date.now()) - (t.startedAt || t.createdAt),
+        attention: !!t.attention, pinned: !!t.pinned,
+        lastEvent: t.lastEvent, progress: t.progress,
+        canPause: !!t.supports?.pause, canResume: !!t.supports?.resume, canCancel: !!t.supports?.cancel,
+      }));
+    }
+  } catch { /* task registry best-effort */ }
+
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer, tasks };
 }
 
 // The governor is per-container (no engine singleton), so the host hands it in at startup for the
@@ -378,4 +411,6 @@ export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolReg
   cliEvents.on('clear', emit);
   // Session recorder: thread created / titled / rotated / resumed → sidebar session list updates.
   cliEvents.on('session_changed', emit);
+  // Task workspaces: create / transition / output activity → task panel updates.
+  cliEvents.on('tasks_changed', emit);
 }

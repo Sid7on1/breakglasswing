@@ -111,6 +111,9 @@ export class HeadlessSession {
     this.busy = true;
     this.turnAbort = new AbortController();
     const turnStart = Date.now();
+    // A fresh user instruction legitimizes repetition — failure-memory counters reset so the
+    // system never blocks something the human explicitly re-asked for.
+    if (!opts.autonomous) { try { require('../core/failure.memory').getFailureMemory().newUserTurn(); } catch { /* observer */ } }
     let firstTokenMs = 0; // set on the first streamed token (perf: time-to-first-token)
     // Lightweight conversation lane (P0-3): greetings/acks/simple meta questions bypass the full
     // harness entirely. A manual heavy pin or an engine wake keeps the full path. The decision is

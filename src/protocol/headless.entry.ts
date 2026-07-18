@@ -372,6 +372,29 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     })();
   }
 
+  // Crash recovery for task workspaces: tasks the PREVIOUS process left non-terminal are marked
+  // failed-resumable in the execution ledger (their processes died with that engine — honesty
+  // first), and the user is told what can be re-created. Zellij-style resurrection: we re-CREATE
+  // recorded work on request (/tasks retry <id>); we never pretend it kept running.
+  try {
+    const { getExecutionLedger } = require('../core/execution.ledger');
+    const ledger = getExecutionLedger();
+    const interrupted = ledger.interruptedTasks();
+    if (interrupted.length) {
+      for (const t of interrupted) {
+        ledger.append({ taskId: t.taskId, type: 'transition', state: 'failed-resumable', reason: 'engine restarted while task was running' });
+      }
+      const resumable = interrupted.filter((t: any) => t.resumable);
+      const lines = interrupted.slice(0, 5).map((t: any) =>
+        `  ✗ ${t.title}${t.resumable ? ` — retry with /tasks retry ${t.taskId}` : ''}`);
+      cliEvents.emit('message', {
+        id: `task-recovery-${Date.now()}`, role: 'system', level: 'warn',
+        content: `${interrupted.length} background task(s) were interrupted by the last shutdown:\n${lines.join('\n')}${resumable.length ? '' : '\n  (none are re-creatable — no recorded command)'}`,
+        timestamp: new Date(),
+      } as MessageEntry);
+    }
+  } catch { /* ledger recovery is best-effort */ }
+
   // Self-heal a stale/invalid model pin (e.g. config.json points at a model from a different
   // provider) so the first turn doesn't 400. Non-blocking — runs concurrently with `ready` so it
   // never delays startup; if the user's first turn beats it, the agent loop's model-404 message

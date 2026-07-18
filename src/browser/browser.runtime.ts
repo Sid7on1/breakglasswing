@@ -264,6 +264,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
   private failedRequests: string[] = [];
   private lastStatus?: number;
   private projectRoot = '';
+  // Task-workspace id for the live browser session (task.registry) — null when no session.
+  private taskId: string | null = null;
   /** Element handles from the latest OBSERVATION. Identity is observation-scoped: every action
    * attempt CONSUMES the observation (handles are invalidated success or failure) and a fresh one
    * is captured automatically, so an index is only ever valid against the state it described. */
@@ -373,6 +375,20 @@ export class BrowserRuntime implements BrowserRuntimePort {
     this.page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
     await this.page.evaluateOnNewDocument(MUTATION_COUNTER_SCRIPT);
     await this.page.evaluate(MUTATION_COUNTER_SCRIPT).catch(() => { /* about:blank etc. */ });
+    // Task workspace: a live automated browser is a first-class task — visible in the task panel,
+    // cancellable (closes the browser). No pause: CDP sessions have no real suspend (honesty rule).
+    try {
+      const { getTaskRegistry } = require('../core/task.registry');
+      const reg = getTaskRegistry();
+      const task = reg.create({
+        kind: 'browser', title: 'Browser session',
+        handle: { cancel: () => { void this.close(); } },
+        supports: { cancel: true, pause: false, resume: false },
+      });
+      this.taskId = task.id;
+      reg.transition(task.id, 'starting', 'browser launched');
+      reg.transition(task.id, 'running');
+    } catch { /* registry optional (tests) */ }
     return this.page;
   }
 
@@ -836,6 +852,19 @@ export class BrowserRuntime implements BrowserRuntimePort {
     this.lastSnapshotFilter = '';
     this.page = null; this.browser = null; this.projectRoot = '';
     this.failureLoop = null;
+    // Close out the browser task honestly: cancelled if a cancel was requested, completed otherwise.
+    if (this.taskId) {
+      try {
+        const { getTaskRegistry } = require('../core/task.registry');
+        const reg = getTaskRegistry();
+        const t = reg.get(this.taskId);
+        if (t && t.state === 'cancelling') reg.transition(this.taskId, 'cancelled', 'browser closed');
+        else if (t && !['cancelled', 'completed', 'failed', 'failed-resumable'].includes(t.state)) {
+          reg.transition(this.taskId, 'completed', 'browser closed');
+        }
+      } catch { /* registry optional */ }
+      this.taskId = null;
+    }
     if (browser) {
       // Bounded close: on a crashed browser the graceful close can hang on a dead CDP socket.
       // After the budget, hard-kill the child so a long session never accumulates zombie Chromes.

@@ -34,6 +34,9 @@ media-masters/
 .bimax/browser/
 .bimax/computer/
 
+# Execution ledger (task-workspace journal — per-machine runtime state)
+.bimax/execution/
+
 # Third-party CLI local config
 .grok/
 

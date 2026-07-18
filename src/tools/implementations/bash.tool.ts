@@ -24,7 +24,8 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
 - Before creating a deeply nested directory (e.g., \`mkdir -p foo/bar/baz\`), use \`ls\` on the parent to verify you are in the correct location.
 
 - Chain dependent commands with \`&&\`. Each call is a fresh subshell.
-- NEVER run interactive or long-lived commands — they produce no output and hang until the timeout kills them: no \`git rebase -i\`, no editors (vim/nano), no watch modes or dev servers (\`npm run dev\`, \`--watch\`), no commands that prompt for input. Use non-interactive flags (\`-y\`, \`--no-edit\`, \`CI=1\`) and one-shot equivalents (\`npm run build\`, a single test run).
+- NEVER run interactive commands — they produce no output and hang until the timeout kills them: no \`git rebase -i\`, no editors (vim/nano), no commands that prompt for input. Use non-interactive flags (\`-y\`, \`--no-edit\`, \`CI=1\`).
+- LONG-RUNNING work (a build, a full test suite, a dev server, anything over ~30s): set \`background: true\`. The command becomes a tracked background task — you get a task id immediately, the user sees it in the task panel, and its output/result arrive via the task system (inspect with the TasksTool or /tasks). Do NOT run watch modes or servers in the foreground.
 - Output is truncated after 50,000 characters — pipe noisy commands through \`tail\`/\`head\`/\`grep\` to keep the part you need.
 - Use \`~\` for home directory — it will be resolved.
 - Quote paths with spaces using double quotes.
@@ -34,11 +35,12 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
     type: 'object',
     properties: {
       command: { type: 'string', description: 'The bash command to execute' },
-      timeout: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' }
+      timeout: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' },
+      background: { type: 'boolean', description: 'Run as a tracked background task (long builds, test suites, servers). Returns a task id immediately.' }
     },
     required: ['command']
   },
-  execute: async (args: { command: string, timeout?: number }, context?: any) => {
+  execute: async (args: { command: string, timeout?: number, background?: boolean }, context?: any) => {
     // Coerce the model-supplied timeout. LLMs frequently emit it as a string,
     // a float, or an out-of-range value, which makes Node's exec throw
     // ERR_OUT_OF_RANGE ("timeout ... must be an unsigned integer") and derails
@@ -55,6 +57,15 @@ Reserve BashTool for actual shell operations (installs, builds, git, processes, 
       // authority (BIMAX_SANDBOX_FLOOR_SOFT=1 is the explicit opt-out).
       const blocked = floorBlockedReason();
       if (blocked) throw classifiedError(`Command blocked: ${blocked}`, 'permission', 'blocked');
+      // Background promotion: long-running work becomes a tracked task workspace instead of a
+      // blocking foreground exec (task registry + execution ledger; honest pause via SIGSTOP).
+      // Not available under the sandbox floor — the floored argv path must stay foreground where
+      // the sandbox profile wraps it.
+      if (args.background && !floorRoot() && !sandboxArgv(cmd, currentCwd)) {
+        const { startShellTask } = require('../../core/shell.tasks');
+        const { task, summary } = startShellTask(cmd, { cwd: currentCwd, timeoutMs: timeoutMs > 30_000 ? timeoutMs : 0 });
+        return outcomeOk(JSON.stringify({ taskId: task.id, state: task.state, note: summary }, null, 2), { exitCode: 0 });
+      }
       const flArgv = floorArgv(cmd);
       // When sandboxing is on (B3), run the command under the OS sandbox binary (sandbox-exec on
       // macOS, bwrap on Linux) via execFile so the profile + the command pass as discrete argv (no
