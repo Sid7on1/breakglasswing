@@ -2,20 +2,44 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 
-// Settings live in two places so that preferences persist no matter where you launch bimax:
-//   • GLOBAL  (~/.breakglass/config.json)        — model, provider, theme, toggles, …
-//   • PROJECT (<cwd>/.breakglass/config.json)     — only the fields that are inherently
-//                                                   per-codebase (onboarding state, workspace root)
-// On load we merge global ← project (project wins for its own keys). On save we route each
-// changed field to the right file. API keys are stored separately in ~/.breakglass/.env.
+// ─── Configuration scopes and precedence ────────────────────────────────────────────────────────
+// Effective config is composed from explicit scopes, lowest to highest precedence:
+//
+//   1. BUILT-IN DEFAULTS  (DEFAULTS below)
+//   2. USER GLOBAL        ~/.breakglass/config.json          — persisted preferences
+//   3. WORKSPACE/PROJECT  <cwd>/.breakglass/config.json      — per-codebase fields only
+//   4. ENVIRONMENT        BGW_* variables                    — volatile, session-scoped
+//
+// (CLI flags and test overrides ride the ENVIRONMENT scope: both set BGW_*/BIMAX_* vars.)
+//
+// The invariant that makes scope 4 safe: VOLATILE VALUES NEVER PERSIST. Only two things may
+// write config files — an explicit user action (a /command, the Settings UI) or a runtime
+// recovery write that passes the volatility guard in saveConfig. This is the structural fix for
+// the observed contamination class: a benchmark run with BGW_MODEL=mock caused healModel to
+// persist {"model":"mock"} into the user's global config. Provenance is queryable via
+// configSource(key), and every file write is atomic (tmp + rename).
+// API keys are stored separately in ~/.breakglass/.env (see env.loader.ts).
 
-const GLOBAL_DIR = path.join(os.homedir(), '.breakglass');
-const GLOBAL_PATH = path.join(GLOBAL_DIR, 'config.json');
+// BIMAX_BREAKGLASS_DIR relocates the global dir (multi-profile + test isolation) — the same
+// override env.loader.ts honours for the secrets file. Resolved lazily so tests can retarget it.
+const globalDir = () => process.env.BIMAX_BREAKGLASS_DIR || path.join(os.homedir(), '.breakglass');
+const globalPath = () => path.join(globalDir(), 'config.json');
 const projectDir = () => path.join(process.cwd(), '.breakglass');
 const projectPath = () => path.join(projectDir(), 'config.json');
 
 // Fields that belong to the project, not to the user's global preferences.
 const PROJECT_KEYS: (keyof CliConfig)[] = ['onboardingComplete', 'workspaceRoot'];
+
+// Environment overrides: the volatile scope. Maps config key → env var. Parsed on load; tracked
+// as provenance 'env'; refused persistence for runtime-origin writes.
+const ENV_OVERRIDES: Partial<Record<keyof CliConfig, string>> = {
+  model: 'BGW_MODEL',
+  liteModel: 'BGW_LITE_MODEL',
+  visionModel: 'BGW_VISION_MODEL',
+  reasoningEffort: 'BGW_REASONING_EFFORT',
+};
+
+export type ConfigSource = 'default' | 'global' | 'project' | 'env';
 
 export interface CliConfig {
   defaultAgent: string;
@@ -133,23 +157,90 @@ const DEFAULTS: CliConfig = {
 };
 
 let cached: CliConfig | null = null;
+let sources: Partial<Record<keyof CliConfig, ConfigSource>> = {};
 
+/** Where the effective value of `key` came from. 'default' until loadConfig() has run. */
+export function configSource(key: keyof CliConfig): ConfigSource {
+  return sources[key] || 'default';
+}
+
+/** Test seam: drop the module-level cache so the next loadConfig() re-reads scopes. */
+export function __resetConfigForTests(): void {
+  cached = null;
+  sources = {};
+}
+
+// Distinguishes "file absent" (normal) from "file corrupt" (must not be silently treated as
+// empty — a later save would then rewrite the file from just the update, losing every other
+// key). A corrupt file is preserved to config.json.corrupt-<ts> and an empty scope returned.
 async function readJson(file: string): Promise<Partial<CliConfig>> {
+  let raw: string;
   try {
-    return JSON.parse(await fs.readFile(file, 'utf-8'));
+    raw = await fs.readFile(file, 'utf-8');
   } catch {
+    return {}; // absent/unreadable — an empty scope
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    const backup = `${file}.corrupt-${Date.now()}`;
+    try {
+      await fs.copyFile(file, backup);
+      console.warn(`[Config] ${file} is not valid JSON — preserved a copy at ${backup} and continuing with defaults for that scope.`);
+    } catch { /* best-effort backup */ }
     return {};
   }
 }
 
+// Atomic write: same-directory temp file + rename, so a crash mid-write can never leave a
+// half-written config.json, and concurrent writers each land a complete file (last one wins,
+// which is the same semantics the two processes would have had with whole-file writes).
+let tmpSeq = 0;
+async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}`;
+  await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf-8');
+  try {
+    await fs.rename(tmp, file);
+  } catch (e) {
+    try { await fs.unlink(tmp); } catch { /* already gone */ }
+    throw e;
+  }
+}
+
+function parseEnvValue(key: keyof CliConfig, raw: string): unknown {
+  const kind = typeof (DEFAULTS as any)[key];
+  if (kind === 'number') { const n = Number(raw); return Number.isFinite(n) ? n : undefined; }
+  if (kind === 'boolean') return raw !== 'false' && raw !== '0';
+  return raw;
+}
+
 export async function loadConfig(): Promise<CliConfig> {
   if (cached) return cached;
-  const globalCfg = await readJson(GLOBAL_PATH);
+  const globalCfg = await readJson(globalPath());
   const projectCfg = await readJson(projectPath());
-  // Project file may be a legacy combined config; merging it last preserves existing setups,
-  // and the next saveConfig migrates global keys out to the global file.
-  cached = { ...DEFAULTS, ...globalCfg, ...projectCfg };
-  cached!.workspaceRoot = path.resolve(projectCfg.workspaceRoot || globalCfg.workspaceRoot || DEFAULTS.workspaceRoot);
+  // Compose the scopes in precedence order, recording where each effective value came from.
+  const merged: CliConfig = { ...DEFAULTS, ...globalCfg, ...projectCfg };
+  sources = {};
+  for (const key of Object.keys(DEFAULTS) as (keyof CliConfig)[]) {
+    if (key in projectCfg) sources[key] = 'project';
+    else if (key in globalCfg) sources[key] = 'global';
+    else sources[key] = 'default';
+  }
+  // Environment overrides win over both files but are VOLATILE: they colour the session and are
+  // never written back. (Previously config.model silently clobbered BGW_MODEL — the precedence
+  // was backwards, and the mock benchmark only worked because healModel then "healed" the config
+  // model to the mock id and persisted it into the user's real config.)
+  for (const [key, envVar] of Object.entries(ENV_OVERRIDES) as [keyof CliConfig, string][]) {
+    const raw = process.env[envVar];
+    if (raw !== undefined && raw !== '') {
+      const v = parseEnvValue(key, raw);
+      if (v !== undefined) { (merged as any)[key] = v; sources[key] = 'env'; }
+    }
+  }
+  cached = merged;
+  cached.workspaceRoot = path.resolve(projectCfg.workspaceRoot || globalCfg.workspaceRoot || DEFAULTS.workspaceRoot);
   // Migration: earlier builds saved "one model everywhere" by literally copying the coding model
   // into the lite slot. With a reasoning model that meant every small task (greeting, summary,
   // routing) sat behind an unhidable 20-30s think phase. Split it back apart in memory — the
@@ -157,11 +248,11 @@ export async function loadConfig(): Promise<CliConfig> {
   // picks are untouched (true single-model setups stay unified).
   try {
     const { isReasoningModel, DEFAULT_LITE_MODEL } = require('./models');
-    if (cached!.liteModel && cached!.liteModel === cached!.model && isReasoningModel(cached!.liteModel)) {
-      cached!.liteModel = DEFAULT_LITE_MODEL;
+    if (cached.liteModel && cached.liteModel === cached.model && isReasoningModel(cached.liteModel)) {
+      cached.liteModel = DEFAULT_LITE_MODEL;
     }
   } catch { /* models module unavailable in some test harnesses — defaults already sane */ }
-  return cached!;
+  return cached;
 }
 
 export function getConfig(): CliConfig {
@@ -169,39 +260,87 @@ export function getConfig(): CliConfig {
   return cached;
 }
 
-export async function saveConfig(updates: Partial<CliConfig>): Promise<CliConfig> {
-  const current = await loadConfig();
-  cached = { ...current, ...updates };
+export interface SaveOptions {
+  /**
+   * Who is asking for persistence.
+   *   'user'    (default) — an explicit user action (/command, Settings UI). Always persisted.
+   *   'runtime' — automatic recovery/healing. Persisted ONLY when the affected key's effective
+   *               value did not come from a volatile scope: if the key is currently
+   *               env-overridden, the recovery was recovering a session-scoped value, and writing
+   *               it would leak test/benchmark/CI state into the user's real configuration.
+   */
+  origin?: 'user' | 'runtime';
+}
 
-  // Route each updated key to the file it belongs in.
+// In-process saves are serialized so two same-tick writers can't interleave their
+// read-merge-write cycles (each write still lands atomically; this makes the MERGE atomic too).
+let saveChain: Promise<unknown> = Promise.resolve();
+
+export function saveConfig(updates: Partial<CliConfig>, opts: SaveOptions = {}): Promise<CliConfig> {
+  const run = saveChain.then(() => doSave(updates, opts), () => doSave(updates, opts));
+  saveChain = run;
+  return run;
+}
+
+async function doSave(updates: Partial<CliConfig>, opts: SaveOptions = {}): Promise<CliConfig> {
+  const origin = opts.origin || 'user';
+  const current = await loadConfig();
+
+  // The volatility guard: runtime-origin writes to env-overridden keys are dropped (in-memory
+  // state still updates, so the session keeps working with the recovered value).
+  let accepted: Partial<CliConfig> = updates;
+  if (origin === 'runtime') {
+    accepted = {};
+    for (const [key, value] of Object.entries(updates) as [keyof CliConfig, any][]) {
+      if (sources[key] === 'env') {
+        console.warn(`[Config] Not persisting runtime change to "${key}" — its value came from ${ENV_OVERRIDES[key] || 'the environment'} and is session-scoped.`);
+      } else {
+        (accepted as any)[key] = value;
+      }
+    }
+  }
+
+  cached = { ...current, ...updates }; // the live session always reflects the requested state
+
+  // Route each accepted key to the file it belongs in.
   const globalUpdates: Record<string, any> = {};
   const projectUpdates: Record<string, any> = {};
-  for (const [key, value] of Object.entries(updates)) {
+  for (const [key, value] of Object.entries(accepted)) {
     if (PROJECT_KEYS.includes(key as keyof CliConfig)) projectUpdates[key] = value;
     else globalUpdates[key] = value;
+    // A persisted value's provenance becomes its destination scope.
+    sources[key as keyof CliConfig] = PROJECT_KEYS.includes(key as keyof CliConfig) ? 'project' : 'global';
   }
 
-  if (Object.keys(globalUpdates).length) {
-    const existing = await readJson(GLOBAL_PATH);
-    await fs.mkdir(GLOBAL_DIR, { recursive: true });
-    await fs.writeFile(GLOBAL_PATH, JSON.stringify({ ...existing, ...globalUpdates }, null, 2), 'utf-8');
-    // Migrate-on-write: a legacy combined project file merges LAST in loadConfig, so a stale copy
-    // of a global key there (e.g. an old `model`) silently shadows the value we just saved — the
-    // user "changes model" and nothing actually changes (this pinned sub-agents to a model the
-    // user had switched away from). Strip the just-updated global keys from the project file.
-    try {
-      const existingProject = await readJson(projectPath());
-      const stale = Object.keys(globalUpdates).filter(k => k in existingProject);
-      if (stale.length) {
-        for (const k of stale) delete (existingProject as any)[k];
-        await fs.writeFile(projectPath(), JSON.stringify(existingProject, null, 2), 'utf-8');
-      }
-    } catch { /* no project file — nothing to migrate */ }
-  }
-  if (Object.keys(projectUpdates).length) {
-    const existing = await readJson(projectPath());
-    await fs.mkdir(projectDir(), { recursive: true });
-    await fs.writeFile(projectPath(), JSON.stringify({ ...existing, ...projectUpdates }, null, 2), 'utf-8');
+  try {
+    if (Object.keys(globalUpdates).length) {
+      const existing = await readJson(globalPath());
+      await writeJsonAtomic(globalPath(), { ...existing, ...globalUpdates });
+      // Migrate-on-write: a legacy combined project file merges LAST in loadConfig, so a stale copy
+      // of a global key there (e.g. an old `model`) silently shadows the value we just saved — the
+      // user "changes model" and nothing actually changes (this pinned sub-agents to a model the
+      // user had switched away from). Strip the just-updated global keys from the project file.
+      try {
+        const existingProject = await readJson(projectPath());
+        const stale = Object.keys(globalUpdates).filter(k => k in existingProject);
+        if (stale.length) {
+          for (const k of stale) delete (existingProject as any)[k];
+          await writeJsonAtomic(projectPath(), existingProject);
+        }
+      } catch { /* no project file — nothing to migrate */ }
+    }
+    if (Object.keys(projectUpdates).length) {
+      const existing = await readJson(projectPath());
+      await writeJsonAtomic(projectPath(), { ...existing, ...projectUpdates });
+    }
+  } catch (e: any) {
+    // A read-only config dir (EROFS/EACCES/EPERM) must not crash the session — the in-memory
+    // state above already reflects the change; it just won't survive a restart.
+    if (['EROFS', 'EACCES', 'EPERM'].includes(e?.code)) {
+      console.warn(`[Config] Config directory is not writable (${e.code}) — change applies to this session only.`);
+    } else {
+      throw e;
+    }
   }
 
   return cached;

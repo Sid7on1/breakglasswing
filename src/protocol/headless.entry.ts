@@ -380,7 +380,10 @@ export async function startHeadless(container: any, config: any): Promise<void> 
     try {
       const healed = await llmAdapter.healModel();
       if (healed) {
-        try { saveConfig({ model: healed.to } as any); } catch { /* persistence optional */ }
+        // origin:'runtime' — the volatility guard drops this write when the model came from
+        // BGW_MODEL (test/benchmark/CI session), so healing can never contaminate the user's
+        // real configuration. Real drift (a stale persisted pin) still persists its fix.
+        try { saveConfig({ model: healed.to } as any, { origin: 'runtime' }); } catch { /* persistence optional */ }
         cliEvents.emit('message', {
           id: `heal-${Date.now()}`, role: 'system', level: 'info',
           content: `Model "${healed.from}" isn't available on your provider — switched to "${healed.to}". Use /model to choose another.`,
