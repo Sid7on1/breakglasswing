@@ -90,3 +90,5 @@ opencode.json
 .cursor/mcp.json
 .cursor/cli.json
 .gemini/settings.json
+.bimax/harness-lab/
+.bimax/harness-patches.json
