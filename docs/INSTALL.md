@@ -50,7 +50,8 @@ remains private.
 
 ### Apple signing and notarization
 
-Tagged releases are built and published by `.github/workflows/release.yml`. The macOS binaries
+Tagged releases are built and archived by `.github/workflows/release.yml`, then promoted to the
+public binary repository with `scripts/publish-public-release.sh`. The macOS binaries
 are signed with hardened runtime and a secure timestamp, submitted to Apple's notary service, and
 then repackaged before `SHA256SUMS` is generated.
 

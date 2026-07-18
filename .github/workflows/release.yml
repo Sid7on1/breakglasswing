@@ -6,9 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -16,7 +14,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Build · attest · publish
+    name: Build · verify · archive
     runs-on: macos-15
     env:
       PUPPETEER_SKIP_DOWNLOAD: "true"
@@ -59,7 +57,7 @@ jobs:
           if [ "$signing_available" = true ]; then
             echo "RELEASE_TITLE=Bimax CLI $GITHUB_REF_NAME" >> "$GITHUB_ENV"
           else
-            echo "::warning::Apple credentials are unavailable; publishing an unsigned macOS beta with GitHub artifact attestations"
+            echo "::warning::Apple credentials are unavailable; building an unsigned macOS beta"
             echo "RELEASE_TITLE=Bimax CLI $GITHUB_REF_NAME (unsigned macOS beta)" >> "$GITHUB_ENV"
           fi
 
@@ -113,32 +111,32 @@ jobs:
           tar -xOzf bimax-darwin-arm64.tar.gz bimax-darwin-arm64 > /dev/null
           tar -xOzf bimax-darwin-x64.tar.gz bimax-darwin-x64 > /dev/null
 
-      - name: Attest release provenance
-        uses: actions/attest@v4
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          if [ "${{ steps.release_mode.outputs.signing_available }}" = true ]; then
+            cp docs/CLI_V1_RELEASE.md build/release-notes.md
+          else
+            {
+              echo "> **macOS beta notice:** These builds are unsigned because Apple Developer credentials are not configured. Verify the attached SHA256SUMS before use; macOS may display a first-run security warning."
+              echo
+              cat docs/CLI_V1_RELEASE.md
+            } > build/release-notes.md
+          fi
+
+      # The source repository intentionally stays private. Its scoped GITHUB_TOKEN cannot publish
+      # into the separate public bimax-releases repository, so CI archives the verified matrix and
+      # local maintainers promote it with scripts/publish-public-release.sh.
+      - name: Archive verified release matrix
+        uses: actions/upload-artifact@v4
         with:
-          subject-path: |
+          name: bimax-${{ github.ref_name }}-verified
+          retention-days: 14
+          if-no-files-found: error
+          path: |
             build/bimax-darwin-arm64.tar.gz
             build/bimax-darwin-x64.tar.gz
             build/bimax-linux-x64.tar.gz
             build/bimax-linux-arm64.tar.gz
             build/SHA256SUMS
-
-      - name: Prepare release notes
-        shell: bash
-        run: |
-          if [ "${{ steps.release_mode.outputs.signing_available }}" = true ]; then
-            cp docs/CLI_V1_RELEASE.md "$RUNNER_TEMP/release-notes.md"
-          else
-            {
-              echo "> **macOS beta notice:** These builds are unsigned because Apple Developer credentials are not configured. Verify the checksum and GitHub artifact attestation before use; macOS may display a first-run security warning."
-              echo
-              cat docs/CLI_V1_RELEASE.md
-            } > "$RUNNER_TEMP/release-notes.md"
-          fi
-
-      - name: Publish GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" build/bimax-darwin-arm64.tar.gz build/bimax-darwin-x64.tar.gz build/bimax-linux-x64.tar.gz build/bimax-linux-arm64.tar.gz build/SHA256SUMS --verify-tag --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
+            build/release-notes.md

@@ -43,10 +43,11 @@ and Vision model slots introduced in v1.0.3 and hardens the execution layer unde
 
 ## Release artifacts
 
-The release contains four self-contained archives and `SHA256SUMS`. Every published asset receives
-a GitHub artifact attestation backed by Sigstore. When Apple credentials are configured, the tagged
-release workflow also signs, notarizes, and repackages the two macOS binaries; the attached
-`SHA256SUMS` is always authoritative for the published release.
+The release contains four self-contained archives and `SHA256SUMS`. The private source repository's
+tagged workflow builds, verifies, and archives that matrix; `scripts/publish-public-release.sh`
+promotes the verified assets to the separate public `Sid7on1/bimax-releases` repository. When Apple
+credentials are configured, the workflow also signs, notarizes, and repackages the two macOS
+binaries. The attached `SHA256SUMS` is always authoritative for the published release.
 
 Use the attached `SHA256SUMS` file for the exact v1.0.4 archive digests.
 
@@ -55,9 +56,10 @@ Use the attached `SHA256SUMS` file for the exact v1.0.4 archive digests.
 - Commit the verified CLI/TUI source and this evidence on the release branch.
 - Merge or select that commit as the release target.
 - Optionally add the five Apple credential secrets documented in `docs/INSTALL.md`.
-- Create tag `v1.0.4`; the release workflow builds, checksums, attests, and uploads all five release
-  assets. With Apple credentials it also signs and notarizes the macOS binaries; without them it
-  clearly labels the macOS release as an unsigned beta.
+- Create tag `v1.0.4`; the private-source workflow builds, checksums, and archives all five release
+  assets. With Apple credentials it also signs and notarizes the macOS binaries.
+- Run `scripts/publish-public-release.sh` to promote or replace the verified assets in the public
+  `Sid7on1/bimax-releases` release while keeping source and history private.
 - Confirm the one-line installer on one clean macOS host and one clean Linux host.
 
 ## Honest scope
