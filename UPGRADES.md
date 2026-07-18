@@ -4,6 +4,68 @@ One line per upgrade, newest first. ✅ = implemented, tested, and in the
 installed binary. ⏳ = open, deliberately deferred and marked. Every ✅ names
 its commit; claims without a commit don't belong here.
 
+## 2026-07-18 — Phase 2: finish the engineering (commits abee9e36 → …)
+
+### Routing latency (§3)
+- ✅ **Pre-flight classifier removed from the turn path entirely** — routing is
+  now fully local (`heuristicTier` + `localTier` in `src/cli/model.router.ts`:
+  imperative/repo-signal/question-shape regexes, ambiguity → Work model =
+  correctness-safe). First visible token vs 120ms mock: **1817ms → 678ms cold
+  p50 / 402ms warm p50** (n=20, matrix + method in `docs/ROUTING_DECISION.md`;
+  7 architectures compared in the router header). Closes the ⏳ "remaining
+  1.85s" item below. — `abee9e36`
+- ✅ Failure modes of the old remote classifier (parse crash, key billing,
+  cooldown serialization) are structurally unreachable — no remote call exists
+  to fail. Anti-oscillation: the router documents what A (remote classifier)
+  and B (local heuristics) each handled; historical failure prompts are pinned
+  as tests in `src/__tests__/model.router.test.ts`. — `abee9e36`
+
+### Config contamination fixed as a class (§4)
+- ✅ **Configuration scopes with provenance**: defaults ← global
+  (`~/.breakglass/config.json`) ← project (`<cwd>/.breakglass`) ← env
+  (`BGW_MODEL`…), `configSource()` names each key's origin, atomic
+  tmp+rename writes, corrupt files preserved aside (`.corrupt-<ts>`).
+  — `ce116395`
+- ✅ **Runtime writes can never persist volatile state**: `saveConfig(...,
+  {origin:'runtime'})` refuses to persist keys whose live value came from env —
+  healModel against a mock now leaves the user's config untouched (proven live:
+  config stays `{}` across a benchmark run). Closes the ⏳ healModel item
+  below. 14 regression tests in `src/__tests__/config.scopes.test.ts`.
+  — `ce116395`
+
+### Execution ledger + failure memory + task workspaces (§5/§6/§7)
+- ✅ **Execution ledger** (`src/core/execution.ledger.ts`): append-only NDJSON
+  task journal — schema v1 + forward-compat skip, Temporal-style
+  fold-reconstruction, bounded retention (512KB/14d/keep-400, live tasks always
+  survive), credential redaction incl. values embedded in longer strings,
+  corruption preserved never crashed on. Boot marks interrupted tasks
+  `failed-resumable` with `/tasks retry` hints. — `13f5686f`
+- ✅ **Generalized failure memory** (`src/core/failure.memory.ts`): every tool
+  (browser keeps its specialized page-aware detector) — normalized-target
+  fingerprints digit-churn can't dodge, per-class retry budgets
+  (Brooker/SRE: budgets on retries only), transient +2, changed-failure and
+  new-user-turn resets. Exhaustion appends a change-strategy note to the tool
+  result. FP/FN matrix in `src/__tests__/failure.memory.test.ts`. Closes the
+  ⏳ "failure-loop memory only in browser" item. — `13f5686f`
+- ✅ **Task workspaces, engine side** (`src/core/task.registry.ts`,
+  `shell.tasks.ts`): 16-state machine with a validated transition map, honest
+  pause (real SIGSTOP or refused with reason), detached process groups,
+  bounded 400-line output rings, `/tasks` command, `ui_snapshot.tasks`,
+  BashTool `background:true`, browser sessions self-register. Closes the ⏳
+  "long shell streams inline" item. — `13f5686f`
+- ✅ **Task panel in the Go TUI** (`tui/panels.go` taskPanel): pinned live
+  strip, Ctrl+E keyboard control driving exactly the engine's capability
+  flags, <48-col single-line degradation, retires when idle. 6 Go tests.
+  — `1c758aed`
+- ✅ Tests caught two real bugs pre-commit: embedded credentials leaking
+  through redaction; `npx jest` misclassified as `shell`. — `13f5686f`
+
+### Research (§8)
+- ✅ **docs/RESEARCH_LEDGER.md** — 8 primary sources (Temporal, Zellij,
+  Brooker, Google SRE + Azure, OpenHands, bubbles, browser-use, codex), each
+  with licence verified, maintenance checked, and the exact code location it
+  shaped; rejected alternatives documented.
+
 ## 2026-07-18 — overnight rebuild pass (commits 77a89465 → 9b35658d)
 
 ### Latency & truth-telling
@@ -64,17 +126,15 @@ its commit; claims without a commit don't belong here.
   `~/.breakglass/config.json` during benchmarking.
 
 ## Open / deferred (marked, not hidden)
-- ⏳ `healModel` persists a healed model id into the user's global config —
-  correct for real drift, but a benchmark against a mock can pollute it
-  (observed live). Needs a "don't persist when the model came from env" guard.
-- ⏳ Remaining ~1.85s mock first-token = pre-flight classifier round-trip when
-  Work≠Quick models; the unified single-model path already skips it. A
-  parallel classifier+main-dispatch would cut it further.
-- ⏳ Classifier response parsing still falls back silently on empty content;
-  the mock's non-stream endpoint shape should be verified against real NIM
-  aux-call shapes.
-- ⏳ Long-running *shell* processes still stream inline (no dedicated panel);
-  see docs/TASK_WORKSPACES.md "deliberately deferred".
-- ⏳ Desktop runtime: no screenshot deduplication yet; failure-loop memory
-  exists only in the browser runtime.
+- ⏳ Desktop runtime: no screenshot deduplication yet.
 - ⏳ macOS notarization + minisign release key (external, unchanged).
+
+### Closed by Phase 2 (2026-07-18, kept for the record)
+- ✅ ~~healModel env-persist guard~~ → fixed as a class, `ce116395`.
+- ✅ ~~remaining ~1.85s classifier round-trip~~ → classifier removed from the
+  turn path, `abee9e36`.
+- ✅ ~~classifier parse fallback vs real NIM shapes~~ → moot; no remote
+  classifier call exists anymore, `abee9e36`.
+- ✅ ~~long shell processes stream inline~~ → `background:true` + task panel,
+  `13f5686f` + `1c758aed`.
+- ✅ ~~failure-loop memory only in browser~~ → generalized, `13f5686f`.
