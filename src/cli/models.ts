@@ -23,7 +23,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
   // — Work: does the real coding/agentic work AND drives computer use — (tier 'coding' internal key)
   { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'The default — fast, sees screens, calls tools reliably', tier: 'coding' },
   { label: 'Qwen 3.5 397B', value: 'qwen/qwen3.5-397b-a17b', desc: 'Bigger reasoner — reliable tools but slow (15-37s/step)', tier: 'coding' },
-  { label: 'GLM 5.2', value: 'z-ai/glm-5.2', desc: 'Strong coding + reasoning', tier: 'coding' },
+  { label: 'GLM 5.2', value: 'z-ai/glm-5.2', desc: 'Coding + reasoning — UNAVAILABLE on some NIM keys (times out; probe before defaulting)', tier: 'coding' },
   { label: 'GPT-OSS 120B', value: 'openai/gpt-oss-120b', desc: 'Fast open reasoner — effort adjustable, no vision', tier: 'coding' },
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strong coder — slow to start', tier: 'coding' },
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Thinks on EVERY call — overthinks, slow', tier: 'coding' },
@@ -57,7 +57,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
  * vision times out; qwen-122b's vision returned empty every time. LITE stays a PLAIN non-reasoning
  * model on the "fastest safe path" rule: qwen3.5-122b answered warm text in under a second.
  */
-export const DEFAULT_CODING_MODEL = 'z-ai/glm-5.2';
+export const DEFAULT_CODING_MODEL = 'mistralai/mistral-small-4-119b-2603';
 export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.7-flash';
 export const LEGACY_SAFE_LITE_MODEL = 'qwen/qwen3.5-122b-a10b';
 

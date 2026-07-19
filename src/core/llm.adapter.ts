@@ -65,7 +65,7 @@ export function selectRequestModel(
 }
 
 export class LlmAdapter implements LLMProvider {
-  public defaultModel = process.env.BGW_MODEL || 'z-ai/glm-5.2';
+  public defaultModel = process.env.BGW_MODEL || 'mistralai/mistral-small-4-119b-2603';
   public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
   public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
   // Nucleus sampling cap. Clipping the low-probability tail is what actually curbs the

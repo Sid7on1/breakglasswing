@@ -134,7 +134,7 @@ const DEFAULTS: CliConfig = {
   // model instead of fragmenting to a separate perception model 3-4 steps in. The prior defaults
   // failed this workload: step-3.7 overthinks every call, qwen-397b's vision times out, and
   // qwen-122b returned EMPTY on every real vision question.
-  model: 'z-ai/glm-5.2',
+  model: 'mistralai/mistral-small-4-119b-2603',
   // Lite slot: PLAIN model, never a reasoner. qwen3.5-122b answered plain text in <1s on the
   // 2026-07-19 probe; the old llama-3.1-70b default took 88s on a cold "hi" (NIM keeps it cold).
   liteModel: 'stepfun-ai/step-3.7-flash',
