@@ -424,6 +424,29 @@ describe('BimaxComputerRuntime', () => {
     expect(fullDisplay.mock.calls.some(([c]: any) => c.action === 'screenshot')).toBe(false);
   });
 
+  it('waits for the window to finish rendering instead of capturing a 35px menu-bar strip', async () => {
+    let ticks = 0;
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Finder', pid: 615, windows: [{ window_id: 2272 }] });
+      if (name === 'list_apps') return result({ apps: [{ pid: 615, name: 'Finder', active: true }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_windows') {
+        // Finder's window is a 1559×35 toolbar strip for the first polls, then fills in to full size.
+        ticks++;
+        return result({ windows: [{ window_id: 2272, is_on_screen: true, bounds: { width: 1559, height: ticks >= 3 ? 900 : 35 } }] });
+      }
+      if (name === 'get_window_state') return result({ screenshot_file_path: '/tmp/desk.png', screenshot_width: 1342, screenshot_height: 1568, elements: [] });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime();
+    await runtime.run({ action: 'open', app: 'Finder', deliveryMode: 'background' });
+    const shot = await runtime.run({ action: 'screenshot' });
+    expect(shot).toEqual(expect.objectContaining({ ok: true, windowId: 2272, width: 1342 }));
+    // It polled past the 35px strip (≥3 list_windows) rather than capturing the half-rendered window.
+    expect(ticks).toBeGreaterThanOrEqual(3);
+  });
+
   it('glides the one cursor into the target window before foreground typing', async () => {
     const nativeRun = jest.fn(async (cmd: any) => ({
       ok: true, action: cmd.action, driver: 'native-helper',

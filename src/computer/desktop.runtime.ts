@@ -1313,14 +1313,27 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   private async refreshTargetWindow(target: ComputerTarget): Promise<ComputerTarget> {
-    const data = await this.call('list_windows', { pid: target.pid });
-    const windows = Array.isArray(data?.windows) ? data.windows : [];
-    if (windows.length === 0) return target;
-    const visible = windows.filter((w: any) => w?.is_on_screen !== false
-      && Number(w?.bounds?.width || 0) > 100 && Number(w?.bounds?.height || 0) > 100);
-    const candidates = visible.length > 0 ? visible : windows;
-    const window = candidates.find((w: any) => Number(w.window_id) === target.windowId) || candidates[0];
-    return { ...target, windowId: Number(window?.window_id || 0) || target.windowId };
+    // A freshly created/activated window (e.g. Finder's Desktop window, a new document) briefly
+    // reports a toolbar-only STRIP — full width but ~35px tall — before its content renders. Capturing
+    // that strip gives the model a screenshot no click can be mapped against (the live "1559×35" bug).
+    // Poll briefly for a properly-sized window instead of pinning the strip. A window already rendered
+    // is found on the first attempt with no delay; only the not-yet-drawn case pays the wait.
+    let windows: any[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const data = await this.call('list_windows', { pid: target.pid });
+      windows = Array.isArray(data?.windows) ? data.windows : [];
+      const visible = windows.filter((w: any) => w?.is_on_screen !== false
+        && Number(w?.bounds?.width || 0) > 100 && Number(w?.bounds?.height || 0) > 100);
+      if (visible.length > 0) {
+        const good = visible.find((w: any) => Number(w.window_id) === target.windowId) || visible[0];
+        return { ...target, windowId: Number(good?.window_id || 0) || target.windowId };
+      }
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1))); // let it finish rendering
+    }
+    // Still nothing properly sized after retrying — keep the CURRENT window id rather than pin a
+    // degenerate strip; a slightly stale-but-real window captures better than a 35px menu-bar proxy.
+    if (windows.length === 0 || target.windowId) return target;
+    return { ...target, windowId: Number(windows[0]?.window_id || 0) || target.windowId };
   }
 
   /** Resolve a human app name for a pid from the sidecar's app list. launch_app sometimes returns
