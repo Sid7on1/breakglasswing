@@ -918,12 +918,17 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           },
         });
         await client.callTool({ name: 'start_session', arguments: { session: this.session } });
-        // Bimax visible mode uses the one real macOS cursor. Keep the sidecar's synthetic overlay
-        // permanently hidden so users never see two pointers racing toward different targets.
+        // Cursor policy follows the delivery mode. VISIBLE mode drives the ONE real macOS cursor, so
+        // the sidecar overlay is hidden (never two pointers). BACKGROUND mode (the OpenAI/ChatGPT
+        // computer-use style: screenshot → pixel action → screenshot, delivered synthetically without
+        // stealing focus) never moves the real cursor — so we SHOW the sidecar's own agent cursor so
+        // the user can see where the agent is acting, including while they work in another window
+        // (the PiP preview mirrors that same surface).
+        const showAgentCursor = cfg.computerVisible === false;
         try {
           await client.callTool({
             name: 'set_agent_cursor_enabled',
-            arguments: { enabled: false, cursor_id: this.session },
+            arguments: { enabled: showAgentCursor, cursor_id: this.session },
           });
         } catch { /* pinned driver supports this; older local overrides remain usable */ }
         return client;

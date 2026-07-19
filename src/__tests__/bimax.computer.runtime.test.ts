@@ -64,7 +64,7 @@ describe('BimaxComputerRuntime', () => {
       frontmostApp: async () => 'Calculator',
     };
     const runtime = new BimaxComputerRuntime(native);
-    const opened = await runtime.run({ action: 'open', app: 'Calculator' });
+    const opened = await runtime.run({ action: 'open', app: 'Calculator', deliveryMode: 'foreground' });
     expect(opened).toEqual(expect.objectContaining({ ok: true, app: 'Calculator', pid: 42, windowId: 7 }));
     expect(callTool).toHaveBeenCalledWith({ name: 'bring_to_front', arguments: { pid: 42, window_id: 7 } });
 
@@ -78,7 +78,7 @@ describe('BimaxComputerRuntime', () => {
     const observeCall = callTool.mock.calls.find(([arg]) => arg.name === 'get_window_state')?.[0];
     expect(observeCall.arguments.max_elements).toBe(1000);
 
-    await runtime.run({ action: 'type', text: '1271*170+104' });
+    await runtime.run({ action: 'type', text: '1271*170+104', deliveryMode: 'foreground' });
     expect(nativeRun).toHaveBeenCalledWith(expect.objectContaining({
       action: 'type', app: 'Calculator', text: '1271*170+104',
     }), undefined);
@@ -86,7 +86,7 @@ describe('BimaxComputerRuntime', () => {
     expect(callTool.mock.calls.filter(([arg]) => arg.name === 'start_session')).toHaveLength(1);
     expect(callTool).toHaveBeenCalledWith({
       name: 'set_agent_cursor_enabled',
-      arguments: { enabled: false, cursor_id: expect.stringMatching(/^bimax-/) },
+      arguments: { enabled: true, cursor_id: expect.stringMatching(/^bimax-/) }, // background default → agent shows its OWN cursor
     });
     expect((openClient as jest.Mock).mock.calls[0][0].args).toContain('--experimental-pip');
   });

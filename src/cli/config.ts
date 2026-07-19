@@ -179,8 +179,13 @@ const DEFAULTS: CliConfig = {
   contextWindowTokens: 0,
   parallelToolCalls: true,
   computerApprovals: 'high-impact-only',
-  computerVisible: true,
-  computerPip: false,
+  // Background delivery (OpenAI/ChatGPT computer-use style): the agent acts on the target window
+  // synthetically WITHOUT stealing the user's real cursor or requiring the window to be frontmost,
+  // and shows its OWN agent cursor. Set true (or /computer visible) to instead drive the one real
+  // macOS cursor in the foreground.
+  computerVisible: false,
+  // PiP on by default so the user can watch the agent's surface while they work in another window.
+  computerPip: true,
   computerRecord: true,
 };
 
