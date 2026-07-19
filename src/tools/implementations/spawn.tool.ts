@@ -58,7 +58,7 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
         },
         model: {
           type: 'string',
-          description: 'Model id this sub-agent runs on (e.g. "stepfun-ai/step-3.7-flash"). Omit to inherit the main model (or the configured subagentModel). Use a fast model for bulk mechanical tasks, a heavier one for hard reasoning.'
+          description: 'Model id this sub-agent runs on (e.g. "mistralai/mistral-small-4-119b-2603"). Omit to inherit the main model (or the configured subagentModel). Use a fast model for bulk mechanical tasks, a heavier one for hard reasoning.'
         },
         outcome_task_id: {
           type: 'string',

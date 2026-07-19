@@ -9,6 +9,7 @@ import {
   recordTurn, beginTurnTimeline, markRouted, markAssembled, markFirstVisibleToken, endTurnTimeline,
 } from '../telemetry/perf';
 import { IGraphStore } from '../graph/models';
+import { globalDesktopRuntime } from '../computer/desktop.runtime';
 
 /**
  * Confidence-in-margin (turn-end form): from the epistemic-ledger delta across a turn, decide what
@@ -100,6 +101,9 @@ export class HeadlessSession {
   interrupt(): void {
     if (!this.busy || !this.turnAbort) return;
     this.turnAbort.abort();
+    // Tear down the native session immediately as well as in runTurn.finally. A provider or tool
+    // can take a moment to notice AbortSignal; the PiP/recording/cursor must not survive that wait.
+    void globalDesktopRuntime.dispose?.().catch(() => { /* finalizer retries best-effort cleanup */ });
     cliEvents.emit('status', 'Interrupting…');
   }
 
@@ -181,6 +185,10 @@ export class HeadlessSession {
       }
       cliEvents.emit('log', { id: Date.now(), level: 'error', text: `Agent error: ${detail}`, timestamp: new Date() });
     } finally {
+      // A computer-use MCP session owns the experimental PiP window and native recording stream.
+      // End it at the user-turn boundary, not only when Bimax exits, so PiP disappears immediately
+      // after success, failure, or interruption. dispose() is a cheap no-op on non-computer turns.
+      try { await globalDesktopRuntime.dispose?.(); } catch { /* turn cleanup is best-effort */ }
       this.busy = false;
       this.turnAbort = null;
       recordTurn({ firstTokenMs, totalMs: Date.now() - turnStart, tokens: totalChars });

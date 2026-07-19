@@ -5,6 +5,7 @@ import { LLMProvider, Message, ChatOptions, ChatEvent } from './llm.provider';
 import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capabilities';
 import { contentToText } from './multimodal';
 import { globalTelemetry } from '../telemetry/telemetry';
+import { cliEvents } from '../cli/events';
 
 // Streaming & response-parsing helpers now live in ./llm.stream (extracted to keep this file
 // focused on the adapter class). Imported for internal use and re-exported so existing importers
@@ -22,8 +23,49 @@ export {
 };
 export type { ToolCallSlot };
 
+/**
+ * NVIDIA NIM chat templates accept one system block at the beginning and reject system roles
+ * later in the conversation. They also require a completed assistant turn between a tool result
+ * and a fresh user turn. Normalize those provider-specific constraints at the final wire boundary
+ * so context injectors cannot accidentally create another role-order 400.
+ */
+export function normalizeNvidiaMessages(messages: Message[]): Message[] {
+  const systems = messages.filter(m => m.role === 'system');
+  const conversation = messages.filter(m => m.role !== 'system');
+  const out: Message[] = [];
+
+  if (systems.length > 0) {
+    out.push({
+      role: 'system',
+      content: systems.map(m => contentToText(m.content as any)).filter(Boolean).join('\n\n'),
+    });
+  }
+
+  for (const message of conversation) {
+    if (out[out.length - 1]?.role === 'tool' && message.role === 'user') {
+      out.push({
+        role: 'assistant',
+        content: 'Tool results received. I will use the new user-provided context to continue.',
+      });
+    }
+    out.push(message);
+  }
+  return out;
+}
+
+/** Pure request router, exported so image-slot behavior stays regression-testable. */
+export function selectRequestModel(
+  primary: string,
+  visionModel: string | undefined,
+  hasImages: boolean,
+  provider?: string | null,
+): string {
+  if (hasImages && visionModel && !capabilitiesFor(provider, primary).visionInput) return visionModel;
+  return primary;
+}
+
 export class LlmAdapter implements LLMProvider {
-  public defaultModel = process.env.BGW_MODEL || 'meta/llama-3.1-70b-instruct';
+  public defaultModel = process.env.BGW_MODEL || 'z-ai/glm-5.2';
   public requestTimeout = parseInt(process.env.BGW_TIMEOUT || '120000', 10);
   public temperature: number = parseFloat(process.env.BGW_TEMPERATURE || '0.1');
   // Nucleus sampling cap. Clipping the low-probability tail is what actually curbs the
@@ -207,10 +249,7 @@ export class LlmAdapter implements LLMProvider {
       : (this.userModel || keyResult.model || this.defaultModel);
     // Image turns silently reroute to the vision slot when the chosen model can't see — the ONLY
     // condition under which visionModel is used. A vision-capable primary keeps its own turn.
-    if (hasImages && this.visionModel && !capabilitiesFor(keyResult.provider, chosen).visionInput) {
-      return this.visionModel;
-    }
-    return chosen;
+    return selectRequestModel(chosen, this.visionModel, !!hasImages, keyResult.provider);
   }
 
   /** Any message carrying an OpenAI image_url content part → this call needs a vision-capable model. */
@@ -308,12 +347,12 @@ export class LlmAdapter implements LLMProvider {
   // design (provider.ts:buildKeyPool), so this mismatch always means "the configured model id
   // isn't in the active provider's namespace". Rewrites e.message in place when it matches;
   // no-op for every other error, so existing classification/retry behavior is untouched.
-  private enrichModelNotFound(e: any, kr: KeyResult, lite?: boolean): void {
-    if ((e?.status ?? 0) !== 400) return;
+  private enrichModelNotFound(e: any, kr: KeyResult, lite?: boolean, attemptedModel?: string): void {
+    if (![400, 404].includes(e?.status ?? 0)) return;
     const raw = String(e?.message || '');
-    if (e?.code !== 'model_not_found' &&
+    if ((e?.status ?? 0) !== 404 && e?.code !== 'model_not_found' &&
         !(/model/i.test(raw) && /not.{0,4}found|not.{0,4}a.{0,4}valid|does not exist|invalid|unknown|no such|unavailable/i.test(raw))) return;
-    const model = this.pickModel(kr, lite);
+    const model = attemptedModel || this.pickModel(kr, lite);
     const provider = kr.provider || 'the active provider';
     e.message = `Model "${model}" is not served by provider "${provider}". ` +
       `Run /model to pick an id ${provider} serves, or /provider to switch to the provider that has it. ` +
@@ -578,18 +617,28 @@ export class LlmAdapter implements LLMProvider {
     // already settled by a mid-stream usage report — otherwise an error after the
     // usage chunk would release the same reservation twice (under-counting spend).
     let usageRecorded = false;
+    let attemptedModel: string | undefined;
 
     try {
       let finalMessages: any[] = options.system
         ? [{ role: 'system', content: options.system }, ...messages]
         : messages;
 
+      if (kr.provider === 'nvidia' || String(kr.baseURL || '').includes('api.nvidia.com')) {
+        finalMessages = normalizeNvidiaMessages(finalMessages);
+      }
+
       // Resolve the model BEFORE any image handling: an image-bearing turn is exactly what
       // reroutes to the dedicated vision slot (pickModel), so the images must still be present
       // when the pick happens. Deriving caps from the RESOLVED model also keeps every knob below
       // (sampling, reasoning, caching) aligned with the model actually called.
       const model = this.pickModel(kr, options.lite, LlmAdapter.messagesHaveImages(finalMessages));
+      attemptedModel = model;
       const caps = capabilitiesFor(kr.provider, model);
+      const primary = (options.lite && this.liteModel) ? this.liteModel : (this.userModel || kr.model || this.defaultModel);
+      if (LlmAdapter.messagesHaveImages(finalMessages) && model !== primary) {
+        cliEvents.emit('status', `Vision → ${model}`);
+      }
 
       // Vision safety net: only if the RESOLVED model (after any vision-slot reroute) still can't
       // see images do we flatten image_url parts to a "[image]" text placeholder — never send
@@ -961,7 +1010,7 @@ export class LlmAdapter implements LLMProvider {
       // reservation, otherwise we would release it a second time.
       if (this.budgetVeto && !usageRecorded) await this.budgetVeto.releaseReservation(estimatedCostUsd);
 
-      this.enrichModelNotFound(e, kr, options.lite);
+      this.enrichModelNotFound(e, kr, options.lite, attemptedModel);
       const { status, recoverable, kind, retryAfterSecs } = classifyStreamError(e);
       // A first-token timeout means the provider is queueing/hanging THIS key — bench it so
       // rotation stops feeding the dead lane (reportKeyResult alone gives it a 2s cooldown,

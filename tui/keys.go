@@ -2,15 +2,38 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// BIMAX_KEYLOG=<path> appends every key event this process receives, plus the modal state that
+// will route it. The one question it answers is the one nothing else can: when a user says
+// "pressing Enter does nothing", did the keypress reach this process at all? (A missing entry
+// means the loss is upstream — terminal focus, window server, tty — not Bimax key handling.)
+var keylogPath = os.Getenv("BIMAX_KEYLOG")
+
+func (m *model) keylog(msg tea.KeyMsg) {
+	if keylogPath == "" {
+		return
+	}
+	f, err := os.OpenFile(keylogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(f, "%s key=%q reqOpen=%v reqID=%d reqIdx=%d menu=%v comp=%v search=%v busy=%v\n",
+		time.Now().Format("15:04:05.000"), msg.String(), m.reqOpen, m.reqID, m.reqIdx,
+		m.menuOpen, m.compOpen, m.searchMode, m.busy)
+	f.Close()
+}
 
 // handleKey is the single keyboard dispatcher, extracted from update() so each input mode reads
 // as its own block: request overlay > search > menu > completion dropdown > history > global
 // chords > plain typing. Order is priority — an open overlay owns the keyboard.
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.keylog(msg)
 	// Request overlay captures input until answered (highest priority).
 	if m.reqOpen {
 		if m.reqKind == "input" {

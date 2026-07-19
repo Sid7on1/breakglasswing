@@ -47,6 +47,22 @@ func post(_ event: CGEvent?) {
   usleep(12_000)
 }
 
+// Glide the visible cursor from wherever it is to the target instead of teleporting: the human
+// watching the run can follow what is about to be clicked. ~16 steps x 10ms ≈ 160ms per travel.
+func glide(to target: CGPoint, button: CGMouseButton = .left) {
+  let from = CGEvent(source: nil)?.location ?? target
+  let steps = 16
+  for i in 1...steps {
+    let t = Double(i) / Double(steps)
+    // Ease-out: fast leave, gentle arrival — reads as intentional, not as a laggy warp.
+    let e = 1.0 - (1.0 - t) * (1.0 - t)
+    let p = CGPoint(x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e)
+    let m = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: button)
+    m?.post(tap: .cghidEventTap)
+    usleep(10_000)
+  }
+}
+
 func frontmostName() -> String { NSWorkspace.shared.frontmostApplication?.localizedName ?? "" }
 
 let keyCodes: [String: CGKeyCode] = [
@@ -119,23 +135,39 @@ case "frontmost":
 case "move":
   guard args.count >= 4 else { die("move x y") }
   let p = CGPoint(x: num(args[2]), y: num(args[3]))
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
+  glide(to: p)
   print("{\\"ok\\":true}")
 
 case "click":
-  guard args.count >= 4 else { die("click x y [left|right|middle] [count]") }
+  guard args.count >= 4 else { die("click x y [left|right|middle] [count] [modifiers]") }
   let p = CGPoint(x: num(args[2]), y: num(args[3]))
   let button = args.count >= 5 ? args[4] : "left"
   let count = args.count >= 6 ? Int(num(args[5])) : 1
+  let modifierNames = args.count >= 7 ? args[6].lowercased().split(separator: ",").map(String.init) : []
+  var flags = CGEventFlags()
+  for modifier in modifierNames {
+    switch modifier {
+    case "cmd", "command", "meta": flags.insert(.maskCommand)
+    case "shift": flags.insert(.maskShift)
+    case "alt", "option", "opt": flags.insert(.maskAlternate)
+    case "ctrl", "control": flags.insert(.maskControl)
+    case "fn": flags.insert(.maskSecondaryFn)
+    case "": break
+    default: die("unknown click modifier: " + modifier)
+    }
+  }
   guard count >= 1 && count <= 3 else { die("count must be 1-3") }
   var mb = CGMouseButton.left; var down = CGEventType.leftMouseDown; var up = CGEventType.leftMouseUp
   if button == "right" { mb = .right; down = .rightMouseDown; up = .rightMouseUp }
   else if button == "middle" { mb = .center; down = .otherMouseDown; up = .otherMouseUp }
+  glide(to: p, button: mb)
   post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: mb))
   for c in 1...count {
     let d = CGEvent(mouseEventSource: nil, mouseType: down, mouseCursorPosition: p, mouseButton: mb)
+    d?.flags = flags
     d?.setIntegerValueField(.mouseEventClickState, value: Int64(c)); post(d)
     let u = CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: p, mouseButton: mb)
+    u?.flags = flags
     u?.setIntegerValueField(.mouseEventClickState, value: Int64(c)); post(u)
   }
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
@@ -144,6 +176,7 @@ case "drag":
   guard args.count >= 6 else { die("drag x1 y1 x2 y2") }
   let a = CGPoint(x: num(args[2]), y: num(args[3]))
   let b = CGPoint(x: num(args[4]), y: num(args[5]))
+  glide(to: a)
   post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: a, mouseButton: .left))
   post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left))
   let steps = 14
@@ -158,6 +191,9 @@ case "drag":
 case "scroll":
   guard args.count >= 6 else { die("scroll x y dx dy") }
   let p = CGPoint(x: num(args[2]), y: num(args[3]))
+  // Glide the visible cursor over the scroll target first, so the human sees WHERE the agent is
+  // scrolling instead of the content moving under a cursor parked somewhere else on screen.
+  glide(to: p)
   post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
   // Positive dy = scroll DOWN (content moves up); CGEvent wheel1 positive = up, so negate.
   let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
@@ -182,6 +218,59 @@ case "key":
   guard let code = keyCodes[keyName] else { die("unknown key: " + keyName) }
   postKey(code, flags)
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
+
+case "hover":
+  guard args.count >= 4 else { die("hover x y [ms]") }
+  let hp = CGPoint(x: num(args[2]), y: num(args[3]))
+  glide(to: hp)
+  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: hp, mouseButton: .left))
+  let hoverMs = args.count >= 5 ? Int(num(args[4])) : 400
+  usleep(UInt32(max(0, min(5000, hoverMs)) * 1000))
+  print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
+
+case "hold":
+  // Click-and-hold, done ATOMICALLY in one process (down → wait → up) so a crashed invocation can
+  // never leave the physical button stuck. Cross-process mousedown/mouseup exist below for staged
+  // selection, but hold is the safe default for "press and hold".
+  guard args.count >= 4 else { die("hold x y [ms] [left|right]") }
+  let holdP = CGPoint(x: num(args[2]), y: num(args[3]))
+  let holdMs = args.count >= 5 ? Int(num(args[4])) : 800
+  let holdBtn = args.count >= 6 ? args[5] : "left"
+  var hmb = CGMouseButton.left; var hdown = CGEventType.leftMouseDown; var hup = CGEventType.leftMouseUp
+  if holdBtn == "right" { hmb = .right; hdown = .rightMouseDown; hup = .rightMouseUp }
+  glide(to: holdP, button: hmb)
+  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: holdP, mouseButton: hmb))
+  let hd = CGEvent(mouseEventSource: nil, mouseType: hdown, mouseCursorPosition: holdP, mouseButton: hmb)
+  hd?.setIntegerValueField(.mouseEventClickState, value: 1); post(hd)
+  usleep(UInt32(max(50, min(5000, holdMs)) * 1000))
+  let hu = CGEvent(mouseEventSource: nil, mouseType: hup, mouseCursorPosition: holdP, mouseButton: hmb)
+  hu?.setIntegerValueField(.mouseEventClickState, value: 1); post(hu)
+  print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
+
+case "mousedown":
+  guard args.count >= 4 else { die("mousedown x y [left|right]") }
+  let dp = CGPoint(x: num(args[2]), y: num(args[3]))
+  let dbtn = args.count >= 5 ? args[4] : "left"
+  var dmb = CGMouseButton.left; var dtype = CGEventType.leftMouseDown
+  if dbtn == "right" { dmb = .right; dtype = .rightMouseDown } else if dbtn == "middle" { dmb = .center; dtype = .otherMouseDown }
+  glide(to: dp, button: dmb)
+  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: dp, mouseButton: dmb))
+  let dd = CGEvent(mouseEventSource: nil, mouseType: dtype, mouseCursorPosition: dp, mouseButton: dmb)
+  dd?.setIntegerValueField(.mouseEventClickState, value: 1); post(dd)
+  print("{\\"ok\\":true}")
+
+case "mouseup":
+  guard args.count >= 4 else { die("mouseup x y [left|right]") }
+  let up_p = CGPoint(x: num(args[2]), y: num(args[3]))
+  let ubtn = args.count >= 5 ? args[4] : "left"
+  var umb = CGMouseButton.left; var utype = CGEventType.leftMouseUp; var udrag = CGEventType.leftMouseDragged
+  if ubtn == "right" { umb = .right; utype = .rightMouseUp; udrag = .rightMouseDragged } else if ubtn == "middle" { umb = .center; utype = .otherMouseUp; udrag = .otherMouseDragged }
+  // A button may still be held from a prior mousedown; DRAG (not plain move) so the release lands here.
+  let um = CGEvent(mouseEventSource: nil, mouseType: udrag, mouseCursorPosition: up_p, mouseButton: umb)
+  um?.post(tap: .cghidEventTap); usleep(8_000)
+  let uu = CGEvent(mouseEventSource: nil, mouseType: utype, mouseCursorPosition: up_p, mouseButton: umb)
+  uu?.setIntegerValueField(.mouseEventClickState, value: 1); post(uu)
+  print("{\\"ok\\":true}")
 
 case "type":
   guard args.count >= 3 else { die("type <base64-utf8>") }
@@ -215,4 +304,4 @@ extension Array {
 `;
 
 /** Bump when the protocol changes so stale cached binaries are never reused. */
-export const DESKTOP_HELPER_VERSION = 2;
+export const DESKTOP_HELPER_VERSION = 6; // v6: hover, atomic hold, mousedown/mouseup primitives

@@ -1,4 +1,4 @@
-import { ContextManager } from '../memory/context.manager';
+import { ContextManager, injectRepoMap } from '../memory/context.manager';
 import { LLMProvider, Message, ChatEvent } from '../core/llm.provider';
 import { contentToText } from '../core/multimodal';
 
@@ -46,6 +46,27 @@ describe('ContextManager — multimodal-safe summarization', () => {
 });
 
 describe('ContextManager — layered passes (smart vs full)', () => {
+  it('keeps RepoMap refreshes provider-valid after a tool screenshot observation', () => {
+    const messages: Message[] = [
+      { role: 'user', content: 'open calculator' },
+      { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ComputerTool', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"ok":true}' },
+      { role: 'assistant', content: 'Tool results received. I will inspect the fresh screenshot before choosing the next action.' },
+      { role: 'user', content: [{ type: 'text', text: '[BrowserScreenshot] fresh screen' }] as any },
+    ];
+
+    const out = injectRepoMap(messages, '[RepoMap] current outline');
+
+    expect(out.map(m => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'user']);
+    expect(out[0].content).toBe('[RepoMap] current outline');
+    expect(out.some((m, i) => m.role === 'system' && out[i - 1]?.role === 'tool')).toBe(false);
+  });
+
+  it('keeps RepoMap as a system message during an ordinary user turn', () => {
+    const out = injectRepoMap([{ role: 'user', content: 'fix auth.ts' }], '[RepoMap] outline');
+    expect(out.map(m => m.role)).toEqual(['system', 'user']);
+  });
+
   it('full mode is a no-op: history passes through untouched', async () => {
     const cm = new ContextManager(noopLlm, 100); // tiny window, but full mode ignores it
     const messages: Message[] = [

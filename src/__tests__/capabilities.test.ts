@@ -125,6 +125,12 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('local', 'mystery-7b').inlineReasoning).toBe(false);
   });
 
+  it('routes Kimi K2.6 image turns as multimodal with conservative tool sequencing', () => {
+    const caps = capabilitiesFor('nvidia', 'moonshotai/kimi-k2.6');
+    expect(caps.visionInput).toBe(true);
+    expect(caps.parallelToolCalls).toBe(false);
+  });
+
   // plainContent marks confirmed non-reasoning models so the streaming filter skips implicit
   // buffering and streams the answer from token 1 (the minimax "feels very slow" head-of-reply stall).
   it('plainContent: on for minimax (confirmed non-reasoning), off for reasoning + unknown models', () => {

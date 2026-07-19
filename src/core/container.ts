@@ -44,6 +44,7 @@ import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { createBrowserTool } from '../tools/implementations/browser.tool';
 import { createComputerTool } from '../tools/implementations/computer.tool';
 import { globalBrowserRuntime } from '../browser/browser.runtime';
+import { globalDesktopRuntime } from '../computer/desktop.runtime';
 import { shutdownTracer } from '../telemetry/trace';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { createSkillInstallTool } from '../tools/implementations/skill.install.tool';
@@ -245,6 +246,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
     browserShutdownWired = true;
     cliEvents.once('shutdown', () => {
       void globalBrowserRuntime.close();
+      void globalDesktopRuntime.dispose?.();
       void shutdownTracer();
     });
   }

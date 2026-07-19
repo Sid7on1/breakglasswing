@@ -1,7 +1,19 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+// Isolate from the developer's real ~/.breakglass — computerApprovals there would otherwise
+// change what the gating tests observe.
+const testBreakglass = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-computer-tool-test-'));
+process.env.BIMAX_BREAKGLASS_DIR = testBreakglass;
+
 import { appNamesMatch, scaleNormalizedPoint, DesktopRuntimePort, DesktopResult } from '../computer/desktop.runtime';
 import { screenshotFromToolResult } from '../core/multimodal';
 import { IGovernor } from '../core/interfaces';
 import { createComputerTool } from '../tools/implementations/computer.tool';
+import { __resetConfigForTests } from '../cli/config';
+
+afterAll(() => { try { fs.rmSync(testBreakglass, { recursive: true, force: true }); } catch { /* tmp */ } });
 
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
 
@@ -16,7 +28,17 @@ function fakeRuntime(overrides: Partial<DesktopResult> = {}): DesktopRuntimePort
 }
 
 describe('ComputerTool', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    __resetConfigForTests();
+    fs.rmSync(path.join(testBreakglass, 'config.json'), { force: true });
+  });
+
+  function setApprovals(mode: string): void {
+    fs.mkdirSync(testBreakglass, { recursive: true });
+    fs.writeFileSync(path.join(testBreakglass, 'config.json'), JSON.stringify({ computerApprovals: mode }));
+    __resetConfigForTests();
+  }
 
   it('maps normalized 0–1000 coordinates to screen points, clamped', () => {
     expect(scaleNormalizedPoint(500, 1470)).toBe(735);
@@ -31,7 +53,7 @@ describe('ComputerTool', () => {
     expect(appNamesMatch('Terminal', 'Calculator')).toBe(false);
   });
 
-  it('gates acting verbs with the frontmost app as the grant scope, leaves observation free', async () => {
+  it('keeps routine acting verbs governor-visible without prompting by default, and leaves observation free', async () => {
     const runtime = fakeRuntime();
     const tool = createComputerTool(governor, runtime);
 
@@ -43,7 +65,45 @@ describe('ComputerTool', () => {
 
     await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
-      tool: 'ComputerTool', action: 'click', app: 'Notes', isDestructive: true,
+      tool: 'ComputerTool', action: 'click', app: 'Notes', isDestructive: false,
+    }));
+  });
+
+  it('always approvals mode keeps routine acting verbs prompt-worthy', async () => {
+    setApprovals('always');
+    const tool = createComputerTool(governor, fakeRuntime());
+
+    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'click', isDestructive: true,
+    }));
+  });
+
+  it('high-impact-only approvals: routine actions flow without a prompt, high-impact still asks', async () => {
+    setApprovals('high-impact-only');
+    const tool = createComputerTool(governor, fakeRuntime());
+
+    // Routine click → still governor-visible (sensitive-target floor runs) but not prompt-worthy.
+    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'click', isDestructive: false,
+    }));
+
+    // Typing text that matches the high-impact intent (a delete) keeps the human in the loop.
+    jest.clearAllMocks();
+    await tool.execute({ action: 'type', text: 'delete all my files', app: 'Notes' }, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'type', highImpact: true, isDestructive: true,
+    }));
+  });
+
+  it('plan mode ignores high-impact-only and keeps every acting verb destructive', async () => {
+    setApprovals('high-impact-only');
+    const planGovernor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined), mode: 'plan' } as unknown as IGovernor;
+    const tool = createComputerTool(planGovernor, fakeRuntime());
+    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    expect(planGovernor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      action: 'click', isDestructive: true,
     }));
   });
 
@@ -126,5 +186,18 @@ describe('ComputerTool', () => {
     const output = await tool.execute({ action: 'screenshot' }, { cwd: process.cwd() });
     expect(screenshotFromToolResult('ComputerTool', output)).toBe('/tmp/shot.png');
     expect(screenshotFromToolResult('ReadTool', output)).toBeNull();
+  });
+
+  it('keeps delivery mode user-owned and forwards modifier-click selection', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({
+      action: 'click', x: 10, y: 20, deliveryMode: 'background', modifier: ['cmd'],
+    }, { cwd: process.cwd() });
+
+    expect(runtime.run).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'click', x: 10, y: 20, modifier: ['cmd'],
+    }), expect.anything());
+    expect((runtime.run as jest.Mock).mock.calls[0][0]).not.toHaveProperty('deliveryMode');
   });
 });

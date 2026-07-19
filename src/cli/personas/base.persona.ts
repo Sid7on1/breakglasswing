@@ -2,7 +2,7 @@ import { ToolRegistry } from '../../tools/tool.registry';
 import { BuiltTool } from '../../tools/tool.factory';
 import { LlmAdapter } from '../../core/llm.adapter';
 import { ModelCapabilities } from '../../core/capabilities';
-import { buildUserContent } from '../../core/multimodal';
+import { buildUserContent, isScreenshotObservationMessage } from '../../core/multimodal';
 import { cliEvents } from '../events';
 import * as os from 'os';
 import { AgentLoop } from '../../core/agent.loop';
@@ -32,6 +32,23 @@ export interface PersonaConfig {
   name: string;
   roleDescription: string;
   allowedTools: string[];
+}
+
+export function explicitlyRequiresComputerUse(prompt: string): boolean {
+  return /\b(?:use|using|with|via)\s+(?:the\s+)?computer(?:\s+use)?\b/i.test(prompt);
+}
+
+/** An explicit visual-only retry must not inherit a value from a previous shell/browser result.
+ * Keep protocol roles and tool ids intact, but replace prior evidence and synthetic screenshots. */
+export function isolateComputerUseHistory(messages: any[]): any[] {
+  return messages
+    .filter(message => !isScreenshotObservationMessage(message))
+    .filter(message => !(message?.role === 'assistant'
+      && typeof message.content === 'string'
+      && message.content.startsWith('Tool results received. I will inspect the fresh screenshot')))
+    .map(message => message?.role === 'tool'
+      ? { ...message, content: '{"note":"prior-turn tool output hidden because this turn explicitly requires fresh computer-use evidence"}' }
+      : message);
 }
 
 export abstract class AgentPersona {
@@ -340,16 +357,24 @@ export abstract class AgentPersona {
   public static injectTurnContext(messages: any[], turnContext: string): any[] {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
-      if (m.role === 'system' && typeof m.content === 'string' && m.content.startsWith(AgentPersona.TURN_CONTEXT_MARKER)) {
+      if ((m.role === 'system' || m.role === 'user')
+        && typeof m.content === 'string'
+        && m.content.startsWith(AgentPersona.TURN_CONTEXT_MARKER)) {
         messages.splice(i, 1);
       }
     }
     if (!turnContext) return messages;
-    const msg = { role: 'system', content: `${AgentPersona.TURN_CONTEXT_MARKER}\nBackground for THIS turn (auto-refreshed each user message — trust the latest copy only):\n\n${turnContext}` };
     let lastUser = -1;
     for (let j = messages.length - 1; j >= 0; j--) {
-      if (messages[j].role === 'user') { lastUser = j; break; }
+      if (messages[j].role === 'user' && !isScreenshotObservationMessage(messages[j])) {
+        lastUser = j;
+        break;
+      }
     }
+    const msg = {
+      role: 'system',
+      content: `${AgentPersona.TURN_CONTEXT_MARKER}\nBackground for THIS turn (auto-refreshed each user message — trust the latest copy only):\n\n${turnContext}`,
+    };
     if (lastUser >= 0) messages.splice(lastUser, 0, msg);
     else messages.push(msg);
     return messages;
@@ -375,6 +400,12 @@ export abstract class AgentPersona {
       try { void getHarnessTuner().labPass().catch(() => { /* best-effort */ }); } catch { /* best-effort */ }
     }
 
+    let modelPrompt = prompt;
+    if (explicitlyRequiresComputerUse(prompt)) {
+      this.messages = isolateComputerUseHistory(this.messages);
+      modelPrompt += '\n\n[Fresh computer-use constraint: Complete this turn only from screenshots captured after this request. Prior shell, browser, assistant, memory, and tool values are not evidence. Navigate until the requested screen and value are visibly present; otherwise report that visual verification failed.]';
+    }
+
     // Resolve the active model's capabilities once for this turn — drives both vision attachment
     // and the context-window fallback below. Best-effort: FLOOR (no caps) on any failure.
     let caps: ModelCapabilities | undefined;
@@ -387,11 +418,11 @@ export abstract class AgentPersona {
       // A configured vision slot counts: the adapter reroutes image turns to it when the primary
       // model is text-only, so the images should be attached rather than dropped.
       const canSee = (this.llmAdapter as any).canSeeImages?.() ?? !!caps?.visionInput;
-      const built = buildUserContent(prompt, images, canSee);
+      const built = buildUserContent(modelPrompt, images, canSee);
       if (built.notice && onToken) onToken(`_${built.notice}_\n`);
       this.messages.push({ role: 'user', content: built.content });
     } else {
-      this.messages.push({ role: 'user', content: prompt });
+      this.messages.push({ role: 'user', content: modelPrompt });
     }
     let executionLog = '';
 
@@ -429,7 +460,7 @@ export abstract class AgentPersona {
     // the real budget there). Must be applied HERE too — this callsite always passes
     // maxIterations down, so the loop-level env fallback never sees an undefined value.
     const maxIterations = options?.maxIterations
-      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || 130);
+      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || cfg.maxToolIterations || 500);
     const contextMode = (cfg.contextMode ?? 'smart') as 'smart' | 'full';
     // Cache split (see splitPrompt): the system prompt carries only the static persona + session
     // suffix, so its bytes are stable turn-over-turn and the provider's prompt-prefix cache holds.

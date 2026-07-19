@@ -25,7 +25,9 @@ interface CallRecord {
 
 const SOFT_THRESHOLD = 3;  // warn, inject hint
 const HARD_THRESHOLD = 5;  // intervene, push the model to stop
-const MAX_TOTAL_CALLS = 200; // circuit breaker
+// Long desktop workflows can legitimately span hundreds of see/act rounds. Repetition detectors
+// remain the primary guard; this is only a last-resort session fuse.
+const MAX_TOTAL_CALLS = 2_000;
 // Error-thrashing: how many times a single tool may FAIL within the rolling window before we step in.
 // This is deliberately independent of argsHash — the whole point is to catch the "keep tweaking the
 // arguments and it keeps erroring" spiral (a mis-anchored EditFileTool, a Bash command that never
@@ -35,6 +37,20 @@ const ERROR_HARD_THRESHOLD = 4;
 
 function sha256Short(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex').slice(0, 16);
+}
+
+function resultFingerprint(toolName: string, resultText: string): string {
+  if (toolName === 'ComputerTool') {
+    try {
+      const parsed = JSON.parse(resultText);
+      // Paths change on every capture even when the screen did not. Pixel identity is the progress
+      // signal that matters for computer use, so hash the runtime-provided frame digest instead.
+      if (typeof parsed?.frameHash === 'string' && parsed.frameHash) {
+        return `frame:${parsed.frameHash}:ok:${parsed.ok !== false}`;
+      }
+    } catch { /* fall through to the ordinary text digest */ }
+  }
+  return resultText;
 }
 
 /**
@@ -69,7 +85,7 @@ export class LoopDetector {
   record(toolName: string, argsJson: string, resultText: string, isError?: boolean): LoopSignal | null {
     this.totalCalls++;
     const argsHash = sha256Short(toolName + ':' + argsJson);
-    const resultHash = sha256Short(resultText);
+    const resultHash = sha256Short(resultFingerprint(toolName, resultText));
     const failed = isError ?? /^(tool error|error:|failed to|tool .* not found)/i.test((resultText || '').trimStart());
 
     this.history.push({ tool: toolName, argsHash, resultHash, isError: failed });
@@ -93,11 +109,15 @@ export class LoopDetector {
     // read C, read A …), so the old strict "N-in-a-row" check never fired and the agent thrashed for
     // minutes re-reading identical files. Count occurrences anywhere in the rolling window instead.
     const repeats = this.history.filter(c => c.tool === toolName && c.argsHash === argsHash).length;
-    if (repeats >= HARD_THRESHOLD - 1) {
-      return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'hard' };
-    }
-    if (repeats >= SOFT_THRESHOLD) {
-      return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'soft' };
+    // Repeating `observe {}` or clicking the same coordinate is normal when the pixels are changing.
+    // ComputerTool progress is handled below by the frame-hash-aware no-progress detector.
+    if (toolName !== 'ComputerTool') {
+      if (repeats >= HARD_THRESHOLD - 1) {
+        return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'hard' };
+      }
+      if (repeats >= SOFT_THRESHOLD) {
+        return { type: 'generic_repeat', tool: toolName, argsHash, count: repeats, severity: 'soft' };
+      }
     }
 
     // Error thrashing — the same tool keeps FAILING across the window even as the model varies its
@@ -138,7 +158,7 @@ export class LoopDetector {
 
     // Ping-pong — A→B→A→B alternation over last 4 calls. Cooled down so a sustained alternation
     // warns once per few cycles instead of on every call.
-    if (this.history.length >= 4 && this.totalCalls - this.lastPingPongAt >= LoopDetector.PING_PONG_COOLDOWN) {
+    if (toolName !== 'ComputerTool' && this.history.length >= 4 && this.totalCalls - this.lastPingPongAt >= LoopDetector.PING_PONG_COOLDOWN) {
       const [h0, h1, h2, h3] = this.history.slice(-4);
       if (
         h0.tool === h2.tool && h0.argsHash === h2.argsHash &&

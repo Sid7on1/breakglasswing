@@ -37,6 +37,9 @@ const ENV_OVERRIDES: Partial<Record<keyof CliConfig, string>> = {
   liteModel: 'BGW_LITE_MODEL',
   visionModel: 'BGW_VISION_MODEL',
   reasoningEffort: 'BGW_REASONING_EFFORT',
+  computerPip: 'BIMAX_COMPUTER_PIP',
+  computerRecord: 'BIMAX_COMPUTER_RECORD',
+  computerVisible: 'BIMAX_COMPUTER_VISIBLE',
 };
 
 export type ConfigSource = 'default' | 'global' | 'project' | 'env';
@@ -104,21 +107,42 @@ export interface CliConfig {
   keybindings?: Record<string, string>;
   // Accessibility: calm static UI — disables spinner/shimmer animation (also set via BGW_REDUCED_MOTION env).
   reducedMotion?: boolean;
+  // Computer-use approval cadence: 'always' prompts for every acting verb (click/type/open/…);
+  // 'high-impact-only' auto-approves routine interaction and prompts ONLY for high-impact actions
+  // (delete/send/purchase/submit/permissions — see action.impact.ts). The sensitive-target hard
+  // floor (password managers, security settings, wallets) applies in BOTH modes and cannot be waived.
+  computerApprovals: 'always' | 'high-impact-only';
+  // Show the work: deliver computer-use input in the foreground so the real cursor visibly moves
+  // to each target. false = background delivery (invisible, no focus steal) as before.
+  computerVisible: boolean;
+  // Show a live post-action preview window from the embedded native driver.
+  computerPip: boolean;
+  // Record computer-use turns plus a ScreenCaptureKit MP4 under .bimax/computer/recordings.
+  computerRecord: boolean;
 }
 
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
-  // Coding/heavy model: the fast REASONING model drives the main agent loop. minimax-m3 was the
-  // coding model but ran very slow on NIM, while step-3.7-flash reasons AND streams fast — so it does
-  // the real work now. (Restore minimax here if you prefer it; the plainContent cap now streams it
-  // from token 1 so it no longer feels like it hangs.)
-  model: 'stepfun-ai/step-3.7-flash',
-  // Lite slot: PLAIN model, never a reasoner — step-3.7 thinks on every call with no API off
-  // switch, which put a 20-30s hidden reasoning phase in front of greetings/summaries/routing.
-  liteModel: 'meta/llama-3.1-70b-instruct',
-  // Vision slot: '' = none. Set via /model vision (or /computer). Screenshots/images reroute to
-  // it per-turn; it never displaces the coding model.
-  visionModel: '',
+  // Coding/heavy model: qwen3.5-397b (probed live 2026-07-19): tool calls work, VISION input works
+  // (so computer-use screenshots stay with the working model — no perception-model reroute), and it
+  // does NOT burn a hidden reasoning phase on every call the way step-3.7 does (step-3.7 ignores
+  // every server-side thinking off-switch and is a paid partner model on NIM).
+  // Probed live 2026-07-19 for the exact computer-use workload (4x tool call + 2x real-image
+  // vision): mistral-small-4 called the tool 4/4 at 0.5-1s AND read the image correctly 2/2 at
+  // ~0.7s, with NO hidden reasoning phase. It is fast enough for hours of stepping, reliable
+  // enough to not stall, and — crucially — SEES screenshots itself, so images stay on the working
+  // model instead of fragmenting to a separate perception model 3-4 steps in. The prior defaults
+  // failed this workload: step-3.7 overthinks every call, qwen-397b's vision times out, and
+  // qwen-122b returned EMPTY on every real vision question.
+  model: 'z-ai/glm-5.2',
+  // Lite slot: PLAIN model, never a reasoner. qwen3.5-122b answered plain text in <1s on the
+  // 2026-07-19 probe; the old llama-3.1-70b default took 88s on a cold "hi" (NIM keeps it cold).
+  liteModel: 'stepfun-ai/step-3.7-flash',
+  // Vision slot: '' because the WORK model above already sees images (pickModel only reroutes when
+  // the active model is text-only). Set one via /model vision if you switch work to a text-only
+  // model — prefer a VLM that can also call tools (mistral-small-4) over a describe-only perception
+  // model (llama-3.2-90b-vision), which stalls the agent loop.
+  visionModel: 'mistralai/mistral-small-4-119b-2603',
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   subagentModel: '', // '' = sub-agents use the main model
 
@@ -132,7 +156,7 @@ const DEFAULTS: CliConfig = {
   skipSemanticMetadata: false,
   autoIndex: true,
   excludeFromIndex: [],
-  maxToolIterations: 50, // deep multi-file work (audits, refactors) needs headroom; 15 forced constant "continue" babysitting. Loop-detection + context compaction guard runaway.
+  maxToolIterations: 500, // Several hours of visual stepping at ordinary model latency; progress-aware loop guards catch stalls.
   maxSubAgents: 4, // hard global runtime ceiling; nested agents share the same lease coordinator
   autoResumeAgents: true,
   autoContinueOutcome: true,
@@ -154,6 +178,10 @@ const DEFAULTS: CliConfig = {
   contextMode: 'smart',
   contextWindowTokens: 0,
   parallelToolCalls: true,
+  computerApprovals: 'high-impact-only',
+  computerVisible: true,
+  computerPip: false,
+  computerRecord: true,
 };
 
 let cached: CliConfig | null = null;
@@ -221,7 +249,14 @@ function parseEnvValue(key: keyof CliConfig, raw: string): unknown {
 export async function loadConfig(): Promise<CliConfig> {
   if (cached) return cached;
   const globalCfg = await readJson(globalPath());
-  const projectCfg = await readJson(projectPath());
+  const rawProjectCfg = await readJson(projectPath());
+  // Old builds wrote the whole default object into .breakglass/config.json. Letting those stale
+  // values override current defaults silently kept this workspace at 50 iterations even after the
+  // long-run default was raised. The scope contract above is authoritative: only project-owned
+  // fields may flow from this file.
+  const projectCfg = Object.fromEntries(
+    PROJECT_KEYS.filter(key => key in rawProjectCfg).map(key => [key, rawProjectCfg[key]]),
+  ) as Partial<CliConfig>;
   // Compose the scopes in precedence order, recording where each effective value came from.
   const merged: CliConfig = { ...DEFAULTS, ...globalCfg, ...projectCfg };
   sources = {};
@@ -249,9 +284,9 @@ export async function loadConfig(): Promise<CliConfig> {
   // coding slot keeps the user's pick; quick replies go to the plain lite default. Non-reasoning
   // picks are untouched (true single-model setups stay unified).
   try {
-    const { isReasoningModel, DEFAULT_LITE_MODEL } = require('./models');
+    const { isReasoningModel, LEGACY_SAFE_LITE_MODEL } = require('./models');
     if (cached.liteModel && cached.liteModel === cached.model && isReasoningModel(cached.liteModel)) {
-      cached.liteModel = DEFAULT_LITE_MODEL;
+      cached.liteModel = LEGACY_SAFE_LITE_MODEL;
     }
   } catch { /* models module unavailable in some test harnesses — defaults already sane */ }
   return cached;

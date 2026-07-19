@@ -51,6 +51,7 @@ media-masters/
 .bimax/user-model.json
 .bimax/epistemic.json
 .bimax/drives.json
+.bimax/genome-patterns.jsonl
 .bimax/dreams.json
 .bimax/dogfood/
 .bimax/ledger.db*

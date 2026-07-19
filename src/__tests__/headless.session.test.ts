@@ -1,5 +1,6 @@
 import { cliEvents } from '../cli/events';
 import { HeadlessSession } from '../protocol/headless.session';
+import { globalDesktopRuntime } from '../computer/desktop.runtime';
 import '../cli/commands/meta';
 
 // The headless session must honor /tier identically to Ink's FullScreen: a set_tier event pins the
@@ -66,5 +67,23 @@ describe('HeadlessSession — set_tier routing parity', () => {
     await session.dispatch('/model new/model');
     expect(applyConfig).toHaveBeenCalledWith({ model: 'new/model' });
     expect(saveConfig).toHaveBeenCalledWith({ model: 'new/model' });
+  });
+
+  it('tears down Computer Use immediately when a turn is interrupted', async () => {
+    const dispose = jest.spyOn(globalDesktopRuntime, 'dispose').mockResolvedValue(undefined);
+    const execute = jest.fn((_prompt: string, _onToken: any, options: any) => new Promise<void>(resolve => {
+      options.signal.addEventListener('abort', () => resolve(), { once: true });
+    }));
+    const session = new HeadlessSession({
+      personas: { bimax: { messages: [], execute } as any },
+      options: { llmAdapter: { userModel: 'model', liteModel: 'model' }, maxToolIterations: 5, governor: { mode: 'default' } },
+      graphStore: {} as any,
+    });
+    const turn = session.dispatch('perform a multi-step desktop task');
+    await new Promise(resolve => setImmediate(resolve));
+    session.interrupt();
+    expect(dispose).toHaveBeenCalled();
+    await turn;
+    dispose.mockRestore();
   });
 });

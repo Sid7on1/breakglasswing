@@ -258,6 +258,52 @@ const RULES: CapabilityRule[] = [
   {
     match: ['glm-'],
     caps: {
+      parallelToolCalls: false,
+      contextWindow: 128_000,
+    },
+  },
+  // --- Kimi K2.6: multimodal agent model used for screenshot-bearing turns. ---
+  {
+    match: ['kimi-k2.6', 'kimi-k2-6'],
+    caps: {
+      parallelToolCalls: false,
+      visionInput: true,
+      contextWindow: 256_000,
+    },
+  },
+  // --- Qwen 3.5 (NIM): fast plain (no reasoning channel, no <think>) with working tool calls, used
+  //     as the Quick default. visionInput is FALSE despite the endpoint accepting image parts: on
+  //     the 2026-07-19 probe both 397b (timeout) and 122b (empty answer) FAILED a real-image
+  //     question, so image turns must reroute to the vision slot rather than silently return
+  //     nothing. Parallel tools stay conservative for NIM. ---
+  {
+    match: ['qwen3.5', 'qwen3-5'],
+    caps: {
+      plainContent: true,
+      parallelToolCalls: false,
+      visionInput: false,
+      contextWindow: 128_000,
+    },
+  },
+  // --- OpenAI gpt-oss (NIM): open-weight reasoner with a NATIVE reasoning_content channel that
+  //     honors reasoning_effort (unlike step-3.7). Fast (~2s warm on the 2026-07-19 probe). ---
+  {
+    match: ['gpt-oss'],
+    caps: {
+      nativeThinking: true,
+      reasoningEffortKnob: true,
+      parallelToolCalls: false,
+      contextWindow: 128_000,
+    },
+  },
+  // --- Mistral Small 4 (NIM): fast VLM — tools + image input probed working 2026-07-19. Listed
+  //     BEFORE the generic mistral rule so it keeps its vision flag. ---
+  {
+    match: ['mistral-small-4'],
+    caps: {
+      plainContent: true,
+      parallelToolCalls: false,
+      visionInput: true,
       contextWindow: 128_000,
     },
   },

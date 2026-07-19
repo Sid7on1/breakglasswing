@@ -1,5 +1,5 @@
 import { LLMProvider, Message } from '../core/llm.provider';
-import { contentToText } from '../core/multimodal';
+import { contentToText, isScreenshotObservationMessage } from '../core/multimodal';
 import { encode } from 'gpt-tokenizer';
 import { Logger } from '../utils/logger';
 import { fileStateCache } from './file-state-cache';
@@ -36,7 +36,7 @@ export function getContextManagerGraphStore(): IGraphStore | null { return _grap
 // skipped — boosting on "read"/"improve" would surface unrelated symbols. Empty for a vague request,
 // so the map falls back to pure PageRank ranking.
 export function focusTermsFromMessages(msgs: Message[]): string[] {
-  const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+  const lastUser = [...msgs].reverse().find(m => m.role === 'user' && !isScreenshotObservationMessage(m));
   const text = lastUser ? contentToText(lastUser.content as any) : '';
   if (!text) return [];
   const terms = new Set<string>();
@@ -47,6 +47,33 @@ export function focusTermsFromMessages(msgs: Message[]): string[] {
     }
   }
   return [...terms];
+}
+
+/** Inject a refreshed RepoMap without violating strict tool-result role ordering. */
+export function injectRepoMap(messages: Message[], outline: string): Message[] {
+  const withoutOldMap = messages.filter(m => !(
+    (m.role === 'system' || m.role === 'user')
+    && typeof m.content === 'string'
+    && m.content.startsWith('[RepoMap]')
+  ));
+  if (!outline) return withoutOldMap;
+
+  let lastUser = -1;
+  for (let i = withoutOldMap.length - 1; i >= 0; i--) {
+    if (withoutOldMap[i].role === 'user' && !isScreenshotObservationMessage(withoutOldMap[i])) {
+      lastUser = i;
+      break;
+    }
+  }
+  const insertionIndex = lastUser >= 0 ? lastUser : withoutOldMap.length;
+  // Screenshot observations are protocol turns, not new human requests. Anchor the refreshed map
+  // before the latest real user turn so it never lands inside assistant → tool → assistant → user.
+  const mapMsg: Message = { role: 'system', content: outline };
+  return [
+    ...withoutOldMap.slice(0, insertionIndex),
+    mapMsg,
+    ...withoutOldMap.slice(insertionIndex),
+  ];
 }
 
 export class ContextManager {
@@ -221,22 +248,10 @@ export class ContextManager {
     // turn the position is stable too — tool rounds append after it.)
     if (_graphStore) {
       try {
-        msgs = msgs.filter(m => !(m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[RepoMap]')));
         // Cross-repo (PR3): merges every indexed repo in a multi-repo workspace into one map; with a
         // single repo it returns exactly the old single-repo outline. Sync — never blocks on disk.
         const outline = crossRepoMapSync(_graphStore, 1500, focusTermsFromMessages(msgs));
-        if (outline) {
-          const mapMsg = { role: 'system' as const, content: outline };
-          let lastUser = -1;
-          for (let j = msgs.length - 1; j >= 0; j--) {
-            if (msgs[j].role === 'user') { lastUser = j; break; }
-          }
-          // Insert before the latest user message; if there is none (shouldn't happen mid-turn),
-          // fall back to appending — never to the cache-hostile head.
-          msgs = lastUser >= 0
-            ? [...msgs.slice(0, lastUser), mapMsg, ...msgs.slice(lastUser)]
-            : [...msgs, mapMsg];
-        }
+        msgs = injectRepoMap(msgs, outline);
       } catch { /* pagerank optional — never fail the compaction loop */ }
     }
 
@@ -251,7 +266,7 @@ export class ContextManager {
       msgs = [
         ...msgs,
         {
-          role: 'system' as const,
+          role: msgs[msgs.length - 1]?.role === 'tool' ? 'user' as const : 'system' as const,
           content: `[ContextManager] You have used ~${Math.round(ratio * 100)}% of your context window. To avoid forced compaction, prefer targeted reads (startLine/endLine), release unneeded context with FreeContextTool, and avoid re-reading files you already have.`,
         },
       ];

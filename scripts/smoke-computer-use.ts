@@ -28,8 +28,11 @@ async function main() {
     }
     const typed = await runtime.run({ action: 'type', text: '1271*170+104' });
     if (!typed.ok) throw new Error(typed.error || typed.summary);
-    const entered = await runtime.run({ action: 'key', combo: 'return' });
+    // Exercise the visual path, not AX activation or a keyboard shortcut. Calculator has a fixed
+    // keypad layout; this normalized point is the visible center of '=' in the newest screenshot.
+    const entered = await runtime.run({ action: 'click', x: 852, y: 915, normalized: true });
     if (!entered.ok) throw new Error(entered.error || entered.summary);
+    if (!entered.screenshot || !entered.frameHash) throw new Error('pixel click returned no fresh visual evidence');
 
     await new Promise(resolve => setTimeout(resolve, 350));
     const after = await runtime.run({ action: 'observe', maxElements: 500 });
@@ -46,6 +49,7 @@ async function main() {
     console.log(JSON.stringify({
       driver: after.driver, pid: after.pid, windowId: after.windowId,
       semantic: displayed || null, degraded: !!after.degraded, screenshot, screenshotBytes,
+      pixelClick: { normalized: [852, 915], frameHash: entered.frameHash },
     }, null, 2));
   } finally {
     if (opened) {

@@ -20,7 +20,7 @@ import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder'
 import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
-import { screenshotFromToolResult, buildScreenshotObservation, pruneScreenshotObservations } from './multimodal';
+import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations } from './multimodal';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -104,7 +104,7 @@ export class AgentLoop {
     // Env override for headless/benchmark runs: a hard task can legitimately need hundreds of
     // rounds, and there the wall clock (container/task timeout) is the real budget, not this.
     const maxIter = options?.maxIterations
-      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || 130);
+      ?? (parseInt(process.env.BIMAX_MAX_ITERATIONS || '', 10) || 500);
     const contextMode = options?.contextMode ?? 'smart';
     // Cooperative cancellation: the front-end's interrupt aborts this signal. We don't tear the
     // in-flight fetch down mid-byte; we stop at the next safe boundary (next streamed token, or
@@ -709,6 +709,7 @@ export class AgentLoop {
         // models misread which result belongs to which call.
         const loopSignals: LoopSignal[] = [];
         const screenshotPaths: string[] = [];
+        let sawComputerResult = false;
         for (const tc of toolCalls) {
           const ran = resultById.get(tc.id);
           const result = ran ? ran.result : 'Tool call interrupted before it ran.';
@@ -718,7 +719,15 @@ export class AgentLoop {
             if (sig) loopSignals.push(sig);
             const shot = screenshotFromToolResult(tc.name, result);
             if (shot) screenshotPaths.push(shot);
+            if (tc.name === 'ComputerTool') sawComputerResult = true;
           }
+        }
+        // Long computer-use runs: as soon as a newer observation lands, older accessibility
+        // trees/element dumps describe a dead screen — stub them out so hours of stepping never
+        // drowns the model in stale screen state (that drift is what made it start "explaining
+        // the picture" instead of acting).
+        if (sawComputerResult) {
+          try { pruneStaleToolObservations(this.messages); } catch { /* hygiene must never break the loop */ }
         }
         // History is now well-formed (every tool_call answered) even on interrupt — so stop here
         // instead of leaving a dangling turn, and the next user message appends to a valid log.
@@ -738,7 +747,7 @@ export class AgentLoop {
             if (canSee) {
               const observation = buildScreenshotObservation(screenshotPaths[screenshotPaths.length - 1]);
               if (observation) {
-                this.messages.push(observation);
+                appendScreenshotObservation(this.messages, observation);
                 pruneScreenshotObservations(this.messages);
               }
             }

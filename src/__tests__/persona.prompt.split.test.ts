@@ -2,7 +2,7 @@ import { IGovernor } from '../core/interfaces';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
-import { AgentPersona } from '../cli/personas/base.persona';
+import { AgentPersona, explicitlyRequiresComputerUse, isolateComputerUseHistory } from '../cli/personas/base.persona';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -105,6 +105,27 @@ describe('Persona system prompt — static/session/turn cache split', () => {
   });
 });
 
+describe('explicit computer-use history isolation', () => {
+  it('recognizes an explicit visual-tool request', () => {
+    expect(explicitlyRequiresComputerUse('use computer use and check my battery health')).toBe(true);
+    expect(explicitlyRequiresComputerUse('check my battery health')).toBe(false);
+  });
+
+  it('hides prior shell evidence and stale screenshots without breaking tool-result roles', () => {
+    const messages: any[] = [
+      { role: 'user', content: 'check battery' },
+      { role: 'assistant', tool_calls: [{ id: '1', type: 'function', function: { name: 'BashTool', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: '1', content: 'Maximum Capacity: 92%; Cycle Count: 269' },
+      { role: 'assistant', content: 'Tool results received. I will inspect the fresh screenshot before choosing the next action.' },
+      { role: 'user', content: [{ type: 'text', text: '[BrowserScreenshot] old screen' }] },
+    ];
+    const isolated = isolateComputerUseHistory(messages);
+    expect(isolated.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
+    expect(String(isolated[2].content)).not.toContain('92%');
+    expect(isolated[2].tool_call_id).toBe('1');
+  });
+});
+
 describe('injectTurnContext — cache-safe tail placement', () => {
   const tc = 'USER PREFERS TABS';
 
@@ -132,7 +153,7 @@ describe('injectTurnContext — cache-safe tail placement', () => {
       { role: 'user', content: 'second task' },
     ];
     AgentPersona.injectTurnContext(msgs, tc);
-    const tcMsgs = msgs.filter(m => m.role === 'system' && String(m.content).startsWith('[TurnContext]'));
+    const tcMsgs = msgs.filter(m => String(m.content).startsWith('[TurnContext]'));
     expect(tcMsgs).toHaveLength(1);
     expect(tcMsgs[0].content).toContain(tc);
     expect(tcMsgs[0].content).not.toContain('stale block');
@@ -152,5 +173,22 @@ describe('injectTurnContext — cache-safe tail placement', () => {
     const msgs: any[] = [{ role: 'assistant', content: 'hello' }];
     AgentPersona.injectTurnContext(msgs, tc);
     expect(msgs[1].content).toContain(tc);
+  });
+
+  it('does not insert a system role after a tool result before a screenshot observation', () => {
+    const msgs: any[] = [
+      { role: 'user', content: 'open Calculator' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'ComputerTool', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call_1', content: '{"ok":true}' },
+      { role: 'assistant', content: 'Tool results received. I will inspect the fresh screenshot before choosing the next action.' },
+      { role: 'user', content: [{ type: 'text', text: '[BrowserScreenshot] fresh screen' }] },
+    ];
+
+    AgentPersona.injectTurnContext(msgs, tc);
+
+    expect(msgs[0].role).toBe('system');
+    expect(msgs[0].content).toContain('[TurnContext]');
+    expect(msgs.map(m => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'user']);
+    expect(msgs.some((m, i) => m.role === 'system' && msgs[i - 1]?.role === 'tool')).toBe(false);
   });
 });

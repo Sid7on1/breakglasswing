@@ -289,6 +289,7 @@ function MenuCard({
 
 function ToolCard({ call, inGroup }: { call: ToolCallEntry; inGroup?: boolean }): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const screenshot = computerScreenshot(call);
   const icon =
     call.status === 'running' ? <Loader size={13} className="animate-spin text-amber" />
     : call.status === 'success' ? <CircleCheck size={13} className="text-moss" />
@@ -314,6 +315,13 @@ function ToolCard({ call, inGroup }: { call: ToolCallEntry; inGroup?: boolean })
           <span className="shrink-0 text-[10.5px] text-faint tabular-nums">{secs < 10 ? secs.toFixed(1) : Math.round(secs)}s</span>
         ) : null}
       </button>
+      {screenshot ? (
+        <img
+          src={localImageUrl(screenshot)}
+          alt="Latest computer screen"
+          className="mt-1 max-h-[360px] w-auto max-w-full border border-line object-contain"
+        />
+      ) : null}
       {open && (
         <pre className="-mt-1 max-h-[280px] overflow-auto rounded-b-lg border border-t-0 border-line bg-well px-3 py-2.5 font-mono text-xs leading-normal whitespace-pre-wrap text-dim">
           {call.input ? `» ${call.input}\n\n` : ''}
@@ -322,6 +330,21 @@ function ToolCard({ call, inGroup }: { call: ToolCallEntry; inGroup?: boolean })
       )}
     </div>
   );
+}
+
+function computerScreenshot(call: ToolCallEntry): string {
+  if (call.toolName !== 'ComputerTool' || call.status !== 'success' || !call.output) return '';
+  try {
+    const parsed = JSON.parse(call.output);
+    return typeof parsed?.screenshot === 'string' ? parsed.screenshot : '';
+  } catch {
+    return '';
+  }
+}
+
+function localImageUrl(file: string): string {
+  const normalized = file.replace(/\\/g, '/');
+  return `file://${normalized.startsWith('/') ? '' : '/'}${encodeURI(normalized)}`;
 }
 
 function truncate(s: string, n: number): string {

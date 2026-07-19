@@ -7,6 +7,9 @@ import {
   buildUserContent,
   contentToText,
   extractImagePaths,
+  pruneStaleToolObservations,
+  appendScreenshotObservation,
+  isScreenshotObservationMessage,
   IMAGE_EXTENSIONS,
 } from '../core/multimodal';
 
@@ -135,5 +138,64 @@ describe('contentToText', () => {
       { type: 'image_url', image_url: { url: 'data:...' } },
       { type: 'text', text: 'b' },
     ])).toBe('a\n[image]\nb');
+  });
+});
+
+describe('pruneStaleToolObservations', () => {
+  const bigObserve = (n: number) =>
+    JSON.stringify({ ok: true, action: 'observe', driver: 'bimax-computer-use 0.8.3', screenshot: `/tmp/${n}.png`, tree: 'x'.repeat(3000), n });
+  const bigAction = (n: number) =>
+    JSON.stringify({ ok: true, action: 'click', driver: 'bimax-computer-use 0.8.3', screenshot: `/tmp/${n}.png`, elements: ['x'.repeat(3000)], n });
+
+  it('stubs old explicit and post-action screen results, keeping the newest N', () => {
+    const messages: Array<{ role: string; tool_call_id?: string; content: string }> = [
+      { role: 'tool', tool_call_id: 'a', content: bigObserve(1) },
+      { role: 'tool', tool_call_id: 'b', content: bigAction(2) },
+      { role: 'tool', tool_call_id: 'c', content: bigObserve(3) },
+    ];
+    pruneStaleToolObservations(messages, 1);
+    expect(messages[0].content).toContain('pruned from context');
+    expect(messages[1].content).toContain('pruned from context');
+    expect(messages[2].content).toBe(bigObserve(3)); // newest untouched
+    expect(messages[0].tool_call_id).toBe('a'); // id preserved → history stays well-formed
+  });
+
+  it('never touches non-observation tool results or small payloads', () => {
+    const readResult = 'file contents here'.repeat(200); // big, but not a computer observation
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'tool', content: readResult },
+      { role: 'tool', content: JSON.stringify({ ok: true, action: 'click', driver: 'x' }) }, // small
+      { role: 'tool', content: bigObserve(9) },
+    ];
+    pruneStaleToolObservations(messages, 0);
+    expect(messages[0].content).toBe(readResult);
+    expect(messages[1].content).toContain('click');
+    expect(messages[2].content).toContain('pruned from context');
+  });
+});
+
+describe('appendScreenshotObservation', () => {
+  const observation = {
+    role: 'user' as const,
+    content: [
+      { type: 'text' as const, text: '[BrowserScreenshot] fresh screen' },
+      { type: 'image_url' as const, image_url: { url: 'data:image/png;base64,AA' } },
+    ],
+  };
+
+  it('completes a strict tool exchange with assistant before the screenshot user turn', () => {
+    const messages: any[] = [
+      { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ComputerTool', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"ok":true}' },
+    ];
+    appendScreenshotObservation(messages, observation);
+    expect(messages.map(m => m.role)).toEqual(['assistant', 'tool', 'assistant', 'user']);
+    expect(isScreenshotObservationMessage(messages[3])).toBe(true);
+  });
+
+  it('does not add a redundant bridge when the tool exchange is already complete', () => {
+    const messages: any[] = [{ role: 'assistant', content: 'ready' }];
+    appendScreenshotObservation(messages, observation);
+    expect(messages.map(m => m.role)).toEqual(['assistant', 'user']);
   });
 });

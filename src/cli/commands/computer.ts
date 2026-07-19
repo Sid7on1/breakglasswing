@@ -3,6 +3,7 @@ import { globalMcpManager } from '../../mcp/manager';
 import { globalBrowserRuntime } from '../../browser/browser.runtime';
 import { globalDesktopRuntime } from '../../computer/desktop.runtime';
 import { getTaintTracker } from '../../mind/taint';
+import { loadConfig, saveConfig } from '../config';
 
 // /computer — the truthful status hub for computer use: what BiMax can currently OBSERVE and ACT
 // on (browser + native desktop), whether the active model can actually see screenshots, and which
@@ -25,6 +26,67 @@ globalCommandRegistry.register({
       context.addSystemMessage('success', n > 0
         ? `Revoked ${n} session computer-control grant${n === 1 ? '' : 's'}.`
         : 'No session computer-control grants to revoke.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'approvals') {
+      const cfg = await loadConfig();
+      const next = cfg.computerApprovals === 'high-impact-only' ? 'always' : 'high-impact-only';
+      await saveConfig({ computerApprovals: next });
+      context.addSystemMessage('success', next === 'high-impact-only'
+        ? 'Computer-use approvals: only high-impact actions (delete/send/purchase/submit/permissions) will ask. Routine clicks and typing run without prompts; credential managers and wallets stay hard-denied.'
+        : 'Computer-use approvals: every acting verb asks again (per app/domain session grants still apply).');
+      return { type: 'none' };
+    }
+
+    if (sub === 'pause' || sub === 'takeover') {
+      const r = globalDesktopRuntime.pauseForUser?.() ?? { ok: false };
+      const surface = globalDesktopRuntime.activeSurface?.();
+      context.addSystemMessage(r.ok ? 'success' : 'info', r.ok
+        ? `You have control${surface?.app ? ` of ${surface.app}` : ''}. The agent will not click, type, or move the cursor until you run /computer resume.`
+        : 'No active computer-use surface to take over.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'resume') {
+      const r = globalDesktopRuntime.resume?.() ?? { ok: false };
+      context.addSystemMessage(r.ok ? 'success' : 'info', r.ok
+        ? 'Resumed — the agent has control of the surface again.'
+        : 'Nothing to resume.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'visible') {
+      const cfg = await loadConfig();
+      const next = !cfg.computerVisible;
+      await saveConfig({ computerVisible: next });
+      context.addSystemMessage('success', next
+        ? 'Computer use is VISIBLE: one native macOS cursor handles all foreground input.'
+        : 'Computer use is invisible: input is delivered in the background without moving the cursor.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'pip') {
+      const cfg = await loadConfig();
+      const next = !cfg.computerPip;
+      await saveConfig({ computerPip: next });
+      await globalDesktopRuntime.dispose?.();
+      context.addSystemMessage('success', next
+        ? 'Computer-use PiP is ON. The native post-action preview will appear on the next computer-use action.'
+        : 'Computer-use PiP is OFF. The current native driver session was restarted to remove it.');
+      return { type: 'none' };
+    }
+
+    if (sub === 'recording') {
+      const cfg = await loadConfig();
+      const next = !cfg.computerRecord;
+      await saveConfig({ computerRecord: next });
+      const state = next
+        ? await globalDesktopRuntime.run({ action: 'record_start', recordVideo: true })
+        : await globalDesktopRuntime.run({ action: 'record_stop' });
+      context.addSystemMessage(state.ok ? 'success' : 'info', state.ok
+        ? state.summary
+        : `Could not ${next ? 'start' : 'stop'} computer-use recording: ${state.error || 'unknown error'}`);
       return { type: 'none' };
     }
 
@@ -114,6 +176,42 @@ globalCommandRegistry.register({
       });
     }
 
+    // Behavior toggles: approval cadence + visible cursor.
+    const cfg = await loadConfig();
+    options.push({
+      label: cfg.computerApprovals === 'high-impact-only' ? '⚙ Approvals: high-impact only' : '⚙ Approvals: every action',
+      value: '/computer approvals',
+      desc: cfg.computerApprovals === 'high-impact-only'
+        ? 'only delete/send/purchase/submit ask — Enter switches to asking every action'
+        : 'every click/type asks — Enter switches to high-impact-only',
+      category: 'Behavior',
+    });
+    const pip = await (globalDesktopRuntime.pipStatus?.() ?? Promise.resolve(null)).catch(() => null);
+    options.push({
+      label: cfg.computerPip ? '⚙ PiP preview: on' : '⚙ PiP preview: off',
+      value: '/computer pip',
+      desc: cfg.computerPip
+        ? `live post-action preview${pip?.surface ? ` — ${pip.surface} (capture-safe)` : pip && !pip.captureSafe ? ' — whole desktop until an app window is active' : ''} — Enter disables it`
+        : 'Enter enables the native post-action preview',
+      category: 'Behavior',
+    });
+    options.push({
+      label: cfg.computerRecord ? '⚙ Screen recording: on' : '⚙ Screen recording: off',
+      value: '/computer recording',
+      desc: cfg.computerRecord
+        ? 'trajectory screenshots + MP4 under .bimax/computer/recordings — Enter stops'
+        : 'Enter starts trajectory screenshots + MP4 recording',
+      category: 'Behavior',
+    });
+    options.push({
+      label: cfg.computerVisible ? '⚙ Cursor: one native cursor' : '⚙ Cursor: invisible',
+      value: '/computer visible',
+      desc: cfg.computerVisible
+        ? 'sidecar overlay hidden; macOS cursor handles every action — Enter makes it background/invisible'
+        : 'background input, cursor does not move — Enter enables one visible native cursor',
+      category: 'Behavior',
+    });
+
     // Safety posture: session grants + taint, with the one-keystroke revoke.
     const grants: string[] = governor?.computerGrants?.() ?? [];
     options.push({
@@ -124,6 +222,35 @@ globalCommandRegistry.register({
         : 'each domain/app asks once per session',
       category: 'Safety',
     });
+    // Live control: which surface the agent is operating on and who owns input right now, with a
+    // one-keystroke takeover/resume. This is the user's coexistence control (Stage 3).
+    const surface = (() => { try { return globalDesktopRuntime.activeSurface?.() || null; } catch { return null; } })();
+    if (surface) {
+      const owner = surface.focusOwner;
+      options.push({
+        label: owner === 'user' ? '⏸ You have control (paused)' : '▶ Agent has control',
+        value: owner === 'user' ? '/computer resume' : '/computer pause',
+        desc: owner === 'user'
+          ? `${surface.app || 'surface'} — Enter resumes agent control`
+          : `${surface.app || 'surface'}${surface.captureSafe ? '' : ' (whole desktop)'} — Enter pauses so you can take over`,
+        category: 'Behavior',
+      });
+    }
+
+    // Durability (Stage 7): the bounded action history for this session — proof nothing accumulates
+    // unbounded across an hours-long run, and it survives a crash+relaunch of the same app via
+    // .bimax/computer/session.json. Only shown once the session has actually acted.
+    const hist = (() => { try { return globalDesktopRuntime.history?.() || null; } catch { return null; } })();
+    if (hist && hist.total > 0) {
+      const foot = (() => { try { return globalDesktopRuntime.memoryFootprint?.() || null; } catch { return null; } })();
+      options.push({
+        label: `◷ Session: ${hist.total} action${hist.total === 1 ? '' : 's'}`,
+        value: '/computer',
+        desc: `${hist.kept} kept in memory${foot ? ` · ${foot.observedElements} observed element${foot.observedElements === 1 ? '' : 's'}` : ''}${hist.noChangeStreak >= 2 ? ` · ${hist.noChangeStreak} no-change in a row` : ''} — bounded + persisted for resume`,
+        category: 'Behavior',
+      });
+    }
+
     const taint = (() => { try { return getTaintTracker(); } catch { return null; } })();
     const latest = taint?.latest();
     options.push({

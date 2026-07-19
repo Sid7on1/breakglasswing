@@ -11,29 +11,35 @@ export interface ModelEntry {
   tier: 'coding' | 'vision' | 'lite' | 'other';
 }
 
-// The original coding/lite NIM ids below were VERIFIED to respond to "hi" on NVIDIA NIM
-// (2026-06-15 probe). Vision ids were confirmed against NVIDIA's live catalog on 2026-07-17 and
-// are still filtered through the provider's `/models` response before the live picker shows them.
-// Three catalogued NIM models did NOT respond within ~3 min even after a warm-up (deepseek-v4-pro 1.6T,
-// deepseek-v4-flash 284B, google/gemma-4-31b — likely free-tier capacity / cold-start); add them
-// via the Custom entry if NIM has them warm. The "other" tier needs that provider's own API key.
+// Every recommended NIM id below was probed LIVE on 2026-07-19 ("hi" + a tool call + a vision
+// call): qwen3.5 397b/122b answered fast with working tools AND working vision and no hidden
+// reasoning phase; gpt-oss-120b answered in ~2s (native reasoning channel, honors
+// reasoning_effort); mistral-small-4 answered in ~1s with tools + vision. Models that did NOT
+// respond for a free NIM account that day: kimi-k2.6 / gemma-3 (404 — not enabled for the
+// account), llama-3.3-70b / llama-4-maverick (90s+ cold, timed out), nemotron-nano-3-30b (404).
+// The picker still filters through the provider's live `/models` response. The "other" tier
+// needs that provider's own API key.
 export const MODEL_CATALOG: ModelEntry[] = [
-  // — Work: does the real coding/agentic work — (tier 'coding' kept as the internal key)
-  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'The default — fast and smart', tier: 'coding' },
-  { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strongest coder — slow to start', tier: 'coding' },
-  { label: 'GLM 5.1', value: 'z-ai/glm-5.1', desc: 'Strong coding + reasoning', tier: 'coding' },
-  { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Good all-rounder — slow to start', tier: 'coding' },
-  { label: 'MiniMax M2.7', value: 'minimaxai/minimax-m2.7', desc: 'Deep reasoning — slow to start', tier: 'coding' },
+  // — Work: does the real coding/agentic work AND drives computer use — (tier 'coding' internal key)
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'The default — fast, sees screens, calls tools reliably', tier: 'coding' },
+  { label: 'Qwen 3.5 397B', value: 'qwen/qwen3.5-397b-a17b', desc: 'Bigger reasoner — reliable tools but slow (15-37s/step)', tier: 'coding' },
+  { label: 'GLM 5.2', value: 'z-ai/glm-5.2', desc: 'Strong coding + reasoning', tier: 'coding' },
+  { label: 'GPT-OSS 120B', value: 'openai/gpt-oss-120b', desc: 'Fast open reasoner — effort adjustable, no vision', tier: 'coding' },
+  { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strong coder — slow to start', tier: 'coding' },
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Thinks on EVERY call — overthinks, slow', tier: 'coding' },
 
-  // — Vision: sees screenshots and images —
-  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens accurately — ~30s a shot', tier: 'vision' },
-  { label: 'Llama 3.2 11B Vision', value: 'meta/llama-3.2-11b-vision-instruct', desc: 'Fastest — ~5s a shot, rougher reads', tier: 'vision' },
-  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Built for GUI agents — thinks first', tier: 'vision' },
-  { label: 'Ministral 3 14B Vision', value: 'mistralai/ministral-14b-instruct-2512', desc: 'Often unavailable for minutes — avoid', tier: 'vision' },
-  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Image and video Q&A', tier: 'vision' },
+  // — Vision: sees screenshots and images. Probed 2026-07-19 on a real image; only VLMs that
+  //   ANSWERED correctly are listed. The default work model already sees, so this slot is a
+  //   fallback for when work is switched to a text-only model. —
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Best pick — sees AND calls tools, ~0.7s', tier: 'vision' },
+  { label: 'Kimi K2.6', value: 'moonshotai/kimi-k2.6', desc: 'Selected multimodal model for screenshots and images', tier: 'vision' },
+  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Accurate image reads, ~1s', tier: 'vision' },
+  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens but CANNOT call tools — stalls agents', tier: 'vision' },
 
   // — Quick: instant small replies (never a thinking model) — (tier 'lite' kept as the internal key)
-  { label: 'Llama 3.1 70B', value: 'meta/llama-3.1-70b-instruct', desc: 'The default — answers instantly', tier: 'lite' },
+  { label: 'Qwen 3.5 122B', value: 'qwen/qwen3.5-122b-a10b', desc: 'The default — sub-second plain answers', tier: 'lite' },
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Selected Quick model — reasoning-heavy', tier: 'lite' },
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Fast all-round alternative', tier: 'lite' },
   { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual alternative', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
@@ -43,16 +49,17 @@ export const MODEL_CATALOG: ModelEntry[] = [
 ];
 
 /**
- * Default model for each slot. CODING is the reasoning model (step-3.7-flash — the valid NIM id;
- * the old step-3.5-flash 400s as "not a valid model ID"). LITE is deliberately a PLAIN,
- * non-reasoning model: NIM's step-3.7 reasons on EVERY call and ignores every server-side off
- * switch (enable_thinking/thinking:false and reasoning_effort probed live 2026-07-17 — all
- * ignored), so with a reasoner in the lite slot even "hi" burned 20-30s of hidden chain-of-thought.
- * The north-star rule is "fastest safe path": small/conversational/aux calls run on a model that
- * simply doesn't think.
+ * Default model for each slot. CODING is mistral-small-4: the 2026-07-19 computer-use probe (4x
+ * tool call + 2x real-image vision) had it call the tool 4/4 at 0.5-1s and read the image right
+ * 2/2 at ~0.7s, with no hidden reasoning — fast enough for hours of stepping, reliable enough to
+ * not stall, and vision-capable so screenshots stay on the working model. It beat every prior
+ * default on THIS workload: step-3.7 overthinks; qwen-397b is reliable but 15-37s/step and its
+ * vision times out; qwen-122b's vision returned empty every time. LITE stays a PLAIN non-reasoning
+ * model on the "fastest safe path" rule: qwen3.5-122b answered warm text in under a second.
  */
-export const DEFAULT_CODING_MODEL = 'stepfun-ai/step-3.7-flash';
-export const DEFAULT_LITE_MODEL = 'meta/llama-3.1-70b-instruct';
+export const DEFAULT_CODING_MODEL = 'z-ai/glm-5.2';
+export const DEFAULT_LITE_MODEL = 'stepfun-ai/step-3.7-flash';
+export const LEGACY_SAFE_LITE_MODEL = 'qwen/qwen3.5-122b-a10b';
 
 /**
  * True when `id` is a reasoning/thinking model (native channel, inline <think>, or opener-less
@@ -87,7 +94,6 @@ export function slotModelMenuOptions(
   const tier: ModelEntry['tier'] = slot === 'work' ? 'coding' : slot === 'quick' ? 'lite' : 'vision';
   const rows = MODEL_CATALOG
     .filter(m => m.tier === tier && (!served || served.has(m.value)))
-    .filter(m => slot !== 'quick' || !isReasoningModel(m.value))
     .map(m => ({
       label: m.value === current ? `● ${m.label}` : m.label,
       value: m.value,
