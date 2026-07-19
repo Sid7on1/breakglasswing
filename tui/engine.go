@@ -30,6 +30,23 @@ func engineCacheRoots() []string {
 	return roots
 }
 
+// pruneStaleSiblings deletes files in dir named prefix* except keepBasename. The engine and driver
+// are cached content-addressed (one file per version, ~85MB / ~42MB), and nothing ever removed the
+// previous version's file — so every update orphaned another copy until the cache reached GBs and,
+// on a disk-tight machine, crossed the point where APFS truncates reads and a fresh boot hangs.
+// Bounding the cache to the current version keeps the self-contained-binary design without the leak.
+func pruneStaleSiblings(dir, prefix, keepBasename string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if name := e.Name(); strings.HasPrefix(name, prefix) && name != keepBasename {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
 func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, error) {
 	var lastErr error
 	seen := make(map[string]bool)
@@ -45,12 +62,14 @@ func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, erro
 		}
 		path := filepath.Join(dir, "bimax-engine-"+suffix)
 		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedEngine)) {
+			pruneStaleSiblings(dir, "bimax-engine-", "bimax-engine-"+suffix)
 			return path, nil
 		}
 		if err := os.WriteFile(path, embeddedEngine, 0o755); err != nil {
 			lastErr = err
 			continue
 		}
+		pruneStaleSiblings(dir, "bimax-engine-", "bimax-engine-"+suffix)
 		return path, nil
 	}
 	return "", fmt.Errorf("no writable engine cache directory: %w", lastErr)
@@ -78,12 +97,14 @@ func extractEmbeddedComputerUseFromRoots(roots []string, suffix string) (string,
 		}
 		path := filepath.Join(dir, "bimax-computer-use-"+suffix)
 		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedComputerUse)) {
+			pruneStaleSiblings(dir, "bimax-computer-use-", "bimax-computer-use-"+suffix)
 			return path, nil
 		}
 		if err := os.WriteFile(path, embeddedComputerUse, 0o755); err != nil {
 			lastErr = err
 			continue
 		}
+		pruneStaleSiblings(dir, "bimax-computer-use-", "bimax-computer-use-"+suffix)
 		return path, nil
 	}
 	return "", fmt.Errorf("no writable computer-use cache directory: %w", lastErr)
