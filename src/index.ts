@@ -48,6 +48,7 @@ program
   .option('-o, --output-format <format>', 'Output format: text, json, stream-json', 'text')
   .option('-y, --yes', 'Skip all permission prompts')
   .option('--print-with-tools', 'Include tool call output in print mode')
+  .option('--acp', 'Run as an Agent Client Protocol agent over stdio (embed in Zed/editors)')
   .option('--dangerously-skip-permissions', 'Skip all permission prompts');
 
 program.parse(process.argv);
@@ -161,6 +162,15 @@ async function main() {
       outputFormat: cliFlags.outputFormat,
       ...container,
     });
+    process.exit(0);
+  }
+
+  // ACP mode — run as an Agent Client Protocol agent over stdio, so an editor (Zed and other ACP
+  // clients) can embed the full Bimax engine. Speaks newline-delimited JSON-RPC instead of Bimax's
+  // own NDJSON protocol. Checked before headless so `--acp` wins if both are somehow set.
+  if (process.env.BIMAX_ACP === '1' || cliFlags.acp) {
+    const { startAcpAgent } = await import('./protocol/acp/entry');
+    await startAcpAgent(container, config);
     process.exit(0);
   }
 

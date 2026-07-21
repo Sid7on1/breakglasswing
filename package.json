@@ -23,6 +23,7 @@
     "test:leaks": "jest --coverage=false --detectOpenHandles",
     "test:tui": "python3 scripts/tui-regression.py",
     "test:computer": "tsx scripts/smoke-computer-use.ts",
+    "test:acp": "node scripts/smoke-acp.mjs",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
     "prepublishOnly": "npm run build",
