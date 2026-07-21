@@ -135,6 +135,26 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
     if (process.env.NODE_ENV !== 'test' && powerAwarenessEnabled()) powerMonitor.start();
   }
 
+  // Phase 3b — fire-and-forget update check + announcements. Fully non-blocking (cached, short
+  // timeout, fails open); it never delays boot. Emits at most a single log line, then marks any
+  // shown announcement as seen so it doesn't repeat next launch.
+  if (process.env.NODE_ENV !== 'test') {
+    void (async () => {
+      try {
+        const { updateChecker, updateCheckEnabled } = await import('./self.update');
+        if (!updateCheckEnabled()) return;
+        const report = await updateChecker.check();
+        if (report.updateAvailable && report.latest) {
+          cliEvents.emit('log', { id: Date.now(), level: 'info', text: `⬆️  Bimax ${report.latest} is available (you have ${report.current}). Run /update — upgrade: ${report.downloadCmd}`, timestamp: new Date() });
+        }
+        for (const a of report.announcements) {
+          cliEvents.emit('log', { id: Date.now() + Math.random(), level: a.level === 'warn' ? 'warn' : 'info', text: `📣 ${a.text}`, timestamp: new Date() });
+        }
+        if (report.announcements.length) updateChecker.markSeen(report.announcements.map((a) => a.id));
+      } catch { /* update notices are best-effort */ }
+    })();
+  }
+
   // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();
   // SQLite-backed when node:sqlite exists (atomic saves, per-file staleness → incremental

@@ -21,6 +21,7 @@ loadGlobalEnv();
 dotenv.config();
 import { Command } from 'commander';
 import { createContainer } from './core/container';
+import { readPackageVersion } from './core/self.update';
 import { resolveTheme } from './cli/themes';
 import { loadConfig, getConfig } from './cli/config';
 import { setCustomRoutingRules } from './cli/agentRouter';
@@ -38,7 +39,7 @@ const program = new Command();
 program
   .name('bimax')
   .description('BiMax — Autonomous AI agent for your terminal')
-  .version('1.0.5')
+  .version(readPackageVersion())
   .argument('[prompt]', 'Prompt to run in non-interactive mode')
   .option('-p, --print', 'Non-interactive mode: print response and exit')
   .option('-m, --model <model>', 'Model override (e.g. gpt-4, claude-opus)')
