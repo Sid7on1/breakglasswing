@@ -21,6 +21,8 @@ import {
   RequestPermissionParams, RequestPermissionResult,
   promptText, agentMessageChunk, toolCallStart, toolCallUpdate,
 } from './types';
+import { powerSummary, powerStatusLine } from '../../governor/power.monitor';
+import { updateChecker, updateCheckEnabled } from '../../core/self.update';
 
 /** Engine abstraction the agent drives. Backed by HeadlessSession in production, a fake in tests. */
 export interface AcpSessionDriver {
@@ -49,6 +51,8 @@ export class AcpAgent {
   private activeAbort: AbortController | null = null;
   /** Detach fns for the cliEvents listeners bound for the active turn. */
   private turnListeners: Array<() => void> = [];
+  /** Sessions already shown the update/announcement banner (Phase 3b) — once per session, not per turn. */
+  private postureNotified = new Set<string>();
 
   constructor(
     private readonly conn: JsonRpcConnection,
@@ -96,6 +100,7 @@ export class AcpAgent {
     this.activeSessionId = sessionId;
     this.activeAbort = abort;
     this.bindTurnStreaming(sessionId);
+    this.sendStartupPosture(sessionId);
     try {
       const stopReason = await this.driver.prompt(sessionId, text, abort.signal);
       // A cancel() flips the reason even if the driver reports a natural end.
@@ -110,6 +115,34 @@ export class AcpAgent {
       this.activeSessionId = null;
       this.activeAbort = null;
     }
+  }
+
+  /**
+   * Phase 3 → Phase 2 bridge: surface out-of-band posture to the editor at the top of a turn.
+   * Update/announcement banner (3b) is sent once per session; an already-active power backoff (3a)
+   * is announced so the editor knows why work may be running slower. All reads are cached/sync and
+   * best-effort — never block or fail the turn. Live power *transitions* are handled during the turn
+   * by the `power_changed` listener in bindTurnStreaming.
+   */
+  private sendStartupPosture(sessionId: string): void {
+    try {
+      if (updateCheckEnabled() && !this.postureNotified.has(sessionId)) {
+        this.postureNotified.add(sessionId);
+        const u = updateChecker.lastKnown();
+        if (u.updateAvailable && u.latest) {
+          this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId,
+            `⬆️ Bimax ${u.latest} is available (you have ${u.current}). Upgrade: ${u.downloadCmd}\n`));
+        }
+        for (const a of u.announcements) {
+          this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `📣 ${a.text}\n`));
+        }
+        if (u.announcements.length) updateChecker.markSeen(u.announcements.map((a) => a.id));
+      }
+      const p = powerSummary();
+      if (p.level === 'soft') {
+        this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `${powerStatusLine(p)}\n`));
+      }
+    } catch { /* posture is best-effort — never disrupt the turn */ }
   }
 
   private onCancel(params: CancelParams): void {
@@ -181,6 +214,14 @@ export class AcpAgent {
     };
     events.on('veto_prompt', onVeto);
     this.turnListeners.push(() => events.off('veto_prompt', onVeto));
+
+    // Phase 3a → editor: power-throttle transitions mid-turn (engaged/lifted) so a slow-running
+    // long turn explains itself instead of looking hung. Rides the same engine seam as tool events.
+    const onPower = () => {
+      this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `${powerStatusLine()}\n`));
+    };
+    events.on('power_changed', onPower);
+    this.turnListeners.push(() => events.off('power_changed', onPower));
   }
 
   private unbindTurnStreaming(): void {

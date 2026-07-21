@@ -3,6 +3,7 @@ import { responseSanitizer } from './response.sanitizer';
 import { extractTextToolCalls } from './tool.call.parser';
 import { ToolRegistry } from '../tools/tool.registry';
 import { IGovernor } from './interfaces';
+import { powerThrottleAdvice } from '../governor/power.monitor';
 import { Logger } from '../utils';
 import { ContextManager } from '../memory/context.manager';
 import { cliEvents, ToolCallEntry } from '../cli/events';
@@ -176,6 +177,21 @@ export class AgentLoop {
     for (let i = 0; i < maxIter; i++) {
       // Interrupted between turns: stop cleanly before spending another model call.
       if (signal?.aborted) return;
+      // Phase 3a power-aware loop backoff. On battery / thermal throttle, insert a short pause
+      // BETWEEN tool-iteration steps (never before the first — first-response latency is untouched)
+      // so a long autonomous run drips model calls instead of spinning at full tilt, draining the
+      // battery or holding the CPU hot. Advisory-only: reads cached power state (no I/O) and honors
+      // the interrupt signal so Ctrl+C/esc still cancels immediately.
+      if (i > 0) {
+        const powerBackoffMs = powerThrottleAdvice().loopBackoffMs;
+        if (powerBackoffMs > 0) {
+          await new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, powerBackoffMs);
+            signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+          });
+          if (signal?.aborted) return;
+        }
+      }
       // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
       //    full mode is a no-op here and relies on reactive compaction if the API rejects the size).
       this.messages = await this.contextManager.checkAndCompact(this.messages, contextMode);

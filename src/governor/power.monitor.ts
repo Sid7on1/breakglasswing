@@ -297,6 +297,8 @@ export class PowerMonitor {
     const prev = this.lastLevel;
     this.lastLevel = level;
     if (!this.announce) return;
+    // Refresh any ui_snapshot-driven footer chip immediately on a throttle transition.
+    cliEvents.emit('power_changed');
     if (level === 'soft') {
       const a = this.advice();
       const text = `🔋 Power-aware backoff engaged — ${a.reason}. Limiting parallel sub-agents to ${a.maxConcurrentSubagents} and slowing the loop.`;
@@ -318,6 +320,51 @@ export const powerMonitor = new PowerMonitor({ announce: true });
 /** Cached advice for hot-path callers (spawn gate). Zero I/O — reads the last poll. */
 export function powerThrottleAdvice(): ThrottleAdvice {
   return powerMonitor.advice();
+}
+
+/**
+ * Flattened power + throttle view — the single shape every surface reads (ui_snapshot footer, the
+ * `/power` command, the ACP session banner) so they never drift. Pure read off the cached poll.
+ */
+export interface PowerSummary {
+  source: PowerSource;
+  batteryPercent: number | null;
+  charging: boolean;
+  thermalThrottled: boolean;
+  cpuSpeedLimitPct: number | null;
+  level: ThrottleLevel;
+  maxConcurrentSubagents: number;
+  loopBackoffMs: number;
+  reason: string;
+  /** True once at least one real reading has landed (source left `unknown`). */
+  known: boolean;
+}
+
+export function powerSummary(monitor: PowerMonitor = powerMonitor): PowerSummary {
+  const s = monitor.snapshot();
+  const a = monitor.advice();
+  return {
+    source: s.source,
+    batteryPercent: s.batteryPercent,
+    charging: s.charging,
+    thermalThrottled: s.thermalThrottled,
+    cpuSpeedLimitPct: s.cpuSpeedLimitPct,
+    level: a.level,
+    maxConcurrentSubagents: a.maxConcurrentSubagents,
+    loopBackoffMs: a.loopBackoffMs,
+    reason: a.reason,
+    known: s.source !== 'unknown',
+  };
+}
+
+/** One-line human summary for status chips / the `/power` header. */
+export function powerStatusLine(sum: PowerSummary = powerSummary()): string {
+  if (!sum.known) return 'Power: unknown (no reading yet)';
+  const src = sum.source === 'ac' ? (sum.charging ? 'AC (charging)' : 'AC') : 'battery';
+  const batt = sum.batteryPercent != null ? ` ${sum.batteryPercent}%` : '';
+  const therm = sum.thermalThrottled ? `, thermal-limited to ${sum.cpuSpeedLimitPct ?? '?'}%` : '';
+  const throttle = sum.level === 'soft' ? ` — backoff active (≤${sum.maxConcurrentSubagents} sub-agents)` : '';
+  return `Power: ${src}${batt}${therm}${throttle}`;
 }
 
 /** Re-export of the shared hard cap so consumers/tests confirm they agree on the ceiling. */

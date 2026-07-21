@@ -260,6 +260,22 @@ export class UpdateChecker {
     return this.report(latest, downloadCmd, announcements, false);
   }
 
+  /**
+   * The last cached result, read synchronously with NO network and NO fetch. For always-on
+   * surfaces (the ui_snapshot footer, the ACP session banner) that must never block or await.
+   * Returns `latest: null` (updateAvailable false) until a real check has populated the cache.
+   */
+  lastKnown(): UpdateReport {
+    const cache = this.loadCache();
+    const manifest = cache.latest ? { latest: cache.latest, downloadCmd: cache.downloadCmd, announcements: cache.announcements } : null;
+    return this.report(
+      cache.latest,
+      cache.downloadCmd || DEFAULT_DOWNLOAD_CMD,
+      selectAnnouncements(manifest, this.current, cache.seenIds),
+      true,
+    );
+  }
+
   /** Remember these announcement ids as seen so they aren't shown again. */
   markSeen(ids: string[]): void {
     if (!ids.length) return;

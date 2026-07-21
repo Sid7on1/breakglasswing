@@ -177,6 +177,20 @@ describe('UpdateChecker', () => {
     expect(second.announcements).toEqual([]);
   });
 
+  it('lastKnown() reads the cache synchronously without a fetch', async () => {
+    const cachePath = tmpCache();
+    let fetches = 0;
+    const c = new UpdateChecker({ currentVersion: '1.0.6', cachePath, now: () => 1,
+      fetchManifest: async () => { fetches++; return { latest: '1.5.0' }; } });
+    expect(c.lastKnown().latest).toBeNull(); // empty cache → nothing known yet
+    await c.check(true);                      // populates cache (fetch #1)
+    const lk = c.lastKnown();                 // pure cache read, no fetch
+    expect(lk.latest).toBe('1.5.0');
+    expect(lk.updateAvailable).toBe(true);
+    expect(lk.fromCache).toBe(true);
+    expect(fetches).toBe(1);
+  });
+
   it('does not throw on an unwritable cache path', async () => {
     const c = new UpdateChecker({ currentVersion: '1.0.6', cachePath: '/proc/nonexistent/dir/x.json', now: () => 1, fetchManifest: async () => ({ latest: '9.9.9' }) });
     const r = await c.check(true);

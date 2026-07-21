@@ -3,6 +3,8 @@ import {
   parsePmsetBatt,
   parsePmsetTherm,
   powerThrottleAdvice,
+  powerSummary,
+  powerStatusLine,
   powerMonitor,
   powerAwarenessEnabled,
   defaultThresholds,
@@ -207,6 +209,41 @@ describe('caching + failure resilience', () => {
     await Promise.all([mon.refresh(), mon.refresh(), mon.refresh()]);
     // darwin does 2 execs (batt + therm) per single read; 3 coalesced calls => still one read.
     expect(calls).toBe(2);
+  });
+});
+
+describe('powerSummary / powerStatusLine (footer + ACP + /power surface)', () => {
+  beforeEach(() => { delete process.env.BIMAX_POWER_AWARE; });
+
+  it('reports unknown before any reading', () => {
+    const sum = powerSummary(makeMonitor());
+    expect(sum.known).toBe(false);
+    expect(sum.level).toBe('none');
+    expect(powerStatusLine(sum)).toMatch(/unknown/i);
+  });
+
+  it('flattens a critically-throttled battery state for every surface', async () => {
+    const exec = async (_cmd: string, args: string[]) =>
+      args[1] === 'batt'
+        ? `Now drawing from 'Battery Power'\n -InternalBattery-0\t12%; discharging; 0:20 remaining`
+        : 'CPU_Speed_Limit = 100';
+    const mon = makeMonitor({ platform: 'darwin', exec });
+    await mon.refresh();
+    const sum = powerSummary(mon);
+    expect(sum.known).toBe(true);
+    expect(sum.source).toBe('battery');
+    expect(sum.level).toBe('soft');
+    expect(sum.maxConcurrentSubagents).toBe(1); // 12% ≤ critical
+    expect(sum.loopBackoffMs).toBe(4000);
+    expect(powerStatusLine(sum)).toMatch(/battery 12%.*backoff active/);
+  });
+
+  it('reads AC cleanly with no backoff', async () => {
+    const mon = makeMonitor({ platform: 'darwin', exec: async () => "Now drawing from 'AC Power'\n 90%; charged" });
+    await mon.refresh();
+    const line = powerStatusLine(powerSummary(mon));
+    expect(line).toMatch(/AC/);
+    expect(line).not.toMatch(/backoff/);
   });
 });
 

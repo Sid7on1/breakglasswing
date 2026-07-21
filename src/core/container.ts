@@ -144,6 +144,8 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
         const { updateChecker, updateCheckEnabled } = await import('./self.update');
         if (!updateCheckEnabled()) return;
         const report = await updateChecker.check();
+        // Refresh the footer's update chip now that the cache is populated (ui.snapshot reads it).
+        cliEvents.emit('update_changed');
         if (report.updateAvailable && report.latest) {
           cliEvents.emit('log', { id: Date.now(), level: 'info', text: `⬆️  Bimax ${report.latest} is available (you have ${report.current}). Run /update — upgrade: ${report.downloadCmd}`, timestamp: new Date() });
         }
