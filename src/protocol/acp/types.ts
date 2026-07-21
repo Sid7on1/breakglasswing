@@ -161,3 +161,58 @@ export function agentMessageChunk(sessionId: string, text: string): SessionUpdat
 export function agentThoughtChunk(sessionId: string, text: string): SessionUpdateParams {
   return { sessionId, update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } } };
 }
+
+/** ACP tool-call kinds (drive the editor's icon/affordance). Bimax tool names are mapped heuristically. */
+export type ToolKind = 'read' | 'edit' | 'delete' | 'move' | 'search' | 'execute' | 'think' | 'fetch' | 'other';
+
+/** Best-effort map from a Bimax tool name to an ACP tool kind. Unknown tools fall back to 'other'. */
+export function toolKind(toolName: string): ToolKind {
+  const n = (toolName || '').toLowerCase();
+  if (/read|cat|view|open|lsp|graph|scout|search|grep|find|glob|toolsearch/.test(n)) {
+    return /search|grep|find|glob|scout|toolsearch/.test(n) ? 'search' : 'read';
+  }
+  if (/delete|remove|\brm\b/.test(n)) return 'delete';
+  if (/move|rename|\bmv\b/.test(n)) return 'move';
+  if (/edit|write|apply|patch|create|str_replace/.test(n)) return 'edit';
+  if (/bash|shell|exec|run|command|terminal|computer|train|browser/.test(n)) return 'execute';
+  if (/web|fetch|http|url|download/.test(n)) return 'fetch';
+  if (/think|plan|reason/.test(n)) return 'think';
+  return 'other';
+}
+
+/** Parse a tool's input (a JSON string, or already-object) into rawInput; never throws. */
+function toRawInput(input: unknown): unknown {
+  if (input == null) return undefined;
+  if (typeof input !== 'string') return input;
+  const s = input.trim();
+  if (!s) return undefined;
+  try { return JSON.parse(s); } catch { return { input: s }; }
+}
+
+/** A tool call has started (status in_progress). Editors render it in the live tool timeline. */
+export function toolCallStart(sessionId: string, toolCallId: string, toolName: string, input: unknown): SessionUpdateParams {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      title: toolName,
+      status: 'in_progress',
+      kind: toolKind(toolName),
+      rawInput: toRawInput(input),
+    },
+  };
+}
+
+/** A tool call has finished — carries the completed/failed status and its output text. */
+export function toolCallUpdate(sessionId: string, toolCallId: string, isError: boolean, output: string): SessionUpdateParams {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: 'tool_call_update',
+      toolCallId,
+      status: isError ? 'failed' : 'completed',
+      content: output ? [{ type: 'content', content: { type: 'text', text: output } }] : [],
+    },
+  };
+}

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { JsonRpcConnection, LineBuffer, RpcError, RpcErrorCode } from '../protocol/acp/jsonrpc';
 import { AcpAgent, AcpSessionDriver } from '../protocol/acp/agent';
-import { AgentMethod, ClientMethod, ACP_PROTOCOL_VERSION, StopReason, promptText } from '../protocol/acp/types';
+import { AgentMethod, ClientMethod, ACP_PROTOCOL_VERSION, StopReason, promptText, toolKind } from '../protocol/acp/types';
 
 /** A connection wired to an in-memory sink; `feed` parses a JSON message in. */
 function harness() {
@@ -79,6 +79,19 @@ describe('LineBuffer', () => {
     const lb = new LineBuffer();
     expect(lb.push('partial')).toEqual([]);
     expect(lb.flush()).toBe('partial');
+  });
+});
+
+describe('toolKind heuristic', () => {
+  it('classifies common Bimax tool names', () => {
+    expect(toolKind('BashTool')).toBe('execute');
+    expect(toolKind('EditTool')).toBe('edit');
+    expect(toolKind('WriteTool')).toBe('edit');
+    expect(toolKind('ReadTool')).toBe('read');
+    expect(toolKind('ScoutTool')).toBe('search');
+    expect(toolKind('WebSearchTool')).toBe('search');
+    expect(toolKind('BrowserTool')).toBe('execute');
+    expect(toolKind('SomethingWeird')).toBe('other');
   });
 });
 
@@ -182,6 +195,46 @@ describe('AcpAgent', () => {
     conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: permReq.id, result: { outcome: { outcome: 'selected', optionId: 'Approve' } } }));
     await new Promise((r) => setImmediate(r));
     expect(approved).toBe('Approve');
+  });
+
+  it('maps tool_call/tool_call_result to ACP tool_call + tool_call_update, deduped per id', async () => {
+    const out: any[] = [];
+    const conn = new JsonRpcConnection((line) => out.push(JSON.parse(line)));
+    const driver = new FakeDriver();
+    driver.prompt = async (_sid: string) => {
+      // Bimax emits tool_call TWICE for one id (partial + authoritative), then a result.
+      driver.events.emit('tool_call', { id: 't1', toolName: 'BashTool', input: '{"cmd":"ls"}', status: 'running' });
+      driver.events.emit('tool_call', { id: 't1', toolName: 'BashTool', input: '{"cmd":"ls -la"}', status: 'running' });
+      driver.events.emit('tool_call_result', { id: 't1', toolName: 'BashTool', output: 'a.ts\nb.ts', status: 'success' });
+      return 'end_turn';
+    };
+    new AcpAgent(conn, driver);
+    conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 9, method: AgentMethod.Prompt, params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'ls' }] } }));
+    await new Promise((r) => setImmediate(r));
+
+    const updates = out.filter((m) => m.method === ClientMethod.SessionUpdate).map((m) => m.params.update);
+    const starts = updates.filter((u) => u.sessionUpdate === 'tool_call');
+    const finishes = updates.filter((u) => u.sessionUpdate === 'tool_call_update');
+    expect(starts).toHaveLength(1); // deduped despite two tool_call emits
+    expect(starts[0]).toMatchObject({ toolCallId: 't1', title: 'BashTool', kind: 'execute', status: 'in_progress', rawInput: { cmd: 'ls' } });
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]).toMatchObject({ toolCallId: 't1', status: 'completed' });
+    expect(finishes[0].content[0].content.text).toBe('a.ts\nb.ts');
+  });
+
+  it('marks a failed tool result as status failed', async () => {
+    const out: any[] = [];
+    const conn = new JsonRpcConnection((line) => out.push(JSON.parse(line)));
+    const driver = new FakeDriver();
+    driver.prompt = async () => {
+      driver.events.emit('tool_call_result', { id: 't2', toolName: 'EditTool', output: 'boom', status: 'error' });
+      return 'end_turn';
+    };
+    new AcpAgent(conn, driver);
+    conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 10, method: AgentMethod.Prompt, params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] } }));
+    await new Promise((r) => setImmediate(r));
+    const finishes = out.filter((m) => m.method === ClientMethod.SessionUpdate).map((m) => m.params.update).filter((u) => u.sessionUpdate === 'tool_call_update');
+    expect(finishes[0]).toMatchObject({ toolCallId: 't2', status: 'failed' });
   });
 
   it('session/cancel aborts the turn and flips the stopReason to cancelled', async () => {

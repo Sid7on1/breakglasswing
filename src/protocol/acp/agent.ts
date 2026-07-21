@@ -19,7 +19,7 @@ import {
   InitializeParams, InitializeResult, NewSessionParams, NewSessionResult,
   PromptParams, PromptResult, CancelParams, StopReason, McpServerConfig,
   RequestPermissionParams, RequestPermissionResult,
-  promptText, agentMessageChunk,
+  promptText, agentMessageChunk, toolCallStart, toolCallUpdate,
 } from './types';
 
 /** Engine abstraction the agent drives. Backed by HeadlessSession in production, a fake in tests. */
@@ -145,6 +145,33 @@ export class AcpAgent {
     };
     events.on('message', onMessage);
     this.turnListeners.push(() => events.off('message', onMessage));
+
+    // Tool lifecycle → the editor's live tool timeline. Bimax emits `tool_call` (status running) on
+    // start — TWICE for the same id (a streaming "partial" then the authoritative call), so the id
+    // set dedupes the ACP `tool_call` to one declaration — and `tool_call_result` on completion,
+    // which becomes a `tool_call_update` carrying the final status + output.
+    const announced = new Set<string>();
+    const onToolCall = (e: any) => {
+      const id = String(e?.id ?? '');
+      if (!id || announced.has(id)) return;
+      announced.add(id);
+      this.conn.notify(ClientMethod.SessionUpdate, toolCallStart(sessionId, id, String(e?.toolName ?? 'tool'), e?.input));
+    };
+    events.on('tool_call', onToolCall);
+    this.turnListeners.push(() => events.off('tool_call', onToolCall));
+
+    const onToolResult = (e: any) => {
+      const id = String(e?.id ?? '');
+      if (!id) return;
+      // A result for a call we never announced (edge case) → declare it first so the update has a home.
+      if (!announced.has(id)) {
+        announced.add(id);
+        this.conn.notify(ClientMethod.SessionUpdate, toolCallStart(sessionId, id, String(e?.toolName ?? 'tool'), e?.input));
+      }
+      this.conn.notify(ClientMethod.SessionUpdate, toolCallUpdate(sessionId, id, e?.status === 'error', String(e?.output ?? '')));
+    };
+    events.on('tool_call_result', onToolResult);
+    this.turnListeners.push(() => events.off('tool_call_result', onToolResult));
 
     // Tool-approval gate: veto_prompt(question, options, resolve) → session/request_permission.
     const onVeto = (question: string, options: string[], resolve: (a: string) => void) => {
