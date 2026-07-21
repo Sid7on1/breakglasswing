@@ -128,6 +128,13 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   const governor = new Governor(eventBus, yolo);
   llmAdapter.setBudgetVeto(governor.budget);
 
+  // Phase 3a — start background power-awareness (battery/thermal → advisory sub-agent backoff).
+  // Never in tests; the unref'd poll timer never holds the process open.
+  {
+    const { powerMonitor, powerAwarenessEnabled } = await import('../governor/power.monitor');
+    if (process.env.NODE_ENV !== 'test' && powerAwarenessEnabled()) powerMonitor.start();
+  }
+
   // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();
   // SQLite-backed when node:sqlite exists (atomic saves, per-file staleness → incremental
