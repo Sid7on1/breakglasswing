@@ -15,6 +15,7 @@ import { pointInFrame } from './coordinates';
 import { classifyVerification, VerificationResult } from './verification';
 import { RecoveryController, RecoveryDecision } from './recovery';
 import { ActionHistory, ActionHistorySummary, ComputerSessionState, sweepRecordings, writeSessionState, readSessionState } from './durability';
+import { CircuitBreaker, Outcome, BreakerOpen, serverConfig } from '../core/circuit-breaker';
 
 /**
  * Offline/development fallback for Bimax Computer Use.
@@ -253,11 +254,46 @@ export class DesktopRuntime implements DesktopRuntimePort {
     return { driver, ready: driver !== 'unavailable', ...this.lastStatus };
   }
 
+  /**
+   * Circuit breaker around the native Swift driver. If the helper starts failing in bursts — a
+   * revoked permission looping, a wedged binary, a display that vanished — the breaker OPENS after a
+   * few failures and sheds calls for a short cool-down instead of spawning a doomed subprocess on
+   * every action. Tuned tighter than the HTTP defaults because this is a fast local process: 5
+   * samples over a 30s window, 60% failure rate to trip, 3s cool-down. (Ported from Grok Build's
+   * xai-circuit-breaker; see core/circuit-breaker.ts.)
+   */
+  private readonly driverBreaker = new CircuitBreaker({
+    ...serverConfig(),
+    minSamples: 5,
+    errorRateThreshold: 0.6,
+    windowDurationMs: 30_000,
+    openDurationMs: 3_000,
+  });
+
   private async helper(args: string[], signal?: AbortSignal, timeoutMs = 15_000): Promise<any> {
     const bin = this.resolveHelper();
     if (!bin) throw new Error('native helper unavailable');
-    const { stdout } = await exec(bin, args, timeoutMs, signal);
-    return JSON.parse(stdout.trim());
+    try {
+      this.driverBreaker.check();
+    } catch (e) {
+      if (e instanceof BreakerOpen) {
+        throw new Error(
+          `native helper temporarily disabled: the desktop driver failed repeatedly, backing off for ${(e.retryAfterMs / 1000).toFixed(1)}s to avoid hammering a broken driver. Check Accessibility/Screen Recording permissions, then retry.`,
+          { cause: e },
+        );
+      }
+      throw e;
+    }
+    try {
+      const { stdout } = await exec(bin, args, timeoutMs, signal);
+      const parsed = JSON.parse(stdout.trim());
+      this.driverBreaker.record(Outcome.Success);
+      return parsed;
+    } catch (err) {
+      // Caller-driven cancellation is not a driver fault — don't let it trip the breaker.
+      if (!signal?.aborted) this.driverBreaker.record(Outcome.Failure);
+      throw err;
+    }
   }
 
   public async frontmostApp(): Promise<string> {
