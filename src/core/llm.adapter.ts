@@ -17,6 +17,17 @@ import {
 import type { ToolCallSlot } from './llm.stream';
 import { markProviderRequest, markFirstRawChunk } from '../telemetry/perf';
 import { attributeSlowWait, SLOW_WAIT_THRESHOLD_MS } from '../telemetry/netprobe';
+import { CircuitBreaker, Outcome, BreakerOpen, RetryPolicy, serverConfig } from './circuit-breaker';
+
+// Provider-fault classification for the LLM circuit breaker. The per-key ApiKeyManager already
+// rotates and cools individual keys; the breaker sits ABOVE that to catch a whole-provider outage,
+// where every rotated key fails and the agent loop would otherwise hot-retry chat() with no pause.
+const LLM_RETRY_POLICY = RetryPolicy.server(); // 429 + any 5xx are transient provider faults
+export function isProviderFault(status: number | null | undefined): boolean {
+  // No status = a timeout / dropped stream (a provider fault for outage purposes); 408 likewise.
+  if (status == null || status === 0 || status === 408) return true;
+  return LLM_RETRY_POLICY.shouldRetry(status);
+}
 export {
   markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy, hasMeaningfulStreamPayload,
@@ -607,7 +618,35 @@ export class LlmAdapter implements LLMProvider {
     }
   }
 
+  /**
+   * Provider-level circuit breaker. The ApiKeyManager already breaks/rotates PER KEY; this sits
+   * above it to detect a whole-provider outage (every key failing) and force a short cool-down so
+   * the agent loop backs off instead of hot-retrying chat() into a dead provider. Tuned loose so it
+   * only trips on a sustained aggregate failure: 8 samples over 60s, 70% failure rate, 5s cool-down.
+   * Disable with BGW_LLM_BREAKER=false. (Ported from Grok Build's xai-circuit-breaker.)
+   */
+  private readonly providerBreaker = new CircuitBreaker({
+    ...serverConfig(),
+    minSamples: 8,
+    errorRateThreshold: 0.7,
+    windowDurationMs: 60_000,
+    openDurationMs: 5_000,
+    enabled: process.env.BGW_LLM_BREAKER !== 'false',
+  });
+
   async *chat(messages: Message[], options: ChatOptions): AsyncGenerator<ChatEvent> {
+    // Shed BEFORE acquiring a key or hitting the wire: if the provider has been failing across keys,
+    // yield a recoverable error so the agent loop waits out the cool-down instead of hammering.
+    try {
+      this.providerBreaker.check();
+    } catch (e) {
+      if (e instanceof BreakerOpen) {
+        const retryAfterSecs = Math.ceil(e.retryAfterMs / 1000);
+        yield { type: 'error', message: `LLM provider is failing across all keys — backing off ${retryAfterSecs}s before retrying.`, recoverable: true, kind: 'transient', retryAfterSecs };
+        return;
+      }
+      throw e;
+    }
     const kr = await this.getKey();
     const client = this.createClient(kr);
     const estimatedTokens = options.maxTokens || this.maxTokens || 4096;
@@ -1004,7 +1043,8 @@ export class LlmAdapter implements LLMProvider {
         await this.budgetVeto.recordSpend(estimatedCostUsd, estimatedCostUsd); // Rough fallback
       }
       this.apiKeyManager.reportKeyResult(kr.idx!, 200);
-      
+      this.providerBreaker.record(Outcome.Success);
+
     } catch (e: any) {
       // Only release if a mid-stream usage report hasn't already settled the
       // reservation, otherwise we would release it a second time.
@@ -1019,6 +1059,9 @@ export class LlmAdapter implements LLMProvider {
         this.apiKeyManager.reportKeyHang(kr.idx!);
       }
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
+      // Feed the provider breaker: count only provider-side faults (5xx/429/timeouts), so a client
+      // error (400 bad request, 401 auth) — the provider responding fine — never trips the breaker.
+      this.providerBreaker.record(isProviderFault(status) ? Outcome.Failure : Outcome.Success);
       yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
     }
   }
