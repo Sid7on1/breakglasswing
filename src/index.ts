@@ -21,6 +21,7 @@ loadGlobalEnv();
 dotenv.config();
 import { Command } from 'commander';
 import { createContainer } from './core/container';
+import { readPackageVersion } from './core/self.update';
 import { resolveTheme } from './cli/themes';
 import { loadConfig, getConfig } from './cli/config';
 import { setCustomRoutingRules } from './cli/agentRouter';
@@ -38,7 +39,7 @@ const program = new Command();
 program
   .name('bimax')
   .description('BiMax — Autonomous AI agent for your terminal')
-  .version('1.0.5')
+  .version(readPackageVersion())
   .argument('[prompt]', 'Prompt to run in non-interactive mode')
   .option('-p, --print', 'Non-interactive mode: print response and exit')
   .option('-m, --model <model>', 'Model override (e.g. gpt-4, claude-opus)')
@@ -48,6 +49,7 @@ program
   .option('-o, --output-format <format>', 'Output format: text, json, stream-json', 'text')
   .option('-y, --yes', 'Skip all permission prompts')
   .option('--print-with-tools', 'Include tool call output in print mode')
+  .option('--acp', 'Run as an Agent Client Protocol agent over stdio (embed in Zed/editors)')
   .option('--dangerously-skip-permissions', 'Skip all permission prompts');
 
 program.parse(process.argv);
@@ -161,6 +163,15 @@ async function main() {
       outputFormat: cliFlags.outputFormat,
       ...container,
     });
+    process.exit(0);
+  }
+
+  // ACP mode — run as an Agent Client Protocol agent over stdio, so an editor (Zed and other ACP
+  // clients) can embed the full Bimax engine. Speaks newline-delimited JSON-RPC instead of Bimax's
+  // own NDJSON protocol. Checked before headless so `--acp` wins if both are somehow set.
+  if (process.env.BIMAX_ACP === '1' || cliFlags.acp) {
+    const { startAcpAgent } = await import('./protocol/acp/entry');
+    await startAcpAgent(container, config);
     process.exit(0);
   }
 

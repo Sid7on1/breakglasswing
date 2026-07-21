@@ -35,6 +35,8 @@ import './goals';
 import './workspace';
 import './tx';
 import './changelog';
+import './update';
+import './power';
 import './scout';
 import './recipe';
 import './mode';

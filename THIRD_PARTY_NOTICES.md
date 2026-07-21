@@ -1,5 +1,18 @@
 # Third-party notices
 
+## Circuit breaker (ported from Grok Build)
+
+`src/core/circuit-breaker.ts` is a TypeScript transcription of the `xai-circuit-breaker` crate from
+xAI's **Grok Build** (<https://github.com/xai-org/grok-build>), licensed under the Apache License,
+Version 2.0. The sliding-window trip algorithm, three-state machine, half-open probe lease-reclaim,
+config presets, and RetryPolicy status classification are preserved; the Rust atomics/mutex/CAS
+concurrency machinery was omitted as unnecessary in single-threaded Node. This constitutes a
+modified port under Apache-2.0 §4(b).
+
+    Copyright 2023-2026 SpaceXAI
+    Licensed under the Apache License, Version 2.0.
+    https://www.apache.org/licenses/LICENSE-2.0
+
 ## Bimax Computer Use native sidecar
 
 Bimax Computer Use embeds an integrated binary distribution of `trycua/cua`'s Rust

@@ -67,6 +67,8 @@ export const PALETTE_HIDDEN = new Set<string>([
   'resume', 'output',
   // Niche / advanced — reachable when typed, off the browsable surface.
   'agents', 'ask', 'autocommit', 'branch', 'check', 'keys', 'lint', 'log', 'changelog', 'watch',
+  // Phase 3 utility readouts — advisory, not primary verbs (run when typed in full).
+  'update', 'upgrade', 'power',
   // Already represented by primary product surfaces: Map panel and Security settings/status.
   'map', 'governor',
   'pipelines', 'recipe', 'selection', 'shortcuts', 'headroom',

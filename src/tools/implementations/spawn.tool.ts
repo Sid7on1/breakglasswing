@@ -19,6 +19,7 @@ import {
   SubAgentCapacityCoordinator,
 } from '../../core/subagent.capacity';
 import { formatSubAgentResult } from '../../core/subagent.result';
+import { powerThrottleAdvice } from '../../governor/power.monitor';
 
 export function createSpawnSubagentTool(governor: IGovernor, registry: ToolRegistry, llmAdapter: LlmAdapter): BuiltTool {
   return buildTool({
@@ -113,6 +114,16 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
       // the model from passing maxSubAgents:100 and spawning 100 worker threads.
       if (globalSubAgentManager.activeCount() >= MAX_CONCURRENT_SUBAGENTS) {
         return `Error: Concurrent sub-agent limit reached (${MAX_CONCURRENT_SUBAGENTS}). Wait for running sub-agents to finish before spawning more.`;
+      }
+
+      // Phase 3a power-aware soft backoff: on battery / thermal throttle, serialize fan-out under a
+      // reduced effective ceiling (never below 1). This is advisory — it caps *parallel* spawns so a
+      // long unattended run doesn't drain the battery or cook the CPU; sequential work still proceeds
+      // once a running sub-agent finishes. Reads cached power state (no I/O on this path).
+      const powerAdvice = powerThrottleAdvice();
+      if (powerAdvice.level !== 'none'
+        && globalSubAgentManager.activeCount() >= powerAdvice.maxConcurrentSubagents) {
+        return `Deferred (power-aware backoff): ${powerAdvice.reason}. Holding parallel sub-agents at ${powerAdvice.maxConcurrentSubagents} while unplugged/throttled — let a running sub-agent finish, or do this work sequentially yourself. Override with BIMAX_POWER_AWARE=off.`;
       }
 
       const currentCwd = context?.cwd || process.cwd();
