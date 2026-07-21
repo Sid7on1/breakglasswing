@@ -179,13 +179,13 @@ const DEFAULTS: CliConfig = {
   contextWindowTokens: 0,
   parallelToolCalls: true,
   computerApprovals: 'high-impact-only',
-  // Background delivery (OpenAI/ChatGPT computer-use style): the agent acts on the target window
-  // synthetically WITHOUT stealing the user's real cursor or requiring the window to be frontmost,
-  // and shows its OWN agent cursor. Set true (or /computer visible) to instead drive the one real
-  // macOS cursor in the foreground.
-  computerVisible: false,
-  // PiP on by default so the user can watch the agent's surface while they work in another window.
-  computerPip: true,
+  // Visible/foreground delivery drives the ONE real macOS cursor. This is the default because macOS
+  // apps built on SwiftUI (System Settings especially) IGNORE synthetic background click events — so
+  // the real cursor is the only reliable way to drive them. /computer visible toggles to background
+  // mode (the agent's own cursor, no focus steal), which is better for plain AppKit apps but will
+  // silently miss clicks in System Settings.
+  computerVisible: true,
+  computerPip: false,
   computerRecord: true,
 };
 
