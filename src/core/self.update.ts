@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 /**
@@ -54,8 +55,18 @@ interface UpdateCache {
   seenIds: string[];
 }
 
-const DEFAULT_DOWNLOAD_CMD = 'npm i -g bimax@latest';
+// Bimax ships as a SINGLE standalone binary installed by install.sh (see repo root) — the upgrade
+// command must match that channel, not suggest a global npm install that doesn't apply.
+const DEFAULT_DOWNLOAD_CMD = 'curl -fsSL https://bimax-liard.vercel.app/install | bash -s -- --update';
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // one check per day is plenty
+
+/** User cache directory for update metadata — NEVER process.cwd() (a repo-local write). */
+export function defaultUpdateCachePath(): string {
+  const base = process.env.XDG_CACHE_HOME
+    ? path.join(process.env.XDG_CACHE_HOME, 'bimax')
+    : path.join(os.homedir(), '.bimax');
+  return path.join(base, 'update-check.json');
+}
 
 // ── Version helpers (pure) ───────────────────────────────────────────────────────────────────────
 
@@ -124,9 +135,11 @@ export function selectAnnouncements(
 export function parseManifest(raw: unknown): UpdateManifest | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
-  // npm registry `…/bimax/latest` uses `version`; our own manifest uses `latest`. Accept both.
+  // Our own manifest uses `latest`; a GitHub release object uses `tag_name` (e.g. "v1.2.0");
+  // an npm-style payload uses `version`. Accept all three.
   const latest = typeof obj.latest === 'string' ? obj.latest
-    : typeof obj.version === 'string' ? obj.version : null;
+    : typeof obj.tag_name === 'string' ? obj.tag_name
+      : typeof obj.version === 'string' ? obj.version : null;
   if (!latest) return null;
   const announcements = Array.isArray(obj.announcements)
     ? obj.announcements
@@ -155,9 +168,11 @@ export function updateCheckEnabled(): boolean {
   return v !== 'off' && v !== '0';
 }
 
-/** Where to fetch the manifest. Our manifest URL if set, else the npm registry version endpoint. */
+/** Where to fetch the manifest. Our manifest URL if set, else the GitHub release feed for the
+ * standalone-binary channel install.sh actually installs from. */
 export function manifestUrl(): string {
-  return process.env.BIMAX_UPDATE_MANIFEST_URL || 'https://registry.npmjs.org/bimax/latest';
+  return process.env.BIMAX_UPDATE_MANIFEST_URL
+    || 'https://api.github.com/repos/Sid7on1/bimax-releases/releases/latest';
 }
 
 // ── The checker ──────────────────────────────────────────────────────────────────────────────────
@@ -195,7 +210,7 @@ export class UpdateChecker {
   constructor(opts: UpdateCheckerOptions = {}) {
     this.fetchManifest = opts.fetchManifest ?? defaultFetchManifest;
     this.now = opts.now ?? Date.now;
-    this.cachePath = opts.cachePath ?? path.join(process.cwd(), '.bimax', 'update-check.json');
+    this.cachePath = opts.cachePath ?? defaultUpdateCachePath();
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
     this.current = opts.currentVersion ?? readPackageVersion();
   }

@@ -4,8 +4,6 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
-import { openClient, isDeadConnectionError } from '../mcp/client';
-import { withTimeout } from '../utils/withTimeout';
 import { cliEvents } from '../cli/events';
 import { loadConfig } from '../cli/config';
 import { normalizedToPixel, screenshotToGlobal, elementCenterToScreenshot } from './coordinates';
@@ -14,8 +12,11 @@ import { DragMachine } from './drag';
 import { pointInFrame } from './coordinates';
 import { classifyVerification, VerificationResult } from './verification';
 import { RecoveryController, RecoveryDecision } from './recovery';
-import { ActionHistory, ActionHistorySummary, ComputerSessionState, sweepRecordings, writeSessionState, readSessionState } from './durability';
-import { CircuitBreaker, Outcome, BreakerOpen, serverConfig } from '../core/circuit-breaker';
+import { ActionHistory, ActionHistorySummary, ComputerSessionState, writeSessionState, readSessionState } from './durability';
+import { RecordingController } from './recording';
+import { toActionResult, ActionResult } from './verification';
+import { SidecarTransport, SidecarTransportPort, bimaxBrand } from './transport';
+import { TargetOwnership, ComputerTarget } from './target';
 
 /**
  * Offline/development fallback for Bimax Computer Use.
@@ -33,7 +34,7 @@ import { CircuitBreaker, Outcome, BreakerOpen, serverConfig } from '../core/circ
 
 export type DesktopAction =
   | 'status' | 'request_access' | 'apps' | 'windows' | 'observe' | 'screenshot'
-  | 'cursor' | 'frontmost' | 'open' | 'close' | 'move' | 'click' | 'drag'
+  | 'cursor' | 'frontmost' | 'open' | 'close' | 'quit_app' | 'move' | 'click' | 'drag'
   | 'scroll' | 'type' | 'key' | 'set_value' | 'wait'
   | 'hover' | 'hold' | 'mouse_down' | 'mouse_up'
   | 'record_start' | 'record_status' | 'record_stop';
@@ -73,6 +74,11 @@ export interface DesktopCommand {
   recordVideo?: boolean;
   /** record_start: optional output directory; defaults under .bimax/computer/recordings. */
   outputDir?: string;
+  /** record_start: single-use approval token for WHOLE-DISPLAY video capture, minted ONLY by the
+   * runtime's authorizeFullDisplayRecording() after a governor-approved prompt. This field is
+   * STRIPPED from model-supplied arguments by the tool layer — a model cannot forge it, and no
+   * boolean can authorize whole-display capture. */
+  fullDisplayToken?: string;
 }
 
 export interface DesktopDisplay { index: number; width: number; height: number; scale: number; main: boolean }
@@ -93,6 +99,10 @@ export interface DesktopResult {
   /** Typed verification of whether THIS action actually changed the screen (Stage 6): the runtime
    * judges the action by the fresh frame, not by the driver's success return. */
   progressCheck?: VerificationResult;
+  /** The honest per-action outcome contract: delivery status, observed state, semantic
+   * postcondition, confidence, and failure reason. Pixel change is supporting evidence only —
+   * `confidence: 'proven'` requires a matched semantic postcondition. */
+  actionResult?: ActionResult;
   /** Nudge attached after several consecutive no-effect actions — re-observe / retarget / wait. */
   recoveryHint?: string;
   /** The bounded recovery controller's decision for THIS action (Stage 6): continue / retry /
@@ -141,6 +151,11 @@ export interface DesktopRuntimePort {
   memoryFootprint?(): { historyKept: number; observedElements: number; indexedElements: number; surfaces: number };
   /** PiP presentation status (Stage 2): enabled? which surface? is it capture-safe (window-scoped)? */
   pipStatus?(): Promise<{ enabled: boolean; surface?: string; captureSafe: boolean }>;
+  /** What the next record_start would capture — so the approval layer can phrase the prompt honestly. */
+  recordingScopePreview?(): { scope: string; captureSafe: boolean };
+  /** Mint a single-use whole-display recording approval token AFTER the user explicitly approved
+   * that scope. Only the tool/approval layer calls this; models can never reach it. */
+  authorizeFullDisplayRecording?(): string;
 }
 
 /** Pure: 0–1000 normalized → screen points (clamped). Retained name; the canonical implementation
@@ -183,6 +198,23 @@ export function sweepShots(dir: string, keep = 30): void {
       .sort((a, b) => b.t - a.t);
     for (const { f } of files.slice(keep)) fs.rmSync(path.join(dir, f), { force: true });
   } catch { /* hygiene is best-effort */ }
+}
+
+/** Verbs that ACT on the desktop (vs pure observation) — every one must yield ONE ActionResult. */
+const ACTING_VERBS = new Set<DesktopAction>([
+  'open', 'click', 'type', 'key', 'set_value', 'drag', 'scroll', 'move',
+  'hover', 'hold', 'mouse_down', 'mouse_up', 'close', 'quit_app', 'wait',
+]);
+
+/** Invariant: every acting verb's result carries exactly one honest ActionResult. Results that
+ * already computed one (post-action evidence, verified close/quit) pass through; anything else
+ * gets the truthful default — delivered-but-unverified on success, failed on error. */
+export function ensureActionResult(result: DesktopResult): DesktopResult {
+  if (result.actionResult || !ACTING_VERBS.has(result.action)) return result;
+  if (!result.ok) {
+    return { ...result, actionResult: { delivered: false, observed: 'failed', confidence: 'unknown', failureReason: result.error || result.summary } };
+  }
+  return { ...result, actionResult: { delivered: true, observed: 'unverified', confidence: 'unknown' } };
 }
 
 /** App names vary slightly between APIs ("Calculator" vs "Calculator.app"). */
@@ -254,46 +286,15 @@ export class DesktopRuntime implements DesktopRuntimePort {
     return { driver, ready: driver !== 'unavailable', ...this.lastStatus };
   }
 
-  /**
-   * Circuit breaker around the native Swift driver. If the helper starts failing in bursts — a
-   * revoked permission looping, a wedged binary, a display that vanished — the breaker OPENS after a
-   * few failures and sheds calls for a short cool-down instead of spawning a doomed subprocess on
-   * every action. Tuned tighter than the HTTP defaults because this is a fast local process: 5
-   * samples over a 30s window, 60% failure rate to trip, 3s cool-down. (Ported from Grok Build's
-   * xai-circuit-breaker; see core/circuit-breaker.ts.)
-   */
-  private readonly driverBreaker = new CircuitBreaker({
-    ...serverConfig(),
-    minSamples: 5,
-    errorRateThreshold: 0.6,
-    windowDurationMs: 30_000,
-    openDurationMs: 3_000,
-  });
-
+  // NOTE: the Grok-ported circuit breaker that wrapped this helper was removed. It only guarded
+  // the FALLBACK driver (never the real sidecar path), so the same action was governed by two
+  // conflicting failure policies depending on which driver happened to be active — a misleading
+  // half-protection. The runtime's own recovery controller + per-action errors are the one policy.
   private async helper(args: string[], signal?: AbortSignal, timeoutMs = 15_000): Promise<any> {
     const bin = this.resolveHelper();
     if (!bin) throw new Error('native helper unavailable');
-    try {
-      this.driverBreaker.check();
-    } catch (e) {
-      if (e instanceof BreakerOpen) {
-        throw new Error(
-          `native helper temporarily disabled: the desktop driver failed repeatedly, backing off for ${(e.retryAfterMs / 1000).toFixed(1)}s to avoid hammering a broken driver. Check Accessibility/Screen Recording permissions, then retry.`,
-          { cause: e },
-        );
-      }
-      throw e;
-    }
-    try {
-      const { stdout } = await exec(bin, args, timeoutMs, signal);
-      const parsed = JSON.parse(stdout.trim());
-      this.driverBreaker.record(Outcome.Success);
-      return parsed;
-    } catch (err) {
-      // Caller-driven cancellation is not a driver fault — don't let it trip the breaker.
-      if (!signal?.aborted) this.driverBreaker.record(Outcome.Failure);
-      throw err;
-    }
+    const { stdout } = await exec(bin, args, timeoutMs, signal);
+    return JSON.parse(stdout.trim());
   }
 
   public async frontmostApp(): Promise<string> {
@@ -608,6 +609,10 @@ export class DesktopRuntime implements DesktopRuntimePort {
   // ---- entry ----------------------------------------------------------------------------------
 
   public async run(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
+    return ensureActionResult(await this.runInner(cmd, ctx));
+  }
+
+  private async runInner(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
     const cwd = ctx?.cwd || process.cwd();
     const driver = this.driverName();
     try {
@@ -628,18 +633,41 @@ export class DesktopRuntime implements DesktopRuntimePort {
 
       // Approval prompts and the TUI both run in Terminal and can steal focus. Restore focus only
       // after approval, immediately before native input, and refuse to report success on mismatch.
-      if (cmd.action === 'type' || cmd.action === 'key' || cmd.action === 'close') {
+      if (cmd.action === 'type' || cmd.action === 'key' || cmd.action === 'close' || cmd.action === 'quit_app') {
         await this.activateApp(cmd.app || '', ctx?.signal);
       }
 
       if (cmd.action === 'close') {
+        // close = close the SELECTED WINDOW only (Cmd+W / Ctrl+W). Quitting the entire application
+        // is the separate, high-impact `quit_app` action — close must never tear down other windows
+        // or discard unsaved state app-wide.
+        const partial = process.platform === 'darwin'
+          ? await this.runDarwin({ action: 'key', combo: 'cmd+w', app: cmd.app }, ctx?.signal)
+          : process.platform === 'linux'
+            ? await this.runLinux({ action: 'key', combo: 'ctrl+w', app: cmd.app }, ctx?.signal)
+            : (() => { throw new Error(`desktop control is not supported on ${process.platform}`); })();
+        // TRUTHFUL: this driver cannot enumerate windows, so it can DELIVER Cmd+W but cannot verify
+        // the window actually closed. Never claim a verified outcome here.
+        return {
+          ok: true, action: 'close', driver: this.driverName(), ...partial, app: cmd.app,
+          actionResult: { delivered: true, observed: 'unverified', postcondition: { query: 'target window closed', matched: false }, confidence: 'unknown', failureReason: undefined },
+          summary: `sent close-window (Cmd+W/Ctrl+W) to ${cmd.app} — delivery only; this driver cannot verify the window closed (the application keeps running; use quit_app to quit it entirely)`,
+        };
+      }
+
+      if (cmd.action === 'quit_app') {
+        // High-impact by contract: quits the whole application and may discard unsaved state.
         const partial = process.platform === 'darwin'
           ? await this.runDarwin({ action: 'key', combo: 'cmd+q', app: cmd.app }, ctx?.signal)
           : process.platform === 'linux'
             ? await this.runLinux({ action: 'key', combo: 'alt+f4', app: cmd.app }, ctx?.signal)
             : (() => { throw new Error(`desktop control is not supported on ${process.platform}`); })();
         await this.waitForApp(cmd.app || '', false, ctx?.signal);
-        return { ok: true, action: 'close', driver: this.driverName(), ...partial, app: cmd.app, summary: `closed ${cmd.app}` };
+        return {
+          ok: true, action: 'quit_app', driver: this.driverName(), ...partial, app: cmd.app,
+          actionResult: { delivered: true, observed: 'changed', postcondition: { query: 'app no longer frontmost', matched: true }, confidence: 'likely' },
+          summary: `quit ${cmd.app} (verified it is no longer frontmost)`,
+        };
       }
 
       const resolved = await this.denormalize(cmd, ctx?.signal);
@@ -662,42 +690,9 @@ export class DesktopRuntime implements DesktopRuntimePort {
   }
 }
 
-/** Replace upstream implementation names in anything that can reach the model or user. */
-function bimaxBrand<T>(value: T): T {
-  if (typeof value === 'string') {
-    return value
-      .replace(/cua-driver-rs/gi, 'Bimax Computer Use')
-      .replace(/cua[ -]driver/gi, 'Bimax Computer Use') as T;
-  }
-  if (Array.isArray(value)) return value.map(bimaxBrand) as T;
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as any).map(([k, v]) => [k, bimaxBrand(v)])) as T;
-  }
-  return value;
-}
-
-function mcpText(result: any): string {
-  return (result?.content || [])
-    .filter((part: any) => part?.type === 'text')
-    .map((part: any) => String(part.text || ''))
-    .join('\n');
-}
-
-function mcpStructured(result: any): any {
-  if (result?.structuredContent && typeof result.structuredContent === 'object') return result.structuredContent;
-  const text = mcpText(result).replace(/^✅[^\n]*\n?/, '').trim();
-  try { return JSON.parse(text); } catch { return text ? { message: text } : {}; }
-}
-
-interface ComputerTarget { app: string; pid: number; windowId?: number }
-
-// Cold start (spawn the native sidecar + MCP handshake + start_session) and a steady-state RPC are
-// different operations with different failure modes — a cold start doing real process/IPC work can
-// legitimately take much longer than any single tool call. Budgeting them together made the FIRST
-// gated action of a session race a clock that silently included both, so a slow-but-alive boot was
-// indistinguishable from a hang. They now get separate, honestly-labeled budgets.
-const COLD_START_TIMEOUT_MS = 45_000;
-const RPC_TIMEOUT_MS = 30_000;
+// Transport-level helpers (branding, MCP decode, timeouts) live in transport.ts;
+// target-ownership rules live in target.ts. Re-export the target type for existing importers.
+export type { ComputerTarget } from './target';
 
 /**
  * Bimax Computer Use — a long-lived, private MCP connection to the embedded native sidecar.
@@ -708,18 +703,18 @@ const RPC_TIMEOUT_MS = 30_000;
  * observation that created them; spawning a process per action would silently discard that cache.
  */
 export class BimaxComputerRuntime implements DesktopRuntimePort {
-  private clientPromise: Promise<any> | null = null;
-  private target: ComputerTarget | null = null;
+  private readonly session = `bimax-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  /** Driver transport — the ONE place a sidecar RPC can happen (see transport.ts). */
+  private readonly transport: SidecarTransportPort = new SidecarTransport(this.session);
+  /** Target ownership — the single authority on which app/window an action goes to (target.ts). */
+  private readonly targets = new TargetOwnership();
   private indexedElements = new Map<string, { label?: string; role?: string; value?: string; description?: string; frame?: unknown; elementToken?: string; elementIndex?: number }>();
   private observedElements: Array<{ label?: string; role?: string; value?: string; description?: string; frame?: unknown; elementToken?: string; elementIndex?: number }> = [];
   private observedTarget: { pid: number; windowId?: number; degraded: boolean; width?: number; height?: number } | null = null;
   private observedWindowFrame: { x: number; y: number; w: number; h: number } | null = null;
-  private recordingStarted = false;
-  private recordingDir: string | undefined;
-  private recordingError: string | undefined;
-  /** What the current recording is scoped to and whether that scope is capture-safe (Stage 8). */
-  private recordingScope: string | undefined;
-  private recordingCaptureSafe: boolean | undefined;
+  /** Single owner of recording state (see recording.ts). Recording is explicit-opt-in only:
+   * nothing in the action path may start it — only the record_start case below. */
+  private readonly recording = new RecordingController();
   /** Which surfaces this session is operating on, who owns input, and which is active. Recorded
    * additively — Stage 1 of the surface architecture. Delivery routing still lives in run(). */
   private readonly surfaces = new SurfaceRegistry();
@@ -739,21 +734,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private activeAction = '';
   private lastCwd = process.cwd();
   private lastPersistAt = 0;
-  /** Heartbeat: updated on every sidecar call so a watchdog can spot a wedged session. */
-  private lastActivityAt = Date.now();
-  private readonly session = `bimax-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   private lastStatus = { accessibility: null as boolean | null, screenRecording: null as boolean | null };
 
   public constructor(private readonly fallback: DesktopRuntimePort = new DesktopRuntime()) {}
 
-  private driverPath(): string | null {
-    const configured = process.env.BIMAX_COMPUTER_USE_DRIVER?.trim();
-    return configured && fs.existsSync(configured) ? configured : null;
-  }
-
   public quickStatus() {
-    const path = this.driverPath();
-    if (!path) return this.fallback.quickStatus();
+    if (!this.transport.available()) return this.fallback.quickStatus();
     return { driver: 'bimax-computer-use 0.8.3', ready: true, ...this.lastStatus };
   }
 
@@ -761,13 +747,14 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
    * Additive: this tracks WHAT the agent is operating on and who owns input; it does not change how
    * actions are delivered (that routing stays in run() until Stage 3 moves it behind chooseMechanism). */
   private syncSurface(opts: { focusOwner?: InputOwner } = {}): void {
-    if (!this.target?.pid) return;
+    const target = this.targets.current();
+    if (!target?.pid) return;
     this.surfaces.register({
-      id: `native:${this.target.pid}`,
+      id: `native:${target.pid}`,
       kind: 'native-window',
-      app: this.target.app || undefined,
-      pid: this.target.pid,
-      windowId: this.target.windowId,
+      app: target.app || undefined,
+      pid: target.pid,
+      windowId: target.windowId,
       bounds: this.observedWindowFrame ? { ...this.observedWindowFrame } : undefined,
       ...(opts.focusOwner ? { focusOwner: opts.focusOwner } : {}),
     });
@@ -794,7 +781,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   /** PiP presentation status (Stage 2): whether the post-action preview is enabled, which surface it
    * reflects, and whether that surface is capture-safe (so a preview never mirrors the whole desktop). */
   public async pipStatus(): Promise<{ enabled: boolean; surface?: string; captureSafe: boolean }> {
-    const enabled = (() => { try { return this.driverPath() != null; } catch { return false; } })()
+    const enabled = (() => { try { return this.transport.available(); } catch { return false; } })()
       && (await loadConfig().catch(() => ({} as any))).computerPip !== false && process.platform === 'darwin';
     const scoped = this.captureSurface();
     return { enabled, surface: scoped?.label, captureSafe: !!scoped };
@@ -809,7 +796,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       version: 1, updatedAt: Date.now(),
       surface: s ? { id: s.id, kind: s.kind, app: s.app, pid: s.pid, windowId: s.windowId, bounds: s.bounds, focusOwner: s.focusOwner } : null,
       history: this.actionHistory.summary(8),
-      recordingDir: this.recordingDir,
+      recordingDir: this.recording.outputDir,
     };
   }
 
@@ -843,7 +830,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     if (this.resumedFromDisk || this.actionHistory.total > 0) { this.resumedFromDisk = true; return; }
     this.resumedFromDisk = true;
     const persisted = readSessionState(this.sessionStateFile(cwd));
-    const app = this.target?.app;
+    const app = this.targets.current()?.app;
     if (!persisted?.surface || !app || persisted.surface.app !== app) return;
     this.actionHistory = ActionHistory.fromSummary(persisted.history);
     if (this.actionHistory.total > 0) {
@@ -852,7 +839,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
   /** Watchdog view: is the sidecar connected, and how long since the last real activity? */
   public health(): { connected: boolean; idleMs: number; lastActivityAt: number } {
-    return { connected: !!this.clientPromise, idleMs: Date.now() - this.lastActivityAt, lastActivityAt: this.lastActivityAt };
+    return this.transport.health();
   }
   /** Cheap memory-footprint reporter — everything here is bounded; this surfaces the current sizes. */
   public memoryFootprint(): { historyKept: number; observedElements: number; indexedElements: number; surfaces: number } {
@@ -885,135 +872,36 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   public async dispose(): Promise<void> {
-    const pending = this.clientPromise;
-    const wasRecording = this.recordingStarted;
+    const wasRecording = this.recording.started;
     // Persist a final durable snapshot (active surface + compressed history) BEFORE tearing state
     // down, so an interrupted run can be resumed via loadPersistedState() on the next launch.
     try { writeSessionState(this.sessionStateFile(this.lastCwd), this.buildSessionState()); }
     catch { /* best-effort */ }
-    this.clientPromise = null;
     // Session-scoped identity and observations must never leak into the next user turn. In
     // particular, closing the client is what removes the experimental PiP window.
-    this.target = null;
+    this.targets.clear();
     this.indexedElements.clear();
     this.observedElements = [];
     this.observedTarget = null;
     this.observedWindowFrame = null;
-    this.recordingStarted = false;
-    this.recordingDir = undefined;
-    this.recordingError = undefined;
-    this.recordingScope = undefined;
-    this.recordingCaptureSafe = undefined;
+    this.recording.reset();
     this.surfaces.clear();
     this.prevFrameHash = undefined;
     this.noChangeStreak = 0;
     this.recovery.reset();
     this.actionHistory.reset();
     this.resumedFromDisk = false; // a session ended; the next open may resume from disk again
-    this.lastActivityAt = Date.now();
     this.lastPersistAt = 0;
-    if (!pending) return;
-    try {
-      const client = await pending;
-      if (wasRecording) {
-        try { await client.callTool({ name: 'stop_recording', arguments: {} }); } catch { /* session teardown also finalizes */ }
-      }
-      await client.callTool({ name: 'end_session', arguments: { session: this.session } });
-      await client.close?.();
-    } catch { /* process teardown is best-effort */ }
+    await this.transport.dispose({ stopRecording: wasRecording });
   }
 
   /** Start (or join) the sidecar spawn/handshake without waiting on it — lets boot time overlap
    * with human read/decision time (e.g. an approval prompt) instead of starting after Enter. */
-  public warm(): void {
-    if (this.driverPath()) this.client().catch(() => { /* real error surfaces on the next call() */ });
-  }
+  public warm(): void { this.transport.warm(); }
 
-  private async client(): Promise<any> {
-    const driver = this.driverPath();
-    if (!driver) throw new Error('embedded Bimax Computer Use driver is unavailable');
-    if (!this.clientPromise) {
-      cliEvents.emit('status', 'Starting native driver…');
-      // Every teardown below is identity-guarded (clientPromise === promise): a late failure or
-      // close event from a SUPERSEDED connection must never destroy its healthy replacement —
-      // unconditional nulling here would strand duplicate live sidecars behind a respawn loop.
-      const promise: Promise<any> = withTimeout<any>((async () => {
-        const cfg = await loadConfig();
-        const driverArgs = ['mcp', '--embedded', '--host-bundle-id', 'ai.bimax.cli'];
-        if (cfg.computerPip !== false && process.platform === 'darwin') driverArgs.push('--experimental-pip');
-        const client = await openClient({
-          name: 'bimax-computer-use',
-          command: driver,
-          args: driverArgs,
-          forceScrubEnv: true,
-          env: {
-            CUA_DRIVER_EMBEDDED: '1',
-            CUA_DRIVER_HOST_BUNDLE_ID: 'ai.bimax.cli',
-            CUA_DRIVER_RS_TELEMETRY_ENABLED: '0',
-            CUA_TELEMETRY_ENABLED: '0',
-          },
-        });
-        await client.callTool({ name: 'start_session', arguments: { session: this.session } });
-        // Cursor policy follows the delivery mode. VISIBLE mode drives the ONE real macOS cursor, so
-        // the sidecar overlay is hidden (never two pointers). BACKGROUND mode (the OpenAI/ChatGPT
-        // computer-use style: screenshot → pixel action → screenshot, delivered synthetically without
-        // stealing focus) never moves the real cursor — so we SHOW the sidecar's own agent cursor so
-        // the user can see where the agent is acting, including while they work in another window
-        // (the PiP preview mirrors that same surface).
-        const showAgentCursor = cfg.computerVisible === false;
-        try {
-          await client.callTool({
-            name: 'set_agent_cursor_enabled',
-            arguments: { enabled: showAgentCursor, cursor_id: this.session },
-          });
-        } catch { /* pinned driver supports this; older local overrides remain usable */ }
-        return client;
-      })(), COLD_START_TIMEOUT_MS, 'Bimax Computer Use driver start')
-        .then(client => {
-          // Detect a crashed/exited sidecar the moment it happens rather than waiting for the
-          // next action to hang out a full RPC timeout before discovering the connection is dead.
-          client.onclose = () => { if (this.clientPromise === promise) this.clientPromise = null; };
-          cliEvents.emit('status', 'Native driver ready');
-          return client;
-        })
-        .catch(err => {
-          if (this.clientPromise === promise) this.clientPromise = null;
-          throw err;
-        });
-      this.clientPromise = promise;
-    }
-    return this.clientPromise;
-  }
-
-  private async call(name: string, args: Record<string, unknown> = {}): Promise<any> {
-    const promise = this.client();
-    const client = await promise;
-    this.lastActivityAt = Date.now(); // heartbeat
-    cliEvents.emit('status', `Running ${name}…`);
-    const result = await withTimeout<any>(
-      client.callTool({ name, arguments: args }),
-      RPC_TIMEOUT_MS,
-      `Bimax Computer Use '${name}'`,
-    ).catch((err: any) => {
-      // A wedged/crashed sidecar leaves clientPromise resolved-but-dead, and nothing else clears
-      // it — but only a dead transport or our own timeout condemns the CONNECTION. An app-level
-      // RPC rejection from a healthy sidecar must not cost the whole session (element caches,
-      // plus a fresh cold start) on the next action.
-      if (isDeadConnectionError(err) || String(err?.message || '').includes('timed out after')) {
-        if (this.clientPromise === promise) this.clientPromise = null;
-        // Close the condemned client: a timed-out action could otherwise still land on the
-        // user's desktop later, unsupervised, and an unclosed client leaks the sidecar process.
-        try { Promise.resolve(client.close?.()).catch(() => { /* best-effort teardown */ }); }
-        catch { /* best-effort teardown */ }
-      }
-      throw err;
-    });
-    const data = bimaxBrand(mcpStructured(result));
-    if (result?.isError) {
-      const detail = bimaxBrand(mcpText(result)).trim();
-      throw new Error(detail || `${name} failed`);
-    }
-    return data;
+  /** One sidecar RPC, via the extracted transport (spawn/handshake/timeouts live there). */
+  private call(name: string, args: Record<string, unknown> = {}): Promise<any> {
+    return this.transport.call(name, args);
   }
 
   /** Delivery mode for acting verbs: an explicit request wins; otherwise the user's visibility
@@ -1025,48 +913,48 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     catch { return 'background'; }
   }
 
-  private defaultRecordingDir(cwd: string): string {
-    const root = path.join(cwd, '.bimax', 'computer', 'recordings');
-    fs.mkdirSync(root, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    return path.join(root, `run-${stamp}-${process.pid}`);
-  }
+  /** Single-use whole-display approval tokens. Minted ONLY by authorizeFullDisplayRecording()
+   * (called by the tool layer AFTER a governor-approved whole-display prompt) and consumed by the
+   * next record_start. Unforgeable by the model: its arguments are stripped of any token field. */
+  private readonly fullDisplayTokens = new Set<string>();
 
-  private async startRecording(cwd: string, outputDir?: string, recordVideo = true): Promise<any> {
-    if (this.recordingStarted) return { enabled: true, output_dir: this.recordingDir };
-    // Bound recording storage before adding another run — hours-long sessions must not fill the disk.
-    sweepRecordings(path.join(cwd, '.bimax', 'computer', 'recordings'), { keepRuns: 5 });
-    const dir = path.resolve(outputDir || this.defaultRecordingDir(cwd));
-    fs.mkdirSync(dir, { recursive: true });
-    // Stage 8: scope the capture to the agent's own window when one exists, so an hours-long
-    // recording never silently mirrors unrelated windows. Passing pid/window_id is best-effort — a
-    // driver that ignores them still records the display — so the scope/captureSafe we report is the
-    // TRUTH about what was requested, and captureSafe is false whenever we fall back to whole-display.
+  /** What the next record_start would capture — lets the approval layer phrase the prompt honestly
+   * BEFORE any recording starts. */
+  public recordingScopePreview(): { scope: string; captureSafe: boolean } {
     const scoped = this.captureSurface();
-    this.recordingScope = scoped ? scoped.label : 'whole display';
-    this.recordingCaptureSafe = !!scoped;
-    try {
-      const data = await this.call('start_recording', {
-        output_dir: dir, record_video: recordVideo,
-        ...(scoped ? { pid: scoped.pid, window_id: scoped.windowId } : {}),
-      });
-      this.recordingStarted = true;
-      this.recordingDir = dir;
-      this.recordingError = undefined;
-      return data;
-    } catch (err: any) {
-      this.recordingError = bimaxBrand(String(err?.message || err)).slice(0, 500);
-      throw err;
-    }
+    return { scope: scoped ? scoped.label : 'whole display', captureSafe: !!scoped };
   }
 
-  private async ensureAutoRecording(cwd: string): Promise<void> {
-    if (this.recordingStarted || this.recordingError) return;
-    try {
-      if ((await loadConfig()).computerRecord !== false) await this.startRecording(cwd, undefined, true);
-    } catch (err: any) {
-      cliEvents.emit('status', `Screen recording unavailable: ${bimaxBrand(String(err?.message || err)).slice(0, 160)}`);
+  /** Mint a single-use whole-display recording approval token. MUST only be called after the user
+   * explicitly approved whole-display capture (the governor prompt in the tool layer). */
+  public authorizeFullDisplayRecording(): string {
+    const token = crypto.randomBytes(16).toString('hex');
+    this.fullDisplayTokens.add(token);
+    return token;
+  }
+
+  /**
+   * Explicit recording start (the ONLY path that can begin a recording — there is no auto-record):
+   *   - requires the opt-in `computerRecord` config to be true;
+   *   - scopes the capture to the agent's own window when one exists;
+   *   - refuses whole-display VIDEO capture unless a valid governor-issued single-use token is
+   *     presented (a model-supplied boolean or guessed token can never authorize it).
+   */
+  private async startRecording(cwd: string, cmd: DesktopCommand): Promise<any> {
+    const cfg = await loadConfig().catch(() => ({} as any));
+    if (cfg.computerRecord !== true) {
+      throw new Error('screen recording is disabled — it is opt-in. Enable it first (/computer record on), then retry record_start.');
     }
+    // Consume the token exactly once, and only if it was genuinely minted by this runtime.
+    const approvedFullDisplay = !!cmd.fullDisplayToken && this.fullDisplayTokens.delete(cmd.fullDisplayToken);
+    return this.recording.start({
+      cwd,
+      outputDir: cmd.outputDir,
+      recordVideo: cmd.recordVideo !== false,
+      approveFullDisplay: approvedFullDisplay,
+      scopeTarget: this.captureSurface(),
+      call: (name, args) => this.call(name, args),
+    });
   }
 
   private resolveObservedElement(query: string, target: ComputerTarget): { elementToken?: string; elementIndex?: number; label?: string; role?: string; frame?: unknown } {
@@ -1167,28 +1055,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     };
   }
 
+  /** Delegates to the extracted TargetOwnership (target.ts) — the one authority on the recipient. */
   private targetFor(cmd: DesktopCommand): ComputerTarget | null {
-    // Once open() establishes a target, that identity is runtime-owned until close/open changes it.
-    // Models routinely repeat ids from older observations; trusting those ids ahead of this.target
-    // sent System Settings actions from freshly-opened window 5151 back to stale window 5142.
-    // A different app must be opened explicitly so the governor and the runtime agree on the input
-    // recipient. `windows` remains a read-only escape hatch for inspecting another explicit pid.
-    if (this.target && cmd.action !== 'open') {
-      if (cmd.action === 'windows' && cmd.pid && Number(cmd.pid) !== this.target.pid) {
-        return { app: cmd.app?.trim() || '', pid: Number(cmd.pid), windowId: Number(cmd.windowId || 0) || undefined };
-      }
-      if (cmd.app?.trim() && !appNamesMatch(cmd.app, this.target.app)) {
-        throw new Error(`target app mismatch: ${this.target.app} is active; open ${cmd.app.trim()} before controlling it`);
-      }
-      return { ...this.target };
-    }
-    const pid = Number(cmd.pid || 0);
-    if (!pid) return null;
-    return {
-      app: cmd.app?.trim() || '',
-      pid,
-      windowId: Number(cmd.windowId || 0) || undefined,
-    };
+    return this.targets.resolveFor(cmd);
   }
 
   private screenshotPath(cwd: string): string {
@@ -1287,7 +1156,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       : undefined;
     // Refresh the surface's bounds from the geometry we just observed, so window moves/resizes keep
     // the tracked surface (and any PiP built on it) aligned with the real window.
-    if (this.target?.pid === target.pid) this.syncSurface();
+    if (this.targets.owns(target.pid)) this.syncSurface();
     const frameHash = cmd.includeScreenshot === false ? undefined : this.screenshotHash(screenshotFile);
     // Any fresh frame becomes the baseline the next action's outcome is judged against.
     if (frameHash) this.prevFrameHash = frameHash;
@@ -1313,7 +1182,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       // visible window before capture; otherwise a launch-time 33px menu proxy remains pinned and
       // every later screenshot is a black strip even though the real document is on screen.
       const refreshed = await this.refreshTargetWindow(target);
-      if (this.target?.pid === target.pid) this.target = refreshed;
+      this.targets.retargetWindow(target.pid, refreshed.windowId);
       // Capture the pre-action baseline BEFORE observeTarget overwrites it with the fresh frame.
       const prev = this.prevFrameHash;
       const observed = await this.observeTarget(refreshed, cwd, session, { action: 'observe', maxElements: 24 });
@@ -1324,12 +1193,19 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         expectedApp: target.app || undefined, actualApp: observed.app || undefined,
         targetWindowId: refreshed.windowId, actualWindowId: observed.windowId,
       });
-      if (progressCheck.outcome === 'no-change') this.noChangeStreak++; else this.noChangeStreak = 0;
+      const verb = this.activeAction || 'action';
+      // Only genuinely state-mutating verbs feed the no-progress accounting. Verbs that are
+      // legitimately visually static (wait, hover, move, a mouse_up completing a gesture) must not
+      // accrue a false "stuck" state just because the pixels didn't change.
+      const countsForProgress = ['click', 'type', 'key', 'set_value', 'drag', 'scroll', 'open'].includes(verb);
+      if (countsForProgress) {
+        if (progressCheck.outcome === 'no-change') this.noChangeStreak++; else this.noChangeStreak = 0;
+      }
       // Durable, bounded record of what the agent did and whether it worked (Stage 7).
-      this.recordAction(this.activeAction || 'action', target.app, progressCheck.outcome);
+      this.recordAction(verb, target.app, progressCheck.outcome);
       // Feed the outcome to the bounded recovery authority (Stage 6). Its decision is surfaced to the
       // model, and once it latches stop-failure the run() guard refuses further acting verbs.
-      const recoveryDecision = this.recovery.record(progressCheck.outcome);
+      const recoveryDecision: RecoveryDecision = countsForProgress ? this.recovery.record(progressCheck.outcome) : 'continue';
       const recoveryHint = recoveryDecision === 'stop-failure'
         ? `no visible progress after repeated attempts — stopping to avoid a loop; re-observe (screenshot/observe) and target a different element, or ask the user`
         : recoveryDecision === 'escalate'
@@ -1341,7 +1217,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         screenshot: observed.screenshot, frameHash: observed.frameHash,
         width: observed.width, height: observed.height,
         elements: observed.elements, degraded: observed.degraded, windowId: refreshed.windowId,
-        progressCheck, recoveryDecision, ...(recoveryHint ? { recoveryHint } : {}),
+        progressCheck, actionResult: toActionResult(progressCheck),
+        recoveryDecision, ...(recoveryHint ? { recoveryHint } : {}),
       };
     } catch (err: any) {
       return { visualEvidenceError: bimaxBrand(String(err?.message || err)).slice(0, 500) };
@@ -1419,7 +1296,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   public async frontmostApp(): Promise<string> {
-    if (!this.driverPath()) return this.fallback.frontmostApp();
+    if (!this.transport.available()) return this.fallback.frontmostApp();
     try {
       const data = await this.call('list_apps');
       const active = (Array.isArray(data?.apps) ? data.apps : []).find((app: any) => app.active);
@@ -1430,15 +1307,15 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   public async run(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
-    if (!this.driverPath()) return this.fallback.run(cmd, ctx);
+    return ensureActionResult(await this.runInner(cmd, ctx));
+  }
+
+  private async runInner(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
+    if (!this.transport.available()) return this.fallback.run(cmd, ctx);
     const cwd = ctx?.cwd || process.cwd();
     this.lastCwd = cwd;
     this.activeAction = cmd.action;
     const driver = 'bimax-computer-use 0.8.3';
-    // An explicit re-observation is the agent re-orienting itself — the corrective step the recovery
-    // authority asks for. It clears any latched no-progress stop so the agent may act again on a
-    // fresh read (the automatic post-action observe does NOT reset it; only a deliberate one does).
-    if (cmd.action === 'observe' || cmd.action === 'screenshot') this.recovery.reset();
     try {
       if (ctx?.signal?.aborted) throw new Error('computer action aborted');
       const target = this.targetFor(cmd);
@@ -1482,10 +1359,6 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         }
       }
 
-      if (['open', 'click', 'type', 'key', 'set_value', 'drag', 'scroll'].includes(cmd.action)) {
-        await this.ensureAutoRecording(cwd);
-      }
-
       switch (cmd.action) {
         case 'status': {
           const data = await this.call('health_report');
@@ -1504,11 +1377,11 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return { ok: true, action: cmd.action, driver, ...this.lastStatus, details: data, summary: 'Bimax Computer Use permission check completed' };
         }
         case 'record_start': {
-          const data = await this.startRecording(cwd, cmd.outputDir, cmd.recordVideo !== false);
+          const data = await this.startRecording(cwd, cmd);
           return {
             ok: true, action: cmd.action, driver, details: data,
-            recording: { enabled: true, outputDir: this.recordingDir, scope: this.recordingScope, captureSafe: this.recordingCaptureSafe },
-            summary: `computer-use recording started${cmd.recordVideo === false ? '' : ' with screen video'} → ${this.recordingDir} (capturing ${this.recordingScope}${this.recordingCaptureSafe ? '' : ' — may include unrelated windows'})`,
+            recording: { enabled: true, outputDir: this.recording.outputDir, scope: this.recording.scope, captureSafe: this.recording.captureSafe },
+            summary: `computer-use recording started${cmd.recordVideo === false ? '' : ' with screen video'} → ${this.recording.outputDir} (capturing ${this.recording.scope}${this.recording.captureSafe ? '' : ' — WHOLE DISPLAY, explicitly approved'})`,
           };
         }
         case 'record_status': {
@@ -1517,23 +1390,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return {
             ok: true, action: cmd.action, driver, details: data,
             recording: {
-              enabled, outputDir: String(data?.output_dir || this.recordingDir || '') || undefined,
+              enabled, outputDir: String(data?.output_dir || this.recording.outputDir || '') || undefined,
               videoPath: String(data?.last_video_path || '') || undefined,
-              error: String(data?.last_error || this.recordingError || '') || undefined,
-              scope: enabled ? this.recordingScope : undefined,
-              captureSafe: enabled ? this.recordingCaptureSafe : undefined,
+              error: String(data?.last_error || this.recording.error || '') || undefined,
+              scope: enabled ? this.recording.scope : undefined,
+              captureSafe: enabled ? this.recording.captureSafe : undefined,
             },
-            summary: enabled ? `computer-use recording active → ${data?.output_dir || this.recordingDir}` : 'computer-use recording is off',
+            summary: enabled ? `computer-use recording active → ${data?.output_dir || this.recording.outputDir}` : 'computer-use recording is off',
           };
         }
         case 'record_stop': {
           const data = await this.call('stop_recording');
-          this.recordingStarted = false;
+          this.recording.markStopped();
           const videoPath = String(data?.last_video_path || data?.video_path || '') || undefined;
           return {
             ok: true, action: cmd.action, driver, details: data,
-            recording: { enabled: false, outputDir: this.recordingDir, videoPath },
-            summary: `computer-use recording stopped${videoPath ? ` → ${videoPath}` : this.recordingDir ? ` → ${this.recordingDir}` : ''}`,
+            recording: { enabled: false, outputDir: this.recording.outputDir, videoPath },
+            summary: `computer-use recording stopped${videoPath ? ` → ${videoPath}` : this.recording.outputDir ? ` → ${this.recording.outputDir}` : ''}`,
           };
         }
         case 'apps': {
@@ -1551,14 +1424,16 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             ...(cmd.newInstance ? { creates_new_application_instance: true } : {}),
           });
           const window = Array.isArray(data?.windows) ? data.windows[0] : undefined;
-          this.target = {
+          let opened: ComputerTarget = {
             app: String(data?.name || cmd.app || cmd.bundleId || ''),
             pid: Number(data?.pid || 0),
             windowId: Number(window?.window_id || 0) || undefined,
           };
-          if (!this.target.pid) throw new Error(`opened ${this.target.app || 'application'} but received no target pid`);
+          if (!opened.pid) throw new Error(`opened ${opened.app || 'application'} but received no target pid`);
           // Never surface a bundle id or an empty "?" as the app name — resolve the human name.
-          this.target.app = await this.resolveAppName(this.target.pid, this.target.app);
+          opened.app = await this.resolveAppName(opened.pid, opened.app);
+          // open() establishes ownership: from here every action routes to THIS app/window.
+          this.targets.set(opened);
           // Resume: if this is the first open of a fresh process and a persisted session for this
           // same app is on disk, restore its bounded history before this open records onto it.
           this.maybeResumeHistory(cwd);
@@ -1577,17 +1452,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             let activated = false;
             for (let attempt = 0; attempt < 4 && !activated; attempt++) {
               try {
-                await this.call('bring_to_front', { pid: this.target.pid, window_id: this.target.windowId });
+                await this.call('bring_to_front', { pid: opened.pid, window_id: opened.windowId });
                 activated = true;
               } catch {
                 await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
-                this.target = await this.refreshTargetWindow(this.target);
+                opened = await this.refreshTargetWindow(opened);
+                this.targets.set(opened);
               }
             }
             if (!activated) {
               // Some apps publish their process before AppKit accepts activation. `open -a` is the
               // native foreground contract and handles hidden/launching applications reliably.
-              const nativeOpen = await this.fallback.run({ action: 'open', app: this.target.app }, ctx);
+              const nativeOpen = await this.fallback.run({ action: 'open', app: opened.app }, ctx);
               if (!nativeOpen.ok) throw new Error(nativeOpen.error || nativeOpen.summary);
             }
             await new Promise(resolve => setTimeout(resolve, 250));
@@ -1595,29 +1471,33 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             // (Electron/Catalyst, e.g. WhatsApp) accept the call yet leave the terminal frontmost.
             // Verify the truth; if a different app is positively still in front, escalate to the
             // native `open -a` contract and re-check. Only then do we trust that it is focused.
-            let stillWrong = await this.frontmostMismatch(this.target.app);
+            let stillWrong = await this.frontmostMismatch(opened.app);
             if (stillWrong) {
-              try { await this.fallback.run({ action: 'open', app: this.target.app }, ctx); } catch { /* re-checked below */ }
+              try { await this.fallback.run({ action: 'open', app: opened.app }, ctx); } catch { /* re-checked below */ }
               await new Promise(resolve => setTimeout(resolve, 300));
-              stillWrong = await this.frontmostMismatch(this.target.app);
+              stillWrong = await this.frontmostMismatch(opened.app);
             }
             if (stillWrong) {
-              frontmostWarning = `${this.target.app} was launched but ${stillWrong} is still frontmost — its window may be hidden or blocked; screenshots and clicks may land on the wrong app until it is brought forward`;
+              frontmostWarning = `${opened.app} was launched but ${stillWrong} is still frontmost — its window may be hidden or blocked; screenshots and clicks may land on the wrong app until it is brought forward`;
               cliEvents.emit('status', frontmostWarning);
             }
-            this.target = await this.refreshTargetWindow(this.target);
-          } else if (!this.target.windowId) {
-            this.target = await this.refreshTargetWindow(this.target);
+            opened = await this.refreshTargetWindow(opened);
+            this.targets.set(opened);
+          } else if (!opened.windowId) {
+            opened = await this.refreshTargetWindow(opened);
+            this.targets.set(opened);
           }
-          const evidence = this.target.windowId
-            ? await this.postActionEvidence(this.target, cwd, session)
+          const evidence = opened.windowId
+            ? await this.postActionEvidence(opened, cwd, session)
             : { visualEvidenceError: 'opened application has no capturable window yet' };
+          // postActionEvidence may have re-acquired a better window — read the owned truth back.
+          opened = this.targets.current() ?? opened;
           // The agent owns input on this surface only when it is genuinely frontmost in visible mode.
           this.syncSurface({ focusOwner: (delivery === 'foreground' && !frontmostWarning) ? 'agent' : 'none' });
           return {
-            ok: true, action: cmd.action, driver, app: this.target.app, pid: this.target.pid,
-            windowId: this.target.windowId, details: data, ...evidence, frontmostWarning,
-            summary: `opened ${this.target.app} as pid ${this.target.pid}${this.target.windowId ? ` window ${this.target.windowId}` : ''}${frontmostWarning ? `; WARNING: ${frontmostWarning}` : '; fresh screen attached'}`,
+            ok: true, action: cmd.action, driver, app: opened.app, pid: opened.pid,
+            windowId: opened.windowId, details: data, ...evidence, frontmostWarning,
+            summary: `opened ${opened.app} as pid ${opened.pid}${opened.windowId ? ` window ${opened.windowId}` : ''}${frontmostWarning ? `; WARNING: ${frontmostWarning}` : '; fresh screen attached'}`,
           };
         }
         case 'observe':
@@ -1631,14 +1511,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             const refreshed = await this.refreshTargetWindow(capture);
             if (refreshed.windowId) {
               capture = refreshed;
-              if (this.target?.pid === capture.pid) this.target = refreshed;
+              this.targets.retargetWindow(capture.pid, refreshed.windowId);
             }
           }
           if (!capture?.windowId) {
             if (cmd.action === 'screenshot') return this.fallback.run(cmd, ctx);
             throw new Error('observe needs pid + windowId; open or select an application window first');
           }
-          return this.observeTarget(capture, cwd, session, cmd);
+          const observed = await this.observeTarget(capture, cwd, session, cmd);
+          // An explicit re-observation that actually produced fresh evidence (a captured frame) is
+          // the corrective step the recovery authority requires — only then does a latched
+          // no-progress stop clear. Merely issuing observe/screenshot (or a capture that failed to
+          // produce a frame) does NOT reset or bypass the latch.
+          if (observed.ok && observed.frameHash) this.recovery.reset();
+          return observed;
         }
         case 'cursor': {
           if (delivery === 'foreground') return this.fallback.run({ action: 'cursor' }, ctx);
@@ -1911,17 +1797,51 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return this.pointerPrimitive(cmd.action, target, cmd, cwd, session, ctx);
         }
         case 'close': {
+          // close = close the SELECTED WINDOW only (Cmd+W / Ctrl+W). It must never quit the whole
+          // application — that is the separate, high-impact quit_app action below.
           if (!target) return this.fallback.run(cmd, ctx);
+          const closingWindowId = target.windowId;
+          const keys = process.platform === 'darwin' ? ['cmd', 'w'] : ['ctrl', 'w'];
+          await this.call('hotkey', { pid: target.pid, window_id: closingWindowId, session, keys, delivery_mode: 'background' });
+          await new Promise(resolve => setTimeout(resolve, 350));
+          const windows = await this.call('list_windows', { pid: target.pid });
+          const remaining: any[] = Array.isArray(windows?.windows) ? windows.windows : [];
+          if (closingWindowId && remaining.some((w: any) => Number(w?.window_id) === closingWindowId)) {
+            throw new Error(`window ${closingWindowId} of ${target.app || `pid ${target.pid}`} did not close after Cmd+W — it may have an unsaved-changes prompt open; observe to see its current state`);
+          }
+          // The app keeps running. Retarget to its next window when one exists; otherwise drop the target.
+          const next = remaining.find((w: any) => w?.is_on_screen !== false && Number(w?.bounds?.width || 0) > 100);
+          if (next && this.targets.owns(target.pid)) {
+            this.targets.retargetWindow(target.pid, Number(next.window_id) || undefined);
+            this.syncSurface();
+          } else if (this.targets.owns(target.pid) && remaining.length === 0) {
+            this.surfaces.remove(`native:${target.pid}`);
+            this.targets.clear();
+          }
+          return {
+            ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: closingWindowId,
+            actionResult: { delivered: true, observed: 'confirmed', postcondition: { query: 'target window no longer listed', matched: true }, confidence: 'proven' },
+            summary: `closed window ${closingWindowId ?? '?'} of ${target.app || `pid ${target.pid}`} (application still running${remaining.length ? `, ${remaining.length} window(s) remain` : ''})`,
+          };
+        }
+        case 'quit_app': {
+          // High impact: quits the ENTIRE application and may discard unsaved state. The tool layer
+          // gates this behind an explicit approval; the runtime verifies the quit actually happened.
+          if (!target) return this.fallback.run({ ...cmd, action: 'quit_app' }, ctx);
           const keys = process.platform === 'darwin' ? ['cmd', 'q'] : ['alt', 'f4'];
           await this.call('hotkey', { pid: target.pid, window_id: target.windowId, session, keys, delivery_mode: 'background' });
           await new Promise(resolve => setTimeout(resolve, 350));
           const windows = await this.call('list_windows', { pid: target.pid });
           if (Array.isArray(windows?.windows) && windows.windows.length > 0) {
-            throw new Error(`${target.app || `pid ${target.pid}`} did not close after the cooperative quit shortcut`);
+            throw new Error(`${target.app || `pid ${target.pid}`} did not quit after the cooperative quit shortcut — it may be showing an unsaved-changes prompt; observe to see its current state`);
           }
           this.surfaces.remove(`native:${target.pid}`);
-          this.target = null;
-          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, summary: `closed ${target.app || `pid ${target.pid}`} and verified that its windows disappeared` };
+          this.targets.clear();
+          return {
+            ok: true, action: cmd.action, driver, app: target.app, pid: target.pid,
+            actionResult: { delivered: true, observed: 'confirmed', postcondition: { query: 'application windows no longer listed', matched: true }, confidence: 'proven' },
+            summary: `quit ${target.app || `pid ${target.pid}`} and verified that its windows disappeared`,
+          };
         }
         case 'move': {
           if (cmd.x == null || cmd.y == null) throw new Error('move needs x and y');
@@ -1942,7 +1862,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return { ok: false, action: cmd.action, driver, error: `unsupported computer action: ${String(cmd.action)}`, summary: `${cmd.action} failed` };
       }
     } catch (err: any) {
-      return { ok: false, action: cmd.action, driver, error: bimaxBrand(String(err?.message || err)).slice(0, 1000), summary: `${cmd.action} failed` };
+      const error = bimaxBrand(String(err?.message || err)).slice(0, 1000);
+      return {
+        ok: false, action: cmd.action, driver, error,
+        actionResult: { delivered: false, observed: 'failed', confidence: 'unknown', failureReason: error },
+        summary: `${cmd.action} failed`,
+      };
     }
   }
 }

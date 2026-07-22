@@ -41,7 +41,7 @@ func (m model) nextTick() tea.Cmd {
 	}
 	// Also run the fast cadence while sub-agents are working in the BACKGROUND — the parent turn may
 	// have already ended (so m.working() is false), but their live panel still needs to animate.
-	if m.working() || m.subAgentsRunning() || !m.resizeAt.IsZero() {
+	if m.working() || m.subAgentsRunning() {
 		return tickCmd(50 * time.Millisecond)
 	}
 	return tickCmd(500 * time.Millisecond)
@@ -133,10 +133,12 @@ type model struct {
 	histIdx   int
 	histStash string
 
-	lines        []string // bounded in-memory copy of the transcript (kept only for Ctrl+F search)
-	printQueue   []string // committed lines to flush into the terminal's native scrollback (tea.Println)
-	pendingClear bool     // /clear requested: wipe the physical screen + scrollback before re-banner
-	started      bool     // true once any transcript line has been emitted (for inter-turn spacing)
+	lines   []string // the committed transcript (single source of truth; rendered by the viewport View, searched by Ctrl+F)
+	started bool     // true once any transcript line has been emitted (for inter-turn spacing)
+	// Alt-screen viewport scroll: 0 = pinned to the bottom (live tail); >0 = rows scrolled up into
+	// the transcript. Clamped in View; PgUp/PgDn drive it. New content keeps the position stable
+	// unless pinned to bottom (scrollOff == 0), which follows the live tail.
+	scrollOff int
 	// Tool calls for the current consecutive run, in START order, each updated IN PLACE by id as its
 	// result arrives (pending → running → done/error). One ordered list — not two groups — so a tool
 	// occupies a single fixed slot for its whole lifecycle and never jumps position when it resolves;
@@ -165,8 +167,6 @@ type model struct {
 	engineGone      bool
 	engineStalled   bool
 	busy            bool      // a turn is executing — Ctrl+C cancels it instead of quitting
-	resizeAt        time.Time // last WindowSizeMsg; non-zero = a resize is settling (repaint on the tick after 250ms)
-	resizeNarrowed  bool      // the settling gesture narrowed at some point → ghosts possible → repair on settle
 	interrupting    bool      // interrupt sent, turn not yet ended → indicator shows "Stopping…" (truthful state)
 	quitting        bool      // engine asked us to shut down — quit after this message
 	cwd             string    // working directory, updated by cwd_changed
@@ -376,8 +376,6 @@ func cwdOrWD(p string) string {
 }
 
 func (m model) Init() tea.Cmd {
-	// The screen + scrollback were wiped in main() before the program started (launch scroll-lock),
-	// so the welcome banner prints at the top of a clean scrollback. No further clear needed here.
 	return tea.Batch(
 		waitForEngine(m.engine),
 		textarea.Blink,
@@ -386,53 +384,11 @@ func (m model) Init() tea.Cmd {
 	)
 }
 
-// Update wraps the real handler (update) and flushes any committed transcript lines it queued into
-// the terminal's native scrollback via tea.Println — so committed output scrolls/copies natively
-// while the redrawn View stays just the live region. /clear additionally wipes screen + scrollback.
+// Update delegates to the real handler. The alternate-screen renderer needs no commit/flush
+// wrapper: the transcript lives in m.lines and every frame is a pure function of state (View),
+// so committed output is never cleared, reprinted, or repaired — resize simply reflows state.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	res, cmd := m.update(msg)
-	nm, ok := res.(model)
-	if !ok {
-		return res, cmd
-	}
-	// /clear: wipe the visible screen BEFORE the new banner is flushed, else the banner would be erased.
-	// tea.Sequence guarantees the order. (tea.ClearScreen clears only the visible screen — scrollback
-	// is never wiped; the terminal's history belongs to the user.)
-	var clearCmd tea.Cmd
-	if nm.pendingClear {
-		nm.pendingClear = false
-		clearCmd = tea.ClearScreen
-	}
-	if len(nm.printQueue) == 0 {
-		switch {
-		case clearCmd == nil:
-			return nm, cmd
-		case cmd == nil:
-			return nm, clearCmd
-		default:
-			return nm, tea.Batch(clearCmd, cmd)
-		}
-	}
-	// COMMIT wrap. Must stay in parity with the LIVE wrap in View() (ansi.Hardwrap at width-1):
-	// content that fits and renders clean while streaming must fit and render clean once committed
-	// to scrollback, or coloured backgrounds bleed to column 0 on a phantom continuation row. The
-	// invariant (a line already within budget is never re-wrapped) is enforced for BOTH paths by
-	// TestWrapPathParityNoBleed — preserve it if you touch either wrap.
-	for i, line := range nm.printQueue {
-		if nm.width > 2 {
-			nm.printQueue[i] = indentAwareWrap(line, nm.width-2)
-		}
-	}
-	joined := strings.Join(nm.printQueue, "\n")
-	nm.printQueue = nil
-	printCmd := tea.Println(joined)
-	if clearCmd != nil {
-		printCmd = tea.Sequence(clearCmd, printCmd)
-	}
-	if cmd == nil {
-		return nm, printCmd
-	}
-	return nm, tea.Batch(printCmd, cmd)
+	return m.update(msg)
 }
 
 func indentAwareWrap(text string, width int) string {
@@ -501,21 +457,10 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// In inline mode, resizing NARROWER makes previously painted live-region rows wrap, breaking
-		// the renderer's cursor math and leaving ghost overlay frames. The old fix wiped the ENTIRE
-		// scrollback (\033[3J) and reprinted the whole transcript — destroying the user's pre-BiMax
-		// terminal history on every resize. Instead: debounce until the drag settles (see tickMsg),
-		// then clear only the visible screen and reprint just the last screenful. The user's
-		// scrollback — theirs and ours — is never touched.
-		//
-		// Only a narrowing needs this: on a widen (or a height-only change) no painted row re-wraps,
-		// so there are no ghosts to clear — repainting there only added a duplicate screenful to the
-		// scrollback per gesture. A drag that dips narrower at ANY point still repairs (the flag
-		// latches until the debounce fires).
-		if msg.Width < prevWidth {
-			m.resizeNarrowed = true
-		}
-		m.resizeAt = time.Now()
+		// Alternate-screen renderer: resize is a pure REFLOW of state. View() re-wraps the
+		// transcript from its logical lines at the new width on the next frame; nothing is
+		// cleared, reprinted, or repaired, and no settle/debounce machinery exists.
+		_ = prevWidth
 		return m, nil
 
 	case spinner.TickMsg:
@@ -543,25 +488,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.welcomeBy.IsZero() && time.Now().After(m.welcomeBy) {
 			m.welcomeBy = time.Time{}
 			m.showWelcome()
-		}
-		// Resize settled (no WindowSizeMsg for 250ms): clear the visible screen once to remove any
-		// ghost frames from the drag, and reprint only the last screenful of transcript so the view
-		// isn't left blank. Never wipes scrollback — bounded duplication (≤1 screenful per gesture)
-		// beats destroying the user's terminal history. Skipped entirely when the gesture never
-		// narrowed (widen / height-only): nothing re-wrapped, so there are no ghosts to repair.
-		if !m.resizeAt.IsZero() && time.Since(m.resizeAt) > 250*time.Millisecond {
-			m.resizeAt = time.Time{}
-			if m.resizeNarrowed {
-				m.resizeNarrowed = false
-				m.pendingClear = true
-				if n := len(m.lines); n > 0 && m.height > 1 {
-					keep := m.height - 1
-					if keep > n {
-						keep = n
-					}
-					m.printQueue = append(m.printQueue, m.lines[n-keep:]...)
-				}
-			}
 		}
 		// 50ms animation chrome: elapsed clock + smooth shimmer/pulse animation.
 		if m.busy && !m.busyStart.IsZero() {
@@ -733,7 +659,6 @@ func (m *model) append(line string) {
 	if !m.flushing {
 		m.flushToolRun()
 	}
-	m.printQueue = append(m.printQueue, line)
 	m.started = true
 	m.lines = append(m.lines, line)
 	if len(m.lines) > transcriptCap {
@@ -742,8 +667,8 @@ func (m *model) append(line string) {
 	}
 }
 
-// relayout / refresh are no-ops in inline mode — the committed transcript lives in the terminal's own
-// scrollback (printed via tea.Println), so there is no viewport buffer to rebuild. Kept so the many
+// relayout / refresh are no-ops — the transcript is state (m.lines) and every frame re-derives the
+// visible window from it, so there is no separate viewport buffer to rebuild. Kept so the many
 // existing m.relayout()/m.refresh() call sites don't need touching.
 func (m *model) relayout() {}
 func (m *model) refresh()  {}
@@ -761,46 +686,81 @@ func (m model) chromeLines() []string {
 	return append(c, m.belowSections()...)
 }
 
-// View renders ONLY the live region — the in-flight streamed answer plus the chrome. Everything
-// committed is already in the terminal's native scrollback (printed via tea.Println), so the terminal
-// owns the visible transcript, its NATIVE scrollbar, and scrolling. Redrawn in place each frame.
+// View renders the alternate-screen frame: the committed transcript re-wrapped at the CURRENT
+// width (resize REFLOWS state — committed output is never cleared, reprinted, or repaired), then
+// the live open stream block, with the chrome pinned at the bottom. Every frame is a pure
+// function of model state, so there is no cursor math to desync and no ghost frames to repair.
 func (m model) View() string {
-	var rows []string
-	// Only the trailing OPEN block is live — every closed block above it is already committed to
-	// scrollback (formatted). Render the open block through the SAME markdown renderer the commit
-	// uses, so when it closes and commits there is no raw→formatted snap. The turn's leading ⏺
-	// marker rides on the open block until the first block commits and takes it over.
+	// Chrome (pinned at the bottom): pending tool run + panels + prompt + footer.
+	chrome := strings.Join(m.chromeLines(), "\n")
+	if m.width > 1 {
+		// No chrome row may reach the last column (terminal auto-wrap would desync row math).
+		chrome = ansi.Hardwrap(chrome, m.width-1, true)
+	}
+	chromeRows := strings.Split(chrome, "\n")
+
+	// Body: the committed transcript (logical lines, re-wrapped at the current width every frame)
+	// plus the trailing OPEN markdown block of the in-flight answer.
+	var body []string
+	for _, line := range m.lines {
+		if m.width > 2 {
+			body = append(body, strings.Split(indentAwareWrap(line, m.width-2), "\n")...)
+		} else {
+			body = append(body, line)
+		}
+	}
 	if m.streamCommitted <= len(m.stream) {
 		if open := m.stream[m.streamCommitted:]; strings.TrimSpace(open) != "" {
 			md := indentLines(renderMarkdown(open), "  ")
 			if !m.turnAnswerStarted {
 				md = caretStyle.Render("● ") + strings.TrimPrefix(md, "  ")
 			}
-			rows = append(rows, md)
+			if m.width > 1 {
+				md = ansi.Hardwrap(md, m.width-1, true)
+			}
+			body = append(body, strings.Split(md, "\n")...)
 		}
 	}
-	rows = append(rows, m.chromeLines()...)
-	out := strings.Join(rows, "\n")
-	if m.width > 1 {
-		// Wrap the live region to width-1 so no line reaches the last column. A full-width line trips
-		// the terminal's auto-wrap at the last column (cursor slides to the next row), which desyncs
-		// Bubble Tea's inline cursor-up clear → the footer/meter/input "multiply" or leave a mirror box
-		// on resize/zoom. width-1 keeps logical rows == physical rows so the renderer clears exactly.
-		// Parity with the COMMIT wrap in Update() is enforced by TestWrapPathParityNoBleed — a line
-		// that fits here must also fit once committed, or the diff background bleeds to column 0.
-		out = ansi.Hardwrap(out, m.width-1, true)
-	}
-	// Never emit more rows than the terminal has, or the renderer pushes the top of the live region into
-	// scrollback every frame (the "footer multiplies itself" bug). Clip whole lines from the TOP, keeping
-	// the prompt + footer visible.
-	if m.height > 0 && m.width > 0 {
-		lines := strings.Split(out, "\n")
-		for len(lines) > 1 && len(lines) > m.height {
-			lines = lines[1:]
+
+	// Fit: chrome keeps the bottom (clipped from its own top only on tiny terminals); the
+	// transcript window gets the remaining rows, honoring the scroll offset (0 = live tail).
+	if m.height > 0 {
+		for len(chromeRows) > 1 && len(chromeRows) > m.height {
+			chromeRows = chromeRows[1:]
 		}
-		out = strings.Join(lines, "\n")
 	}
-	return out
+	avail := len(body)
+	if m.height > 0 {
+		avail = m.height - len(chromeRows)
+		if avail < 0 {
+			avail = 0
+		}
+	}
+	maxOff := len(body) - avail
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	off := m.scrollOff
+	if off > maxOff {
+		off = maxOff
+	}
+	start := len(body) - avail - off
+	if start < 0 {
+		start = 0
+	}
+	window := body[start : len(body)-off]
+
+	rows := make([]string, 0, len(window)+len(chromeRows)+1)
+	rows = append(rows, window...)
+	if off > 0 {
+		// Scrolled away from the live tail: say so, and how to get back.
+		rows = append(rows, dimStyle.Render(fmt.Sprintf("  ▲ scrolled up %d line(s) — PgDn to return to the live view", off)))
+		if m.height > 0 && len(rows)+len(chromeRows) > m.height && len(rows) > 1 {
+			rows = rows[1:] // keep the frame within the terminal height
+		}
+	}
+	rows = append(rows, chromeRows...)
+	return strings.Join(rows, "\n")
 }
 
 // belowSections is everything rendered below the transcript viewport, top → bottom, mirroring Ink's

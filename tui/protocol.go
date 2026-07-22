@@ -134,6 +134,50 @@ type UiSnapshot struct {
 	// Task workspaces (v3 additive): live + recent background tasks (shell, browser, builds) for
 	// the pinned task panel. nil/empty on older engines and when nothing is running.
 	Tasks []TaskStrip `json:"tasks"`
+	// v2 additive: recent saved sessions for the sidebar (resume via /resume <id>).
+	Sessions []SessionStrip `json:"sessions,omitempty"`
+	// v2 additive: Time Machine checkpoints for the History strip (restore via /rewind <id>).
+	Checkpoints []CheckpointStrip `json:"checkpoints,omitempty"`
+	// v2 additive: coarse git state for header pills.
+	Git *GitStrip `json:"git,omitempty"`
+	// v3 additive: live tool-fabric posture (ready vs deferred vs discovered vs MCP).
+	Tools *ToolsStrip `json:"tools,omitempty"`
+}
+
+// SessionStrip mirrors UiSnapshotSession (src/protocol/ui.snapshot.ts).
+type SessionStrip struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	StartedAt    string `json:"startedAt"`
+	MessageCount int    `json:"messageCount"`
+	Cwd          string `json:"cwd"`
+	Current      bool   `json:"current"`
+}
+
+// CheckpointStrip mirrors UiSnapshotCheckpoint (src/protocol/ui.snapshot.ts).
+type CheckpointStrip struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Ts    int64  `json:"ts"`
+	Auto  bool   `json:"auto"`
+}
+
+// GitStrip mirrors UiSnapshotGit (src/protocol/ui.snapshot.ts).
+type GitStrip struct {
+	Branch string `json:"branch"`
+	Dirty  int    `json:"dirty"`
+	Ahead  int    `json:"ahead"`
+	Behind int    `json:"behind"`
+}
+
+// ToolsStrip mirrors UiSnapshotTools (src/protocol/ui.snapshot.ts).
+type ToolsStrip struct {
+	Registered int  `json:"registered"`
+	Ready      int  `json:"ready"`
+	Deferred   int  `json:"deferred"`
+	Discovered int  `json:"discovered"`
+	Mcp        int  `json:"mcp"`
+	GraphReady bool `json:"graphReady"`
 }
 
 // TaskStrip mirrors UiSnapshotTask (src/protocol/ui.snapshot.ts): one live/recent task workspace.
@@ -158,9 +202,12 @@ type TaskStrip struct {
 // page (empty when no browser session is open), desktop driver posture, and whether untrusted
 // web content has entered the conversation window.
 type ComputerStrip struct {
-	BrowserURL string `json:"browserUrl"`
-	Desktop    string `json:"desktop"` // "connected" | "configured" | "not-installed"
-	Tainted    bool   `json:"tainted"`
+	BrowserURL   string   `json:"browserUrl"`
+	Desktop      string   `json:"desktop"` // "connected" | "configured" | "not-installed"
+	DesktopTools int      `json:"desktopTools"`
+	Vision       bool     `json:"vision"`
+	Grants       []string `json:"grants"`
+	Tainted      bool     `json:"tainted"`
 }
 
 // OutcomeStrip — the compact engine-owned completion snapshot sent by outcome_update. It is a

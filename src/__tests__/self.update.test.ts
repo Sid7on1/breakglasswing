@@ -100,9 +100,11 @@ describe('config', () => {
     process.env.BIMAX_UPDATE_CHECK = '0';
     expect(updateCheckEnabled()).toBe(false);
   });
-  it('manifest url defaults to the npm registry, overridable by env', () => {
+  it('manifest url defaults to the standalone-binary release feed, overridable by env', () => {
     delete process.env.BIMAX_UPDATE_MANIFEST_URL;
-    expect(manifestUrl()).toMatch(/registry\.npmjs\.org\/bimax/);
+    // The install channel is the standalone binary (install.sh) — never the npm registry.
+    expect(manifestUrl()).toMatch(/github\.com\/repos\/.*releases\/latest/);
+    expect(manifestUrl()).not.toMatch(/registry\.npmjs\.org/);
     process.env.BIMAX_UPDATE_MANIFEST_URL = 'https://example.com/m.json';
     expect(manifestUrl()).toBe('https://example.com/m.json');
   });

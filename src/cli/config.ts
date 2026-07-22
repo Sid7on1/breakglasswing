@@ -40,6 +40,9 @@ const ENV_OVERRIDES: Partial<Record<keyof CliConfig, string>> = {
   computerPip: 'BIMAX_COMPUTER_PIP',
   computerRecord: 'BIMAX_COMPUTER_RECORD',
   computerVisible: 'BIMAX_COMPUTER_VISIBLE',
+  // Lets tests/CI pin the approval cadence deterministically (the PTY approval scenarios depend
+  // on 'always'), and lets cautious users force per-action prompts without editing config files.
+  computerApprovals: 'BIMAX_COMPUTER_APPROVALS',
 };
 
 export type ConfigSource = 'default' | 'global' | 'project' | 'env';
@@ -117,7 +120,9 @@ export interface CliConfig {
   computerVisible: boolean;
   // Show a live post-action preview window from the embedded native driver.
   computerPip: boolean;
-  // Record computer-use turns plus a ScreenCaptureKit MP4 under .bimax/computer/recordings.
+  // Opt-in: allow computer-use screen recording. Recording NEVER starts implicitly — only an
+  // explicit record_start action (which itself requires approval, and separate explicit approval
+  // for whole-display capture) can begin one, and only when this is true.
   computerRecord: boolean;
 }
 
@@ -186,7 +191,9 @@ const DEFAULTS: CliConfig = {
   // silently miss clicks in System Settings.
   computerVisible: true,
   computerPip: false,
-  computerRecord: true,
+  // Privacy default: recording is OFF. Screen recording captures everything visible — it must be
+  // an explicit, approved user decision (record_start), never an ambient side effect of acting.
+  computerRecord: false,
 };
 
 let cached: CliConfig | null = null;

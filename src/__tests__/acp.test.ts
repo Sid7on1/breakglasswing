@@ -138,7 +138,11 @@ describe('AcpAgent', () => {
     const res = out[0].result;
     expect(res.protocolVersion).toBe(ACP_PROTOCOL_VERSION); // clamped down from 99
     expect(res.authMethods).toEqual([]);
-    expect(res.agentCapabilities.promptCapabilities.image).toBe(true);
+    // Truthful capabilities: promptText drops image blocks, so image support is NOT advertised.
+    expect(res.agentCapabilities.promptCapabilities.image).toBe(false);
+    expect(res.agentCapabilities.promptCapabilities.embeddedContext).toBe(true);
+    // Machine-readable session semantics: not concurrent, not isolated — supersede model.
+    expect(res.agentCapabilities.sessions).toEqual({ concurrent: false, isolated: false, model: 'single-supersede' });
   });
 
   it('session/new returns a session id from the driver', async () => {
@@ -253,5 +257,128 @@ describe('AcpAgent', () => {
     expect(driver.cancelled).toBe(true);
     const response = out.find((m) => m.id === 6);
     expect(response.result).toEqual({ stopReason: 'cancelled' });
+  });
+});
+
+describe('AcpAgent honesty + isolation (regressions)', () => {
+  it('rejects per-session MCP server configuration explicitly instead of silently ignoring it', async () => {
+    const out: any[] = [];
+    const conn = new JsonRpcConnection((line) => out.push(JSON.parse(line)));
+    new AcpAgent(conn, new FakeDriver());
+    conn.handleLine(JSON.stringify({
+      jsonrpc: '2.0', id: 20, method: AgentMethod.NewSession,
+      params: { cwd: '/tmp', mcpServers: [{ name: 's', command: 'x', args: [] }] },
+    }));
+    await new Promise((r) => setImmediate(r));
+    const res = out.find((m) => m.id === 20);
+    expect(res.error).toBeDefined();
+    expect(res.error.message).toMatch(/mcp/i);
+  });
+
+  it('rejects a concurrent prompt clearly (one turn at a time)', async () => {
+    const out: any[] = [];
+    const conn = new JsonRpcConnection((line) => out.push(JSON.parse(line)));
+    const driver = new FakeDriver();
+    let release!: () => void;
+    driver.prompt = () => new Promise<StopReason>((resolve) => { release = () => resolve('end_turn'); });
+    new AcpAgent(conn, driver);
+    conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 30, method: AgentMethod.Prompt, params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'a' }] } }));
+    await new Promise((r) => setImmediate(r));
+    conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 31, method: AgentMethod.Prompt, params: { sessionId: 'sess-2', prompt: [{ type: 'text', text: 'b' }] } }));
+    await new Promise((r) => setImmediate(r));
+    const second = out.find((m) => m.id === 31);
+    expect(second.error).toBeDefined();
+    expect(second.error.message).toMatch(/already running|one turn/i);
+    release();
+    await new Promise((r) => setImmediate(r));
+    const first = out.find((m) => m.id === 30);
+    expect(first.result).toEqual({ stopReason: 'end_turn' });
+  });
+
+  it('does not turn power/update/log events into assistant answer text', async () => {
+    const out: any[] = [];
+    const conn = new JsonRpcConnection((line) => out.push(JSON.parse(line)));
+    const driver = new FakeDriver();
+    driver.prompt = async () => {
+      driver.events.emit('power_changed');
+      driver.events.emit('update_changed');
+      driver.events.emit('log', { id: 1, level: 'info', text: 'operational log line', timestamp: new Date() });
+      driver.events.emit('stream_token', 'the answer');
+      return 'end_turn';
+    };
+    new AcpAgent(conn, driver);
+    conn.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 40, method: AgentMethod.Prompt, params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'q' }] } }));
+    await new Promise((r) => setImmediate(r));
+    const chunks = out
+      .filter((m) => m.method === ClientMethod.SessionUpdate)
+      .map((m) => m.params.update)
+      .filter((u: any) => u.sessionUpdate === 'agent_message_chunk')
+      .map((u: any) => u.content.text)
+      .join('');
+    expect(chunks).toBe('the answer');
+    expect(chunks).not.toMatch(/Power|operational log/);
+  });
+
+  it('outbound JSON-RPC requests have a finite timeout', async () => {
+    const conn = new JsonRpcConnection(() => { /* peer never answers */ });
+    const p = conn.request('session/request_permission', {}, 30);
+    await expect(p).rejects.toThrow(/timed out/);
+  });
+});
+
+describe('HeadlessAcpDriver session semantics (supersede model)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { HeadlessAcpDriver } = require('../protocol/acp/driver');
+
+  function fakeEngine(busy = false) {
+    return {
+      isBusy: busy,
+      dispatched: [] as string[],
+      interrupted: 0,
+      async dispatch(text: string) { this.dispatched.push(text); },
+      interrupt() { this.interrupted++; },
+    };
+  }
+
+  it('a new session supersedes the previous one: history reset, old id rejected', async () => {
+    const engine = fakeEngine();
+    const resetHistory = jest.fn();
+    const driver = new HeadlessAcpDriver(engine, resetHistory);
+    const first = driver.newSession({ cwd: process.cwd() });
+    expect(resetHistory).toHaveBeenCalledTimes(1);
+    await expect(driver.prompt(first, 'hello', new AbortController().signal)).resolves.toBe('end_turn');
+
+    const second = driver.newSession({ cwd: process.cwd() });
+    expect(second).not.toBe(first);
+    expect(resetHistory).toHaveBeenCalledTimes(2); // boundary reset — sessions never share history
+    // The superseded id is REJECTED, never silently interleaved into the new conversation.
+    await expect(driver.prompt(first, 'stale', new AbortController().signal)).rejects.toThrow(/superseded/);
+    await expect(driver.prompt(second, 'fresh', new AbortController().signal)).resolves.toBe('end_turn');
+    expect(engine.dispatched).toEqual(['hello', 'fresh']);
+  });
+
+  it('rejects an unknown session id outright', async () => {
+    const driver = new HeadlessAcpDriver(fakeEngine());
+    await expect(driver.prompt('never-issued', 'x', new AbortController().signal)).rejects.toThrow(/unknown or superseded/);
+  });
+
+  it('refuses to create a session mid-turn', () => {
+    const driver = new HeadlessAcpDriver(fakeEngine(true));
+    expect(() => driver.newSession({ cwd: process.cwd() })).toThrow(/mid-turn/);
+  });
+
+  it('cancellation aborts the running turn and reports cancelled', async () => {
+    const engine = fakeEngine();
+    let release!: () => void;
+    engine.dispatch = () => new Promise<void>((resolve) => { release = resolve; }) as any;
+    const driver = new HeadlessAcpDriver(engine);
+    const id = driver.newSession({ cwd: process.cwd() });
+    const abort = new AbortController();
+    const turn = driver.prompt(id, 'long task', abort.signal);
+    abort.abort();          // ACP session/cancel path
+    driver.cancel(id);
+    expect(engine.interrupted).toBeGreaterThanOrEqual(1);
+    release();
+    await expect(turn).resolves.toBe('cancelled');
   });
 });

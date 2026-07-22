@@ -18,6 +18,8 @@ type fixtureFile struct {
 	ProtocolVersion int               `json:"protocolVersion"`
 	Outbound        []json.RawMessage `json:"outbound"`
 	Inbound         []json.RawMessage `json:"inbound"`
+	// The ui_snapshot payload fixture (rides event args, so it escapes the Outbound decode).
+	UiSnapshot json.RawMessage `json:"uiSnapshot"`
 }
 
 func loadFixtures(t *testing.T) fixtureFile {
@@ -63,6 +65,25 @@ func TestOutboundFixturesStrictDecode(t *testing.T) {
 		if !seen[kind] {
 			t.Errorf("no fixture for outbound %q — the contract under-covers the wire", kind)
 		}
+	}
+}
+
+// Semantic parity for the ui_snapshot payload: the engine's fixture (typed Required<UiSnapshot>,
+// every optional populated) must strict-decode into this TUI's UiSnapshot struct. A field the
+// engine produces that this struct doesn't model fails here — it cannot be silently ignored.
+func TestUiSnapshotFixtureStrictDecode(t *testing.T) {
+	f := loadFixtures(t)
+	if len(f.UiSnapshot) == 0 {
+		t.Fatal("fixtures.json has no uiSnapshot payload — run `npm run gen:protocol` in the repo root")
+	}
+	dec := json.NewDecoder(bytes.NewReader(f.UiSnapshot))
+	dec.DisallowUnknownFields()
+	var snap UiSnapshot
+	if err := dec.Decode(&snap); err != nil {
+		t.Fatalf("engine produces a ui_snapshot field this TUI doesn't model (silent drift): %v", err)
+	}
+	if snap.ContextWindow == 0 || snap.Models.Coding == "" {
+		t.Fatalf("ui_snapshot fixture decoded but core fields are empty: %+v", snap)
 	}
 }
 

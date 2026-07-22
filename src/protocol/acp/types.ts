@@ -58,6 +58,17 @@ export interface InitializeResult {
       /** Agent accepts embedded resource content blocks. */
       embeddedContext?: boolean;
     };
+    /**
+     * Machine-readable session semantics (Bimax extension; unknown fields are ignored by
+     * standard ACP clients). Bimax runs ONE engine conversation: sessions are not isolated or
+     * concurrent — creating a new session SUPERSEDES (and resets) the previous one, and prompts
+     * against superseded ids are rejected.
+     */
+    sessions?: {
+      concurrent: boolean;
+      isolated: boolean;
+      model: 'single-supersede';
+    };
   };
   /** Authentication methods the agent supports; empty = no auth needed. */
   authMethods: Array<{ id: string; name: string; description?: string | null }>;

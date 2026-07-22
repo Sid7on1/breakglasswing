@@ -84,7 +84,9 @@ describe('advice() thresholds', () => {
   const mon = makeMonitor();
   const state = (p: Partial<PowerState>): PowerState => ({ ...UNKNOWN_POWER, ...p });
 
-  beforeEach(() => { delete process.env.BIMAX_POWER_AWARE; });
+  // Power-awareness is OPT-IN now — enable it for the threshold behavior under test.
+  beforeEach(() => { process.env.BIMAX_POWER_AWARE = '1'; });
+  afterAll(() => { delete process.env.BIMAX_POWER_AWARE; });
 
   it('does not throttle on AC', () => {
     expect(mon.advice(state({ source: 'ac', charging: true, batteryPercent: 20 })).level).toBe('none');
@@ -115,13 +117,19 @@ describe('advice() thresholds', () => {
     expect(a.reason).toMatch(/thermal throttling.*60%/);
   });
 
-  it('honors BIMAX_POWER_AWARE=off', () => {
+  it('never throttles unless explicitly enabled (opt-in default)', () => {
+    delete process.env.BIMAX_POWER_AWARE;
+    expect(mon.advice(state({ source: 'battery', batteryPercent: 5 })).level).toBe('none');
     process.env.BIMAX_POWER_AWARE = 'off';
     expect(mon.advice(state({ source: 'battery', batteryPercent: 5 })).level).toBe('none');
+    process.env.BIMAX_POWER_AWARE = '1';
   });
 });
 
 describe('readDarwin', () => {
+  beforeEach(() => { process.env.BIMAX_POWER_AWARE = '1'; });
+  afterAll(() => { delete process.env.BIMAX_POWER_AWARE; });
+
   it('composes battery + thermal from pmset', async () => {
     const exec = async (_cmd: string, args: string[]) =>
       args[1] === 'batt'
@@ -144,6 +152,9 @@ describe('readDarwin', () => {
 });
 
 describe('readLinux', () => {
+  beforeEach(() => { process.env.BIMAX_POWER_AWARE = '1'; });
+  afterAll(() => { delete process.env.BIMAX_POWER_AWARE; });
+
   it('reads discharging battery from sysfs', async () => {
     const readFile = (p: string): string | null => {
       if (p === '/sys/class/power_supply/BAT0/capacity') return '18\n';
@@ -213,7 +224,8 @@ describe('caching + failure resilience', () => {
 });
 
 describe('powerSummary / powerStatusLine (footer + ACP + /power surface)', () => {
-  beforeEach(() => { delete process.env.BIMAX_POWER_AWARE; });
+  beforeEach(() => { process.env.BIMAX_POWER_AWARE = '1'; });
+  afterAll(() => { delete process.env.BIMAX_POWER_AWARE; });
 
   it('reports unknown before any reading', () => {
     const sum = powerSummary(makeMonitor());
@@ -259,12 +271,17 @@ describe('module wiring', () => {
     expect(powerThrottleAdvice().level).toBe('none');
   });
 
-  it('powerAwarenessEnabled respects the env switch', () => {
+  it('powerAwarenessEnabled is OPT-IN: off unless explicitly enabled', () => {
     delete process.env.BIMAX_POWER_AWARE;
-    expect(powerAwarenessEnabled()).toBe(true);
+    expect(powerAwarenessEnabled()).toBe(false);
     process.env.BIMAX_POWER_AWARE = 'off';
     expect(powerAwarenessEnabled()).toBe(false);
     process.env.BIMAX_POWER_AWARE = '0';
     expect(powerAwarenessEnabled()).toBe(false);
+    process.env.BIMAX_POWER_AWARE = '1';
+    expect(powerAwarenessEnabled()).toBe(true);
+    process.env.BIMAX_POWER_AWARE = 'on';
+    expect(powerAwarenessEnabled()).toBe(true);
+    delete process.env.BIMAX_POWER_AWARE;
   });
 });

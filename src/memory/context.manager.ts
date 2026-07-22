@@ -5,7 +5,7 @@ import { Logger } from '../utils/logger';
 import { fileStateCache } from './file-state-cache';
 import { IGraphStore } from '../graph/models';
 import { crossRepoMapSync } from '../graph/cross.repo';
-import { compressBacklog, proxyCompress, recordCompression } from './headroom.compress';
+import { compressBacklog, proxyCompress, recordCompression, looksLikeCode } from './headroom.compress';
 import { cliEvents } from '../cli/events';
 
 export type ContextMode = 'smart' | 'full';
@@ -161,69 +161,59 @@ export class ContextManager {
       return messages;
     }
 
-    // Layer 0 — Headroom Kompress compression. The REAL ML compressor (chopratejas/kompress-v2-base
-    // ONNX via the localhost proxy) crushes the noisy bulk of the context (tool outputs, logs, file
-    // dumps) ~30-40% while protecting error/signal lines. It costs ~5-9s of CPU, so we only fire it
-    // under TOKEN PRESSURE — once the backlog is near the compaction threshold, where it pays for
-    // itself; cheap turns stay instant. Opt out with BIMAX_DISABLE_COMPRESSION=1.
+    // Layer 0 — deterministic in-process log compression, only under TOKEN PRESSURE. The default
+    // compactor is compressBacklog: bounded, deterministic, in-process, and code-safe (skipCode
+    // keeps code verbatim; error/warning lines are always preserved). Opt out entirely with
+    // BIMAX_DISABLE_COMPRESSION=1.
+    //
+    // The optional Headroom Kompress ML compressor is STRICTLY opt-in (BIMAX_ENABLE_HEADROOM=1):
+    // it spawns a separately-provisioned localhost sidecar, and NOTHING on the foreground turn path
+    // may create a Python venv, pip-install, download a model, or open a listener. Without the
+    // explicit opt-in it is never imported, so a user turn does deterministic in-process work only.
     let msgs: Message[] = messages;
     const pressureRatio = this.effectiveTokens(messages) / this.MAX_TOKENS;
     if (process.env.BIMAX_DISABLE_COMPRESSION !== '1' && pressureRatio >= this.COMPACT_THRESHOLD) {
-      // Lazy sidecar: bring the Kompress proxy up the FIRST time a turn is actually under pressure —
-      // never at boot. A greeting must not provision a Python venv + spawn a sidecar (the "compression
-      // warmed during a greeting" defect). Fire-and-forget and idempotent: this turn uses the native
-      // fallback if the proxy isn't ready yet; the proxy catches subsequent pressured turns.
-      if (process.env.BIMAX_DISABLE_HEADROOM !== '1') {
-        import('./headroomProxy').then(m => m.ensureHeadroomProxy().catch(() => {})).catch(() => {});
-      }
       // Which model the saving is attributed to (for the per-model /headroom report).
       let model = 'unknown';
       try { const c = require('../cli/config').getConfig(); model = c.model || c.liteModel || 'unknown'; } catch { /* config optional */ }
 
-      let saved = 0, n: number;
-      // NEVER wait for the sidecar in front of a turn. This used to block up to 8s so the first
-      // pressured pass could use the proxy instead of the native fallback — trading user-visible
-      // latency for stats bookkeeping. If the proxy isn't up yet, the lossless native pass covers
-      // this turn and the proxy simply catches the next one.
-      // Prefer the real Headroom Kompress proxy; fall back to the native heuristic if the sidecar
-      // isn't up yet (provisioning/first-run model download) so a turn under pressure never goes uncompacted.
-      const proxied = await proxyCompress(messages as any, model === 'unknown' ? '' : model, this.MAX_TOKENS);
-      if (proxied) {
-        // Measure the REAL before/after of the context so the /headroom ratio is honest. The proxy only
-        // returns `saved`, so deriving after = before - saved (vs. the old before=saved, after=0) is what
-        // stops the report claiming "100% smaller (… → 0 tok)". Trust whichever savings estimate is larger:
-        // our cheap char/4 estimate, or the proxy's own re-tokenized count.
-        const before = this.estimateTokens(messages);
-        const after = this.estimateTokens(proxied.messages as Message[]);
-        if (after > before) {
-          // Sanity net: a compactor that GROWS the context is a regression (bad proxy build, model
-          // misconfig). Never swap in a larger array — keep the original and record nothing.
-          Logger.warn(`[Headroom] proxy returned a LARGER context (${before} → ${after} tok); discarding its result.`);
-        } else {
-          // STACK the lossless native pass on top of the proxy output: the Kompress proxy leaves most
-          // repetitive log/build spam untouched (its real savings on code are now disabled by the code
-          // guard), whereas compressBacklog collapses 4+ identical-signature line runs losslessly and
-          // always keeps error/warning lines. Safe on code (varied lines pass through verbatim), so we
-          // run it on EVERY proxied result to recover the log savings the proxy skips.
-          const stacked = compressBacklog(proxied.messages as any, { protectRecent: 0, skipCode: true });
-          msgs = stacked.messages as Message[];
-          const finalAfter = this.estimateTokens(msgs);
-          saved = Math.max(0, before - finalAfter, proxied.saved);
-          if (saved > 0) recordCompression(model, before, Math.max(0, before - saved), 'proxy');
+      let saved = 0;
+      let usedProxy = false;
+      if (process.env.BIMAX_ENABLE_HEADROOM === '1') {
+        // Explicitly-enabled ML path. Fire-and-forget warm-up (idempotent); NEVER wait for the
+        // sidecar in front of a turn — if it isn't ready, the native pass below covers this turn.
+        import('./headroomProxy').then(m => m.ensureHeadroomProxy().catch(() => {})).catch(() => {});
+        const proxied = await proxyCompress(messages as any, model === 'unknown' ? '' : model, this.MAX_TOKENS);
+        if (proxied) {
+          const before = this.estimateTokens(messages);
+          const after = this.estimateTokens(proxied.messages as Message[]);
+          if (after > before) {
+            // Sanity net: a compactor that GROWS the context is a regression. Keep the original.
+            Logger.warn(`[Headroom] proxy returned a LARGER context (${before} → ${after} tok); discarding its result.`);
+          } else {
+            // Stack the lossless native pass on top to also collapse repetitive log spam.
+            const stacked = compressBacklog(proxied.messages as any, { protectRecent: 0, skipCode: true });
+            msgs = stacked.messages as Message[];
+            const finalAfter = this.estimateTokens(msgs);
+            saved = Math.max(0, before - finalAfter, proxied.saved);
+            usedProxy = true;
+            if (saved > 0) recordCompression(model, before, Math.max(0, before - saved), 'proxy');
+          }
         }
-        n = -1;
-      } else {
-        // Native safety net (proxy not ready): collapse repetitive log/ANSI spam in ALL tool outputs.
-        // Lossless on code and always keeps error/warning lines.
-        const { messages: compressed, stats } = compressBacklog(messages as any, { protectRecent: 0 });
+      }
+      if (!usedProxy) {
+        // Default deterministic path: collapse repetitive log/ANSI spam in tool outputs. skipCode
+        // guarantees code passes through VERBATIM; error/warning lines are always kept.
+        const { messages: compressed, stats } = compressBacklog(messages as any, { protectRecent: 0, skipCode: true });
         msgs = compressed as Message[];
         saved = stats.saved;
-        n = stats.compressedMessages;
         if (saved > 0) recordCompression(model, stats.compressedBefore, stats.compressedAfter, 'native');
       }
       if (saved > 0) {
-        Logger.info(`[Headroom] ${proxied ? 'Kompress proxy' : 'native'} compression saved ~${saved} tokens${n >= 0 ? ` across ${n} output(s)` : ''} (model ${model})`);
-        try { cliEvents.emit('graph_changed'); } catch { /* refresh the token meter; best-effort */ }
+        Logger.info(`[Headroom] ${usedProxy ? 'Kompress proxy' : 'native'} compression saved ~${saved} tokens (model ${model})`);
+        // Token-meter refresh only. This must NOT be 'graph_changed' — the TUI renders that as
+        // "code graph updated", which is a lie for a context-token refresh.
+        try { cliEvents.emit('context_changed'); } catch { /* best-effort */ }
       }
     }
 
@@ -283,14 +273,21 @@ export class ContextManager {
   }
 
   /**
-   * Layer 1 — cap a single oversized tool result so one giant Read/Bash dump can't dominate the
+   * Layer 1 — cap a single oversized tool result so one giant Bash/log dump can't dominate the
    * window. Keeps the head and tail (where the signal usually is) and notes how much was elided.
+   *
+   * CODE IS NEVER ELIDED: a source-file read or code-dense output passes through verbatim no
+   * matter its size (`looksLikeCode`). Partially-elided code is worse than either extreme — the
+   * model edits against a file it believes it has whole. Code leaves the window only via the
+   * explicit, whole-result mechanisms (micro-compact stubs of OLD results, FreeContextTool), never
+   * via silent mid-content truncation.
    */
   private capToolResults(messages: Message[]): Message[] {
     const max = this.TOOL_RESULT_MAX_CHARS;
     let trimmed = 0;
     const out = messages.map(m => {
       if (m.role !== 'tool' || typeof m.content !== 'string' || m.content.length <= max) return m;
+      if (looksLikeCode(m.content)) return m; // code survives every compaction path verbatim
       trimmed++;
       const head = m.content.slice(0, Math.floor(max * 0.7));
       const tail = m.content.slice(-Math.floor(max * 0.2));
@@ -314,8 +311,20 @@ export class ContextManager {
     let cleared = 0;
     const out = messages.map((m, i) => {
       if (m.role !== 'tool' || i >= clearBefore) return m;
-      if (m.content === '[tool result cleared to save context]') return m; // already stubbed
+      if (typeof m.content === 'string' && m.content.startsWith('[tool result cleared')) return m; // already stubbed
       cleared++;
+      // Code is never silently altered: an OLD code result is replaced whole with a LOSSLESS,
+      // RESOLVABLE reference — the file path when the read header carries one — so the model can
+      // restore the exact content by re-reading instead of trusting a truncated ghost.
+      if (typeof m.content === 'string' && looksLikeCode(m.content)) {
+        const file = m.content.match(/^FILE\s+(.+?):/m)?.[1];
+        return {
+          ...m,
+          content: file
+            ? `[tool result cleared to save context — code from ${file}; re-read that file to restore it verbatim]`
+            : '[tool result cleared to save context — code output; re-run the tool to restore it verbatim]',
+        };
+      }
       return { ...m, content: '[tool result cleared to save context]' };
     });
     if (cleared) Logger.info(`[ContextManager] Micro-compacted ${cleared} old tool result(s).`);
@@ -491,18 +500,30 @@ Comma-separated list of files created, modified, or important to the task.`,
     // smaller, newer one behind it.
     const recentReads = fileStateCache.getRecentReads();
     const fileAttachments: Message[] = [];
-    let restoreUsed = 0, restoreSkipped = 0;
+    let restoreUsed = 0, restoreSkipped = 0, restoreStale = 0;
     for (const f of recentReads) {
       if (restoreUsed + f.content.length > this.RESTORE_BUDGET_CHARS) { restoreSkipped++; continue; }
+      // Re-stat before restoring: cached content whose file was edited externally (or deleted)
+      // since the read must NEVER be re-injected as current — that silently feeds the model a
+      // stale version of the file it is about to modify.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const stat = (require('fs') as typeof import('fs')).statSync(f.path);
+        if (stat.mtimeMs !== f.mtime) { restoreStale++; continue; }
+      } catch { restoreStale++; continue; } // deleted/unreadable — do not restore
       restoreUsed += f.content.length;
+      // A partial read is labeled as exactly that — never presented as the complete file.
+      const scope = f.complete
+        ? 'complete file'
+        : `PARTIAL read (offset ${f.offset}${f.limit >= 0 ? `, limit ${f.limit}` : ''}) — NOT the whole file`;
       fileAttachments.push({
         role: 'system' as const,
-        content: `[Post-Compact Restoration — ${f.path} — unchanged since last read]\n${f.content}`,
+        content: `[Post-Compact Restoration — ${f.path} — ${scope}, verified unchanged on disk]\n${f.content}`,
       });
     }
 
-    if (fileAttachments.length > 0 || restoreSkipped > 0) {
-      Logger.info(`[ContextManager] Restored ${fileAttachments.length} recently-read file(s) post-compact${restoreSkipped ? ` (${restoreSkipped} skipped — over the ${this.RESTORE_BUDGET_CHARS}-char budget)` : ''}.`);
+    if (fileAttachments.length > 0 || restoreSkipped > 0 || restoreStale > 0) {
+      Logger.info(`[ContextManager] Restored ${fileAttachments.length} recently-read file(s) post-compact${restoreSkipped ? ` (${restoreSkipped} skipped — over the ${this.RESTORE_BUDGET_CHARS}-char budget)` : ''}${restoreStale ? ` (${restoreStale} not restored — changed on disk since the cached read)` : ''}.`);
     }
 
     const compacted = [...systemMessages, summaryMsg, ...fileAttachments, ...recentMessages];

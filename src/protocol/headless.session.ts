@@ -272,7 +272,12 @@ export class HeadlessSession {
         // and replacing it mid-flight corrupts the conversation. Same guard as runTurn().
         if (this.busy) { cliEvents.emit('status', 'Busy — finish the current turn before loading a session.'); return false; }
         const active = this.deps.personas.bimax;
-        if (active && Array.isArray(msgs)) active.messages = msgs.slice() as any;
+        if (active && Array.isArray(msgs)) {
+          active.messages = msgs.slice() as any;
+          // Explicit session boundary (/clear, session load/resume): the session-scoped
+          // ContextManager (calibration, warning latch, compaction epochs) resets WITH the history.
+          try { (active as any).resetContextSession?.(); } catch { /* best-effort */ }
+        }
         return true;
       },
       // Return the live conversation so /cost, /save, /sessions et al. work (was stubbed to [], which

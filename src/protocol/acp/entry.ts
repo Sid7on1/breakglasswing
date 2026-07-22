@@ -1,56 +1,18 @@
-import * as fs from 'fs';
 import { StringDecoder } from 'string_decoder';
 import { cliEvents } from '../../cli/events';
 import { buildPersonas } from '../../cli/personas/factory';
 import { saveConfig } from '../../cli/config';
 import { HeadlessSession } from '../headless.session';
 import { JsonRpcConnection, LineBuffer } from './jsonrpc';
-import { AcpAgent, AcpSessionDriver } from './agent';
-import { StopReason, McpServerConfig } from './types';
+import { AcpAgent } from './agent';
+import { HeadlessAcpDriver } from './driver';
 // Register every slash command for its side effect (self-registration on import) — otherwise a
 // prompt like "/help" typed in the editor falls through as "Unknown command", same as headless.
 import '../../cli/commands';
 
-/**
- * Live ACP session driver: maps the protocol's session lifecycle onto a single HeadlessSession.
- *
- * Bimax's engine is effectively one global session per process (the agent loop, cliEvents, personas
- * are singletons), so `newSession` returns a fresh id and points the engine at the editor's cwd;
- * `prompt` drives one turn to completion via `dispatch`; `cancel` interrupts it. The event seam is
- * the global cliEvents emitter the AcpAgent streams as session/update notifications.
- */
-export class HeadlessAcpDriver implements AcpSessionDriver {
-  readonly events = cliEvents;
-  private counter = 0;
-
-  constructor(private readonly session: HeadlessSession) {}
-
-  newSession(params: { cwd: string; mcpServers?: McpServerConfig[] }): string {
-    // Honor the editor's workspace root so @-mentions, indexing, and tool paths resolve there. Only
-    // chdir when the turn engine is idle and the path is a real directory — never mid-turn.
-    if (params?.cwd && !this.session.isBusy) {
-      try { if (fs.existsSync(params.cwd) && fs.statSync(params.cwd).isDirectory()) process.chdir(params.cwd); } catch { /* keep current cwd */ }
-    }
-    return `bimax-acp-${Date.now()}-${++this.counter}`;
-  }
-
-  async prompt(_sessionId: string, text: string, signal: AbortSignal): Promise<StopReason> {
-    if (signal.aborted) return 'cancelled';
-    // Bridge the ACP abort to the engine's cooperative interrupt for the duration of the turn.
-    const onAbort = () => this.session.interrupt();
-    signal.addEventListener('abort', onAbort);
-    try {
-      await this.session.dispatch(text); // resolves when the turn (or slash command) fully completes
-      return signal.aborted ? 'cancelled' : 'end_turn';
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
-  }
-
-  cancel(_sessionId: string): void {
-    this.session.interrupt();
-  }
-}
+// The session driver (session supersede/reject rules) lives in ./driver.ts so it is unit-testable
+// without booting personas/commands. Re-exported here for existing importers.
+export { HeadlessAcpDriver } from './driver';
 
 /**
  * Run Bimax as an ACP agent over stdio: newline-delimited JSON-RPC on stdin/stdout, so an editor
@@ -98,7 +60,17 @@ export async function startAcpAgent(container: any, _config: any): Promise<void>
     (line) => { try { process.stdout.write(line + '\n'); } catch { /* editor gone */ } },
     (err) => { try { process.stderr.write(`[acp] ${err.message}\n`); } catch { /* ignore */ } },
   );
-  const driver = new HeadlessAcpDriver(session);
+  // EXPERIMENTAL: the ACP bridge is explicitly opt-in (--acp / BIMAX_ACP=1) and marked as such.
+  // Known limits are enforced, not hidden: one session/turn at a time, text+embedded-context
+  // prompts only (no images), no per-session MCP configuration.
+  try { process.stderr.write('[acp] Bimax ACP bridge is EXPERIMENTAL: single session, single concurrent turn, text-only prompts.\n'); } catch { /* ignore */ }
+  const driver = new HeadlessAcpDriver(session, () => {
+    const active: any = (personas as any).bimax;
+    if (active) {
+      active.messages = [];
+      active.resetContextSession?.();
+    }
+  });
   new AcpAgent(conn, driver);
 
   // stdin → line-buffered frames. StringDecoder guards against a multibyte char split across chunks.

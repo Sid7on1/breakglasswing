@@ -91,11 +91,20 @@ describe('BimaxComputerRuntime', () => {
     expect((openClient as jest.Mock).mock.calls[0][0].args).toContain('--experimental-pip');
   });
 
-  it('records trajectory screenshots and a native screen video when enabled', async () => {
+  it('never starts recording from ordinary open/observe/type — record_start is the only path', async () => {
+    // Even with recording ENABLED in config, ordinary actions must not begin a recording.
     process.env.BIMAX_COMPUTER_RECORD = '1';
     __resetConfigForTests();
     const runtime = new BimaxComputerRuntime();
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
+    await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    await runtime.run({ action: 'click', x: 10, y: 10, deliveryMode: 'background' }, { cwd: '/tmp' });
+    await runtime.run({ action: 'type', text: '2+2', deliveryMode: 'background' }, { cwd: '/tmp' });
+    expect(callTool.mock.calls.some(([a]) => a.name === 'start_recording')).toBe(false);
+
+    // Explicit record_start (window-scoped after open) is the one path that records.
+    const rec = await runtime.run({ action: 'record_start' }, { cwd: '/tmp' });
+    expect(rec.ok).toBe(true);
     const start = callTool.mock.calls.find(([arg]) => arg.name === 'start_recording')?.[0];
     expect(start.arguments).toEqual(expect.objectContaining({ record_video: true }));
     expect(start.arguments.output_dir).toMatch(/\/tmp\/\.bimax\/computer\/recordings\/run-/);
@@ -106,15 +115,50 @@ describe('BimaxComputerRuntime', () => {
     expect(stopped.recording?.videoPath).toBe('/tmp/recording/recording.mp4');
   });
 
-  it('scopes recording + PiP to the agent window when one is active, and is honest when it cannot (Stage 2 + 8)', async () => {
-    // No window yet → recording is whole-display and SAYS so (captureSafe false), never pretending.
-    const wide = new BimaxComputerRuntime();
-    const wideRec = await wide.run({ action: 'record_start' }, { cwd: '/tmp' });
-    expect(wideRec.recording?.captureSafe).toBe(false);
-    expect(wideRec.recording?.scope).toBe('whole display');
-    expect(await wide.pipStatus()).toEqual(expect.objectContaining({ captureSafe: false }));
+  it('refuses record_start entirely when recording is not opted in (default)', async () => {
+    // beforeEach sets BIMAX_COMPUTER_RECORD=0 — the shipped default is also false.
+    const runtime = new BimaxComputerRuntime();
+    await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
+    const rec = await runtime.run({ action: 'record_start' }, { cwd: '/tmp' });
+    expect(rec.ok).toBe(false);
+    expect(rec.error).toMatch(/opt-in/);
+    expect(callTool.mock.calls.some(([a]) => a.name === 'start_recording')).toBe(false);
+  });
 
-    // With a live agent window, recording + PiP scope to that capture-safe surface only.
+  it('refuses whole-display video without explicit approval; scopes to the agent window when one exists', async () => {
+    process.env.BIMAX_COMPUTER_RECORD = '1';
+    __resetConfigForTests();
+    // No window yet → whole-display video is REFUSED without explicit approval.
+    const wide = new BimaxComputerRuntime();
+    const refused = await wide.run({ action: 'record_start' }, { cwd: '/tmp' });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatch(/whole-display/i);
+    expect(callTool.mock.calls.some(([a]) => a.name === 'start_recording')).toBe(false);
+
+    // A model-controlled boolean (the legacy field) can NEVER authorize whole-display capture …
+    const forgedBool = await wide.run({ action: 'record_start', approveFullDisplay: true } as any, { cwd: '/tmp' });
+    expect(forgedBool.ok).toBe(false);
+    expect(forgedBool.error).toMatch(/whole-display/i);
+    // … and neither can a guessed/forged token.
+    const forgedToken = await wide.run({ action: 'record_start', fullDisplayToken: 'forged-token' }, { cwd: '/tmp' });
+    expect(forgedToken.ok).toBe(false);
+    expect(callTool.mock.calls.some(([a]) => a.name === 'start_recording')).toBe(false);
+
+    // Only a governor-issued token (minted by the approval layer AFTER the user approved the
+    // whole-display scope) authorizes it — and it is single-use.
+    const token = wide.authorizeFullDisplayRecording();
+    const approved = await wide.run({ action: 'record_start', fullDisplayToken: token }, { cwd: '/tmp' });
+    expect(approved.ok).toBe(true);
+    expect(approved.recording?.captureSafe).toBe(false);
+    expect(approved.recording?.scope).toBe('whole display');
+    expect(await wide.pipStatus()).toEqual(expect.objectContaining({ captureSafe: false }));
+    // The consumed token cannot be replayed by a second runtime request.
+    const replayTarget = new BimaxComputerRuntime();
+    const replay = await replayTarget.run({ action: 'record_start', fullDisplayToken: token }, { cwd: '/tmp' });
+    expect(replay.ok).toBe(false);
+
+    // With a live agent window, recording + PiP scope to that capture-safe surface only —
+    // no whole-display approval needed.
     const runtime = new BimaxComputerRuntime();
     await runtime.run({ action: 'open', app: 'Calculator', deliveryMode: 'foreground' }, { cwd: '/tmp' });
     const scoped = await runtime.run({ action: 'record_start' }, { cwd: '/tmp' });
@@ -698,14 +742,25 @@ describe('BimaxComputerRuntime', () => {
     expect(callTool.mock.calls.some(([arg]) => arg.name === 'click')).toBe(false);
   });
 
-  it('cooperatively closes and verifies the target window disappeared', async () => {
+  it('close closes ONLY the selected window (Cmd+W) — never quits the application', async () => {
     const runtime = new BimaxComputerRuntime();
     await runtime.run({ action: 'open', app: 'Calculator' });
     const closed = await runtime.run({ action: 'close' });
     expect(closed.ok).toBe(true);
-    expect(closed.summary).toContain('verified');
-    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'hotkey' }));
+    expect(closed.summary).toContain('application still running');
+    const hotkey = callTool.mock.calls.find(([a]) => a.name === 'hotkey')?.[0];
+    expect(hotkey.arguments.keys).toEqual(['cmd', 'w']); // window close, NOT cmd+q
     expect(callTool).toHaveBeenCalledWith({ name: 'list_windows', arguments: { pid: 42 } });
+  });
+
+  it('quit_app is the separate action that quits the application and verifies it', async () => {
+    const runtime = new BimaxComputerRuntime();
+    await runtime.run({ action: 'open', app: 'Calculator' });
+    const quit = await runtime.run({ action: 'quit_app' });
+    expect(quit.ok).toBe(true);
+    expect(quit.summary).toContain('quit');
+    const hotkey = callTool.mock.calls.find(([a]) => a.name === 'hotkey')?.[0];
+    expect(hotkey.arguments.keys).toEqual(['cmd', 'q']);
   });
 
   it('never exposes the upstream product name in model-visible failures', async () => {

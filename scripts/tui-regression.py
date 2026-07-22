@@ -152,7 +152,8 @@ def scenario_streaming():
         # (burst-at-end read as 3.6s+ here; the OSC freeze as 7s+).
         first_tok = prog[0]
         check("first token frame < 2500ms after submit", first_tok - 4500 < 2500, f"delta={first_tok-4500}")
-    hist, vis = emulate(recs)
+    # In-session only: the deliberate post-exit transcript print would double-count.
+    hist, vis = emulate([(t, d) for t, d in recs if t < 14000])
     dups = content_dups(hist + vis)
     check("no duplicated content in scrollback", not dups, str(list(dups.items())[:3]))
     check("clean exit", ex and ex.get("exit") == 0, str(ex))
@@ -164,7 +165,10 @@ def scenario_resize_widen():
         [{"at": 2.5, "send": "stream test\r"},
          {"at": 4.5, "resize": [120, 40]}, {"at": 6.0, "resize": [140, 44]},
          {"at": 12.0, "send": "/exit\r"}], timeout=20)
-    hist, vis = emulate(recs, cols=140, rows=44)
+    # In-session frames only (the post-exit transcript print is a separate, deliberate feature),
+    # emulated at the LARGEST size used — pyte cannot replay pty resizes, and a fixed screen
+    # smaller than a painted frame manufactures scroll-out duplicates that no real terminal shows.
+    hist, vis = emulate([(t, d) for t, d in recs if t < 12000], cols=140, rows=44)
     dups = content_dups(hist + vis)
     check("widen adds no duplicate screenful", not dups, str(list(dups.items())[:3]))
     check("clean exit", ex and ex.get("exit") == 0, str(ex))
@@ -179,6 +183,32 @@ def scenario_resize_narrow():
     hist, vis = emulate(recs, cols=cols2, rows=24)
     over = [l for l in vis if len(l) > cols2]
     check("final screen fits the new width", not over, f"overwide={over[:2]}")
+    check("clean exit", ex and ex.get("exit") == 0, str(ex))
+
+
+def scenario_resize_storm():
+    """The stabilization contract: resize never clears or reprints committed output. Drive a
+    narrow/wide storm during and after streaming, then assert (a) zero clear-screen escapes after
+    startup (3J never, 2J only from the one-time alternate-screen entry), and (b) each committed
+    reply line renders exactly once — no duplication, no loss — at the final size."""
+    print("· resize-storm")
+    recs, ex = run_capture(
+        [{"at": 2.5, "send": "stream test\r"},
+         {"at": 4.0, "resize": [70, 24]}, {"at": 4.6, "resize": [130, 40]},
+         {"at": 5.2, "resize": [56, 20]}, {"at": 5.8, "resize": [110, 34]},
+         {"at": 6.4, "resize": [64, 22]}, {"at": 7.0, "resize": [100, 30]},
+         {"at": 13.0, "send": "/exit\r"}], timeout=20)
+    first_resize_ms = 4000
+    late_clears = [t for t, d in recs if t >= first_resize_ms and (b"\x1b[2J" in d or b"\x1b[3J" in d)]
+    check("zero clear/reprint recovery across the storm (no 2J/3J after startup)",
+          not late_clears, f"clear escapes at t={late_clears[:4]}")
+    check("scrollback is never wiped (3J never emitted)", all(b"\x1b[3J" not in d for _, d in recs))
+    # In-session frames only (the post-exit transcript print is a separate, deliberate feature),
+    # at the storm's largest dimensions (see resize-widen note on pyte and pty resizes).
+    hist, vis = emulate([(t, d) for t, d in recs if t < 13000], cols=130, rows=40)
+    dups = content_dups(hist + vis)
+    check("zero duplicate committed lines across the storm", not dups, str(list(dups.items())[:3]))
+    check("committed reply content survives the storm", any(re.search(r"word0\d\d", l) for l in hist + vis))
     check("clean exit", ex and ex.get("exit") == 0, str(ex))
 
 
@@ -215,6 +245,7 @@ DOWN = "\x1b[B"
 # (governor -> protocol request -> TUI overlay -> keyboard -> reply -> resolver -> tool resumes),
 # then the runtime fails fast on the missing app — the desktop is never actually touched.
 OPEN_CALL = {"name": "ComputerTool", "arguments": {"action": "open", "app": "BimaxRegressionApp"}}
+RECORD_CALL = {"name": "ComputerTool", "arguments": {"action": "record_start"}}
 
 
 def approval_capture(tool_calls, actions, timeout):
@@ -225,14 +256,58 @@ def approval_capture(tool_calls, actions, timeout):
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
     try:
+        # Pin per-action approvals: the shipped default is 'high-impact-only', which auto-approves
+        # a routine open with no prompt — these scenarios exist to drive the approval KEYBOARD path,
+        # so they must run in 'always' mode regardless of the user's config.
         return run_capture(actions, timeout=timeout,
-                           env={"BGW_BASE_URL": f"http://127.0.0.1:{APPROVAL_PORT}/v1"})
+                           env={"BGW_BASE_URL": f"http://127.0.0.1:{APPROVAL_PORT}/v1",
+                                "BIMAX_COMPUTER_APPROVALS": "always"})
     finally:
         mock.send_signal(signal.SIGTERM)
         try:
             mock.wait(timeout=5)
         except Exception:
             mock.kill()
+
+
+def scenario_approval_default_mode():
+    """Exercise the REAL production default ('high-impact-only', NO env override) so the pinned
+    'always' scenarios above cannot conceal broken approval initialization or keyboard handling:
+    the same engine+governor+TUI path must (a) auto-approve a routine open with NO prompt, and
+    (b) still render a real, keyboard-driven prompt for a high-impact action (record_start)."""
+    print("· approval-default (production high-impact-only)")
+    env = dict(os.environ, MOCK_REPLY=unique_reply(30), MOCK_TOKEN_MS="8", MOCK_TTFT_MS="80",
+               MOCK_TOOL_CALLS=json.dumps([OPEN_CALL, RECORD_CALL]))
+    mock = subprocess.Popen(["node", os.path.join(ROOT, "scripts", "mock-provider.mjs"), str(APPROVAL_PORT)],
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.8)
+    try:
+        recs, ex = run_capture(
+            [{"at": 4.5, "send": "open the test app then start recording\r"},
+             {"at": 12.0, "send": DOWN}, {"at": 12.4, "send": "\r"},   # ↓ to "No" on the record prompt, Enter
+             {"at": 18.0, "send": chr(15)},                             # Ctrl+O: open the log panel
+             {"at": 20.0, "send": "/exit\r"}], timeout=28,
+            env={"BGW_BASE_URL": f"http://127.0.0.1:{APPROVAL_PORT}/v1",
+                 # Empty string = unset for the config loader: the SHIPPED default applies.
+                 "BIMAX_COMPUTER_APPROVALS": ""})
+    finally:
+        mock.send_signal(signal.SIGTERM)
+        try:
+            mock.wait(timeout=5)
+        except Exception:
+            mock.kill()
+    raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    hist, vis = emulate(recs)
+    everything = "".join(hist + vis)
+    check("routine open auto-approves under the default (no prompt)",
+          "Allow? open in ComputerTool" not in everything)
+    check("auto-approval is announced in the log panel, not silent",
+          "Auto-approved (high-impact-only): open" in raw)
+    check("high-impact record_start still renders a real prompt under the default",
+          "record_start in ComputerTool" in raw and "HIGH-IMPACT" in raw)
+    check("denial resolved via keyboard under the default", "→ No" in raw)
+    check("turn continued after the veto", re.search(r"word0\d\d", raw) is not None)
+    check("clean exit", ex and ex.get("exit") == 0, str(ex))
 
 
 def scenario_approval_enter():
@@ -341,7 +416,9 @@ def main():
     time.sleep(0.8)
     try:
         for fn in (scenario_startup, scenario_streaming, scenario_resize_widen,
-                   scenario_resize_narrow, scenario_interrupt, scenario_sigterm, scenario_keyless,
+                   scenario_resize_narrow, scenario_resize_storm, scenario_interrupt,
+                   scenario_sigterm, scenario_keyless,
+                   scenario_approval_default_mode,
                    scenario_approval_enter, scenario_approval_deny, scenario_approval_grant,
                    scenario_approval_esc):
             fn()

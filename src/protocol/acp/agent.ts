@@ -21,8 +21,6 @@ import {
   RequestPermissionParams, RequestPermissionResult,
   promptText, agentMessageChunk, toolCallStart, toolCallUpdate,
 } from './types';
-import { powerSummary, powerStatusLine } from '../../governor/power.monitor';
-import { updateChecker, updateCheckEnabled } from '../../core/self.update';
 
 /** Engine abstraction the agent drives. Backed by HeadlessSession in production, a fake in tests. */
 export interface AcpSessionDriver {
@@ -51,8 +49,6 @@ export class AcpAgent {
   private activeAbort: AbortController | null = null;
   /** Detach fns for the cliEvents listeners bound for the active turn. */
   private turnListeners: Array<() => void> = [];
-  /** Sessions already shown the update/announcement banner (Phase 3b) — once per session, not per turn. */
-  private postureNotified = new Set<string>();
 
   constructor(
     private readonly conn: JsonRpcConnection,
@@ -74,17 +70,26 @@ export class AcpAgent {
     const version = Math.min(ACP_PROTOCOL_VERSION, params?.protocolVersion ?? ACP_PROTOCOL_VERSION);
     return {
       protocolVersion: version,
+      // Truthful capabilities only: the turn engine consumes TEXT and embedded resources; image
+      // blocks are dropped by promptText, so image support is NOT advertised.
       agentCapabilities:
         this.opts.capabilities ?? {
           loadSession: typeof this.driver.loadSession === 'function',
-          promptCapabilities: { image: true, embeddedContext: true },
+          promptCapabilities: { image: false, embeddedContext: true },
+          // Machine-readable: not isolated, not concurrent — a new session supersedes the last.
+          sessions: { concurrent: false, isolated: false, model: 'single-supersede' },
         },
       authMethods: this.opts.authMethods ?? [],
     };
   }
 
   private async onNewSession(params: NewSessionParams): Promise<NewSessionResult> {
-    const sessionId = await this.driver.newSession({ cwd: params?.cwd ?? process.cwd(), mcpServers: params?.mcpServers });
+    // MCP server configuration is not implemented on this bridge — reject it explicitly rather
+    // than silently accepting and ignoring it (the editor would believe its servers are active).
+    if (params?.mcpServers?.length) {
+      throw new Error('Bimax ACP does not support per-session MCP server configuration yet — remove mcpServers from session/new (configure MCP in Bimax itself instead)');
+    }
+    const sessionId = await this.driver.newSession({ cwd: params?.cwd ?? process.cwd() });
     return { sessionId };
   }
 
@@ -95,12 +100,16 @@ export class AcpAgent {
 
   private async onPrompt(params: PromptParams): Promise<PromptResult> {
     const sessionId = params?.sessionId;
+    // The engine is a single global session: a second concurrent prompt would interleave two
+    // conversations through one agent loop. Reject it clearly instead of corrupting both.
+    if (this.activeSessionId) {
+      throw new Error(`a prompt is already running (session ${this.activeSessionId}) — Bimax ACP supports one turn at a time; cancel it or wait for it to finish`);
+    }
     const text = promptText(params?.prompt ?? []);
     const abort = new AbortController();
     this.activeSessionId = sessionId;
     this.activeAbort = abort;
     this.bindTurnStreaming(sessionId);
-    this.sendStartupPosture(sessionId);
     try {
       const stopReason = await this.driver.prompt(sessionId, text, abort.signal);
       // A cancel() flips the reason even if the driver reports a natural end.
@@ -115,34 +124,6 @@ export class AcpAgent {
       this.activeSessionId = null;
       this.activeAbort = null;
     }
-  }
-
-  /**
-   * Phase 3 → Phase 2 bridge: surface out-of-band posture to the editor at the top of a turn.
-   * Update/announcement banner (3b) is sent once per session; an already-active power backoff (3a)
-   * is announced so the editor knows why work may be running slower. All reads are cached/sync and
-   * best-effort — never block or fail the turn. Live power *transitions* are handled during the turn
-   * by the `power_changed` listener in bindTurnStreaming.
-   */
-  private sendStartupPosture(sessionId: string): void {
-    try {
-      if (updateCheckEnabled() && !this.postureNotified.has(sessionId)) {
-        this.postureNotified.add(sessionId);
-        const u = updateChecker.lastKnown();
-        if (u.updateAvailable && u.latest) {
-          this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId,
-            `⬆️ Bimax ${u.latest} is available (you have ${u.current}). Upgrade: ${u.downloadCmd}\n`));
-        }
-        for (const a of u.announcements) {
-          this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `📣 ${a.text}\n`));
-        }
-        if (u.announcements.length) updateChecker.markSeen(u.announcements.map((a) => a.id));
-      }
-      const p = powerSummary();
-      if (p.level === 'soft') {
-        this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `${powerStatusLine(p)}\n`));
-      }
-    } catch { /* posture is best-effort — never disrupt the turn */ }
   }
 
   private onCancel(params: CancelParams): void {
@@ -215,13 +196,8 @@ export class AcpAgent {
     events.on('veto_prompt', onVeto);
     this.turnListeners.push(() => events.off('veto_prompt', onVeto));
 
-    // Phase 3a → editor: power-throttle transitions mid-turn (engaged/lifted) so a slow-running
-    // long turn explains itself instead of looking hung. Rides the same engine seam as tool events.
-    const onPower = () => {
-      this.conn.notify(ClientMethod.SessionUpdate, agentMessageChunk(sessionId, `${powerStatusLine()}\n`));
-    };
-    events.on('power_changed', onPower);
-    this.turnListeners.push(() => events.off('power_changed', onPower));
+    // NOTE: power/update/log events are deliberately NOT forwarded as agent message chunks —
+    // operational posture must never masquerade as assistant answer text in the editor.
   }
 
   private unbindTurnStreaming(): void {

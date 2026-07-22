@@ -135,27 +135,9 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
     if (process.env.NODE_ENV !== 'test' && powerAwarenessEnabled()) powerMonitor.start();
   }
 
-  // Phase 3b — fire-and-forget update check + announcements. Fully non-blocking (cached, short
-  // timeout, fails open); it never delays boot. Emits at most a single log line, then marks any
-  // shown announcement as seen so it doesn't repeat next launch.
-  if (process.env.NODE_ENV !== 'test') {
-    void (async () => {
-      try {
-        const { updateChecker, updateCheckEnabled } = await import('./self.update');
-        if (!updateCheckEnabled()) return;
-        const report = await updateChecker.check();
-        // Refresh the footer's update chip now that the cache is populated (ui.snapshot reads it).
-        cliEvents.emit('update_changed');
-        if (report.updateAvailable && report.latest) {
-          cliEvents.emit('log', { id: Date.now(), level: 'info', text: `⬆️  Bimax ${report.latest} is available (you have ${report.current}). Run /update — upgrade: ${report.downloadCmd}`, timestamp: new Date() });
-        }
-        for (const a of report.announcements) {
-          cliEvents.emit('log', { id: Date.now() + Math.random(), level: a.level === 'warn' ? 'warn' : 'info', text: `📣 ${a.text}`, timestamp: new Date() });
-        }
-        if (report.announcements.length) updateChecker.markSeen(report.announcements.map((a) => a.id));
-      } catch { /* update notices are best-effort */ }
-    })();
-  }
+  // NOTE: the Grok-ported startup update check was removed. Normal startup performs NO network
+  // call and NO repository-local write; the on-demand `/update` command is the only path that
+  // fetches the update manifest, and its cache lives in the user cache directory.
 
   // Graph Engine — operates on the directory the CLI was launched from.
   const projectRoot = process.cwd();

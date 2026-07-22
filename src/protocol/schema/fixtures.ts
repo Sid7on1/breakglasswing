@@ -1,4 +1,5 @@
 import { Outbound, Inbound, PROTOCOL_VERSION } from '../protocol';
+import type { UiSnapshot } from '../ui.snapshot';
 
 /**
  * Protocol contract fixtures (v2 §3.11, honest-minimal tier).
@@ -51,10 +52,43 @@ export const INBOUND_FIXTURES: Inbound[] = [
 export const OUTBOUND_KINDS: Record<Outbound['t'], true> = { event: true, request: true, ready: true, queryResult: true, pong: true, configResult: true, boot: true, health: true };
 export const INBOUND_KINDS: Record<Inbound['t'], true> = { reply: true, input: true, interrupt: true, query: true, menuSelect: true, ping: true, configGet: true, configSet: true, resume: true, controls: true };
 
+/**
+ * Semantic parity fixture for the ui_snapshot payload (which rides event args and therefore
+ * escapes the Outbound strict decode). Typed against the REAL UiSnapshot interface with EVERY
+ * optional populated: adding a field here without mirroring it in tui/protocol.go turns the Go
+ * strict-decode test red — a produced-but-ignored field can no longer drift silently.
+ */
+export const UI_SNAPSHOT_FIXTURE: Required<UiSnapshot> = {
+  models: { coding: 'model-a', lite: 'model-b', vision: 'model-c' },
+  goalCount: 1,
+  mind: {
+    weakSpots: 1, driveDeviations: 1, habits: 1,
+    weak: [{ tool: 'BashTool', domain: 'shell', failRate: 0.4, pWeak: 0.9, n: 12, advice: 'verify first' }],
+    drives: [{ label: 'type errors', value: '3', ok: false, spark: [1, 0, 1] }],
+    habitNames: ['read-then-edit'],
+    ledger: { resolved: 3, open: 1, expired: 1, coveragePct: 75, overconfident: 0 },
+  },
+  graph: { nodeCount: 10, fileCount: 4, aiGraphBuilt: true, modules: [{ name: 'core', criticality: 'high' }], engine: 'native' },
+  contextWindow: 128000,
+  tokensBaseline: 9000,
+  compressionSaved: 1200,
+  workspace: { count: 2, names: ['repo-a', 'repo-b'], writable: 1 },
+  sessions: [{ id: 's1', title: 'fix auth', startedAt: '2026-07-22T00:00:00Z', messageCount: 8, cwd: '/w', current: true }],
+  checkpoints: [{ id: 'c1', label: 'before refactor', ts: 1753142400000, auto: false }],
+  git: { branch: 'main', dirty: 2, ahead: 1, behind: 0 },
+  tools: { registered: 40, ready: 25, deferred: 12, discovered: 3, mcp: 5, graphReady: true },
+  computer: { browserUrl: 'https://example.com', desktop: 'connected', desktopTools: 1, vision: true, grants: ['app:Notes'], tainted: false },
+  tasks: [{
+    id: 't1', kind: 'shell', title: 'npm test', state: 'running', elapsedMs: 4200,
+    attention: false, pinned: true, lastEvent: 'output', progress: 0.5,
+    canPause: true, canResume: false, canCancel: true,
+  }],
+};
+
 /** The committed artifact both sides test against. Regenerate with `npm run gen:protocol`. */
 export function fixturesJson(): string {
   return JSON.stringify(
-    { protocolVersion: PROTOCOL_VERSION, outbound: OUTBOUND_FIXTURES, inbound: INBOUND_FIXTURES },
+    { protocolVersion: PROTOCOL_VERSION, outbound: OUTBOUND_FIXTURES, inbound: INBOUND_FIXTURES, uiSnapshot: UI_SNAPSHOT_FIXTURE },
     null, 2,
   ) + '\n';
 }

@@ -1061,7 +1061,11 @@ export class LlmAdapter implements LLMProvider {
       this.apiKeyManager.reportKeyResult(kr.idx!, status, retryAfterSecs ?? null);
       // Feed the provider breaker: count only provider-side faults (5xx/429/timeouts), so a client
       // error (400 bad request, 401 auth) — the provider responding fine — never trips the breaker.
-      this.providerBreaker.record(isProviderFault(status) ? Outcome.Failure : Outcome.Success);
+      // USER CANCELLATION is not a provider fault at all: an aborted request (Ctrl+C/esc) has no
+      // status and would otherwise count as a timeout — a user interrupting three long streams
+      // must never open the breaker. Record nothing for aborts.
+      const userAborted = options.signal?.aborted || e?.name === 'AbortError' || /abort/i.test(String(e?.message || ''));
+      if (!userAborted) this.providerBreaker.record(isProviderFault(status) ? Outcome.Failure : Outcome.Success);
       yield { type: 'error', message: e.message, recoverable, kind, retryAfterSecs };
     }
   }

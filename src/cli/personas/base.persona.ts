@@ -55,6 +55,28 @@ export abstract class AgentPersona {
   protected tools: BuiltTool[] = [];
   public messages: any[] = [];
   public cwd: string = process.cwd();
+  /** Session-scoped context manager: survives across human turns so token calibration, the 50%
+   * warning latch, and compaction epochs are not silently reset every turn. Recreated only on an
+   * explicit session boundary (new/clear/resume → {@link resetContextSession}) or when the
+   * configured context window changes. */
+  private sessionContextManager: import('../../memory/context.manager').ContextManager | null = null;
+  private sessionContextWindow: number | undefined;
+
+  /** Get (or lazily create) the session's ContextManager for the given window size. */
+  protected sessionContext(contextWindow: number | undefined): import('../../memory/context.manager').ContextManager {
+    if (!this.sessionContextManager || this.sessionContextWindow !== contextWindow) {
+      const { ContextManager } = require('../../memory/context.manager') as typeof import('../../memory/context.manager');
+      this.sessionContextManager = new ContextManager(this.llmAdapter, contextWindow);
+      this.sessionContextWindow = contextWindow;
+    }
+    return this.sessionContextManager;
+  }
+
+  /** Explicit session boundary (/clear, session load): drop calibration + warning state. */
+  public resetContextSession(): void {
+    this.sessionContextManager = null;
+    this.sessionContextWindow = undefined;
+  }
 
   constructor(
     public readonly config: PersonaConfig,
@@ -454,8 +476,9 @@ export abstract class AgentPersona {
       contextWindow = caps.contextWindow;
     }
     // governor is undefined here: tools already carry their own injected governor, and the loop
-    // doesn't enforce policy itself (see AgentLoop constructor).
-    const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow);
+    // doesn't enforce policy itself (see AgentLoop constructor). The context manager is
+    // SESSION-scoped (owned by the persona) so calibration/warnings/epochs survive across turns.
+    const loop = new AgentLoop(this.llmAdapter, this.toolRegistry, undefined, contextWindow, this.sessionContext(contextWindow));
     // BIMAX_MAX_ITERATIONS: benchmark/headless runs raise this (the container's wall clock is
     // the real budget there). Must be applied HERE too — this callsite always passes
     // maxIterations down, so the loop-level env fallback never sees an undefined value.

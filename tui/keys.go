@@ -396,6 +396,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Clear the physical terminal for a clean repaint (parity with the Ink UI). The transcript
 		// itself is untouched — use /clear to reset the conversation.
 		return m, tea.ClearScreen
+	case "pgup":
+		// Scroll the transcript viewport up (View clamps to the transcript length).
+		page := m.height / 2
+		if page < 1 {
+			page = 10
+		}
+		m.scrollOff += page
+		return m, nil
+	case "pgdown":
+		page := m.height / 2
+		if page < 1 {
+			page = 10
+		}
+		m.scrollOff -= page
+		if m.scrollOff < 0 {
+			m.scrollOff = 0
+		}
+		return m, nil
 	case "ctrl+f":
 		// Enter transcript/log search; stash the in-progress input until we exit.
 		m.searchMode = true

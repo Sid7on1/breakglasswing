@@ -7,7 +7,7 @@ import { getTaintTracker } from '../../mind/taint';
 import { buildTool, BuiltTool } from '../tool.factory';
 
 /** Acting verbs face the governor; observation (screenshot/cursor/status/…) is approval-free. */
-const GATED_ACTIONS = new Set(['click', 'drag', 'type', 'key', 'set_value', 'open', 'close', 'record_start', 'hold', 'mouse_down', 'mouse_up']);
+const GATED_ACTIONS = new Set(['click', 'drag', 'type', 'key', 'set_value', 'open', 'close', 'quit_app', 'record_start', 'hold', 'mouse_down', 'mouse_up']);
 
 export function createComputerTool(
   governor: IGovernor,
@@ -27,7 +27,7 @@ THE SCREEN IS THE DELIVERABLE. When the task is to make an app do something (com
 
 COMPLETION PROOF IS REQUIRED. Only claim success when the newest post-action screenshot visibly shows the requested result, or a final observe query matches concrete native text unique to that result. A generic heading or a delivered-click message is not proof. If neither pixels nor native text prove the outcome, keep acting or report the blocker instead of guessing.
 
-Actions: status/request_access · apps/windows discovery · open · observe/screenshot · click/type/key/set_value/drag/scroll · hover/hold/mouse_down/mouse_up (fine-grained pointer: hover to reveal, hold=click-and-hold for ms, and the down/up pair for staged text/cell selection — a drag verifies its source is on the window before pressing and always releases the button, even on failure) · cursor/frontmost/move · close/wait · record_start/record_status/record_stop. open returns pid/windowId and keeps that window as the default target. Actions may also name pid/windowId explicitly. Visible/background delivery is a user preference controlled by /computer; the model cannot override it. screenshot observes the selected native window when one exists and otherwise uses the full display fallback. PiP and automatic MP4 trajectory recording follow /computer settings.
+Actions: status/request_access · apps/windows discovery · open · observe/screenshot · click/type/key/set_value/drag/scroll · hover/hold/mouse_down/mouse_up (fine-grained pointer: hover to reveal, hold=click-and-hold for ms, and the down/up pair for staged text/cell selection — a drag verifies its source is on the window before pressing and always releases the button, even on failure) · cursor/frontmost/move · close/quit_app/wait · record_start/record_status/record_stop. open returns pid/windowId and keeps that window as the default target. Actions may also name pid/windowId explicitly. close closes ONLY the selected window (the app keeps running); quit_app quits the ENTIRE application and is high-impact (it may discard unsaved state — always prefer close unless the user asked to quit). Visible/background delivery is a user preference controlled by /computer; the model cannot override it. screenshot observes the selected native window when one exists and otherwise uses the full display fallback. Recording NEVER starts automatically: only an explicit, user-approved record_start begins one. Whole-display capture requires the user approving that exact scope in the approval prompt — no argument you pass can authorize it.
 
 Security: acting (click/drag/type/key/open/close) is governor-gated per intended app with session grants; sensitive targets (password managers, system security settings, wallets) are always denied; screenshots carry untrusted screen content and taint the session like WebFetch.`,
     isDestructive: false,
@@ -35,7 +35,7 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['status', 'request_access', 'apps', 'windows', 'open', 'observe', 'screenshot', 'click', 'type', 'key', 'set_value', 'drag', 'scroll', 'hover', 'hold', 'mouse_down', 'mouse_up', 'cursor', 'frontmost', 'move', 'close', 'wait', 'record_start', 'record_status', 'record_stop'] },
+        action: { type: 'string', enum: ['status', 'request_access', 'apps', 'windows', 'open', 'observe', 'screenshot', 'click', 'type', 'key', 'set_value', 'drag', 'scroll', 'hover', 'hold', 'mouse_down', 'mouse_up', 'cursor', 'frontmost', 'move', 'close', 'quit_app', 'wait', 'record_start', 'record_status', 'record_stop'] },
         x: { type: 'number' }, y: { type: 'number' },
         toX: { type: 'number', description: 'drag: destination x.' }, toY: { type: 'number', description: 'drag: destination y.' },
         dx: { type: 'number', description: 'scroll: horizontal pixels (positive = right).' },
@@ -60,18 +60,26 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
         display: { type: 'number', description: 'screenshot: display index, 1 = main.' },
         ms: { type: 'number', description: 'wait: 50-5000 ms. hover/hold: how long to hover or hold the button (default 400/800 ms).' },
         normalized: { type: 'boolean', description: 'Interpret click coordinates in a 0–1000 space scaled to the newest window screenshot.' },
-        pixelFallback: { type: 'boolean', description: 'Deprecated compatibility flag; screenshot pixel clicks are always supported.' },
         recordVideo: { type: 'boolean', description: 'record_start: include an MP4 screen recording (default true).' },
         outputDir: { type: 'string', description: 'record_start: optional output directory; defaults under .bimax/computer/recordings.' },
       },
       required: ['action'],
     },
     execute: async (args: DesktopCommand, context?: any) => {
-      const intendedApp = args.app?.trim() || (['click', 'drag', 'scroll', 'type', 'key', 'set_value', 'close', 'hover', 'hold', 'mouse_down', 'mouse_up'].includes(args.action) ? targetApp : '');
-      // Delivery is a user-owned /computer preference. Strip any stale or hallucinated model arg
-      // so a visible run cannot silently fall back to the sidecar's synthetic overlay path.
-      const { deliveryMode: _ignoredDelivery, ...modelArgs } = args;
+      const intendedApp = args.app?.trim() || (['click', 'drag', 'scroll', 'type', 'key', 'set_value', 'close', 'quit_app', 'hover', 'hold', 'mouse_down', 'mouse_up'].includes(args.action) ? targetApp : '');
+      // Strip every field the model must NEVER control:
+      //   - deliveryMode: a user-owned /computer preference (a hallucinated arg could silently
+      //     switch to the sidecar's synthetic overlay path);
+      //   - fullDisplayToken / approveFullDisplay(legacy): whole-display recording approval is a
+      //     governor decision — a model-supplied token or boolean can never authorize it.
+      const { deliveryMode: _ignoredDelivery, fullDisplayToken: _ignoredToken, ...modelArgs } = args as DesktopCommand & { approveFullDisplay?: unknown };
+      delete (modelArgs as { approveFullDisplay?: unknown }).approveFullDisplay;
       const effectiveArgs: DesktopCommand = intendedApp ? { ...modelArgs, app: intendedApp } : modelArgs;
+      // Whole-display recording detection BEFORE the approval prompt, so the user approves the
+      // TRUE scope. Only a governor-approved prompt mints the single-use runtime token below.
+      const wantsVideo = effectiveArgs.action === 'record_start' && effectiveArgs.recordVideo !== false;
+      const scopePreview = wantsVideo ? runtime.recordingScopePreview?.() : undefined;
+      const wholeDisplay = !!scopePreview && !scopePreview.captureSafe;
       if (GATED_ACTIONS.has(effectiveArgs.action)) {
         // Scope the approval to the app that will RECEIVE the input so the governor can offer
         // (and honor) a session grant for exactly that app — and hard-deny sensitive targets.
@@ -84,8 +92,15 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
           : intendedApp || await runtime.frontmostApp();
         const semanticTarget = runtime.describeTarget?.(effectiveArgs) || undefined;
         const impact = effectiveArgs.action === 'record_start'
-          ? { high: true, reason: 'starting screen recording captures visible desktop content' }
-          : classifyDesktopActionImpact(effectiveArgs.action, {
+          ? {
+            high: true,
+            reason: wholeDisplay
+              ? 'starting a WHOLE-DISPLAY screen recording — captures EVERYTHING visible, including unrelated windows'
+              : `starting screen recording captures visible desktop content${scopePreview ? ` (scope: ${scopePreview.scope})` : ''}`,
+          }
+          : effectiveArgs.action === 'quit_app'
+            ? { high: true, reason: 'quits the entire application and may discard unsaved state' }
+            : classifyDesktopActionImpact(effectiveArgs.action, {
           text: effectiveArgs.text, combo: effectiveArgs.combo, app: effectiveArgs.app,
           label: semanticTarget?.label, role: semanticTarget?.role, value: semanticTarget?.value,
           });
@@ -107,11 +122,23 @@ Security: acting (click/drag/type/key/open/close) is governor-gated per intended
           highImpact: impact.high || undefined, impactReason: impact.reason,
           isDestructive: !routine,
         });
-        if (routine) cliEvents.emit('status', `Auto-approved (${approvals}): ${effectiveArgs.action}${app ? ` in ${app}` : ''}`);
+        if (routine) {
+          const note = `Auto-approved (${approvals}): ${effectiveArgs.action}${app ? ` in ${app}` : ''}`;
+          cliEvents.emit('status', note);
+          // Auditability: auto-approvals must be findable after the fact (Ctrl+O log panel), not
+          // just a status flash that the next event overwrites.
+          cliEvents.emit('log', { id: Date.now(), level: 'info', text: note, timestamp: new Date() });
+        }
+        // The governor prompt above resolved (or threw on deny). Only NOW — with the user having
+        // approved the explicitly-stated whole-display scope — mint the runtime's single-use token.
+        if (wholeDisplay) {
+          const token = runtime.authorizeFullDisplayRecording?.();
+          if (token) effectiveArgs.fullDisplayToken = token;
+        }
       }
       const result = await runtime.run(effectiveArgs, { cwd: context?.cwd || process.cwd(), signal: context?.signal });
       if (result.ok && effectiveArgs.action === 'open') targetApp = effectiveArgs.app?.trim() || result.app || '';
-      if (result.ok && effectiveArgs.action === 'close' && (!intendedApp || intendedApp === targetApp)) targetApp = '';
+      if (result.ok && effectiveArgs.action === 'quit_app' && (!intendedApp || intendedApp === targetApp)) targetApp = '';
       // Whatever is on screen is untrusted input (prompt injection): a screenshot pulls it into
       // the conversation, exactly like a WebFetch of an arbitrary page.
       if (result.ok && ['observe', 'screenshot'].includes(effectiveArgs.action)) {

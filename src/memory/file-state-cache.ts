@@ -101,10 +101,16 @@ export class FileStateCache {
   /**
    * Returns the most recently read files (not model-evicted, not stale) for post-compact
    * restoration. Limited to small files to avoid blowing up the restored context.
+   *
+   * Each row carries the cached mtime plus the read's offset/limit so the caller can (a) re-stat
+   * the file and refuse to restore stale content after an external edit, and (b) label a partial
+   * read honestly instead of presenting it as the complete file.
    */
-  getRecentReads(maxAgeMs = 10 * 60 * 1000, maxFileBytes = 50 * 1024): Array<{ path: string; content: string }> {
+  getRecentReads(maxAgeMs = 10 * 60 * 1000, maxFileBytes = 50 * 1024): Array<{
+    path: string; content: string; mtime: number; offset: number; limit: number; complete: boolean;
+  }> {
     const now = Date.now();
-    const result: Array<{ path: string; content: string }> = [];
+    const result: Array<{ path: string; content: string; mtime: number; offset: number; limit: number; complete: boolean }> = [];
     const seen = new Set<string>();
 
     for (const key of [...this.lruOrder].reverse()) {
@@ -113,10 +119,17 @@ export class FileStateCache {
       if (now - entry.cachedAt > maxAgeMs) continue;
       if (entry.content.length > maxFileBytes) continue;
 
-      const absPath = key.split(SEP)[0];
+      const [absPath, offsetStr, limitStr] = key.split(SEP);
       if (!seen.has(absPath)) {
         seen.add(absPath);
-        result.push({ path: absPath, content: entry.content });
+        const offset = parseInt(offsetStr, 10) || 0;
+        const limit = parseInt(limitStr, 10);
+        const normalizedLimit = Number.isFinite(limit) ? limit : -1;
+        result.push({
+          path: absPath, content: entry.content, mtime: entry.mtime,
+          offset, limit: normalizedLimit,
+          complete: offset === 0 && normalizedLimit === -1,
+        });
       }
       if (result.length >= 5) break;
     }

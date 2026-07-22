@@ -3,7 +3,6 @@ import { responseSanitizer } from './response.sanitizer';
 import { extractTextToolCalls } from './tool.call.parser';
 import { ToolRegistry } from '../tools/tool.registry';
 import { IGovernor } from './interfaces';
-import { powerThrottleAdvice } from '../governor/power.monitor';
 import { Logger } from '../utils';
 import { ContextManager } from '../memory/context.manager';
 import { cliEvents, ToolCallEntry } from '../cli/events';
@@ -59,9 +58,13 @@ export class AgentLoop {
     private governor?: IGovernor,
     // The active model's context window (tokens). Compaction thresholds scale to this so bimax
     // works correctly whether the chosen model has a 32k or a 1M window. Falls back to a safe default.
-    maxContextTokens?: number
+    maxContextTokens?: number,
+    // Session-scoped context manager owned by the caller (the persona). When provided, token
+    // calibration, warning latches, and compaction epochs survive across turns instead of being
+    // silently reset by each fresh AgentLoop. Omitted → a private per-loop instance (workers/tests).
+    contextManager?: ContextManager
   ) {
-    this.contextManager = new ContextManager(llm, maxContextTokens);
+    this.contextManager = contextManager ?? new ContextManager(llm, maxContextTokens);
   }
 
   /**
@@ -177,21 +180,9 @@ export class AgentLoop {
     for (let i = 0; i < maxIter; i++) {
       // Interrupted between turns: stop cleanly before spending another model call.
       if (signal?.aborted) return;
-      // Phase 3a power-aware loop backoff. On battery / thermal throttle, insert a short pause
-      // BETWEEN tool-iteration steps (never before the first — first-response latency is untouched)
-      // so a long autonomous run drips model calls instead of spinning at full tilt, draining the
-      // battery or holding the CPU hot. Advisory-only: reads cached power state (no I/O) and honors
-      // the interrupt signal so Ctrl+C/esc still cancels immediately.
-      if (i > 0) {
-        const powerBackoffMs = powerThrottleAdvice().loopBackoffMs;
-        if (powerBackoffMs > 0) {
-          await new Promise<void>((resolve) => {
-            const t = setTimeout(resolve, powerBackoffMs);
-            signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
-          });
-          if (signal?.aborted) return;
-        }
-      }
+      // NOTE: the Grok-ported power-aware 4s backoff between tool iterations was removed. Power
+      // policy may constrain NEW background/sub-agent work (see spawn.tool.ts) but must never
+      // stall the user's active interactive turn.
       // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
       //    full mode is a no-op here and relies on reactive compaction if the API rejects the size).
       this.messages = await this.contextManager.checkAndCompact(this.messages, contextMode);
@@ -693,6 +684,9 @@ export class AgentLoop {
             const toolContext = {
               ...(context || { cwd: process.cwd() }), signal,
               reportOutcome: (o: TypedOutcome) => { typed = o; },
+              // The LIVE conversation array for this loop, so context-management tools
+              // (FreeContextTool) can act on the real session context, not a stale copy.
+              sessionMessages: this.messages,
             };
             const result = await tool.execute(argsObj, toolContext);
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2);

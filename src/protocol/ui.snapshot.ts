@@ -173,32 +173,8 @@ export interface UiSnapshot {
   computer?: UiSnapshotComputer;
   // v3 additive: task workspaces (live + recent terminal tasks awaiting close) for the task panel.
   tasks?: UiSnapshotTask[];
-  // Phase 3a additive: live power posture (battery/thermal → throttle) for the footer chip. Omitted
-  // until a real reading lands (or when power-awareness is off) so front-ends can hide the pill.
-  power?: UiSnapshotPower;
-  // Phase 3b additive: update posture (a newer version is published). Omitted until a check populates
-  // the on-disk cache, so this never triggers a network read on the snapshot path.
-  update?: UiSnapshotUpdate;
-}
-
-export interface UiSnapshotPower {
-  source: 'ac' | 'battery' | 'unknown';
-  batteryPercent: number | null;
-  charging: boolean;
-  thermalThrottled: boolean;
-  /** 'none' | 'soft' — whether power-aware backoff is engaged. */
-  throttle: 'none' | 'soft';
-  /** Effective parallel sub-agent ceiling while throttled. */
-  maxSubagents: number;
-  /** Human-readable cause when throttling, else empty. */
-  reason: string;
-}
-
-export interface UiSnapshotUpdate {
-  current: string;
-  latest: string | null;
-  updateAvailable: boolean;
-  downloadCmd: string;
+  // NOTE: the Grok-port power/update footer chips were removed — no front-end ever consumed them
+  // (silent TS→Go drift). Power posture is read via /power and update posture via /update.
 }
 
 /** Lazily-computed baseline (system prompt + tool schemas). Set by headless.entry, which has the
@@ -399,33 +375,7 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* task registry best-effort */ }
 
-  // Phase 3a — power posture. Pure read of the cached poll (no I/O); omitted until a real reading
-  // lands so front-ends can hide the chip on desktops / when power-awareness is disabled.
-  let power: UiSnapshotPower | undefined;
-  try {
-    const { powerSummary } = require('../governor/power.monitor');
-    const p = powerSummary();
-    if (p.known) {
-      power = {
-        source: p.source, batteryPercent: p.batteryPercent, charging: p.charging,
-        thermalThrottled: p.thermalThrottled, throttle: p.level,
-        maxSubagents: p.maxConcurrentSubagents, reason: p.reason,
-      };
-    }
-  } catch { /* power posture best-effort */ }
-
-  // Phase 3b — update posture. Synchronous cache read only (never fetches here); omitted until a
-  // check has populated the cache so an offline/first launch shows no stale pill.
-  let update: UiSnapshotUpdate | undefined;
-  try {
-    const { updateChecker } = require('../core/self.update');
-    const r = updateChecker.lastKnown();
-    if (r.latest) {
-      update = { current: r.current, latest: r.latest, updateAvailable: r.updateAvailable, downloadCmd: r.downloadCmd };
-    }
-  } catch { /* update posture best-effort */ }
-
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer, tasks, power, update };
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer, tasks };
 }
 
 // The governor is per-container (no engine singleton), so the host hands it in at startup for the
@@ -451,6 +401,9 @@ export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolReg
   cliEvents.on('config_changed', emit);
   cliEvents.on('goals_changed', emit);
   cliEvents.on('graph_changed', emit);
+  // Context-token refresh (compression/compaction changed the estimate). Deliberately its own
+  // event: it refreshes the footer meter WITHOUT the TUI printing "code graph updated".
+  cliEvents.on('context_changed', emit);
   cliEvents.on('mcp_changed', emit);
   cliEvents.on('tools_changed', emit);
   // Mind layer: re-snapshot when self-model / drives / habits change so the footer's 🧠 strip
@@ -458,10 +411,6 @@ export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolReg
   cliEvents.on('mind_changed', emit);
   // Workspace: repo registered / scoped / ignored → status-bar repo chip updates.
   cliEvents.on('workspace_changed', emit);
-  // Phase 3: power-throttle engaged/lifted (3a) and a completed update check (3b) → refresh the
-  // footer's power/update chips without waiting for an unrelated change to trigger a snapshot.
-  cliEvents.on('power_changed', emit);
-  cliEvents.on('update_changed', emit);
   // v2: checkpoint created / rewound → History strip updates; clear/resume → session list updates.
   cliEvents.on('timemachine_changed', emit);
   cliEvents.on('clear', emit);

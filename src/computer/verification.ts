@@ -86,6 +86,43 @@ export function classifyVerification(i: VerificationInput): VerificationResult {
   return { outcome: 'changed', frameChanged: false, windowStable, note: 'fresh screen captured (no prior frame to diff against)' };
 }
 
+/**
+ * ActionResult — the honest per-action outcome contract.
+ *
+ * Pixel difference is SUPPORTING evidence, never proof of task success. This shape separates the
+ * facts so callers (and the model) cannot conflate them:
+ *   - delivered:      the driver accepted and delivered the input (says nothing about effect)
+ *   - observed:       what the fresh post-action evidence showed (pixel/window level)
+ *   - postcondition:  the semantic check result, when the caller supplied one (the only path to
+ *                     `confidence: 'proven'`)
+ *   - confidence:     'proven' (semantic postcondition matched) | 'likely' (screen visibly changed
+ *                     in the expected window) | 'unknown' (delivered, but nothing proves an effect —
+ *                     including a pixel-identical screen, which is NOT a failure: many successful
+ *                     actions are visually static)
+ *   - failureReason:  set only for genuine failures (driver error, wrong window)
+ */
+export interface ActionResult {
+  delivered: boolean;
+  observed: VerificationOutcome;
+  postcondition?: { query: string; matched: boolean };
+  confidence: 'proven' | 'likely' | 'unknown';
+  failureReason?: string;
+}
+
+/** Derive the ActionResult contract from a verification classification. */
+export function toActionResult(
+  v: VerificationResult,
+  postcondition?: { query: string; matched: boolean },
+): ActionResult {
+  const delivered = v.outcome !== 'failed';
+  const confidence: ActionResult['confidence'] =
+    (postcondition?.matched || v.outcome === 'confirmed') ? 'proven'
+      : (v.outcome === 'changed' && v.windowStable && v.frameChanged) ? 'likely'
+        : 'unknown';
+  const failureReason = v.outcome === 'failed' || v.outcome === 'wrong-window' ? v.note : undefined;
+  return { delivered, observed: v.outcome, ...(postcondition ? { postcondition } : {}), confidence, ...(failureReason ? { failureReason } : {}) };
+}
+
 /** Normalize text for a clipboard/copy comparison — trims and collapses whitespace, ignores case. */
 function normalizeClip(s: string): string { return s.replace(/\s+/g, ' ').trim().toLowerCase(); }
 

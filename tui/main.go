@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,18 +97,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// INLINE mode (opencode / Claude-Code style): NO alt-screen. Committed transcript lines are printed
-	// into the terminal's OWN scrollback (via tea.Println), so the terminal's NATIVE scrollbar scrolls
-	// the history — smooth, native, no custom scrollbar. Only a small live region (streaming answer,
-	// running tools, input box, footer) is redrawn in place at the bottom.
-	//
-	// Launch scroll-lock: wipe the visible screen AND the terminal's saved scrollback (2J + 3J), then
-	// home the cursor, so the session starts with nothing above it — scrolling up at launch shows no
-	// stale shell output or ghost frames from a previous bimax run. From here on the scrollback is
-	// bimax's own transcript only. (Escape codes are safe here: bubbletea requires a TTY to run, and
-	// the engine-free flags above returned before this point for scripted/piped invocations.)
-	fmt.Print("\x1b[2J\x1b[3J\x1b[H")
-	p := tea.NewProgram(initialModel(eng))
+	// ALTERNATE-SCREEN viewport (ADR-001, revised): the transcript is model state (m.lines) and the
+	// whole frame is a pure function of it. Resize REFLOWS state at the new width — committed output
+	// is never cleared, reprinted, or repaired, which the inline renderer could not guarantee
+	// (post-reflow, previously painted rows cannot be located, so every repair was a clear+reprint).
+	// The user's own shell screen/scrollback is preserved by the terminal and restored on exit;
+	// the session transcript is printed once after exit so the conversation survives.
+	p := tea.NewProgram(initialModel(eng), tea.WithAltScreen())
 
 	// Graceful SIGHUP (closed terminal tab / hangup): quit through Bubble Tea so it restores the
 	// terminal and Run returns — which reaches eng.Close() and reaps the Node engine child.
@@ -125,10 +121,16 @@ func main() {
 		p.Quit()
 	}()
 
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		eng.Close()
 		os.Exit(1)
 	}
 	eng.Close()
+	// The alt screen vanished with the program — print the session transcript into the real
+	// terminal once, so the conversation survives exit (and lands in native scrollback after all).
+	if m, ok := finalModel.(model); ok && len(m.lines) > 0 {
+		fmt.Println(strings.Join(m.lines, "\n"))
+	}
 }

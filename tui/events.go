@@ -208,12 +208,12 @@ func (m *model) handleEvent(o Outbound) {
 	case "log":
 		var le LogEntry
 		if len(o.Args) > 0 && json.Unmarshal(o.Args[0], &le) == nil && le.Text != "" {
-			// Cache structured entries for the Ctrl+O log view; also echo into the transcript dim.
+			// Operational logs belong ONLY in the Ctrl+O log panel — never echoed into the chat
+			// transcript, which is reserved for the conversation itself.
 			m.logs = append(m.logs, le)
 			if len(m.logs) > 200 {
 				m.logs = m.logs[len(m.logs)-200:]
 			}
-			m.append(dimStyle.Render("  " + le.Text))
 		}
 
 	case "todo_update":
@@ -244,11 +244,10 @@ func (m *model) handleEvent(o Outbound) {
 
 	case "clear":
 		// /clear: wipe the transcript + per-turn state, then re-show the welcome banner so the screen
-		// looks freshly launched (the engine has already reset the conversation history). pendingClear
-		// makes the Update wrapper clear the visible screen BEFORE the new banner flushes; scrollback
-		// is deliberately left alone (older transcript stays reachable by scrolling up).
+		// looks freshly launched (the engine has already reset the conversation history). The
+		// alternate-screen View re-derives every frame from state, so resetting m.lines IS the clear.
 		m.lines = nil
-		m.printQueue = nil // drop anything queued this cycle; it would land below the cleared screen
+		m.scrollOff = 0
 		m.started = false
 		m.stream = ""
 		m.streamCommitted = 0
@@ -263,7 +262,6 @@ func (m *model) handleEvent(o Outbound) {
 		m.saFocus = false
 		m.histTokens = 0
 		m.welcomed = false
-		m.pendingClear = true
 		m.showWelcome()
 
 	case "cwd_changed":

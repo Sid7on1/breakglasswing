@@ -919,26 +919,26 @@ func TestSpinnerShownWhileBusy(t *testing.T) {
 	}
 }
 
-// Inline mode (native scrollbar): committed transcript lines are QUEUED for the terminal's native
-// scrollback (flushed via tea.Println), NOT rendered in the live View. The live View shows only
-// in-flight content (the streaming answer) plus chrome (input/footer/menus).
-func TestInlineCommitsToScrollback(t *testing.T) {
+// Alternate-screen viewport: committed transcript lines are model state and RENDER in the View's
+// transcript window (there is no tea.Println path), alongside the in-flight streamed answer.
+func TestTranscriptRendersInView(t *testing.T) {
 	m, _ := newTestModel()
 	m.height = 40
 
 	m.append("❯ hi")
 	m.append("Hey! What's on your mind today?")
 
-	if len(m.printQueue) != 2 {
-		t.Fatalf("expected 2 lines queued for scrollback, got %d", len(m.printQueue))
+	if !strings.Contains(stripANSI(m.View()), "What's on your mind") {
+		t.Fatalf("committed transcript must render in the viewport View")
 	}
-	if strings.Contains(stripANSI(m.View()), "What's on your mind") {
-		t.Fatalf("committed transcript must NOT be in the live View — it belongs in native scrollback")
-	}
-	// An in-flight streamed answer DOES render live.
+	// An in-flight streamed answer renders live below the committed lines.
 	m.stream = "thinking out loud"
-	if !strings.Contains(stripANSI(m.View()), "thinking out loud") {
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "thinking out loud") {
 		t.Fatalf("live stream should render in the View")
+	}
+	if strings.Index(view, "What's on your mind") > strings.Index(view, "thinking out loud") {
+		t.Fatalf("committed lines must render ABOVE the live stream")
 	}
 }
 
@@ -1427,38 +1427,32 @@ func TestIndentAwareWrapNoDiffBleed(t *testing.T) {
 	}
 }
 
-// Narrowing is the only resize direction that can leave ghost frames (painted rows re-wrap), so it
-// is the only one allowed to pay the clear-and-reprint (which costs one duplicated screenful in
-// scrollback). Widen / height-only changes must be free.
-func TestResizeRepairOnlyOnNarrow(t *testing.T) {
+// Resize REFLOWS state — it never clears, reprints, or repairs. Committed lines survive any
+// narrow/widen storm verbatim (exactly once each), and every rendered row fits the new width.
+func TestResizeReflowsWithoutClearOrReprint(t *testing.T) {
 	m, _ := newTestModel()
 	m.terminalSized = true
-	m.lines = []string{"committed line one", "committed line two"}
+	m.lines = []string{"committed line one", "committed line two — " + strings.Repeat("wide ", 30)}
 
-	// Widen: no repair scheduled.
-	res, _ := m.update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	m = res.(model)
-	if m.resizeNarrowed {
-		t.Fatal("widening must not schedule a ghost repair")
+	for _, w := range []int{120, 60, 100, 40, 158, 80} {
+		res, _ := m.update(tea.WindowSizeMsg{Width: w, Height: 40})
+		m = res.(model)
+		// Settle ticks fire freely — no repair state may exist to trigger on them.
+		res, _ = m.update(tickMsg(time.Now()))
+		m = res.(model)
+		view := stripANSI(m.View())
+		if got := strings.Count(view, "committed line one"); got != 1 {
+			t.Fatalf("width %d: committed line rendered %d times (must be exactly 1 — no duplication, no loss)", w, got)
+		}
+		for _, line := range strings.Split(m.View(), "\n") {
+			if lipgloss.Width(line) > w {
+				t.Fatalf("width %d: rendered row exceeds terminal width (%d): %q", w, lipgloss.Width(line), line)
+			}
+		}
 	}
-	m.resizeAt = time.Now().Add(-time.Second) // debounce elapsed
-	res, _ = m.update(tickMsg(time.Now()))
-	m = res.(model)
-	if m.pendingClear || len(m.printQueue) != 0 {
-		t.Fatalf("widen settle must not clear/reprint (pendingClear=%v queue=%d)", m.pendingClear, len(m.printQueue))
-	}
-
-	// Narrow: repair scheduled and fires on settle.
-	res, _ = m.update(tea.WindowSizeMsg{Width: 60, Height: 40})
-	m = res.(model)
-	if !m.resizeNarrowed {
-		t.Fatal("narrowing must schedule the ghost repair")
-	}
-	m.resizeAt = time.Now().Add(-time.Second)
-	res, _ = m.update(tickMsg(time.Now()))
-	m = res.(model)
-	if !m.pendingClear || len(m.printQueue) == 0 {
-		t.Fatalf("narrow settle must clear + reprint the last screenful (pendingClear=%v queue=%d)", m.pendingClear, len(m.printQueue))
+	// The transcript state itself is untouched by the storm — logical lines, verbatim.
+	if m.lines[0] != "committed line one" || !strings.HasPrefix(m.lines[1], "committed line two") {
+		t.Fatalf("resize mutated committed transcript state: %q", m.lines)
 	}
 }
 
@@ -1524,5 +1518,22 @@ func TestBundledThirdPartyNotice(t *testing.T) {
 		if !strings.Contains(thirdPartyNotices, want) {
 			t.Errorf("third-party notices missing %q", want)
 		}
+	}
+}
+
+// Regression (TUI stabilization): operational logs belong ONLY in the Ctrl+O log panel — a `log`
+// event must never print into the chat transcript.
+func TestLogEventsStayOutOfTranscript(t *testing.T) {
+	m, _ := newTestModel()
+	linesBefore := len(m.lines)
+	m.handleEvent(ev("log", LogEntry{ID: 1, Level: "info", Text: "operational log line"}))
+	if len(m.lines) != linesBefore {
+		t.Fatalf("log event leaked into the transcript: lines %d→%d", linesBefore, len(m.lines))
+	}
+	if strings.Contains(stripANSI(m.View()), "operational log line") {
+		t.Fatalf("log text must not render in the transcript view (only the Ctrl+O panel)")
+	}
+	if len(m.logs) != 1 || m.logs[0].Text != "operational log line" {
+		t.Fatalf("log event missing from the log panel cache: %+v", m.logs)
 	}
 }

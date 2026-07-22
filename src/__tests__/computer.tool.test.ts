@@ -201,3 +201,69 @@ describe('ComputerTool', () => {
     expect((runtime.run as jest.Mock).mock.calls[0][0]).not.toHaveProperty('deliveryMode');
   });
 });
+
+describe('ComputerTool whole-display recording approval is unforgeable', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    __resetConfigForTests();
+    fs.rmSync(path.join(testBreakglass, 'config.json'), { force: true });
+  });
+
+  it('strips model-supplied approveFullDisplay/fullDisplayToken and mints a token only after governor approval', async () => {
+    const authorize = jest.fn().mockReturnValue('governor-minted-token');
+    const runtime: DesktopRuntimePort = {
+      run: jest.fn().mockImplementation(async (cmd: any): Promise<DesktopResult> => ({
+        ok: true, action: cmd.action, driver: 'fake', summary: 'ok',
+      })),
+      quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true, accessibility: null, screenRecording: null }),
+      frontmostApp: jest.fn().mockResolvedValue('Notes'),
+      recordingScopePreview: jest.fn().mockReturnValue({ scope: 'whole display', captureSafe: false }),
+      authorizeFullDisplayRecording: authorize,
+    };
+    const tool = createComputerTool(governor, runtime);
+
+    // The model tries to self-authorize with a boolean AND a forged token. Both must be stripped;
+    // the runtime must receive ONLY the token the approval layer minted after governor approval.
+    await tool.execute({ action: 'record_start', approveFullDisplay: true, fullDisplayToken: 'model-forged' } as any, { cwd: '/tmp' });
+    const sent = (runtime.run as jest.Mock).mock.calls[0][0];
+    expect(sent.approveFullDisplay).toBeUndefined();
+    expect(sent.fullDisplayToken).toBe('governor-minted-token');
+    // The governor prompt stated the TRUE whole-display scope, high-impact.
+    const approval = (governor.approveTaskExecution as jest.Mock).mock.calls.find(c => c[0] === 'COMPUTER_CONTROL');
+    expect(approval[1].highImpact).toBe(true);
+    expect(approval[1].impactReason).toMatch(/WHOLE-DISPLAY/);
+    expect(authorize).toHaveBeenCalledTimes(1);
+  });
+
+  it('a governor DENY means no token is ever minted and the runtime is never called', async () => {
+    const authorize = jest.fn();
+    const deny = { approveTaskExecution: jest.fn().mockRejectedValue(new Error('denied')) } as unknown as IGovernor;
+    const runtime: DesktopRuntimePort = {
+      run: jest.fn(),
+      quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true, accessibility: null, screenRecording: null }),
+      frontmostApp: jest.fn().mockResolvedValue('Notes'),
+      recordingScopePreview: jest.fn().mockReturnValue({ scope: 'whole display', captureSafe: false }),
+      authorizeFullDisplayRecording: authorize,
+    };
+    const tool = createComputerTool(deny, runtime);
+    await expect(tool.execute({ action: 'record_start' } as any, { cwd: '/tmp' })).rejects.toThrow(/denied/);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(runtime.run).not.toHaveBeenCalled();
+  });
+
+  it('a window-scoped recording never mints a whole-display token', async () => {
+    const authorize = jest.fn();
+    const runtime: DesktopRuntimePort = {
+      run: jest.fn().mockImplementation(async (cmd: any): Promise<DesktopResult> => ({ ok: true, action: cmd.action, driver: 'fake', summary: 'ok' })),
+      quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true, accessibility: null, screenRecording: null }),
+      frontmostApp: jest.fn().mockResolvedValue('Notes'),
+      recordingScopePreview: jest.fn().mockReturnValue({ scope: 'Notes window 7', captureSafe: true }),
+      authorizeFullDisplayRecording: authorize,
+    };
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'record_start' } as any, { cwd: '/tmp' });
+    expect(authorize).not.toHaveBeenCalled();
+    const sent = (runtime.run as jest.Mock).mock.calls[0][0];
+    expect(sent.fullDisplayToken).toBeUndefined();
+  });
+});

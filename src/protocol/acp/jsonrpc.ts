@@ -80,13 +80,27 @@ export class JsonRpcConnection {
     this.handlers.set(method, handler);
   }
 
-  /** Issue a request and resolve with the peer's result (or reject with its error). */
-  request<T = any>(method: string, params?: unknown): Promise<T> {
+  /** Default outbound-request timeout: finite so a vanished peer can never wedge the agent forever.
+   * Generous (5 min) because permission requests legitimately wait on a human. */
+  static readonly DEFAULT_REQUEST_TIMEOUT_MS =
+    parseInt(process.env.BIMAX_ACP_REQUEST_TIMEOUT_MS || '', 10) || 5 * 60 * 1000;
+
+  /** Issue a request and resolve with the peer's result (or reject with its error / on timeout). */
+  request<T = any>(method: string, params?: unknown, timeoutMs = JsonRpcConnection.DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
     if (this.closed) return Promise.reject(new Error('connection closed'));
     const id = this.nextId++;
     const msg: JsonRpcRequest = { jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) };
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer: NodeJS.Timeout | null = timeoutMs > 0
+        ? setTimeout(() => {
+          if (this.pending.delete(id)) reject(new Error(`ACP request "${method}" timed out after ${Math.round(timeoutMs / 1000)}s — the client did not respond`));
+        }, timeoutMs)
+        : null;
+      timer?.unref?.();
+      this.pending.set(id, {
+        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v); },
+        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
+      });
       this.send(msg);
     });
   }

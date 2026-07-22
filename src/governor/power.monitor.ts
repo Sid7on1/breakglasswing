@@ -90,10 +90,14 @@ export function defaultThresholds(): PowerThresholds {
   };
 }
 
-/** True unless explicitly disabled. Power-awareness is on by default but always opt-out-able. */
+/**
+ * OPT-IN: power-awareness is off unless explicitly enabled (BIMAX_POWER_AWARE=1/on). It ships
+ * disabled because its user benefit is unproven; when enabled it constrains only NEW
+ * background/sub-agent work and never delays the interactive loop.
+ */
 export function powerAwarenessEnabled(): boolean {
-  return String(process.env.BIMAX_POWER_AWARE || '').toLowerCase() !== 'off'
-    && process.env.BIMAX_POWER_AWARE !== '0';
+  const v = String(process.env.BIMAX_POWER_AWARE || '').toLowerCase();
+  return v === '1' || v === 'on' || v === 'true';
 }
 
 // ── Parsers (pure — the impure reader feeds these; tests hit them directly) ──────────────────────
