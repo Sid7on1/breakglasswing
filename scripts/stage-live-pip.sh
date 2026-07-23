@@ -47,8 +47,11 @@ fi
 module_cache="$(mktemp -d)"
 trap 'rm -rf "$module_cache"' EXIT
 
+# Guard empty-array expansion: macOS's bash 3.2 (the CI release runner's /bin/bash) treats
+# "${sdk[@]}" as an unbound variable under `set -u` when sdk is empty, which aborts the build
+# before swiftc runs — same trap lib-build.sh already guards for its own arrays.
 env CLANG_MODULE_CACHE_PATH="$module_cache" SWIFT_MODULECACHE_PATH="$module_cache" \
-  xcrun swiftc -O -parse-as-library "${sdk[@]}" "${target[@]}" \
+  xcrun swiftc -O -parse-as-library ${sdk[@]+"${sdk[@]}"} ${target[@]+"${target[@]}"} \
   -o "$out" native/BimaxLivePip.swift \
   -framework AppKit -framework AVFoundation -framework ScreenCaptureKit
 chmod 0755 "$out"
