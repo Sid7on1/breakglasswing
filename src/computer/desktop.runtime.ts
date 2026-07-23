@@ -315,9 +315,14 @@ export function ensureActionResult(result: DesktopResult): DesktopResult {
   return { ...result, actionResult: { delivered: true, observed: 'unverified', confidence: 'unknown' } };
 }
 
-/** App names vary slightly between APIs ("Calculator" vs "Calculator.app"). */
+/** App names vary slightly between APIs ("Calculator" vs "Calculator.app"). macOS also wraps
+ * localized names in invisible bidi format marks — System Events on macOS 26 reports "‎WhatsApp"
+ * — which `trim()` does NOT remove. Comparing without stripping them made a frontmost app look
+ * not-frontmost, failing every keyboard action with "could not focus X; frontmost app is X". */
 export function appNamesMatch(actual: string, expected: string): boolean {
-  const clean = (s: string) => s.trim().toLowerCase().replace(/\.app$/, '');
+  const clean = (s: string) => s
+    .replace(/[\u200B-\u200F\u2060-\u2069\u061C\uFEFF]/g, '')
+    .trim().toLowerCase().replace(/\.app$/, '');
   return !!clean(actual) && clean(actual) === clean(expected);
 }
 

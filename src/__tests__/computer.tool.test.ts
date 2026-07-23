@@ -53,6 +53,16 @@ describe('ComputerTool', () => {
     expect(appNamesMatch('Terminal', 'Calculator')).toBe(false);
   });
 
+  it('ignores invisible bidi format marks in app names (macOS 26 reports "‎WhatsApp")', () => {
+    // Real failure: frontmost was "‎WhatsApp" (leading LEFT-TO-RIGHT MARK), the target
+    // "WhatsApp" — every keyboard action died on "could not focus WhatsApp; frontmost app is
+    // WhatsApp" with the two names rendering identically. trim() does not remove format marks.
+    expect(appNamesMatch('‎WhatsApp', 'WhatsApp')).toBe(true);
+    expect(appNamesMatch('⁦WhatsApp⁩', 'whatsapp.app')).toBe(true);
+    expect(appNamesMatch('‎Terminal', 'WhatsApp')).toBe(false);
+    expect(appNamesMatch('‎', 'WhatsApp')).toBe(false); // marks-only never matches anything
+  });
+
   it('keeps routine acting verbs governor-visible without prompting by default, and leaves observation free', async () => {
     const runtime = fakeRuntime();
     const tool = createComputerTool(governor, runtime);
