@@ -68,6 +68,8 @@ export class RecoveryController {
         // a recovery, but a long run of unverified actions still trips no-progress via the caller.
         return 'continue';
     }
+    // Exhaustive above; this guards against a future VerificationOutcome added without a case.
+    throw new Error(`unhandled verification outcome: ${outcome as string}`);
   }
 
   private recoverOrGiveUp(): RecoveryDecision {

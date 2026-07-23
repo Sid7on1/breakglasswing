@@ -229,9 +229,11 @@ export class CircuitBreaker {
       case BreakerState.Closed:
         return;
       case BreakerState.Open:
-        return this.checkOpen();
+        this.checkOpen();
+        return;
       case BreakerState.HalfOpen:
-        return this.tryHalfOpenProbe();
+        this.tryHalfOpenProbe();
+        return;
     }
   }
 

@@ -96,6 +96,8 @@ export function defaultSurfaceTraits(kind: SurfaceKind): Pick<ExecutionSurface, 
     case 'virtual-desktop':  return { focusOwner: 'agent', captureSafe: true, backgroundCapable: true  };
     case 'pip':              return { focusOwner: 'none', captureSafe: true,  backgroundCapable: true  };
   }
+  // Exhaustive above; this guards against a future SurfaceKind added without a case.
+  throw new Error(`unhandled surface kind: ${kind as string}`);
 }
 
 /**
