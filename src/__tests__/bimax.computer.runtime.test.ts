@@ -2,7 +2,7 @@ jest.mock('../mcp/client', () => ({ openClient: jest.fn() }));
 
 import { openClient } from '../mcp/client';
 import { BimaxComputerRuntime, pngDimensionsFromBytes } from '../computer/desktop.runtime';
-import { __resetConfigForTests } from '../cli/config';
+import { __resetConfigForTests, loadConfig } from '../cli/config';
 import { LivePipPort } from '../computer/pip';
 
 function result(structuredContent: any, text = '') {
@@ -187,6 +187,9 @@ describe('BimaxComputerRuntime', () => {
   it('streams the active target continuously, suspends for takeover, resumes, and stops on dispose', async () => {
     process.env.BIMAX_COMPUTER_PIP = '1';
     __resetConfigForTests();
+    // syncLivePip resolves config fire-and-forget; a cold cache means real disk reads that the
+    // single setImmediate below does not wait for. Warm the cache so sync lands deterministically.
+    await loadConfig();
     const sync = jest.fn();
     const stop = jest.fn(async () => undefined);
     const pip: LivePipPort = {

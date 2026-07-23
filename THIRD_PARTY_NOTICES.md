@@ -16,7 +16,7 @@ modified port under Apache-2.0 §4(b).
 ## Bimax Computer Use native sidecar
 
 Bimax Computer Use embeds an integrated binary distribution of `trycua/cua`'s Rust
-`cua-driver`, version 0.8.3, source commit `9a29c8dde15591713ddf8657050201894da3c2d8`.
+`cua-driver`, version 0.12.3, source commit `407119202655433dbd4968574cb08ae7d1a01456`.
 The Bimax release build pins the exact upstream archives and verifies their published SHA-256
 digests before embedding them. Upstream product telemetry is disabled by Bimax at both the host and
 child-process boundaries. Bimax exposes its own tool contract, executable name, session identity,

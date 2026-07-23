@@ -29,12 +29,12 @@ function capsSeed(caps: ReturnType<typeof capabilitiesFor>): boolean {
   return caps.inlineReasoning || caps.nativeThinking;
 }
 
-const STEP = 'stepfun-ai/step-3.7-flash'; // the default (opener-based reasoner)
+const STEP = 'stepfun-ai/step-3.7-flash'; // the default (native reasoning_content reasoner)
 
 describe('chooseThinkStrategy', () => {
-  it('opener-based reasoner (step-3.7) streams from token 1 (implicit off)', () => {
+  it('native reasoner (step-3.7) streams from token 1 (implicit off)', () => {
     const caps = capabilitiesFor(undefined, STEP);
-    expect(caps.inlineReasoning).toBe(true);
+    expect(caps.nativeThinking).toBe(true);
     expect(caps.openerlessReasoning).toBe(false);
     expect(chooseThinkStrategy(caps, true, true).implicit).toBe(false);
   });

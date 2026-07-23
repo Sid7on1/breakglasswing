@@ -315,6 +315,10 @@ export function ensureActionResult(result: DesktopResult): DesktopResult {
   return { ...result, actionResult: { delivered: true, observed: 'unverified', confidence: 'unknown' } };
 }
 
+/** The Bimax-branded label for the pinned sidecar, kept in ONE place so the version bump in
+ * scripts/stage-computer-use-driver.sh has a single companion edit here instead of four. */
+export const BIMAX_DRIVER_LABEL = 'bimax-computer-use 0.12.3';
+
 /** App names vary slightly between APIs ("Calculator" vs "Calculator.app"). macOS also wraps
  * localized names in invisible bidi format marks — System Events on macOS 26 reports "‎WhatsApp"
  * — which `trim()` does NOT remove. Comparing without stripping them made a frontmost app look
@@ -800,7 +804,7 @@ export type { ComputerTarget } from './target';
 /**
  * Bimax Computer Use — a long-lived, private MCP connection to the embedded native sidecar.
  *
- * The sidecar is derived from trycua/cua 0.8.3 (MIT) but no Cua surface leaks into Bimax: the
+ * The sidecar is derived from trycua/cua 0.12.3 (MIT) but no Cua surface leaks into Bimax: the
  * executable path, session, tool schema, diagnostics, output and fallback are all Bimax-owned.
  * Keeping one live connection is essential because accessibility element tokens are scoped to the
  * observation that created them; spawning a process per action would silently discard that cache.
@@ -862,7 +866,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
 
   public quickStatus() {
     if (!this.transport.available()) return this.fallback.quickStatus();
-    return { driver: 'bimax-computer-use 0.8.3', ready: true, ...this.lastStatus };
+    return { driver: BIMAX_DRIVER_LABEL, ready: true, ...this.lastStatus };
   }
 
   /** Record/refresh the active native-window surface from the current target + observed geometry.
@@ -1341,7 +1345,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     primitive: 'hover' | 'hold' | 'mouse_down' | 'mouse_up', target: ComputerTarget, cmd: DesktopCommand,
     cwd: string, session: string, ctx?: { cwd?: string; signal?: AbortSignal },
   ): Promise<DesktopResult> {
-    const driver = 'bimax-computer-use 0.8.3';
+    const driver = BIMAX_DRIVER_LABEL;
     const screenshotPoint = this.groundScreenshotPoint(target, cmd, primitive);
     const global = await this.preparePhysicalPoint(target, screenshotPoint);
     const native = await this.fallback.run({ action: primitive, x: global.x, y: global.y, button: cmd.button, ms: cmd.ms, app: target.app, normalized: false }, ctx);
@@ -1522,7 +1526,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // Any fresh frame becomes the baseline the next action's outcome is judged against.
     if (frameHash) this.prevFrameHash = frameHash;
     return {
-      ok: true, action: cmd.action === 'screenshot' ? 'screenshot' : 'observe', driver: 'bimax-computer-use 0.8.3',
+      ok: true, action: cmd.action === 'screenshot' ? 'screenshot' : 'observe', driver: BIMAX_DRIVER_LABEL,
       app: target.app, pid: target.pid, windowId: target.windowId,
       screenshot: screenshotFile, frameHash,
       width: screenshotWidth, height: screenshotHeight,
@@ -1750,7 +1754,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const cwd = ctx?.cwd || process.cwd();
     this.lastCwd = cwd;
     this.activeAction = cmd.action;
-    const driver = 'bimax-computer-use 0.8.3';
+    const driver = BIMAX_DRIVER_LABEL;
     try {
       if (ctx?.signal?.aborted) throw new Error('computer action aborted');
       const target = this.targetFor(cmd);

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Stage the pinned native driver that powers Bimax Computer Use. The upstream implementation is
-# MIT-licensed trycua/cua (driver 0.8.3); it is embedded as a private sidecar inside the single Bimax
+# MIT-licensed trycua/cua (driver 0.12.3); it is embedded as a private sidecar inside the single Bimax
 # executable and is never exposed as a Cua-branded user command.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="0.8.3"
+VERSION="0.12.3"
 TAG="cua-driver-rs-v${VERSION}"
 os="${1:-}"
 arch="${2:-}"
@@ -28,15 +28,15 @@ fi
 case "${os}-${arch}" in
   darwin-arm64|darwin-x64)
     asset="cua-driver-rs-${VERSION}-darwin-universal-binary.tar.gz"
-    expected="a2a29f3ccbd45989819df639d60fa68ac6f28b844f74d7d2b0a1495e4359c6a1"
+    expected="5145ec43dcd70481bef25f19bfec43ff556ab3aa65e4f859ee391fa03bc07493"
     ;;
   linux-x64)
     asset="cua-driver-rs-${VERSION}-linux-x86_64-binary.tar.gz"
-    expected="42bd2cfb2df60b9d635eb52aaf389ff816e6a7ff45c843e815688a8d96feda2f"
+    expected="d623ebfc1add8a1c460842a9be4b842f34aa72c7f8be2d32edda3f71f84e7d6e"
     ;;
   linux-arm64)
     asset="cua-driver-rs-${VERSION}-linux-arm64-binary.tar.gz"
-    expected="910456505b927966867f668e37195b130364dcc50f566d4301cd9c3760da9cd3"
+    expected="1b2dd0a23e30b6e6adbec177a2941ad486638101a606d5ce6bdcd67ceaf69183"
     ;;
   *) echo "error: unsupported Bimax Computer Use target: ${os}-${arch}" >&2; exit 1 ;;
 esac

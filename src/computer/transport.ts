@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn, type ChildProcess } from 'child_process';
 import { openClient, isDeadConnectionError } from '../mcp/client';
 import { withTimeout } from '../utils/withTimeout';
 import { cliEvents } from '../cli/events';
@@ -102,10 +103,24 @@ export function discoverCachedDriver(): string | null {
   return best?.path ?? null;
 }
 
+/** Every daemon this process ever spawned, so a normal exit never strands one listening on a
+ * private socket. A hard crash can still orphan a daemon; it idles on a pid-scoped socket no
+ * future engine will attach to, and the next launch of the same pid number replaces the file. */
+const liveDaemons = new Set<ChildProcess>();
+let daemonExitHookInstalled = false;
+function reapDaemonsOnExit(): void {
+  if (daemonExitHookInstalled) return;
+  daemonExitHookInstalled = true;
+  process.once('exit', () => { for (const d of liveDaemons) { try { d.kill(); } catch { /* already gone */ } } });
+}
+
 export class SidecarTransport implements SidecarTransportPort {
   private clientPromise: Promise<any> | null = null;
   /** Heartbeat: updated on every sidecar call so a watchdog can spot a wedged session. */
   private lastActivityAt = Date.now();
+  /** Driver ≥0.12 daemon (`serve --embedded`); null when running a legacy single-process driver. */
+  private daemon: ChildProcess | null = null;
+  private daemonSocket: string | null = null;
 
   constructor(private readonly session: string) {}
 
@@ -134,6 +149,49 @@ export class SidecarTransport implements SidecarTransportPort {
     return { connected: !!this.clientPromise, idleMs: Date.now() - this.lastActivityAt, lastActivityAt: this.lastActivityAt };
   }
 
+  /** Driver ≥0.12 split the sidecar into a daemon (`serve --embedded`) plus a thin MCP stdio
+   * proxy — `mcp --embedded` alone now exits with "no Cua Driver daemon listening". Spawn a
+   * PRIVATE daemon on a Bimax-owned, pid-scoped socket so we never attach to (or fight over) a
+   * user-level CuaDriver install. Returns the socket path, or null when the daemon never came up
+   * — a pre-0.12 driver has no `serve` and exits immediately, which lands the caller on the
+   * legacy single-process launch unchanged. */
+  private async ensureDaemon(driver: string): Promise<string | null> {
+    if (this.daemon && this.daemon.exitCode === null && this.daemonSocket && fs.existsSync(this.daemonSocket)) {
+      return this.daemonSocket;
+    }
+    const sock = path.join(os.tmpdir(), `bimax-cua-${process.pid}.sock`);
+    try { fs.rmSync(sock, { force: true }); } catch { /* stale socket from a dead pid */ }
+    let exited = false;
+    let child: ChildProcess;
+    try {
+      child = spawn(driver, ['serve', '--embedded', '--socket', sock], {
+        stdio: 'ignore',
+        env: {
+          PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', TMPDIR: process.env.TMPDIR ?? '',
+          CUA_DRIVER_EMBEDDED: '1',
+          CUA_DRIVER_HOST_BUNDLE_ID: 'ai.bimax.cli',
+          CUA_DRIVER_RS_TELEMETRY_ENABLED: '0',
+          CUA_TELEMETRY_ENABLED: '0',
+        },
+      });
+    } catch { return null; }
+    child.on('error', () => { exited = true; });
+    child.once('exit', () => {
+      exited = true;
+      liveDaemons.delete(child);
+      if (this.daemon === child) this.daemon = null;
+    });
+    reapDaemonsOnExit();
+    liveDaemons.add(child);
+    for (let i = 0; i < 50 && !exited; i++) {
+      if (fs.existsSync(sock)) { this.daemon = child; this.daemonSocket = sock; return sock; }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    try { child.kill(); } catch { /* already gone */ }
+    liveDaemons.delete(child);
+    return null;
+  }
+
   private async client(): Promise<any> {
     const driver = this.driverPath();
     if (!driver) throw new Error('embedded Bimax Computer Use driver is unavailable');
@@ -144,6 +202,8 @@ export class SidecarTransport implements SidecarTransportPort {
       // unconditional nulling here would strand duplicate live sidecars behind a respawn loop.
       const promise: Promise<any> = withTimeout<any>((async () => {
         const driverArgs = ['mcp', '--embedded', '--host-bundle-id', 'ai.bimax.cli'];
+        const daemonSocket = await this.ensureDaemon(driver);
+        if (daemonSocket) driverArgs.push('--socket', daemonSocket);
         // Live PiP is owned by NativeLivePip, which continuously streams the exact target window
         // through ScreenCaptureKit. Do not enable the driver's post-action screenshot viewer: two
         // preview processes would race and the old one is not a continuous capture surface.
@@ -221,14 +281,25 @@ export class SidecarTransport implements SidecarTransportPort {
     const pending = this.clientPromise;
     this.clientPromise = null;
     this.lastActivityAt = Date.now();
-    if (!pending) return;
-    try {
-      const client = await pending;
-      if (opts.stopRecording) {
-        try { await client.callTool({ name: 'stop_recording', arguments: {} }); } catch { /* session teardown also finalizes */ }
-      }
-      await client.callTool({ name: 'end_session', arguments: { session: this.session } });
-      await client.close?.();
-    } catch { /* process teardown is best-effort */ }
+    if (pending) {
+      try {
+        const client = await pending;
+        if (opts.stopRecording) {
+          try { await client.callTool({ name: 'stop_recording', arguments: {} }); } catch { /* session teardown also finalizes */ }
+        }
+        await client.callTool({ name: 'end_session', arguments: { session: this.session } });
+        await client.close?.();
+      } catch { /* process teardown is best-effort */ }
+    }
+    const daemon = this.daemon;
+    this.daemon = null;
+    if (daemon) {
+      liveDaemons.delete(daemon);
+      try { daemon.kill(); } catch { /* already gone */ }
+    }
+    if (this.daemonSocket) {
+      try { fs.rmSync(this.daemonSocket, { force: true }); } catch { /* daemon removes it on exit */ }
+      this.daemonSocket = null;
+    }
   }
 }

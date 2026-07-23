@@ -241,8 +241,8 @@ legacy status (still usable if configured; `/computer` offers removal).
 
 The global-coordinate Swift driver remains the offline/development fallback. Shipped builds now use
 **Bimax Computer Use**, a Bimax-owned semantic runtime backed by a pinned MIT-licensed native
-sidecar derived from `trycua/cua` 0.8.3 (source commit
-`9a29c8dde15591713ddf8657050201894da3c2d8`). Attribution and the full upstream MIT text are in
+sidecar derived from `trycua/cua` 0.12.3 (source commit
+`407119202655433dbd4968574cb08ae7d1a01456`). Attribution and the full upstream MIT text are in
 `THIRD_PARTY_NOTICES.md`.
 
 - `scripts/stage-computer-use-driver.sh` selects the exact macOS/Linux artifact for each release
