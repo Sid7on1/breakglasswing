@@ -318,13 +318,16 @@ def scenario_approval_enter():
          {"at": 10.0, "send": "\r"},                       # Enter on the highlighted default (Yes)
          {"at": 18.0, "send": "/exit\r"}], timeout=26)
     raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
+    clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", raw)
     check("approval overlay rendered with the intended app",
           "Allow? open in ComputerTool @ BimaxRegressionApp" in raw)
     check("Enter resolved the default choice", "→ Yes" in raw)
-    check("engine resolver received the approval", "Approved: COMPUTER_CONTROL" in raw)
+    # Status text can be replaced by the immediately-resuming tool lifecycle before the next paint.
+    # The durable proof is behavioral: the selected Yes reached the resolver AND the suspended
+    # ComputerTool invocation resumed.
+    check("engine resolver received the approval", "→ Yes" in raw and "Computer(open" in clean)
     # The label and its (args) are two separately-styled runs — ANSI codes sit between them in the
     # raw stream, so the lifecycle line is only contiguous after stripping styling.
-    clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", raw)
     check("suspended tool call resumed (tool lifecycle in transcript)", "Computer(open" in clean)
     # The turn CONTINUED after the tool: the follow-up mock reply streamed. This is the "resumed
     # exactly once" signal — a double-resume would emit a second tool call/approval, a zero-resume
@@ -359,10 +362,15 @@ def scenario_approval_grant():
          {"at": 10.0, "send": DOWN}, {"at": 10.3, "send": DOWN}, {"at": 10.6, "send": "\r"},  # grant option
          {"at": 22.0, "send": "/exit\r"}], timeout=30)
     raw = b"".join(d for _, d in recs).decode("utf-8", "replace")
-    check("session grant option selected", "for this session" in raw and "→ Allow app" in raw)
-    check("second identical action auto-approved by the grant", "Approved (session grant" in raw)
+    clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", raw)
     hist, vis = emulate(recs)
-    check("no second approval prompt", "".join(hist + vis).count("Allow? open in ComputerTool") <= 1)
+    prompt_count = "".join(hist + vis).count("Allow? open in ComputerTool")
+    check("session grant option selected", "for this session" in raw and "→ Allow app" in raw)
+    # The transient "Approved (session grant …)" status may be overwritten before a paint. Two
+    # completed tool lifecycle entries with only one prompt prove the second action used the grant.
+    check("second identical action auto-approved by the grant",
+          clean.count("Computer(open") >= 2 and prompt_count <= 1)
+    check("no second approval prompt", prompt_count <= 1)
     check("clean exit", ex and ex.get("exit") == 0, str(ex))
 
 

@@ -1,6 +1,6 @@
 {
   "name": "bimax",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "BiMax — Autonomous AI agent for your terminal",
   "bin": {
     "bimax": "bin/bimax.js"
@@ -24,6 +24,7 @@
     "test:tui": "python3 scripts/tui-regression.py",
     "test:computer": "tsx scripts/smoke-computer-use.ts",
     "test:computer:settings": "tsx scripts/smoke-system-settings.ts",
+    "test:computer:settings-values": "tsx scripts/smoke-settings-values.ts",
     "test:computer:finder": "tsx scripts/smoke-finder-mouse.ts",
     "test:computer:pip": "tsx scripts/smoke-live-pip.ts",
     "test:computer:all": "tsx scripts/smoke-computer-all.ts",

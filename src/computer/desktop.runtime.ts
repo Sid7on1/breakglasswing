@@ -139,7 +139,7 @@ export interface DesktopResult {
   summary: string;
 }
 
-const COMPUTER_COMPLETION_GUIDANCE = 'Match the answer type the user requested. A categorical state such as Normal, On, or Connected is not a percentage or other numeric value. If the exact requested datum is not visible, use the Details, info, or disclosure control on the same row/section as that datum in the newest screenshot; never substitute an unrelated Options or ellipsis menu. Repeated generic controls may be enriched with their row context (for example, "Show Detail — Battery Health"); choose that exact control and never click structural containers such as Window, Sidebar, Outline, Group, or Scroll Area. A visible modal, sheet, dialog, or popover blocks the page behind it: interact only with that foreground surface and, after reading it, dismiss it with Done, Close, Cancel, or Escape before navigating or scrolling the underlying page. Dismissing a blocker does not complete the interrupted navigation: retry the original action. Seeing a destination label in a sidebar/menu is not proof that its page is open; require the destination heading in the main content pane. Sidebar entries are navigation, never the requested settings inside that page. Never mark a checklist phase complete when its latest Computer action failed or when no post-action screenshot proves the phase. Otherwise report that the datum could not be retrieved.';
+const COMPUTER_COMPLETION_GUIDANCE = 'Match the answer type the user requested. A categorical state such as Normal, On, or Connected is not a percentage or other numeric value. Battery health means both Battery Condition and Maximum Capacity percentage when macOS exposes them; open the Battery Health info sheet instead of stopping at Normal. If the exact requested datum is not visible, use the Details, info, or disclosure control on the same row/section as that datum in the newest screenshot; never substitute an unrelated Options or ellipsis menu. Repeated generic controls may be enriched with their row context (for example, "Show Detail — Battery Health"); choose that exact control and never click structural containers such as Window, Sidebar, Outline, Group, or Scroll Area. Set sliders with set_value on their fresh semantic handle: maximum/full/100% maps to 1 and minimum/mute/0% maps to 0; never click or drag a slider to approximate an exact value. A visible modal, sheet, dialog, or popover blocks the page behind it: interact only with that foreground surface and, after reading it, dismiss it with Done, Close, Cancel, or Escape before navigating or scrolling the underlying page. Dismissing a blocker does not complete the interrupted navigation: retry the original action. Seeing a destination label in a sidebar/menu is not proof that its page is open; require the destination heading in the main content pane. Sidebar entries are navigation, never the requested settings inside that page. Never mark a checklist phase complete when its latest Computer action failed or when no post-action screenshot proves the phase. Otherwise report that the datum could not be retrieved.';
 const POST_ACTION_ELEMENT_BUDGET = 80;
 
 type ObservedElement = {
@@ -178,7 +178,8 @@ function enrichControlLabels(elements: any[]): any[] {
     const role = String(element?.role || '');
     const label = String(element?.label || '').trim();
     const control = elementFrame(element);
-    if (!control || !ACTIONABLE_AX_ROLES.has(role) || !generic.test(label)) return element;
+    const needsContext = role === 'AXSlider' ? !label : generic.test(label);
+    if (!control || !ACTIONABLE_AX_ROLES.has(role) || !needsContext) return element;
 
     const centerY = control.y + control.h / 2;
     const rowTexts = elements
@@ -190,19 +191,39 @@ function enrichControlLabels(elements: any[]): any[] {
         const rowTolerance = Math.max(16, Math.min(36, (control.h + frame.h) / 2));
         return Math.abs(candidateCenterY - centerY) <= rowTolerance
           && frame.x + frame.w <= control.x + 8
-          && control.x - (frame.x + frame.w) <= 450;
+          && control.x - (frame.x + frame.w) <= (role === 'AXSlider' ? 200 : 450);
       })
       .sort((a, b) => a.frame!.x - b.frame!.x)
       .map(({ candidate }) => String(candidate?.label || candidate?.value || '').trim())
-      .filter(Boolean);
-    const contextParts = Array.from(new Set(rowTexts)).slice(-3);
-    const contextLabel = contextParts.join(' · ').slice(0, 120);
+      .filter(text => text && !/^(?:decrease|increase)\s+volume$/i.test(text));
+    const contextParts = Array.from(new Set(rowTexts)).slice(role === 'AXSlider' ? -1 : -3);
+    let contextLabel = contextParts.join(' · ').slice(0, 120);
+    if (role === 'AXSlider' && !contextLabel) {
+      const rowButtons = elements
+        .filter(candidate => String(candidate?.role || '') === 'AXButton')
+        .map(candidate => ({ label: String(candidate?.label || ''), frame: elementFrame(candidate) }))
+        .filter(candidate => candidate.frame
+          && Math.abs((candidate.frame.y + candidate.frame.h / 2) - centerY) <= 24
+          && candidate.frame.x >= control.x - 60
+          && candidate.frame.x <= control.x + control.w + 60)
+        .map(candidate => candidate.label);
+      const hasVolumeStepper = rowButtons.some(text => /^decrease volume$/i.test(text))
+        && rowButtons.some(text => /^increase volume$/i.test(text));
+      const outputSliderBelow = elements.some(candidate => {
+        const frame = elementFrame(candidate);
+        return String(candidate?.role || '') === 'AXSlider'
+          && /output volume/i.test(String(candidate?.label || candidate?.value || ''))
+          && !!frame && frame.y > control.y;
+      });
+      if (hasVolumeStepper && outputSliderBelow) contextLabel = 'Alert volume';
+    }
     if (!contextLabel || contextLabel.toLocaleLowerCase() === label.toLocaleLowerCase()) return element;
+    const controlName = label || role.replace(/^AX/, '');
     return {
       ...element,
       original_label: element.label,
       context_label: contextLabel,
-      label: `${label || role.replace(/^AX/, '')} — ${contextLabel}`,
+      label: `${controlName} — ${contextLabel}`,
     };
   });
 }
@@ -1126,6 +1147,45 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     if (STRUCTURAL_AX_ROLES.has(role)) {
       throw new Error(`"${element.label || role.replace(/^AX/, '')}" is a structural container, not a clickable control; choose a labeled button/field/row or a visible screenshot point`);
     }
+    if (role === 'AXSlider') {
+      throw new Error(`"${element.label || 'Slider'}" is a slider; use set_value with its fresh query/elementToken/elementIndex (1 = maximum, 0 = minimum) instead of an approximate click`);
+    }
+  }
+
+  private sliderAtScreenshotPoint(point: { x: number; y: number }): ObservedElement | null {
+    const shot = this.observedTarget;
+    const windowFrame = this.observedWindowFrame;
+    if (!shot?.width || !shot?.height || !windowFrame) return null;
+    for (const element of this.observedElements) {
+      if (element.role !== 'AXSlider') continue;
+      const frame = elementFrame(element);
+      if (!frame) continue;
+      const screenshotFrame = globalFrameToScreenshot(
+        frame,
+        { width: shot.width, height: shot.height },
+        windowFrame,
+      );
+      if (screenshotFrame && pointInFrame(point, screenshotFrame)) return element;
+    }
+    return null;
+  }
+
+  private normalizedControlValue(role: string, value: string): { value: string; endpoint?: 'maximum' | 'minimum' } {
+    const clean = value.trim().toLocaleLowerCase();
+    if (role !== 'AXSlider') return { value };
+    if (/^(?:1(?:\.0+)?|100\s*%|max(?:imum)?|full)$/i.test(clean)) {
+      return { value: '1', endpoint: 'maximum' };
+    }
+    if (/^(?:0(?:\.0+)?|0\s*%|min(?:imum)?|mute(?:d)?|off)$/i.test(clean)) {
+      return { value: '0', endpoint: 'minimum' };
+    }
+    const numeric = Number(clean.replace(/\s*%$/, ''));
+    if (!Number.isFinite(numeric)) {
+      throw new Error('slider set_value needs a number from 0 to 1, a percentage from 0% to 100%, or maximum/full/minimum/mute');
+    }
+    const normalized = clean.endsWith('%') ? numeric / 100 : numeric;
+    if (normalized < 0 || normalized > 1) throw new Error('slider set_value must be between 0 and 1 (or 0% and 100%)');
+    return { value: String(normalized) };
   }
 
   private elementCenterInScreenshot(frame: unknown): { x: number; y: number } | null {
@@ -1325,7 +1385,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const maxElements = Math.max(1, Math.min(2000, Math.floor(cmd.maxElements ?? 60)));
     // macOS exposes the application menu tree alongside the window. Traverse deeply, then remove
     // menu boilerplate and apply the small model-visible budget below.
-    const scanElements = Math.max(1000, maxElements);
+    // Most actionable controls appear in the first few hundred AX nodes. A 1000-node traversal on
+    // every automatic post-action frame made each visible click feel sluggish. Explicit queried
+    // observations still scan deeper; routine evidence refreshes use a smaller, measured floor.
+    const scanElements = cmd.query
+      ? Math.max(600, maxElements)
+      : Math.max(300, maxElements);
     const data = await this.call('get_window_state', {
       pid: target.pid,
       window_id: target.windowId,
@@ -2015,6 +2080,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             }
             args.x = x; args.y = y;
             coordinateSource = cmd.normalized ? 'normalized screenshot point' : 'screenshot pixel';
+            const slider = this.sliderAtScreenshotPoint({ x, y });
+            if (slider) {
+              throw new Error(`screenshot point ${x},${y} is inside "${slider.label || 'Slider'}"; use set_value with its fresh semantic handle so the requested value is exact`);
+            }
           }
           if (cmd.count) args.count = Math.floor(cmd.count);
           if (cmd.debugImageOut) args.debug_image_out = path.resolve(cmd.debugImageOut);
@@ -2128,12 +2197,44 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         case 'set_value': {
           if (!target) throw new Error('set_value needs a target pid');
           if (cmd.value == null) throw new Error('set_value needs value');
+          const resolved = cmd.query?.trim()
+            ? this.resolveObservedElement(cmd.query, target)
+            : this.resolveObservedHandle(target, cmd);
+          const role = String(resolved.role || '');
+          if (!ACTIONABLE_AX_ROLES.has(role)) {
+            throw new Error(`"${resolved.label || role || 'element'}" does not support native value assignment`);
+          }
+          const requested = this.normalizedControlValue(role, cmd.value);
+          const handle = resolved.elementToken
+            ? { element_token: resolved.elementToken }
+            : resolved.elementIndex != null ? { element_index: resolved.elementIndex } : null;
+          if (!handle) throw new Error('set_value target has no fresh native handle; observe again');
           const data = await this.call('set_value', {
-            pid: target.pid, window_id: target.windowId, session, value: cmd.value,
-            ...(cmd.elementToken ? { element_token: cmd.elementToken } : { element_index: cmd.elementIndex }),
+            pid: target.pid, window_id: target.windowId, session, value: requested.value,
+            ...handle,
           });
           const evidence = await this.postActionEvidence(target, cwd, session);
-          return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, ...evidence, summary: `value delivered to ${target.app || `pid ${target.pid}`}; fresh screen attached` };
+          const exactEndpoint = role === 'AXSlider' && requested.endpoint;
+          if (exactEndpoint && evidence.progressCheck) {
+            evidence.actionResult = toActionResult(evidence.progressCheck, {
+              query: `${resolved.label || 'Slider'} native ${exactEndpoint} endpoint (${requested.value})`,
+              matched: true,
+            });
+          }
+          return {
+            ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
+            details: {
+              native: data,
+              target: { label: resolved.label, role },
+              requestedValue: cmd.value,
+              appliedValue: requested.value,
+              ...(requested.endpoint ? { endpoint: requested.endpoint } : {}),
+            },
+            ...evidence,
+            summary: exactEndpoint
+              ? `${resolved.label || 'slider'} set to exact ${requested.endpoint} endpoint; fresh screen attached`
+              : `value delivered to ${resolved.label || target.app || `pid ${target.pid}`}; fresh screen attached`,
+          };
         }
         case 'drag': {
           if (!target) return this.fallback.run(cmd, ctx);

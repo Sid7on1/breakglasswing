@@ -43,8 +43,9 @@ export function sanitizeToolArgs(raw: any): string {
 }
 
 /** Prevent a weak model from ending a computer-use turn one disclosure too early. This is narrowly
- * evidence-driven: it only fires for a percentage request, only when the proposed answer contains
- * no numeric percentage, and only when the newest Bimax observation supplies a visible
+ * evidence-driven: it only fires for a numeric request (including battery health, whose native
+ * detail sheet defines Maximum Capacity), only when the proposed answer contains no numeric
+ * percentage, and only when the newest Bimax observation supplies a visible
  * Details/info control. The model still chooses and executes the action; the loop merely refuses
  * to mislabel a category such as "Normal" as completion. */
 export function computerPercentageCompletionNudge(messages: Message[], proposedAnswer: string): string {
@@ -52,7 +53,9 @@ export function computerPercentageCompletionNudge(messages: Message[], proposedA
     && !isScreenshotObservationMessage(message)
     && !contentToText(message.content as any).includes('[COMPUTER COMPLETION GATE]'));
   const requestText = request ? contentToText(request.content as any) : '';
-  if (!/(?:\bpercent(?:age)?\b|%)/i.test(requestText)) return '';
+  const asksForPercentage = /(?:\bpercent(?:age)?\b|%)/i.test(requestText);
+  const asksForBatteryHealth = /\bbattery\s+health\b/i.test(requestText);
+  if (!asksForPercentage && !asksForBatteryHealth) return '';
   if (/\b\d+(?:\.\d+)?(?:\s*%|\s+percent\b)/i.test(proposedAnswer)) return '';
 
   let observation: any = null;
@@ -89,7 +92,8 @@ export function computerPercentageCompletionNudge(messages: Message[], proposedA
     .sort((a: any, b: any) => b.score - a.score || Number(a.element.element_index) - Number(b.element.element_index));
   const best = candidates[0];
   if (!best || best.score <= 0) return '';
-  return `[COMPUTER COMPLETION GATE] The user's requested percentage is still missing; "${proposedAnswer.slice(0, 160)}" does not contain a numeric percentage. Do not stop or repeat that category. The newest observation exposes the relevant visible control: elementIndex ${Number(best.element.element_index)}, "${best.label}". Call ComputerTool click on that fresh elementIndex now, inspect the returned screen, and answer only after the numeric percentage is visible or the detail view proves it unavailable.`;
+  const requestedDatum = asksForBatteryHealth ? 'battery Maximum Capacity percentage' : 'requested percentage';
+  return `[COMPUTER COMPLETION GATE] The user's ${requestedDatum} is still missing; "${proposedAnswer.slice(0, 160)}" does not contain a numeric percentage. Do not stop or repeat that category. The newest observation exposes the relevant visible control: elementIndex ${Number(best.element.element_index)}, "${best.label}". Call ComputerTool click on that fresh elementIndex now, inspect the returned screen, and answer only after the numeric percentage is visible or the detail view proves it unavailable.`;
 }
 
 export class AgentLoop {

@@ -77,7 +77,7 @@ describe('BimaxComputerRuntime', () => {
     expect(runtime.describeTarget({ action: 'click', elementToken: 'fresh-token' }))
       .toEqual(expect.objectContaining({ label: 'Result', value: '216,174' }));
     const observeCall = callTool.mock.calls.find(([arg]) => arg.name === 'get_window_state')?.[0];
-    expect(observeCall.arguments.max_elements).toBe(1000);
+    expect(observeCall.arguments.max_elements).toBe(300);
 
     await runtime.run({ action: 'type', text: '1271*170+104', deliveryMode: 'foreground' });
     expect(nativeRun).toHaveBeenCalledWith(expect.objectContaining({
@@ -416,6 +416,89 @@ describe('BimaxComputerRuntime', () => {
     expect(clicked.ok).toBe(false);
     expect(clicked.error).toMatch(/structural container/i);
     expect(callTool.mock.calls.some(([arg]) => arg.name === 'click')).toBe(false);
+  });
+
+  it('labels an unlabeled slider from its row and refuses approximate clicks inside it', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'System Settings', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 700, height: 800 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/settings-slider.png', screenshot_width: 700, screenshot_height: 800,
+        tree_markdown: '',
+        elements: [
+          { element_index: 0, element_token: 'window', role: 'AXWindow', frame: { x: 0, y: 0, w: 700, h: 800 } },
+          { element_index: 20, role: 'AXStaticText', label: 'Alert volume', frame: { x: 250, y: 150, w: 120, h: 30 } },
+          { element_index: 21, role: 'AXButton', label: 'Decrease volume', frame: { x: 390, y: 150, w: 30, h: 30 } },
+          { element_index: 22, element_token: 'alert-slider', role: 'AXSlider', frame: { x: 430, y: 150, w: 200, h: 30 } },
+          { element_index: 23, role: 'AXButton', label: 'Increase volume', frame: { x: 640, y: 150, w: 30, h: 30 } },
+          { element_index: 30, element_token: 'output-slider', role: 'AXSlider', label: 'Output volume', frame: { x: 430, y: 500, w: 200, h: 30 } },
+        ],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime();
+    const opened = await runtime.run({ action: 'open', app: 'System Settings' });
+    expect(opened.elements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        element_index: 22,
+        label: 'Slider — Alert volume',
+        context_label: 'Alert volume',
+      }),
+    ]));
+
+    const semanticClick = await runtime.run({ action: 'click', query: 'Alert volume' });
+    expect(semanticClick.ok).toBe(false);
+    expect(semanticClick.error).toMatch(/slider.*set_value/i);
+
+    const pixelClick = await runtime.run({ action: 'click', x: 500, y: 165 });
+    expect(pixelClick.ok).toBe(false);
+    expect(pixelClick.error).toMatch(/inside "Slider — Alert volume".*set_value/i);
+  });
+
+  it('sets slider endpoints by fresh query and returns an exact semantic value result', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'System Settings', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 700, height: 800 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/settings-slider.png', screenshot_width: 700, screenshot_height: 800,
+        tree_markdown: '',
+        elements: [
+          { element_index: 0, element_token: 'window', role: 'AXWindow', frame: { x: 0, y: 0, w: 700, h: 800 } },
+          { element_index: 20, role: 'AXStaticText', label: 'Alert volume', frame: { x: 250, y: 150, w: 120, h: 30 } },
+          { element_index: 22, element_token: 'alert-slider', role: 'AXSlider', frame: { x: 430, y: 150, w: 200, h: 30 } },
+          { element_index: 30, element_token: 'output-slider', role: 'AXSlider', label: 'Output volume', frame: { x: 430, y: 500, w: 200, h: 30 } },
+        ],
+      });
+      if (name === 'set_value') return result({ effect: 'delivered' });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime();
+    await runtime.run({ action: 'open', app: 'System Settings' });
+    const set = await runtime.run({ action: 'set_value', query: 'Alert volume', value: 'full' });
+
+    const nativeSet = callTool.mock.calls.find(([arg]) => arg.name === 'set_value')?.[0];
+    expect(nativeSet.arguments).toEqual(expect.objectContaining({
+      pid: 42, window_id: 7, element_token: 'alert-slider', value: '1',
+    }));
+    expect(set).toEqual(expect.objectContaining({
+      ok: true,
+      summary: 'Slider — Alert volume set to exact maximum endpoint; fresh screen attached',
+      details: expect.objectContaining({
+        requestedValue: 'full', appliedValue: '1', endpoint: 'maximum',
+      }),
+      actionResult: expect.objectContaining({
+        delivered: true,
+        confidence: 'proven',
+        postcondition: {
+          query: 'Slider — Alert volume native maximum endpoint (1)',
+          matched: true,
+        },
+      }),
+    }));
   });
 
   it('reports embedded host attribution as ready when bundle identity is the only failed check', async () => {

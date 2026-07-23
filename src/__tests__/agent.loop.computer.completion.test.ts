@@ -26,6 +26,16 @@ describe('computer percentage completion gate', () => {
     expect(computerPercentageCompletionNudge(messages, 'Maximum Capacity is 92%.')).toBe('');
   });
 
+  it('requires Maximum Capacity for a plain battery health request', () => {
+    const messages: Message[] = [
+      { role: 'user', content: 'open settings and check my battery health' },
+      { role: 'tool', tool_call_id: 'open', content: observation },
+    ];
+    expect(computerPercentageCompletionNudge(messages, 'Your battery health is Normal.'))
+      .toMatch(/battery Maximum Capacity percentage.*elementIndex 69/);
+    expect(computerPercentageCompletionNudge(messages, 'Battery Condition is Normal and Maximum Capacity is 91%.')).toBe('');
+  });
+
   it('continues the agent loop through detail instead of accepting the early category answer', async () => {
     const clicks: any[] = [];
     const registry = new ToolRegistry();
