@@ -179,6 +179,10 @@ async function main() {
   // out-of-process front-end (the Go / Bubble Tea TUI) spawns, forked after the container is
   // wired. This is the only interactive path; there is no in-process UI below (see §below).
   if (process.env.BIMAX_HEADLESS === '1' || cliFlags.headless) {
+    // The interface import below evaluates the whole command/persona tree — on a cold page cache
+    // (compiled binary, memory-pressured host) that is the longest silent stretch of boot. Report
+    // it so the front-end shows progress instead of appearing hung between the container and ready.
+    reportBootPhase('loading_interface');
     const { startHeadless } = await import('./protocol/headless.entry');
     await startHeadless(container, config);
     process.exit(0);

@@ -607,6 +607,13 @@ func (m *model) handleEngine(o Outbound) {
 	case "pong":
 		// Liveness bookkeeping above is the whole job.
 
+	case "boot":
+		// Startup phases stream in before `ready`. Surface them so a slow cold start (the 85MB
+		// engine paging in under memory pressure) reads as visible progress, not a frozen spinner.
+		if !m.ready {
+			m.status = "Starting engine… " + bootPhaseLabel(o.Phase)
+		}
+
 	case "ready":
 		m.ready = true
 		m.status = "Ready"

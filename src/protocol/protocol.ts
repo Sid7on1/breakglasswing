@@ -74,7 +74,7 @@ export interface ConfigResultMsg { t: 'configResult'; id: number; config: { [k: 
  */
 export interface BootMsg {
   t: 'boot';
-  phase: 'booting' | 'loading_storage' | 'loading_graph' | 'loading_tools' | 'restoring_session';
+  phase: 'booting' | 'loading_storage' | 'loading_graph' | 'loading_tools' | 'loading_interface' | 'restoring_session';
   detail?: string;
   pid: number;
 }

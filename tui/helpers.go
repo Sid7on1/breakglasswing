@@ -7,6 +7,27 @@ import (
 	"strings"
 )
 
+// bootPhaseLabel renders an engine boot-phase id (protocol `boot` message) as footer-friendly
+// text. Unknown phases (a newer engine) degrade to the id with underscores spaced, never an error.
+func bootPhaseLabel(phase string) string {
+	switch phase {
+	case "booting":
+		return "runtime up"
+	case "loading_storage":
+		return "loading storage"
+	case "loading_graph":
+		return "loading code graph"
+	case "loading_tools":
+		return "loading tools"
+	case "loading_interface":
+		return "loading interface"
+	case "restoring_session":
+		return "restoring session"
+	default:
+		return strings.ReplaceAll(phase, "_", " ")
+	}
+}
+
 // firstLine returns the first line of s, trimmed — so a multi-line prompt renders as a single row.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {

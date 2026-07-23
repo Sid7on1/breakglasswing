@@ -235,6 +235,23 @@ func appendEnvDefault(env []string, key, value string) []string {
 	return append(env, prefix+value)
 }
 
+// prewarmFile streams path into the OS page cache in the background. The extracted engine and
+// driver are ~85MB/~42MB ad-hoc-signed binaries: on a cold cache (fresh boot, memory pressure)
+// exec faults them in page-by-page, each fault paying code-signature verification against slow,
+// contended I/O — measured 15s+ stuck on "Starting engine…" on an 8GB machine. One sequential
+// read-ahead turns that into a single streaming read; when the cache is already warm it's a
+// near-free no-op, so this is safe to fire on every launch.
+func prewarmFile(path string) {
+	go func() {
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = io.Copy(io.Discard, f)
+	}()
+}
+
 // StartEngine launches the engine rooted at repoRoot. Override the command via $BIMAX_ENGINE_CMD
 // (e.g. the compiled binary); defaults to the dev runner. Engine stderr (boot logs) is sent to
 // tui/engine.log so it never corrupts the alt-screen UI or the NDJSON stdout stream.
@@ -249,6 +266,7 @@ func StartEngine(repoRoot string) (*Engine, error) {
 		if err != nil {
 			return nil, err
 		}
+		prewarmFile(path)
 		c = exec.Command(path)
 	case distFresh(repoRoot):
 		// Dev with an up-to-date build: run the compiled engine directly — ~3× faster to `ready`
@@ -274,6 +292,7 @@ func StartEngine(repoRoot string) (*Engine, error) {
 		if extractErr != nil {
 			return nil, extractErr
 		}
+		prewarmFile(driverPath)
 		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+driverPath)
 	}
 	if override := os.Getenv("BIMAX_LIVE_PIP_HELPER"); override != "" {
