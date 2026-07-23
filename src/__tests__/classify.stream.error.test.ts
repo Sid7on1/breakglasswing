@@ -36,6 +36,13 @@ describe('classifyStreamError', () => {
       .toMatchObject({ recoverable: true, kind: 'transient' });
   });
 
+  it('retries empty NVIDIA edge 410s but keeps descriptive 410s fatal', () => {
+    expect(classifyStreamError({ status: 410, message: '410 status code (no body)' }))
+      .toEqual({ status: 410, recoverable: true, kind: 'transient' });
+    expect(classifyStreamError({ status: 410, message: 'model endpoint has been retired' }))
+      .toEqual({ status: 410, recoverable: false });
+  });
+
   it('marks a 429 rate limit as transient and surfaces Retry-After for backoff', () => {
     // No header → recoverable transient, no explicit wait (loop falls back to exponential backoff).
     expect(classifyStreamError({ status: 429, message: 'rate limit exceeded' }))

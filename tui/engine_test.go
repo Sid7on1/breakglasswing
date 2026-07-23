@@ -55,6 +55,54 @@ func TestEmbeddedComputerUseFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
 	}
 }
 
+func TestEmbeddedLivePipFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
+	original := embeddedLivePip
+	embeddedLivePip = []byte("test embedded live pip")
+	t.Cleanup(func() { embeddedLivePip = original })
+
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := filepath.Join(root, "fallback")
+	got, err := extractEmbeddedLivePipFromRoots([]string{blocked, fallback}, "test")
+	if err != nil {
+		t.Fatalf("fallback extraction failed: %v", err)
+	}
+	if want := filepath.Join(fallback, "bimax", "bimax-live-pip-test"); got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded live pip" {
+		t.Fatalf("extracted live pip = %q, err=%v", data, err)
+	}
+	if info, err := os.Stat(got); err != nil || info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("extracted live pip is not executable: info=%v err=%v", info, err)
+	}
+}
+
+func TestPackagedEngineDisablesBlockingCodeMemoryByDefault(t *testing.T) {
+	base := []string{"PATH=/usr/bin"}
+	got := appendEnvDefault(base, "BIMAX_DISABLE_CODEMEM", "1")
+	if !containsEnv(got, "BIMAX_DISABLE_CODEMEM=1") {
+		t.Fatalf("default environment = %v, want BIMAX_DISABLE_CODEMEM=1", got)
+	}
+
+	overridden := appendEnvDefault([]string{"BIMAX_DISABLE_CODEMEM=0"}, "BIMAX_DISABLE_CODEMEM", "1")
+	if len(overridden) != 1 || overridden[0] != "BIMAX_DISABLE_CODEMEM=0" {
+		t.Fatalf("explicit opt-in was overwritten: %v", overridden)
+	}
+}
+
+func containsEnv(env []string, want string) bool {
+	for _, entry := range env {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
 // Integration test: spawn the real headless engine, drive it the way the Bubble Tea model does,
 // and assert the Go side decodes the handshake and a structured command result. Proves the
 // Go↔Node protocol boundary end-to-end (no TTY needed).

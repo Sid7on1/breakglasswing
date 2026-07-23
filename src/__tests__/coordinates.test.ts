@@ -1,6 +1,6 @@
 import {
   normalizedToPixel, pixelToNormalized, screenshotToGlobal, globalToScreenshot,
-  elementCenterToScreenshot, logicalToPhysical, physicalToLogical, pointInFrame, pixelInImage,
+  elementCenterToScreenshot, globalFrameToScreenshot, logicalToPhysical, physicalToLogical, pointInFrame, pixelInImage,
 } from '../computer/coordinates';
 
 describe('coordinate transforms', () => {
@@ -27,6 +27,8 @@ describe('coordinate transforms', () => {
     // Native label frame {150,100,100,40} in window {100,50,350,400}, image 700×800 → pixel 200,140.
     expect(elementCenterToScreenshot({ x: 150, y: 100, w: 100, h: 40 }, { width: 700, height: 800 }, { x: 100, y: 50, w: 350, h: 400 }))
       .toEqual({ x: 200, y: 140 });
+    expect(globalFrameToScreenshot({ x: 150, y: 100, w: 100, h: 40 }, { width: 700, height: 800 }, { x: 100, y: 50, w: 350, h: 400 }))
+      .toEqual({ x: 100, y: 100, w: 200, h: 80 });
   });
 
   it('screenshot ⇄ global round-trips within rounding for a Retina-scaled capture', () => {

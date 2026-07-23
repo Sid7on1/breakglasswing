@@ -942,6 +942,35 @@ func TestTranscriptRendersInView(t *testing.T) {
 	}
 }
 
+func TestMouseWheelScrollsTranscriptViewport(t *testing.T) {
+	m, _ := newTestModel()
+	m.width, m.height = 80, 12
+	for i := 0; i < 40; i++ {
+		m.append(fmt.Sprintf("transcript line %02d", i))
+	}
+
+	scrolled, _ := m.update(tea.MouseMsg(tea.MouseEvent{
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	}))
+	m = scrolled.(model)
+	if m.scrollOff != transcriptWheelRows {
+		t.Fatalf("wheel up scroll offset = %d, want %d", m.scrollOff, transcriptWheelRows)
+	}
+	if !strings.Contains(stripANSI(m.View()), "scrolled up") {
+		t.Fatalf("wheel-up view must expose the transcript scroll state:\n%s", stripANSI(m.View()))
+	}
+
+	scrolled, _ = m.update(tea.MouseMsg(tea.MouseEvent{
+		Button: tea.MouseButtonWheelDown,
+		Action: tea.MouseActionPress,
+	}))
+	m = scrolled.(model)
+	if m.scrollOff != 0 {
+		t.Fatalf("wheel down scroll offset = %d, want 0", m.scrollOff)
+	}
+}
+
 // The live region (View) must never exceed the terminal height, or the inline renderer pushes its top
 // into scrollback every frame (the "footer multiplies itself" bug). Committed lines go to scrollback,
 // so even a huge transcript leaves the live region bounded.

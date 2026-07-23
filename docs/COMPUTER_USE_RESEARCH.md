@@ -20,6 +20,37 @@ whether it was already present, what changed, and how it was tested.
 > Dates/model ids are current as of the fetch (July 2026). Beta headers and tool versions change;
 > re-verify against the live docs before shipping a release that depends on a specific field name.
 
+## Phased repair plan (2026-07-23)
+
+The implementation order follows the vendor loop rather than treating computer use as a large
+prompt plus a mouse API:
+
+1. **TUI reachability — complete.** Keep the transcript in model state, but route wheel and trackpad
+   events into the alternate-screen viewport so live history is actually scrollable.
+2. **Instruction contract — complete.** Replace task-specific prompt accretion with one short,
+   mandatory observe → one action → observe → verify state machine in both the system prompt and
+   tool description.
+3. **Loop enforcement — complete.** Execute at most one `ComputerTool` call from each model turn.
+   Extra calls planned from the stale pre-action frame are returned as deferred, then the first
+   action's fresh frame is attached for the next decision.
+4. **Perception integrity — complete for the current native sidecar.** Native window capture is the
+   source of truth; every attached frame names its source, action and exact dimensions. Input is
+   refused without a matching fresh target frame, and a failed post-action capture invalidates old
+   handles and coordinates.
+5. **Operator PiP — complete.** An in-repo native helper uses `SCStream` at 15 fps with a
+   `desktopIndependentWindow` filter bound to the active `pid + windowId`, rendered in an AppKit
+   always-on-top panel. It is packaged inside the single Bimax executable, follows target changes,
+   suspends for user takeover, and stops on close/quit/dispose. The model still receives the
+   original per-action PNG, never the scaled presentation surface.
+6. **Recovery and durability — present, continue hardening.** Keep bounded no-progress recovery,
+   wrong-window detection, frame hashes, action history, resumable checkpoints and explicit
+   pause/resume takeover; add durable safety-check acknowledgement records to the release gate.
+7. **Evals and release gates — next.** Add deterministic one-action pacing, missing-frame,
+   Retina/window-move, modal, scroll, drag and long-session scenarios to the PTY/native smoke matrix.
+
+The load-bearing rule is now executable, not advisory: **the model cannot perform a second UI input
+until Bimax has captured and attached the result of the first one.**
+
 ## Side-by-side: design → Bimax
 
 | Concern | Anthropic (`computer_20251124`) | OpenAI (`computer_use_preview`) | Bimax component | Status |
@@ -75,11 +106,10 @@ whether it was already present, what changed, and how it was tested.
    not in the `ComputerTool` action enum. (Precision, Stage 5+.)
 2. **Explicit `mouse_down`/`mouse_up` split + drag path state machine** — Anthropic uses these for
    text/cell selection; Bimax's `drag` is one glided call. (Stage 4.)
-3. **Live pause / user-takeover / resume on the desktop path** — `surface.ts` provides the ownership
-   primitive; the interactive control surface is not wired yet. (Stage 3.)
-4. **PiP that shows only the agent surface** — the surface model now makes "which surface, is it
-   capture-safe" answerable; the capture/stream pipeline is Stage 2.
-5. **`acknowledged_safety_checks`-style resumable confirmation record** — Bimax gates per-action; it
+3. **Durable safety acknowledgements across resume** — pause / user takeover / resume is wired
+   through `/computer pause` and `/computer resume`, but consequential-action acknowledgements are
+   still per-action rather than resumable records. (Stage 6.)
+4. **`acknowledged_safety_checks`-style resumable confirmation record** — Bimax gates per-action; it
    does not yet carry an acknowledgement token across turns the way the Responses API does. (Stage 6.)
 
 ## Perception–action–verification loop audit (Stage 6)

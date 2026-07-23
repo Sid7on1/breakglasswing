@@ -21,6 +21,8 @@ type engineMsg Outbound
 type engineBatch []Outbound
 type engineClosed struct{}
 
+const transcriptWheelRows = 3
+
 // tickMsg drives the chrome animation: the working-indicator elapsed clock and the
 // thinking-phrase / dot rotation. Separate from the braille spinner.Tick (sub-second frames).
 type tickMsg time.Time
@@ -166,10 +168,10 @@ type model struct {
 	pingOutstanding time.Time
 	engineGone      bool
 	engineStalled   bool
-	busy            bool      // a turn is executing — Ctrl+C cancels it instead of quitting
-	interrupting    bool      // interrupt sent, turn not yet ended → indicator shows "Stopping…" (truthful state)
-	quitting        bool      // engine asked us to shut down — quit after this message
-	cwd             string    // working directory, updated by cwd_changed
+	busy            bool   // a turn is executing — Ctrl+C cancels it instead of quitting
+	interrupting    bool   // interrupt sent, turn not yet ended → indicator shows "Stopping…" (truthful state)
+	quitting        bool   // engine asked us to shut down — quit after this message
+	cwd             string // working directory, updated by cwd_changed
 	width           int
 	height          int
 
@@ -523,6 +525,20 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		// The alternate screen has no native terminal scrollback. Wheel and trackpad gestures must
+		// therefore move the transcript's own viewport; otherwise only PgUp/PgDn can reach history.
+		switch tea.MouseEvent(msg).Button {
+		case tea.MouseButtonWheelUp:
+			m.scrollOff += transcriptWheelRows
+		case tea.MouseButtonWheelDown:
+			m.scrollOff -= transcriptWheelRows
+			if m.scrollOff < 0 {
+				m.scrollOff = 0
+			}
+		}
+		return m, nil
 
 	case engineMsg:
 		wasWorking := m.working()

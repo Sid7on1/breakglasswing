@@ -115,10 +115,12 @@ export interface CliConfig {
   // (delete/send/purchase/submit/permissions — see action.impact.ts). The sensitive-target hard
   // floor (password managers, security settings, wallets) applies in BOTH modes and cannot be waived.
   computerApprovals: 'always' | 'high-impact-only';
-  // Show the work: deliver computer-use input in the foreground so the real cursor visibly moves
-  // to each target. false = background delivery (invisible, no focus steal) as before.
+  // Compatibility field for older configs. Native input is now always delivered through the real
+  // foreground cursor; false is migrated/ignored because synthetic background clicks were not
+  // accepted reliably by SwiftUI applications.
   computerVisible: boolean;
-  // Show a live post-action preview window from the embedded native driver.
+  // Native always-on-top ScreenCaptureKit stream of the active target window. It is presentation
+  // only: model perception still uses the original per-action PNG and exact coordinate metadata.
   computerPip: boolean;
   // Opt-in: allow computer-use screen recording. Recording NEVER starts implicitly — only an
   // explicit record_start action (which itself requires approval, and separate explicit approval
@@ -184,13 +186,10 @@ const DEFAULTS: CliConfig = {
   contextWindowTokens: 0,
   parallelToolCalls: true,
   computerApprovals: 'high-impact-only',
-  // Visible/foreground delivery drives the ONE real macOS cursor. This is the default because macOS
-  // apps built on SwiftUI (System Settings especially) IGNORE synthetic background click events — so
-  // the real cursor is the only reliable way to drive them. /computer visible toggles to background
-  // mode (the agent's own cursor, no focus steal), which is better for plain AppKit apps but will
-  // silently miss clicks in System Settings.
+  // Native input always drives the ONE real macOS cursor. The operator preview is on by default so
+  // computer work is visible; it remains observation-only and can be disabled in /computer.
   computerVisible: true,
-  computerPip: false,
+  computerPip: true,
   // Privacy default: recording is OFF. Screen recording captures everything visible — it must be
   // an explicit, approved user decision (record_start), never an ambient side effect of acting.
   computerRecord: false,

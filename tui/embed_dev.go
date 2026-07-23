@@ -7,3 +7,4 @@ package main
 // without first producing the 85 MB compiled engine (which is never committed).
 var embeddedEngine []byte = nil
 var embeddedComputerUse []byte = nil
+var embeddedLivePip []byte = nil

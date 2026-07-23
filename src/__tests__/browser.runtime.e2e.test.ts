@@ -26,13 +26,18 @@ describe('BrowserRuntime end to end', () => {
       if (!nav.ok) throw new Error(`Browser navigation failed: ${JSON.stringify(nav)}`);
       expect(nav.status).toBe(200);
       const snapshot = await runtime.run({ action: 'snapshot' }, { cwd: root });
-      expect(snapshot.ok).toBe(true);
+      if (!snapshot.ok) throw new Error(`Browser snapshot failed: ${JSON.stringify(snapshot)}`);
       const indexed = (snapshot.data as any).elements as Array<{ index: number; name: string }>;
       expect(indexed.map(element => element.name)).toEqual(expect.arrayContaining(['Run', 'Name', 'Choice']));
       const runIndex = indexed.find(element => element.name === 'Run')!.index;
       const nameIndex = indexed.find(element => element.name === 'Name')!.index;
       const choiceIndex = indexed.find(element => element.name === 'Choice')!.index;
-      expect((await runtime.run({ action: 'click', elementIndex: runIndex }, { cwd: root })).ok).toBe(true);
+      const clickedRun = await runtime.run({ action: 'click', elementIndex: runIndex }, { cwd: root });
+      expect(clickedRun.ok).toBe(true);
+      expect(clickedRun.summary).toContain('Mouse-clicked');
+      expect((clickedRun.data as any).input).toEqual(expect.objectContaining({
+        x: expect.any(Number), y: expect.any(Number), target: expect.stringContaining('button#ready'),
+      }));
       expect((await runtime.run({ action: 'type', elementIndex: nameIndex, text: 'BiMax' }, { cwd: root })).ok).toBe(true);
       expect((await runtime.run({ action: 'select', elementIndex: choiceIndex, values: ['b'] }, { cwd: root })).ok).toBe(true);
       const assertion = await runtime.run({
@@ -78,6 +83,7 @@ describe('BrowserRuntime end to end', () => {
 
       // Progressive query: only elements matching the filter are indexed.
       const filtered = await runtime.run({ action: 'snapshot', filter: 'add row' }, { cwd: root });
+      if (!filtered.ok) throw new Error(`Filtered browser snapshot failed: ${JSON.stringify(filtered)}`);
       const filteredElements = (filtered.data as any).elements as Array<{ index: number; name: string }>;
       expect(filteredElements).toHaveLength(1);
       expect(filteredElements[0].name).toBe('Add row');
@@ -101,7 +107,9 @@ describe('BrowserRuntime end to end', () => {
       expect(still.summary).toContain('No DOM change');
 
       // Normalized coordinates: (500,500) in 0–1000 space lands mid-viewport (800×600 → 400×300).
-      expect((await runtime.run({ action: 'click', x: 500, y: 500, normalized: true }, { cwd: root })).ok).toBe(true);
+      const coordinateClick = await runtime.run({ action: 'click', x: 500, y: 500, normalized: true }, { cwd: root });
+      expect(coordinateClick.ok).toBe(true);
+      expect((coordinateClick.data as any).input).toEqual(expect.objectContaining({ x: 400, y: 300 }));
       const assertion = await runtime.run({
         action: 'assert', assertion: { selector: '#state', textIncludes: 'clicked-at-400x300' },
       }, { cwd: root });

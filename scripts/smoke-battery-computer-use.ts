@@ -44,13 +44,28 @@ async function main() {
       throw new Error(`System Settings opened without fresh screenshot evidence: ${opened.visualEvidenceError || JSON.stringify(opened.details)}`);
     }
 
+    // Dismiss a health sheet left by a prior run, then establish a deterministic General baseline
+    // so this smoke necessarily exercises the same fresh element-handle navigation the model uses.
+    await requireOk(await runtime.run({ action: 'key', combo: 'escape' }));
+    await requireOk(await runtime.run({ action: 'observe', maxElements: 500 }));
+    await requireOk(await runtime.run({ action: 'click', query: 'General' }));
     const current = await requireOk(await runtime.run({ action: 'observe', query: 'Battery Health', maxElements: 500 }));
     let batteryPage = current;
+    let batteryNavigation: DesktopResult | null = null;
     const alreadyOnBatteryPage = (current.elements || []).some((element: any) =>
       /battery/i.test(String(element?.label || '')) && /battery level/i.test(String(element?.label || element?.value || '')),
     );
     if (!current.verification?.matched && !alreadyOnBatteryPage) {
-      await requireOk(await runtime.run({ action: 'click', query: 'Battery' }));
+      const battery = (current.elements || []).find((element: any) =>
+        String(element?.label || element?.value || '').trim() === 'Battery' && element?.frame,
+      ) as any;
+      if (!battery?.element_token && battery?.element_index == null) {
+        throw new Error('fresh System Settings observation did not expose a clickable Battery handle');
+      }
+      batteryNavigation = await requireOk(await runtime.run({
+        action: 'click',
+        ...(battery.element_token ? { elementToken: String(battery.element_token) } : { elementIndex: Number(battery.element_index) }),
+      }));
       batteryPage = await requireOk(await runtime.run({ action: 'observe', query: 'Battery Health', maxElements: 500 }));
     }
     if (!batteryPage.screenshot) throw new Error('Battery click produced no fresh screenshot evidence');
@@ -67,6 +82,7 @@ async function main() {
 
     console.log(JSON.stringify({
       opened: evidence(opened),
+      batteryNavigation: batteryNavigation ? evidence(batteryNavigation) : null,
       batteryPage: evidence(batteryPage),
       healthClick: evidence(healthClick),
       cursor: { x: cursor.x, y: cursor.y, details: cursor.details },

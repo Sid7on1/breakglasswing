@@ -2,7 +2,7 @@ import { IGovernor } from '../core/interfaces';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
-import { AgentPersona, explicitlyRequiresComputerUse, isolateComputerUseHistory } from '../cli/personas/base.persona';
+import { AgentPersona, explicitlyRequiresComputerUse, isolateComputerUseHistory, requiresComputerChecklist } from '../cli/personas/base.persona';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -108,7 +108,22 @@ describe('Persona system prompt — static/session/turn cache split', () => {
 describe('explicit computer-use history isolation', () => {
   it('recognizes an explicit visual-tool request', () => {
     expect(explicitlyRequiresComputerUse('use computer use and check my battery health')).toBe(true);
-    expect(explicitlyRequiresComputerUse('check my battery health')).toBe(false);
+    expect(explicitlyRequiresComputerUse('hey, poke around my Mac and tell me how worn out the battery is')).toBe(true);
+    expect(explicitlyRequiresComputerUse('explain how lithium-ion batteries age')).toBe(false);
+  });
+
+  it('does not hijack engineering or informational prompts that merely mention an app', () => {
+    // This repo itself contains Finder/Safari-related source — routing these into computer use
+    // would isolate real conversation evidence and demand screenshots for a coding question.
+    expect(explicitlyRequiresComputerUse('check the finder smoke script for bugs')).toBe(false);
+    expect(explicitlyRequiresComputerUse('open src/computer/desktop.runtime.ts and fix the Finder window code')).toBe(false);
+    expect(explicitlyRequiresComputerUse('how does Safari handle cookies? go check the docs')).toBe(false);
+    expect(explicitlyRequiresComputerUse('open System Settings and check my battery')).toBe(true);
+  });
+
+  it('recognizes compound computer work that needs an engine-persistent checklist', () => {
+    expect(requiresComputerChecklist('Use computer use. Open Settings, check Battery, then return to General.')).toBe(true);
+    expect(requiresComputerChecklist('open System Settings')).toBe(false);
   });
 
   it('hides prior shell evidence and stale screenshots without breaking tool-result roles', () => {

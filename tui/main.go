@@ -103,7 +103,14 @@ func main() {
 	// (post-reflow, previously painted rows cannot be located, so every repair was a clear+reprint).
 	// The user's own shell screen/scrollback is preserved by the terminal and restored on exit;
 	// the session transcript is printed once after exit so the conversation survives.
-	p := tea.NewProgram(initialModel(eng), tea.WithAltScreen())
+	p := tea.NewProgram(
+		initialModel(eng),
+		tea.WithAltScreen(),
+		// Alternate-screen mode has no terminal-owned scrollback while the program is running.
+		// Capture wheel/trackpad events so the transcript viewport remains reachable with the
+		// interaction users naturally try first; keyboard paging remains available as a fallback.
+		tea.WithMouseCellMotion(),
+	)
 
 	// Graceful SIGHUP (closed terminal tab / hangup): quit through Bubble Tea so it restores the
 	// terminal and Run returns — which reaches eng.Close() and reaps the Node engine child.

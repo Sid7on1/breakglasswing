@@ -392,6 +392,59 @@ export class BrowserRuntime implements BrowserRuntimePort {
     return this.page;
   }
 
+  /** Deliver one browser click through Chromium's mouse at the target's live clickable point.
+   * ElementHandle.click() is convenient, but its opaque scroll/hit-test path can report success
+   * when an overlay intercepted the point. We make the geometry and obstruction check explicit,
+   * then post exactly one mouse down/up pair (never retry after delivery may have begun). */
+  private async clickElementWithMouse(page: Page, target: ElementHandle<Element>): Promise<{ x: number; y: number; target: string }> {
+    await target.evaluate(element => element.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
+    const point = await target.clickablePoint();
+    // Hit-test in the element's OWN document using its own client rect: clickablePoint() is in
+    // main-frame viewport coordinates, which are wrong inside an iframe's elementFromPoint.
+    const hit = await target.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      const p = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      const actual = document.elementFromPoint(p.x, p.y);
+      const ownsPoint = !!actual && (actual === element || element.contains(actual) || actual.contains(element));
+      const describe = (node: Element | null) => {
+        if (!node) return '(nothing)';
+        const html = node as HTMLElement;
+        const name = html.getAttribute('aria-label') || html.getAttribute('title')
+          || (html.innerText || html.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        return `${html.tagName.toLowerCase()}${html.id ? `#${html.id}` : ''}${name ? ` "${name}"` : ''}`;
+      };
+      return { ownsPoint, actual: describe(actual), target: describe(element) };
+    });
+    if (!hit.ownsPoint) {
+      throw new Error(`browser click target is obscured at ${Math.round(point.x)},${Math.round(point.y)}: expected ${hit.target}, hit ${hit.actual}; take a fresh snapshot or dismiss the overlay`);
+    }
+    await page.mouse.move(point.x, point.y, { steps: 3 });
+    await page.mouse.down({ button: 'left' });
+    await delay(8);
+    await page.mouse.up({ button: 'left' });
+    return { x: Math.round(point.x), y: Math.round(point.y), target: hit.target };
+  }
+
+  private async clickViewportPoint(page: Page, x: number, y: number): Promise<{ x: number; y: number; target: string }> {
+    const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= viewport.width || y >= viewport.height) {
+      throw new Error(`browser click ${x},${y} is outside the live viewport (${viewport.width}x${viewport.height})`);
+    }
+    const target = await page.evaluate((point) => {
+      const node = document.elementFromPoint(point.x, point.y) as HTMLElement | null;
+      if (!node) return '(nothing)';
+      const name = node.getAttribute('aria-label') || node.getAttribute('title')
+        || (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      return `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${name ? ` "${name}"` : ''}`;
+    }, { x, y });
+    if (target === '(nothing)') throw new Error(`browser click ${x},${y} has no live DOM target; take a fresh screenshot or snapshot`);
+    await page.mouse.move(x, y, { steps: 3 });
+    await page.mouse.down({ button: 'left' });
+    await delay(8);
+    await page.mouse.up({ button: 'left' });
+    return { x: Math.round(x), y: Math.round(y), target };
+  }
+
   /** Capture the interactive-element observation: (re)indexes handles + value-safe metadata.
    * ALWAYS consumes the previous observation first — identity is strictly observation-scoped. */
   private async captureSnapshot(page: Page, filter: string, maxElements: number): Promise<{
@@ -626,25 +679,28 @@ export class BrowserRuntime implements BrowserRuntimePort {
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           const hasCoordinates = Number.isFinite(command.x) && Number.isFinite(command.y);
           if (!command.selector && !indexed && !hasCoordinates) return base(false, 'click requires selector, elementIndex from snapshot, or x/y coordinates.');
-          const run = await this.retry(maxAttempts, context.signal, async () => {
-            if (indexed) await indexed.click();
-            else if (hasCoordinates) {
-              let px = Number(command.x), py = Number(command.y);
-              if (command.normalized) {
-                const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
-                px = denormalizeCoordinate(px, viewport.width);
-                py = denormalizeCoordinate(py, viewport.height);
-              }
-              await page.mouse.click(px, py);
+          let click: { x: number; y: number; target: string };
+          if (indexed) {
+            click = await this.clickElementWithMouse(page, indexed);
+          } else if (hasCoordinates) {
+            let px = Number(command.x), py = Number(command.y);
+            if (command.normalized) {
+              const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+              px = denormalizeCoordinate(px, viewport.width);
+              py = denormalizeCoordinate(py, viewport.height);
             }
-            else {
-              await page.waitForSelector(command.selector!, { visible: true, timeout });
-              await page.click(command.selector!);
-            }
-          });
-          attempts = run.attempts;
-          return finishAction(true, indexed ? `Clicked elementIndex ${command.elementIndex}.`
-            : hasCoordinates ? `Clicked (${command.x}, ${command.y}).` : `Clicked ${command.selector}.`);
+            click = await this.clickViewportPoint(page, px, py);
+          } else {
+            const located = await this.retry(maxAttempts, context.signal, async () => {
+              const target = await page.waitForSelector(command.selector!, { visible: true, timeout });
+              if (!target) throw new Error('Browser click target was not found.');
+              return target;
+            });
+            attempts = located.attempts;
+            click = await this.clickElementWithMouse(page, located.value);
+          }
+          return finishAction(true, indexed ? `Mouse-clicked elementIndex ${command.elementIndex} at ${click.x},${click.y}.`
+            : hasCoordinates ? `Mouse-clicked ${click.x},${click.y}.` : `Mouse-clicked ${command.selector} at ${click.x},${click.y}.`, { input: click });
         }
         case 'type': {
           const resolved = this.resolveIndexed(command.elementIndex);

@@ -57,12 +57,11 @@ globalCommandRegistry.register({
     }
 
     if (sub === 'visible') {
-      const cfg = await loadConfig();
-      const next = !cfg.computerVisible;
-      await saveConfig({ computerVisible: next });
-      context.addSystemMessage('success', next
-        ? 'Computer use is VISIBLE: one native macOS cursor handles all foreground input.'
-        : 'Computer use is invisible: input is delivered in the background without moving the cursor.');
+      // Background native input was retired: its overlay cursor animated even when SwiftUI ignored
+      // the synthetic event. Keep the command as a migration alias for old saved configurations.
+      await saveConfig({ computerVisible: true });
+      await globalDesktopRuntime.dispose?.();
+      context.addSystemMessage('success', 'Computer use uses one real native cursor for every mouse and keyboard action. Unreliable background input is retired.');
       return { type: 'none' };
     }
 
@@ -72,8 +71,8 @@ globalCommandRegistry.register({
       await saveConfig({ computerPip: next });
       await globalDesktopRuntime.dispose?.();
       context.addSystemMessage('success', next
-        ? 'Computer-use PiP is ON. The native post-action preview will appear on the next computer-use action.'
-        : 'Computer-use PiP is OFF. The current native driver session was restarted to remove it.');
+        ? 'Computer-use PiP enabled. ScreenCaptureKit continuously streams the active target window; it is never used for model input coordinates.'
+        : 'Computer-use PiP disabled.');
       return { type: 'none' };
     }
 
@@ -178,6 +177,7 @@ globalCommandRegistry.register({
 
     // Behavior toggles: approval cadence + visible cursor.
     const cfg = await loadConfig();
+    const pip = await globalDesktopRuntime.pipStatus?.().catch(() => null);
     options.push({
       label: cfg.computerApprovals === 'high-impact-only' ? '⚙ Approvals: high-impact only' : '⚙ Approvals: every action',
       value: '/computer approvals',
@@ -186,13 +186,18 @@ globalCommandRegistry.register({
         : 'every click/type asks — Enter switches to high-impact-only',
       category: 'Behavior',
     });
-    const pip = await (globalDesktopRuntime.pipStatus?.() ?? Promise.resolve(null)).catch(() => null);
     options.push({
-      label: cfg.computerPip ? '⚙ PiP preview: on' : '⚙ PiP preview: off',
+      label: cfg.computerPip
+        ? (pip?.running ? '● PiP preview: live' : '⚙ PiP preview: waiting')
+        : '⚙ PiP preview: off',
       value: '/computer pip',
       desc: cfg.computerPip
-        ? `live post-action preview${pip?.surface ? ` — ${pip.surface} (capture-safe)` : pip && !pip.captureSafe ? ' — whole desktop until an app window is active' : ''} — Enter disables it`
-        : 'Enter enables the native post-action preview',
+        ? (pip?.error
+          ? `${pip.error} — Enter turns off`
+          : pip?.surface
+            ? `continuous ScreenCaptureKit stream of ${pip.surface} — Enter turns off`
+            : 'waiting for an active target window — Enter turns off')
+        : 'Enter turns on the continuous ScreenCaptureKit preview',
       category: 'Behavior',
     });
     options.push({
@@ -204,11 +209,9 @@ globalCommandRegistry.register({
       category: 'Behavior',
     });
     options.push({
-      label: cfg.computerVisible ? '⚙ Cursor: one native cursor' : '⚙ Cursor: invisible',
+      label: '✓ Input: native mouse + keyboard',
       value: '/computer visible',
-      desc: cfg.computerVisible
-        ? 'sidecar overlay hidden; macOS cursor handles every action — Enter makes it background/invisible'
-        : 'background input, cursor does not move — Enter enables one visible native cursor',
+      desc: 'one physical cursor; synthetic background input is retired',
       category: 'Behavior',
     });
 

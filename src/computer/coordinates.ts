@@ -55,6 +55,20 @@ export function globalToScreenshot(p: Point, image: ImageSize, frame: Frame): Po
   };
 }
 
+/** Accessibility rectangle in global screen points → rectangle in the exact screenshot pixels. */
+export function globalFrameToScreenshot(elementFrame: Frame, image: ImageSize, windowFrame: Frame): Frame | null {
+  if (!image.width || !image.height || !windowFrame.w || !windowFrame.h) return null;
+  const scaleX = image.width / windowFrame.w;
+  const scaleY = image.height / windowFrame.h;
+  const frame = {
+    x: Math.round((elementFrame.x - windowFrame.x) * scaleX),
+    y: Math.round((elementFrame.y - windowFrame.y) * scaleY),
+    w: Math.max(1, Math.round(elementFrame.w * scaleX)),
+    h: Math.max(1, Math.round(elementFrame.h * scaleY)),
+  };
+  return [frame.x, frame.y, frame.w, frame.h].every(Number.isFinite) ? frame : null;
+}
+
 /**
  * Center of an accessibility element — whose frame is reported in global screen points — expressed
  * as a screenshot pixel of the window image. Returns null when the center falls outside the image

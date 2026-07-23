@@ -170,6 +170,15 @@ const RULES: CapabilityRule[] = [
       contextWindow: 64_000,
     },
   },
+  // --- DeepSeek V4: 1M context and a structured reasoning channel. It remains opt-in because
+  //     NVIDIA NIM did not produce a first token within 35s on five prompt sizes (2026-07-23). ---
+  {
+    match: ['deepseek-v4'],
+    caps: {
+      nativeThinking: true,
+      contextWindow: 1_000_000,
+    },
+  },
   // --- NVIDIA Nemotron Omni: purpose-built for GUI/browser agents. The hosted model accepts
   // image/video/audio/text, emits inline reasoning, supports tools, and advertises a 256K window.
   // Keep parallel tools and response_format conservative because NIM deployments vary. ---
@@ -241,12 +250,17 @@ const RULES: CapabilityRule[] = [
       contextWindow: 32_000,
     },
   },
-  // --- StepFun step-3.7 (THE DEFAULT) and other step-3.x: OPENER-based reasoners — reasoning is
-  //     always wrapped `<thinking>…</thinking>` (normalized to `<think>` by the filter). Because the
-  //     opener hides the reasoning, a tag-free answer streams from the first token with NO buffering:
-  //     openerlessReasoning stays false so the filter runs in explicit (non-buffering) mode. This is
-  //     the fix for "short replies don't stream" — the old inlineReasoning+infinite-cap held a short
-  //     tag-free answer until stream end and released it in one burst. ---
+  // --- StepFun 3.7: NVIDIA streams reasoning out-of-band in reasoning_content. It accepts image
+  //     input and advertises a 262K context window, so it can drive screenshot/computer-use turns. ---
+  {
+    match: ['step-3.7'],
+    caps: {
+      nativeThinking: true,
+      visionInput: true,
+      contextWindow: 262_000,
+    },
+  },
+  // --- Other StepFun step-3.x variants use inline reasoning tags. ---
   {
     match: ['stepfun', 'step-3'],
     caps: {

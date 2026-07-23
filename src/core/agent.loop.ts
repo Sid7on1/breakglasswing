@@ -20,7 +20,7 @@ import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder'
 import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
-import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations } from './multimodal';
+import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations, contentToText, isScreenshotObservationMessage } from './multimodal';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -40,6 +40,56 @@ export function sanitizeToolArgs(raw: any): string {
   const s = String(raw).trim();
   if (s === '') return '{}';
   try { return JSON.stringify(JSON.parse(s)); } catch { return '{}'; }
+}
+
+/** Prevent a weak model from ending a computer-use turn one disclosure too early. This is narrowly
+ * evidence-driven: it only fires for a percentage request, only when the proposed answer contains
+ * no numeric percentage, and only when the newest Bimax observation supplies a visible
+ * Details/info control. The model still chooses and executes the action; the loop merely refuses
+ * to mislabel a category such as "Normal" as completion. */
+export function computerPercentageCompletionNudge(messages: Message[], proposedAnswer: string): string {
+  const request = [...messages].reverse().find(message => message.role === 'user'
+    && !isScreenshotObservationMessage(message)
+    && !contentToText(message.content as any).includes('[COMPUTER COMPLETION GATE]'));
+  const requestText = request ? contentToText(request.content as any) : '';
+  if (!/(?:\bpercent(?:age)?\b|%)/i.test(requestText)) return '';
+  if (/\b\d+(?:\.\d+)?(?:\s*%|\s+percent\b)/i.test(proposedAnswer)) return '';
+
+  let observation: any = null;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== 'tool' || typeof message.content !== 'string') continue;
+    try {
+      const parsed = JSON.parse(message.content);
+      if (String(parsed?.driver || '').startsWith('bimax-computer-use')
+        && Array.isArray(parsed?.elements)) {
+        observation = parsed;
+        break;
+      }
+    } catch { /* compacted/non-JSON tool result */ }
+  }
+  if (!observation) return '';
+
+  // Structural request words carry no information about WHICH row's disclosure control matters;
+  // every remaining term is content (battery, health, storage, display, …) and scores equally.
+  // Nothing here is specific to any one Settings page.
+  const structuralTerms = new Set(['computer', 'settings', 'check', 'open', 'percentage', 'percent', 'using', 'please', 'tell', 'show', 'find', 'exact', 'value', 'current']);
+  const requestTerms = Array.from(new Set(requestText.toLocaleLowerCase().match(/[a-z]{4,}/g) || []))
+    .filter(term => !structuralTerms.has(term));
+  const candidates = observation.elements
+    .filter((element: any) => Number.isFinite(Number(element?.element_index))
+      && element?.frame
+      && /(?:show\s+detail|details?|info(?:rmation)?|disclosure|ellipsis)/i.test(String(element?.label || '')))
+    .map((element: any) => {
+      const label = String(element.label || '');
+      const haystack = `${label} ${element.context_label || ''}`.toLocaleLowerCase();
+      const score = requestTerms.filter(term => haystack.includes(term)).length;
+      return { element, label, score };
+    })
+    .sort((a: any, b: any) => b.score - a.score || Number(a.element.element_index) - Number(b.element.element_index));
+  const best = candidates[0];
+  if (!best || best.score <= 0) return '';
+  return `[COMPUTER COMPLETION GATE] The user's requested percentage is still missing; "${proposedAnswer.slice(0, 160)}" does not contain a numeric percentage. Do not stop or repeat that category. The newest observation exposes the relevant visible control: elementIndex ${Number(best.element.element_index)}, "${best.label}". Call ComputerTool click on that fresh elementIndex now, inspect the returned screen, and answer only after the numeric percentage is visible or the detail view proves it unavailable.`;
 }
 
 export class AgentLoop {
@@ -160,6 +210,8 @@ export class AgentLoop {
     // finish (or keeps re-opening items) can't spin the loop forever.
     let persistenceNudges = 0;
     const MAX_PERSISTENCE_NUDGES = 4;
+    let computerCompletionNudges = 0;
+    const MAX_COMPUTER_COMPLETION_NUDGES = 2;
     // Black-box recorder: every execute() is an episode — each LLM call in this run is
     // recorded (request hash + response stream) to a bundle under .bimax/episodes/,
     // self-flushing per call. /episodes replays it; BIMAX_RECORDER=0 disables.
@@ -533,10 +585,17 @@ export class AgentLoop {
         }
         this.messages.push(asstMsg);
 
-        // Execute tools
-        // Partition into parallel (safe) and sequential (destructive)
-        const parallel = toolCalls.filter(tc => this.tools.getTool(tc.name)?.isConcurrencySafe);
-        const sequential = toolCalls.filter(tc => !this.tools.getTool(tc.name)?.isConcurrencySafe);
+        // Execute at most ONE ComputerTool action from this model turn. A second computer call was
+        // planned from the same pre-action screenshot, so executing it after the first action would
+        // be blind. Return a well-formed deferred result for every extra call; the fresh screenshot
+        // from the first call is attached below and the model can choose the next action from it.
+        const computerCalls = toolCalls.filter(tc => tc.name === 'ComputerTool');
+        const deferredComputerIds = new Set(computerCalls.slice(1).map(tc => tc.id));
+        const executableCalls = toolCalls.filter(tc => !deferredComputerIds.has(tc.id));
+
+        // Partition into parallel (safe) and sequential (destructive).
+        const parallel = executableCalls.filter(tc => this.tools.getTool(tc.name)?.isConcurrencySafe);
+        const sequential = executableCalls.filter(tc => !this.tools.getTool(tc.name)?.isConcurrencySafe);
 
         const executeTool = async (tc: { id: string, name: string, args: string }) => {
           const toolSpan = tracer.startSpan(`execute_tool ${tc.name}`, {
@@ -697,9 +756,22 @@ export class AgentLoop {
           }
         };
 
-        const parallelResults = await Promise.all(parallel.map(tc => executeTool(tc)));
         const resultById = new Map<string, { result: string; isError: boolean }>();
+        const parallelResults = await Promise.all(parallel.map(tc => executeTool(tc)));
         for (const res of parallelResults) resultById.set(res.id, { result: res.result, isError: res.isError });
+        for (const tc of computerCalls.slice(1)) {
+          let action = 'unknown';
+          try { action = String(JSON.parse(tc.args || '{}')?.action || 'unknown'); } catch { /* canonical history still gets a result */ }
+          resultById.set(tc.id, {
+            result: JSON.stringify({
+              ok: false,
+              action,
+              deferred: true,
+              summary: 'Deferred because Bimax executes one ComputerTool action per model turn. Inspect the fresh post-action screenshot, then issue exactly one next ComputerTool action.',
+            }),
+            isError: false,
+          });
+        }
 
         let interrupted = false;
         for (const tc of sequential) {
@@ -718,7 +790,13 @@ export class AgentLoop {
         // that didn't match the tool_calls order — order-sensitive servers reject that, and weaker
         // models misread which result belongs to which call.
         const loopSignals: LoopSignal[] = [];
-        const screenshotPaths: string[] = [];
+        const screenshotPaths: Array<{
+          path: string;
+          source: 'BrowserTool' | 'ComputerTool';
+          action?: string;
+          width?: number;
+          height?: number;
+        }> = [];
         let sawComputerResult = false;
         for (const tc of toolCalls) {
           const ran = resultById.get(tc.id);
@@ -728,7 +806,17 @@ export class AgentLoop {
             const sig = loopDetector.record(tc.name, tc.args, result, ran.isError);
             if (sig) loopSignals.push(sig);
             const shot = screenshotFromToolResult(tc.name, result);
-            if (shot) screenshotPaths.push(shot);
+            if (shot) {
+              let metadata: any = {};
+              try { metadata = JSON.parse(result); } catch { /* path alone remains useful */ }
+              screenshotPaths.push({
+                path: shot,
+                source: tc.name as 'BrowserTool' | 'ComputerTool',
+                action: typeof metadata?.action === 'string' ? metadata.action : undefined,
+                width: Number.isFinite(Number(metadata?.width)) ? Number(metadata.width) : undefined,
+                height: Number.isFinite(Number(metadata?.height)) ? Number(metadata.height) : undefined,
+              });
+            }
             if (tc.name === 'ComputerTool') sawComputerResult = true;
           }
         }
@@ -755,7 +843,8 @@ export class AgentLoop {
             const canSee = (this.llm as any).canSeeImages?.()
               ?? (await (this.llm as any).activeCapabilities?.())?.visionInput;
             if (canSee) {
-              const observation = buildScreenshotObservation(screenshotPaths[screenshotPaths.length - 1]);
+              const newest = screenshotPaths[screenshotPaths.length - 1];
+              const observation = buildScreenshotObservation(newest.path, newest);
               if (observation) {
                 appendScreenshotObservation(this.messages, observation);
                 pruneScreenshotObservations(this.messages);
@@ -807,6 +896,15 @@ export class AgentLoop {
 
         // Loop continues so LLM can react to tool results
       } else {
+        const computerCompletionNudge = currentContent
+          ? computerPercentageCompletionNudge(this.messages, currentContent)
+          : '';
+        if (computerCompletionNudge && computerCompletionNudges < MAX_COMPUTER_COMPLETION_NUDGES) {
+          computerCompletionNudges++;
+          this.messages.push({ role: 'user', content: computerCompletionNudge });
+          cliEvents.emit('status', 'Exact percentage not yet verified — continuing through the relevant detail control');
+          continue;
+        }
         // A turn with no tool call that collapsed to pure filler gave the user
         // nothing. Rather than silently ending on an empty reply, nudge the model
         // once to answer directly and let the loop run again. Guarded against spin.

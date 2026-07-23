@@ -24,13 +24,15 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'The default — fast, sees screens, calls tools reliably', tier: 'coding' },
   { label: 'Qwen 3.5 397B', value: 'qwen/qwen3.5-397b-a17b', desc: 'Bigger reasoner — reliable tools but slow (15-37s/step)', tier: 'coding' },
   { label: 'GLM 5.2', value: 'z-ai/glm-5.2', desc: 'Coding + reasoning — UNAVAILABLE on some NIM keys (times out; probe before defaulting)', tier: 'coding' },
+  { label: 'DeepSeek V4 Pro', value: 'deepseek-ai/deepseek-v4-pro', desc: '1M context, terminal + coding — very slow NIM cold-start; opt in', tier: 'coding' },
   { label: 'GPT-OSS 120B', value: 'openai/gpt-oss-120b', desc: 'Fast open reasoner — effort adjustable, no vision', tier: 'coding' },
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strong coder — slow to start', tier: 'coding' },
-  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Thinks on EVERY call — overthinks, slow', tier: 'coding' },
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Multimodal reasoner — selected for computer use', tier: 'coding' },
 
   // — Vision: sees screenshots and images. Probed 2026-07-19 on a real image; only VLMs that
   //   ANSWERED correctly are listed. The default work model already sees, so this slot is a
   //   fallback for when work is switched to a text-only model. —
+  { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Selected computer-use model — 262K multimodal context', tier: 'vision' },
   { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Best pick — sees AND calls tools, ~0.7s', tier: 'vision' },
   { label: 'Kimi K2.6', value: 'moonshotai/kimi-k2.6', desc: 'Selected multimodal model for screenshots and images', tier: 'vision' },
   { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Accurate image reads, ~1s', tier: 'vision' },

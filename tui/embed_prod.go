@@ -12,3 +12,6 @@ var embeddedEngine []byte
 
 //go:embed embed/bimax-computer-use
 var embeddedComputerUse []byte
+
+//go:embed embed/bimax-live-pip
+var embeddedLivePip []byte

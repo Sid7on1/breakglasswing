@@ -80,6 +80,20 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(caps.structuredOutputs).toBe(false);
   });
 
+  it('DeepSeek V4 exposes native thinking and its advertised 1M context window', () => {
+    const caps = capabilitiesFor('nvidia', 'deepseek-ai/deepseek-v4-pro');
+    expect(caps.nativeThinking).toBe(true);
+    expect(caps.contextWindow).toBe(1_000_000);
+  });
+
+  it('Step 3.7 exposes structured thinking, vision input, and a 262K context window', () => {
+    const caps = capabilitiesFor('nvidia', 'stepfun-ai/step-3.7-flash');
+    expect(caps.nativeThinking).toBe(true);
+    expect(caps.inlineReasoning).toBe(false);
+    expect(caps.visionInput).toBe(true);
+    expect(caps.contextWindow).toBe(262_000);
+  });
+
   // The A3 reasoning_effort send-gate keys off reasoningEffortKnob: only flagged models get the
   // field (others 400 on it). Lock both polarities so a table edit can't silently break the gate.
   it('reasoningEffortKnob: on for true reasoning models, off for the rest (incl. minimax)', () => {
@@ -114,12 +128,12 @@ describe('capabilitiesFor — model capability resolution', () => {
   // inlineReasoning drives the streaming think-filter's preamble-cap lift: the NIM reasoning models
   // that emit chain-of-thought inline (before a tool call) must be flagged, or their reasoning leaks
   // into the reply. Plain/structured-reasoning models stay false so the cap protects them.
-  it('inlineReasoning: on for the inline-CoT reasoning models (stepfun), off for plain models (incl. minimax)', () => {
+  it('inlineReasoning: on for Step 3.5 inline CoT, off for structured/plain models', () => {
     // minimax is NOT a reasoning model — inlineReasoning false so its tokens stream instead of being
-    // buffered until a `</think>` that never arrives. stepfun IS a reasoning model → true.
+    // buffered until a `</think>` that never arrives. Step 3.7 uses reasoning_content instead.
     expect(capabilitiesFor('nvidia', 'minimax-m3').inlineReasoning).toBe(false);
     expect(capabilitiesFor('nvidia', 'step-3.5-flash').inlineReasoning).toBe(true);
-    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').inlineReasoning).toBe(true);
+    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').inlineReasoning).toBe(false);
     expect(capabilitiesFor('anthropic', 'claude-3-5-sonnet').inlineReasoning).toBe(false);
     expect(capabilitiesFor('openai', 'gpt-4o').inlineReasoning).toBe(false);
     expect(capabilitiesFor('local', 'mystery-7b').inlineReasoning).toBe(false);
@@ -135,7 +149,7 @@ describe('capabilitiesFor — model capability resolution', () => {
   // buffering and streams the answer from token 1 (the minimax "feels very slow" head-of-reply stall).
   it('plainContent: on for minimax (confirmed non-reasoning), off for reasoning + unknown models', () => {
     expect(capabilitiesFor('nvidia', 'minimaxai/minimax-m3').plainContent).toBe(true);
-    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').plainContent).toBe(false); // reasons inline
+    expect(capabilitiesFor('nvidia', 'stepfun/step-3.7').plainContent).toBe(false); // structured reasoning
     expect(capabilitiesFor('deepseek', 'deepseek-r1').plainContent).toBe(false);
     expect(capabilitiesFor('local', 'mystery-7b').plainContent).toBe(false); // FLOOR default
   });

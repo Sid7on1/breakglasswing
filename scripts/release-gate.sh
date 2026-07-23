@@ -19,6 +19,11 @@ echo "[4/10] Go TUI tests"
 
 echo "[5/10] Self-contained host binary"
 ./build-release.sh
+# The build compiles and embeds native/BimaxLivePip.swift. A real-window frame-delivery smoke needs
+# an interactive macOS login session + Screen Recording permission, so keep it opt-in for headless CI.
+if [ "${BIMAX_NATIVE_PIP_SMOKE:-0}" = "1" ]; then
+  npm run test:computer:pip
+fi
 
 echo "[6/10] Artifact identity"
 version="$(node -p "require('./package.json').version")"

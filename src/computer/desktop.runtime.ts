@@ -6,7 +6,7 @@ import { execFile } from 'child_process';
 import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
 import { cliEvents } from '../cli/events';
 import { loadConfig } from '../cli/config';
-import { normalizedToPixel, screenshotToGlobal, elementCenterToScreenshot } from './coordinates';
+import { normalizedToPixel, screenshotToGlobal, elementCenterToScreenshot, globalFrameToScreenshot, Frame } from './coordinates';
 import { SurfaceRegistry, ExecutionSurface, InputOwner, chooseMechanism, AutomationMechanism } from './surface';
 import { DragMachine } from './drag';
 import { pointInFrame } from './coordinates';
@@ -17,6 +17,7 @@ import { RecordingController } from './recording';
 import { toActionResult, ActionResult } from './verification';
 import { SidecarTransport, SidecarTransportPort, bimaxBrand } from './transport';
 import { TargetOwnership, ComputerTarget } from './target';
+import { LivePipPort, LivePipStatus, NativeLivePip } from './pip';
 
 /**
  * Offline/development fallback for Bimax Computer Use.
@@ -56,6 +57,10 @@ export interface DesktopCommand {
   elementIndex?: number;
   elementToken?: string;
   query?: string;
+  /** drag: destination element handle from the newest observation (mirrors query/elementToken/elementIndex for the source). */
+  toQuery?: string;
+  toElementToken?: string;
+  toElementIndex?: number;
   maxElements?: number;
   includeScreenshot?: boolean;
   value?: string;
@@ -127,7 +132,79 @@ export interface DesktopResult {
     /** True when the recording is scoped to a capture-safe agent surface (no unrelated windows). */
     captureSafe?: boolean };
   details?: unknown;
+  /** Coordinate contract attached to observations so a model never mixes AX global points with
+   * screenshot pixels. Element frames exposed in results use the same pixels as x/y. */
+  coordinateSpace?: { xY: 'screenshot_pixels'; elementFrames: 'screenshot_pixels'; normalized: '0-1000' };
+  completionGuidance?: string;
   summary: string;
+}
+
+const COMPUTER_COMPLETION_GUIDANCE = 'Match the answer type the user requested. A categorical state such as Normal, On, or Connected is not a percentage or other numeric value. If the exact requested datum is not visible, use the Details, info, or disclosure control on the same row/section as that datum in the newest screenshot; never substitute an unrelated Options or ellipsis menu. Repeated generic controls may be enriched with their row context (for example, "Show Detail — Battery Health"); choose that exact control and never click structural containers such as Window, Sidebar, Outline, Group, or Scroll Area. A visible modal, sheet, dialog, or popover blocks the page behind it: interact only with that foreground surface and, after reading it, dismiss it with Done, Close, Cancel, or Escape before navigating or scrolling the underlying page. Dismissing a blocker does not complete the interrupted navigation: retry the original action. Seeing a destination label in a sidebar/menu is not proof that its page is open; require the destination heading in the main content pane. Sidebar entries are navigation, never the requested settings inside that page. Never mark a checklist phase complete when its latest Computer action failed or when no post-action screenshot proves the phase. Otherwise report that the datum could not be retrieved.';
+const POST_ACTION_ELEMENT_BUDGET = 80;
+
+type ObservedElement = {
+  label?: string;
+  originalLabel?: string;
+  contextLabel?: string;
+  role?: string;
+  value?: string;
+  description?: string;
+  frame?: unknown;
+  elementToken?: string;
+  elementIndex?: number;
+};
+
+const ACTIONABLE_AX_ROLES = new Set([
+  'AXButton', 'AXCheckBox', 'AXComboBox', 'AXDisclosureTriangle', 'AXLink', 'AXMenuButton',
+  'AXPopUpButton', 'AXRadioButton', 'AXSearchField', 'AXSlider', 'AXSwitch', 'AXTab',
+  'AXTextArea', 'AXTextField',
+]);
+const STRUCTURAL_AX_ROLES = new Set(['AXWindow', 'AXOutline', 'AXGroup', 'AXScrollArea', 'AXToolbar']);
+
+function elementFrame(element: any): Frame | null {
+  const frame = element?.frame;
+  if (!frame) return null;
+  const parsed = { x: Number(frame.x), y: Number(frame.y), w: Number(frame.w), h: Number(frame.h) };
+  return Object.values(parsed).every(Number.isFinite) && parsed.w > 0 && parsed.h > 0 ? parsed : null;
+}
+
+/** Accessibility APIs often expose several identical icon buttons ("Show Detail", "Info") while
+ * their row labels are separate static-text nodes. Join those two pieces before showing the map to
+ * the model so a semantic target describes the control's actual purpose, not just its glyph. */
+function enrichControlLabels(elements: any[]): any[] {
+  const generic = /^(show detail|details?|info(?:rmation)?|more|disclosure|ellipsis)$/i;
+  const textRoles = new Set(['AXStaticText', 'AXHeading', 'AXLabel']);
+  return elements.map(element => {
+    const role = String(element?.role || '');
+    const label = String(element?.label || '').trim();
+    const control = elementFrame(element);
+    if (!control || !ACTIONABLE_AX_ROLES.has(role) || !generic.test(label)) return element;
+
+    const centerY = control.y + control.h / 2;
+    const rowTexts = elements
+      .filter(candidate => candidate !== element && textRoles.has(String(candidate?.role || '')))
+      .map(candidate => ({ candidate, frame: elementFrame(candidate) }))
+      .filter(({ frame }) => {
+        if (!frame) return false;
+        const candidateCenterY = frame.y + frame.h / 2;
+        const rowTolerance = Math.max(16, Math.min(36, (control.h + frame.h) / 2));
+        return Math.abs(candidateCenterY - centerY) <= rowTolerance
+          && frame.x + frame.w <= control.x + 8
+          && control.x - (frame.x + frame.w) <= 450;
+      })
+      .sort((a, b) => a.frame!.x - b.frame!.x)
+      .map(({ candidate }) => String(candidate?.label || candidate?.value || '').trim())
+      .filter(Boolean);
+    const contextParts = Array.from(new Set(rowTexts)).slice(-3);
+    const contextLabel = contextParts.join(' · ').slice(0, 120);
+    if (!contextLabel || contextLabel.toLocaleLowerCase() === label.toLocaleLowerCase()) return element;
+    return {
+      ...element,
+      original_label: element.label,
+      context_label: contextLabel,
+      label: `${label || role.replace(/^AX/, '')} — ${contextLabel}`,
+    };
+  });
 }
 
 export interface DesktopRuntimePort {
@@ -150,7 +227,7 @@ export interface DesktopRuntimePort {
   /** Long-run durability (Stage 7): current bounded-state footprint (nothing accumulates unbounded). */
   memoryFootprint?(): { historyKept: number; observedElements: number; indexedElements: number; surfaces: number };
   /** PiP presentation status (Stage 2): enabled? which surface? is it capture-safe (window-scoped)? */
-  pipStatus?(): Promise<{ enabled: boolean; surface?: string; captureSafe: boolean }>;
+  pipStatus?(): Promise<LivePipStatus>;
   /** What the next record_start would capture — so the approval layer can phrase the prompt honestly. */
   recordingScopePreview?(): { scope: string; captureSafe: boolean };
   /** Mint a single-use whole-display recording approval token AFTER the user explicitly approved
@@ -481,7 +558,7 @@ export class DesktopRuntime implements DesktopRuntimePort {
         case 'move': await this.helper(['move', String(cmd.x), String(cmd.y)], signal); return { summary: `moved to ${cmd.x},${cmd.y}` };
         case 'click': {
           const r = await this.helper(['click', String(cmd.x), String(cmd.y), cmd.button || 'left', String(cmd.count || 1), (cmd.modifier || []).join(',')], signal);
-          return { app: r.app, summary: `${cmd.count === 2 ? 'double-' : cmd.count === 3 ? 'triple-' : ''}${cmd.button || 'left'} click at ${cmd.x},${cmd.y}${r.app ? ` in ${r.app}` : ''}` };
+          return { app: r.app, x: r.x, y: r.y, summary: `${cmd.count === 2 ? 'double-' : cmd.count === 3 ? 'triple-' : ''}${cmd.button || 'left'} click at ${cmd.x},${cmd.y}${r.app ? ` in ${r.app}` : ''}` };
         }
         case 'drag': await this.helper(['drag', String(cmd.x), String(cmd.y), String(cmd.toX), String(cmd.toY)], signal); return { summary: `dragged ${cmd.x},${cmd.y} → ${cmd.toX},${cmd.toY}` };
         case 'hover': { const r = await this.helper(['hover', String(cmd.x), String(cmd.y), String(cmd.ms ?? 400)], signal); return { app: r.app, summary: `hovered at ${cmd.x},${cmd.y}${r.app ? ` in ${r.app}` : ''}` }; }
@@ -708,10 +785,19 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private readonly transport: SidecarTransportPort = new SidecarTransport(this.session);
   /** Target ownership — the single authority on which app/window an action goes to (target.ts). */
   private readonly targets = new TargetOwnership();
-  private indexedElements = new Map<string, { label?: string; role?: string; value?: string; description?: string; frame?: unknown; elementToken?: string; elementIndex?: number }>();
-  private observedElements: Array<{ label?: string; role?: string; value?: string; description?: string; frame?: unknown; elementToken?: string; elementIndex?: number }> = [];
+  private indexedElements = new Map<string, ObservedElement>();
+  private observedElements: ObservedElement[] = [];
   private observedTarget: { pid: number; windowId?: number; degraded: boolean; width?: number; height?: number } | null = null;
   private observedWindowFrame: { x: number; y: number; w: number; h: number } | null = null;
+  /** Which surface the newest image describes. Context menus/popovers are separate OS windows that
+   * a window-scoped PNG can never show, so right-click switches to a full-display observation:
+   * image pixels == global display points (identity frame), and physical input skips activation
+   * because bring_to_front would dismiss the very menu the model is about to click. */
+  private observedSurfaceKind: 'window' | 'display' = 'window';
+  /** System Settings reports a sheet as the first app window while its screenshot is composed in
+   * the larger parent-window coordinate space. Track the sheet independently so pixels keep mapping
+   * through the parent and background clicks can be rejected instead of silently doing nothing. */
+  private transientDialogFrame: Frame | null = null;
   /** Single owner of recording state (see recording.ts). Recording is explicit-opt-in only:
    * nothing in the action path may start it — only the record_start case below. */
   private readonly recording = new RecordingController();
@@ -735,8 +821,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private lastCwd = process.cwd();
   private lastPersistAt = 0;
   private lastStatus = { accessibility: null as boolean | null, screenRecording: null as boolean | null };
+  /** Immediate delivery/grounding failures do not reach postActionEvidence, so the visual recovery
+   * controller cannot count them. Bound those separately and require a fresh observation. */
+  private failedActingStreak = 0;
+  /** Presentation-only continuous ScreenCaptureKit preview. Its process and failures are isolated
+   * from the action sidecar and exact model screenshot path. */
+  private pipGeneration = 0;
+  private pipPaused = false;
 
-  public constructor(private readonly fallback: DesktopRuntimePort = new DesktopRuntime()) {}
+  public constructor(
+    private readonly fallback: DesktopRuntimePort = new DesktopRuntime(),
+    private readonly livePip: LivePipPort = new NativeLivePip(),
+  ) {}
 
   public quickStatus() {
     if (!this.transport.available()) return this.fallback.quickStatus();
@@ -758,6 +854,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       bounds: this.observedWindowFrame ? { ...this.observedWindowFrame } : undefined,
       ...(opts.focusOwner ? { focusOwner: opts.focusOwner } : {}),
     });
+    this.syncLivePip();
   }
 
   /** The surface the agent is currently operating on (native window, browser tab, …), or null. */
@@ -778,13 +875,31 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return null;
   }
 
-  /** PiP presentation status (Stage 2): whether the post-action preview is enabled, which surface it
-   * reflects, and whether that surface is capture-safe (so a preview never mirrors the whole desktop). */
-  public async pipStatus(): Promise<{ enabled: boolean; surface?: string; captureSafe: boolean }> {
-    const enabled = (() => { try { return this.transport.available(); } catch { return false; } })()
-      && (await loadConfig().catch(() => ({} as any))).computerPip !== false && process.platform === 'darwin';
-    const scoped = this.captureSurface();
-    return { enabled, surface: scoped?.label, captureSafe: !!scoped };
+  /** PiP is a presentation-only preview. It is never used as an input or coordinate surface. */
+  public async pipStatus(): Promise<LivePipStatus> {
+    const cfg = await loadConfig().catch(() => ({ computerPip: false } as any));
+    const current = this.livePip.status();
+    return {
+      ...current,
+      enabled: cfg.computerPip === true,
+      captureSafe: !!this.captureSurface(),
+      surface: this.captureSurface()?.label || current.surface,
+    };
+  }
+
+  /** Resolve configuration asynchronously without making an observe/action wait for UI startup.
+   * Generation checks prevent a late config read from resurrecting PiP after dispose or retarget. */
+  private syncLivePip(): void {
+    const generation = ++this.pipGeneration;
+    const target = this.pipPaused ? null : this.captureSurface();
+    void loadConfig()
+      .then(cfg => {
+        if (generation !== this.pipGeneration) return;
+        this.livePip.sync(target, cfg.computerPip === true);
+      })
+      .catch(() => {
+        if (generation === this.pipGeneration) this.livePip.sync(null, false);
+      });
   }
 
   private sessionStateFile(cwd: string): string { return path.join(cwd, '.bimax', 'computer', 'session.json'); }
@@ -851,6 +966,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   public pauseForUser(): { ok: boolean; surface?: string } {
     const s = this.surfaces.active();
     if (s) this.surfaces.update(s.id, { focusOwner: 'user' });
+    this.pipPaused = true;
+    this.syncLivePip();
     cliEvents.emit('status', s
       ? `Computer use paused — you have control of ${s.app || 'the surface'}; the agent will not act until you resume`
       : 'Computer use paused — the agent will not act until you resume');
@@ -861,6 +978,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   public resume(): { ok: boolean; surface?: string } {
     const s = this.surfaces.active();
     if (s) this.surfaces.claimInput(s.id, 'agent', { force: true });
+    this.pipPaused = false;
+    this.syncLivePip();
     cliEvents.emit('status', 'Computer use resumed — the agent has control again');
     return { ok: true, surface: s?.id };
   }
@@ -880,10 +999,14 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // Session-scoped identity and observations must never leak into the next user turn. In
     // particular, closing the client is what removes the experimental PiP window.
     this.targets.clear();
+    this.pipGeneration++;
+    this.pipPaused = false;
     this.indexedElements.clear();
     this.observedElements = [];
     this.observedTarget = null;
     this.observedWindowFrame = null;
+    this.observedSurfaceKind = 'window';
+    this.transientDialogFrame = null;
     this.recording.reset();
     this.surfaces.clear();
     this.prevFrameHash = undefined;
@@ -892,7 +1015,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     this.actionHistory.reset();
     this.resumedFromDisk = false; // a session ended; the next open may resume from disk again
     this.lastPersistAt = 0;
-    await this.transport.dispose({ stopRecording: wasRecording });
+    await Promise.all([
+      this.transport.dispose({ stopRecording: wasRecording }),
+      this.livePip.stop(),
+    ]);
   }
 
   /** Start (or join) the sidecar spawn/handshake without waiting on it — lets boot time overlap
@@ -904,13 +1030,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return this.transport.call(name, args);
   }
 
-  /** Delivery mode for acting verbs: an explicit request wins; otherwise the user's visibility
-   * preference decides — visible (default) delivers in the foreground so the real cursor moves
-   * and the user can watch the work; invisible keeps the old background delivery. */
+  /** Native applications always receive physical foreground input. The retired background mode
+   * animated an overlay cursor but SwiftUI/System Settings frequently ignored its synthetic event.
+   * Explicit deliveryMode remains only as an internal test/diagnostic seam; model arguments are
+   * stripped by ComputerTool and persisted legacy preferences cannot select the unreliable path. */
   private async defaultDelivery(cmd: DesktopCommand): Promise<'background' | 'foreground'> {
     if (cmd.deliveryMode) return cmd.deliveryMode;
-    try { return (await loadConfig()).computerVisible !== false ? 'foreground' : 'background'; }
-    catch { return 'background'; }
+    return 'foreground';
   }
 
   /** Single-use whole-display approval tokens. Minted ONLY by authorizeFullDisplayRecording()
@@ -959,12 +1085,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
 
   private resolveObservedElement(query: string, target: ComputerTarget): { elementToken?: string; elementIndex?: number; label?: string; role?: string; frame?: unknown } {
     if (!this.observedTarget || this.observedTarget.pid !== target.pid || this.observedTarget.windowId !== target.windowId) {
-      throw new Error('semantic click needs a fresh observe of the current window');
+      throw new Error('semantic targeting needs a fresh observe of the current window');
     }
     const clean = (value: unknown) => String(value || '').trim().toLocaleLowerCase();
     const needle = clean(query);
-    if (!needle) throw new Error('semantic click query cannot be empty');
+    if (!needle) throw new Error('semantic query cannot be empty');
     const score = (element: typeof this.observedElements[number]): number => {
+      if (ACTIONABLE_AX_ROLES.has(String(element.role || '')) && clean(element.contextLabel) === needle) return -1;
       const fields = [element.label, element.value, element.description].map(clean).filter(Boolean);
       if (fields.some(value => value === needle)) return 0;
       if (fields.some(value => value.startsWith(needle))) return 1;
@@ -989,9 +1116,16 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       const choices = Array.from(unique.values()).slice(0, 6)
         .map(candidate => `${candidate.element.role || 'element'} "${candidate.element.label || candidate.element.value || '?'}"`)
         .join(', ');
-      throw new Error(`semantic click query "${query}" is ambiguous: ${choices}; observe with a narrower query`);
+      throw new Error(`semantic query "${query}" is ambiguous: ${choices}; observe with a narrower query`);
     }
     return Array.from(unique.values())[0].element;
+  }
+
+  private assertClickableSemanticTarget(element: { role?: string; label?: string }): void {
+    const role = String(element.role || '');
+    if (STRUCTURAL_AX_ROLES.has(role)) {
+      throw new Error(`"${element.label || role.replace(/^AX/, '')}" is a structural container, not a clickable control; choose a labeled button/field/row or a visible screenshot point`);
+    }
   }
 
   private elementCenterInScreenshot(frame: unknown): { x: number; y: number } | null {
@@ -1005,16 +1139,124 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     );
   }
 
-  private screenshotPixelToGlobalPoint(point: { x: number; y: number }): { x: number; y: number } | null {
+  private resolveObservedHandle(target: ComputerTarget, cmd: Pick<DesktopCommand, 'elementToken' | 'elementIndex'>) {
+    if (!this.observedTarget || this.observedTarget.pid !== target.pid || this.observedTarget.windowId !== target.windowId) {
+      throw new Error('element targeting needs a fresh observe of this exact window');
+    }
+    const key = cmd.elementToken
+      ? `token:${cmd.elementToken}`
+      : cmd.elementIndex != null ? `index:${Math.floor(cmd.elementIndex)}` : '';
+    const resolved = key ? this.indexedElements.get(key) : undefined;
+    if (!resolved) throw new Error('element handle is stale or missing; observe again and use a handle from the newest result');
+    return resolved;
+  }
+
+  private screenshotPixelToGlobalPoint(point: { x: number; y: number }, liveFrame?: Frame | null): { x: number; y: number } | null {
     const shot = this.observedTarget;
-    const frame = this.observedWindowFrame;
+    const frame = liveFrame || this.observedWindowFrame;
     if (!shot?.width || !shot?.height || !frame?.w || !frame?.h) return null;
     return screenshotToGlobal(point, { width: shot.width, height: shot.height }, frame);
   }
 
-  /** Map a screenshot-pixel point (the space the model chose from) to a global screen point for the
-   * current window, refusing points not grounded in the latest image. Shared by click and the new
-   * pointer primitives so they all obey the same "must be on the newest screen" contract. */
+  private appNamesMatch(actual: string | undefined, expected: string | undefined): boolean {
+    if (!actual || !expected) return true;
+    const clean = (value: string) => value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, '');
+    const a = clean(actual), e = clean(expected);
+    return a === e || a.includes(e) || e.includes(a);
+  }
+
+  /** Activate the owned window and prove its application became frontmost before posting physical
+   * input. A click sent while a window is merely visible but not key is often consumed as an
+   * activation click by macOS, which looks exactly like “cursor clicked, control did nothing”. */
+  private async ensurePhysicalTargetFrontmost(target: ComputerTarget): Promise<void> {
+    await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
+    for (const waitMs of [25, 50, 100]) {
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+      const actual = await this.frontmostApp().catch(() => '');
+      if (!actual || this.appNamesMatch(actual, target.app)) return;
+      await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
+    }
+    const actual = await this.frontmostApp().catch(() => '');
+    throw new Error(`could not make ${target.app || `pid ${target.pid}`} frontmost before physical input${actual ? ` (frontmost is ${actual})` : ''}`);
+  }
+
+  /** Resolve the current live window frame after activation. The model acts on screenshot pixels;
+   * mapping those pixels through the live bounds makes window moves/resizes between observe and act
+   * safe without treating the separately-scaled PiP preview as a coordinate surface. */
+  private async liveWindowFrame(target: ComputerTarget): Promise<Frame | null> {
+    try {
+      const data = await this.call('list_windows', { pid: target.pid });
+      const windows = Array.isArray(data?.windows) ? data.windows : [];
+      const window = windows.find((candidate: any) => Number(candidate?.window_id) === Number(target.windowId));
+      const bounds = window?.bounds;
+      const frame = bounds && {
+        x: Number(bounds.x), y: Number(bounds.y),
+        w: Number(bounds.width ?? bounds.w), h: Number(bounds.height ?? bounds.h),
+      };
+      if (frame && [frame.x, frame.y, frame.w, frame.h].every(Number.isFinite) && frame.w > 0 && frame.h > 0) return frame;
+    } catch { /* the observed AX frame remains a safe fallback */ }
+    return this.observedWindowFrame;
+  }
+
+  /** Capture the FULL display (point-scaled: image pixels == global points) as the newest
+   * observation. Used after right-click: the context menu is its own OS window, invisible in any
+   * window-scoped PNG — without this the model chose its next click blind. Element handles are
+   * cleared because their frames were expressed in the previous window image. */
+  private async displayObservation(target: ComputerTarget, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<Record<string, any>> {
+    const shot = await this.fallback.run({ action: 'screenshot', display: 1 }, ctx);
+    if (!shot.ok || !shot.screenshot) {
+      return { visualEvidenceError: shot.error || 'full-display capture failed after opening the transient surface' };
+    }
+    let dims: { width: number; height: number } | null = null;
+    try { dims = pngDimensionsFromBytes(fs.readFileSync(shot.screenshot)); } catch { /* handled below */ }
+    if (!dims?.width || !dims?.height) return { visualEvidenceError: 'full-display capture has unreadable dimensions' };
+    this.indexedElements.clear();
+    this.observedElements = [];
+    this.observedTarget = { pid: target.pid, windowId: target.windowId, degraded: true, width: dims.width, height: dims.height };
+    this.observedWindowFrame = { x: 0, y: 0, w: dims.width, h: dims.height };
+    this.observedSurfaceKind = 'display';
+    const frameHash = this.screenshotHash(shot.screenshot);
+    if (frameHash) this.prevFrameHash = frameHash;
+    return {
+      screenshot: shot.screenshot, frameHash, width: dims.width, height: dims.height,
+      elements: [], degraded: true,
+      coordinateSpace: { xY: 'screenshot_pixels', elementFrames: 'screenshot_pixels', normalized: '0-1000' },
+      completionGuidance: `${COMPUTER_COMPLETION_GUIDANCE} This image is the FULL DISPLAY because a context menu/popover may be open as its own window: click the visible menu item by x/y in THIS image, or press key escape to dismiss it. Element handles from earlier window observations are no longer valid.`,
+    };
+  }
+
+  private async preparePhysicalPoint(target: ComputerTarget, screenshotPoint: { x: number; y: number }): Promise<{ x: number; y: number }> {
+    if (this.observedSurfaceKind === 'display') {
+      // The newest image is the whole display at point scale (identity mapping). Skip activation:
+      // bring_to_front would dismiss the open menu/popover the model is clicking, and the dialog
+      // guard is window-scoped evidence that does not apply to a display-wide frame.
+      const global = this.screenshotPixelToGlobalPoint(screenshotPoint, this.observedWindowFrame);
+      if (!global) throw new Error('could not map the display point; take a fresh screenshot');
+      return global;
+    }
+    await this.ensurePhysicalTargetFrontmost(target);
+    const frame = await this.liveWindowFrame(target);
+    const global = this.screenshotPixelToGlobalPoint(screenshotPoint, frame);
+    if (!global || (frame && !pointInFrame(global, frame))) {
+      throw new Error('could not map the screenshot point into the live target window; re-observe after moving or resizing the window');
+    }
+    if (this.transientDialogFrame && !pointInFrame(global, this.transientDialogFrame)) {
+      throw new Error('a foreground dialog is blocking that background point — click Done/Close/Cancel inside the dialog or press Escape before navigating the page behind it');
+    }
+    return global;
+  }
+
+  private verifyPhysicalClick(target: ComputerTarget, requested: { x: number; y: number }, result: DesktopResult): void {
+    if (result.x != null && result.y != null && Math.hypot(result.x - requested.x, result.y - requested.y) > 3) {
+      throw new Error(`native cursor did not land at the requested point (${requested.x},${requested.y}); it reported ${result.x},${result.y}`);
+    }
+    if (result.app && !this.appNamesMatch(result.app, target.app)) {
+      throw new Error(`physical click landed while ${result.app} was frontmost, not ${target.app || `pid ${target.pid}`}`);
+    }
+  }
+
+  /** Resolve a point in the exact latest screenshot. The final screenshot→global mapping happens
+   * only after activation, through the live window frame, so a move/resize cannot offset input. */
   private groundScreenshotPoint(target: ComputerTarget, cmd: Pick<DesktopCommand, 'x' | 'y' | 'normalized'>, verb: string): { x: number; y: number } {
     if (cmd.x == null || cmd.y == null) throw new Error(`${verb} needs x and y`);
     if (!this.observedTarget || this.observedTarget.pid !== target.pid || this.observedTarget.windowId !== target.windowId) {
@@ -1025,9 +1267,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const x = cmd.normalized ? normalizedToPixel(cmd.x, width - 1) : Math.round(cmd.x);
     const y = cmd.normalized ? normalizedToPixel(cmd.y, height - 1) : Math.round(cmd.y);
     if (x < 0 || y < 0 || x >= width || y >= height) throw new Error(`${verb} point ${x},${y} is outside the latest image (${width}x${height})`);
-    const global = this.screenshotPixelToGlobalPoint({ x, y });
-    if (!global) throw new Error(`${verb} could not map the point to the screen`);
-    return global;
+    return { x, y };
   }
 
   /** hover/hold/mouse_down/mouse_up: physical-cursor primitives delivered by the native helper after
@@ -1037,9 +1277,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     cwd: string, session: string, ctx?: { cwd?: string; signal?: AbortSignal },
   ): Promise<DesktopResult> {
     const driver = 'bimax-computer-use 0.8.3';
-    const global = this.groundScreenshotPoint(target, cmd, primitive);
-    await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
-    await new Promise(resolve => setTimeout(resolve, 80));
+    const screenshotPoint = this.groundScreenshotPoint(target, cmd, primitive);
+    const global = await this.preparePhysicalPoint(target, screenshotPoint);
     const native = await this.fallback.run({ action: primitive, x: global.x, y: global.y, button: cmd.button, ms: cmd.ms, app: target.app, normalized: false }, ctx);
     if (!native.ok) throw new Error(native.error || native.summary);
     // A bare mouse_down leaves the button physically held; do NOT capture a settling screenshot that
@@ -1104,15 +1343,68 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     }
     const screenshotWidth = pngDimensions?.width || Number(data?.screenshot_width || 0) || undefined;
     const screenshotHeight = pngDimensions?.height || Number(data?.screenshot_height || 0) || undefined;
+    if (cmd.includeScreenshot !== false && (!screenshotWidth || !screenshotHeight)) {
+      const nativeFrontmost = await this.fallback.frontmostApp().catch(() => '');
+      if (/loginwindow/i.test(nativeFrontmost)) {
+        throw new Error('the Mac screen is locked (loginwindow is frontmost), so no window screenshot or mouse action can be verified — unlock the Mac and retry');
+      }
+      throw new Error('the native sidecar returned no usable screenshot pixels; stop acting and retry only after Screen Recording permission and the visible desktop are available');
+    }
     const rawElements = Array.isArray(data?.elements) ? data.elements : [];
     const menuRoles = new Set(['AXMenuBar', 'AXMenuBarItem', 'AXMenu', 'AXMenuItem']);
-    const windowElements = rawElements.filter((element: any) => !menuRoles.has(String(element?.role || '')));
+    const windowElements = enrichControlLabels(
+      rawElements.filter((element: any) => !menuRoles.has(String(element?.role || ''))),
+    );
     const degraded = windowElements.length === 0;
+    // The PNG is captured for target.windowId, so THAT window's live CG bounds are the authoritative
+    // mapping frame. The first AXWindow in the walk can belong to a DIFFERENT window of the same app
+    // (a sheet vs its parent) — mapping pixels through the wrong window's frame is exactly how a
+    // click "lands on a random control". Validate candidates against the PNG's aspect ratio and
+    // fall back to the AX frame only when the CG bounds are unavailable or geometrically implausible.
+    const axWindowFrame = windowElements.find((element: any) => String(element?.role || '') === 'AXWindow')?.frame;
+    const axFrame: Frame | null = axWindowFrame && Number(axWindowFrame.w) > 0 && Number(axWindowFrame.h) > 0
+      ? { x: Number(axWindowFrame.x), y: Number(axWindowFrame.y), w: Number(axWindowFrame.w), h: Number(axWindowFrame.h) }
+      : null;
+    let cgFrame: Frame | null = null;
+    try {
+      const wins = await this.call('list_windows', { pid: target.pid });
+      const win = (Array.isArray(wins?.windows) ? wins.windows : [])
+        .find((candidate: any) => Number(candidate?.window_id) === Number(target.windowId));
+      const bounds = win?.bounds;
+      // Require an explicit origin: a bounds record without x/y cannot anchor a pixel mapping.
+      const parsed = bounds && {
+        x: Number(bounds.x), y: Number(bounds.y),
+        w: Number(bounds.width ?? bounds.w), h: Number(bounds.height ?? bounds.h),
+      };
+      if (parsed && [parsed.x, parsed.y, parsed.w, parsed.h].every(Number.isFinite) && parsed.w > 0 && parsed.h > 0) cgFrame = parsed;
+    } catch { /* AX frame remains the fallback authority */ }
+    const pngAspect = screenshotWidth && screenshotHeight ? screenshotWidth / screenshotHeight : null;
+    const aspectMatchesPng = (frame: Frame) => pngAspect == null || Math.abs(frame.w / frame.h - pngAspect) <= pngAspect * 0.03;
+    this.observedWindowFrame =
+      (cgFrame && aspectMatchesPng(cgFrame) ? cgFrame : null)
+      || (axFrame && aspectMatchesPng(axFrame) ? axFrame : null)
+      || axFrame;
+    this.observedSurfaceKind = 'window';
+    this.observedTarget = {
+      pid: target.pid, windowId: target.windowId, degraded,
+      width: screenshotWidth,
+      height: screenshotHeight,
+    };
     this.indexedElements.clear();
     this.observedElements = [];
-    for (const element of rawElements as any[]) {
+    const enrichedByIndex = new Map(windowElements
+      .filter((element: any) => element?.element_index != null)
+      .map((element: any) => [Number(element.element_index), element]));
+    const enrichedByToken = new Map(windowElements
+      .filter((element: any) => element?.element_token)
+      .map((element: any) => [String(element.element_token), element]));
+    for (const rawElement of rawElements as any[]) {
+      const element = (rawElement?.element_token && enrichedByToken.get(String(rawElement.element_token)))
+        || (rawElement?.element_index != null && enrichedByIndex.get(Number(rawElement.element_index)))
+        || rawElement;
       const safe = {
         label: element?.label, role: element?.role, value: element?.value,
+        originalLabel: element?.original_label, contextLabel: element?.context_label,
         description: element?.description, frame: element?.frame,
         elementToken: element?.element_token ? String(element.element_token) : undefined,
         elementIndex: element?.element_index != null ? Number(element.element_index) : undefined,
@@ -1121,16 +1413,6 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       if (element?.element_index != null) this.indexedElements.set(`index:${Number(element.element_index)}`, safe);
       if (!menuRoles.has(String(element?.role || ''))) this.observedElements.push(safe);
     }
-    this.observedTarget = {
-      pid: target.pid, windowId: target.windowId, degraded,
-      width: screenshotWidth,
-      height: screenshotHeight,
-    };
-    const windowFrame = windowElements.find((element: any) => String(element?.role || '') === 'AXWindow')?.frame;
-    this.observedWindowFrame = windowFrame && Number(windowFrame.w) > 0 && Number(windowFrame.h) > 0
-      ? { x: Number(windowFrame.x), y: Number(windowFrame.y), w: Number(windowFrame.w), h: Number(windowFrame.h) }
-      : null;
-
     const verificationQuery = cmd.query?.trim() || '';
     const queryNeedle = verificationQuery.toLocaleLowerCase();
     const matchesQuery = (element: any) => !!queryNeedle
@@ -1138,11 +1420,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const semanticMatches = queryNeedle ? windowElements.filter(matchesQuery) : [];
     const orderedElements = semanticMatches.length > 0
       ? [...semanticMatches, ...windowElements.filter((element: any) => !matchesQuery(element))]
-      : (windowElements.length > 0 ? windowElements : rawElements);
+      : (windowElements.length > 0
+        ? [...windowElements.filter((element: any) => ACTIONABLE_AX_ROLES.has(String(element?.role || ''))),
+          ...windowElements.filter((element: any) => !ACTIONABLE_AX_ROLES.has(String(element?.role || '')))]
+        : rawElements);
     const elements = orderedElements.slice(0, maxElements).map((element: any) => {
       const compact: Record<string, unknown> = {};
-      for (const key of ['element_index', 'element_token', 'role', 'label', 'value', 'description', 'enabled', 'focused', 'frame']) {
-        if (element?.[key] !== undefined && element?.[key] !== null && element?.[key] !== '') compact[key] = element[key];
+      for (const key of ['element_index', 'element_token', 'role', 'label', 'context_label', 'value', 'description', 'enabled', 'focused', 'frame']) {
+        if (element?.[key] === undefined || element?.[key] === null || element?.[key] === '') continue;
+        if (key === 'frame' && this.observedWindowFrame && screenshotWidth && screenshotHeight) {
+          compact.frame = globalFrameToScreenshot(
+            { x: Number(element.frame.x), y: Number(element.frame.y), w: Number(element.frame.w), h: Number(element.frame.h) },
+            { width: screenshotWidth, height: screenshotHeight }, this.observedWindowFrame,
+          ) || undefined;
+        } else compact[key] = element[key];
       }
       return compact;
     });
@@ -1165,6 +1456,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       app: target.app, pid: target.pid, windowId: target.windowId,
       screenshot: screenshotFile, frameHash,
       width: screenshotWidth, height: screenshotHeight,
+      coordinateSpace: { xY: 'screenshot_pixels', elementFrames: 'screenshot_pixels', normalized: '0-1000' },
+      completionGuidance: this.transientDialogFrame
+        ? `${COMPUTER_COMPLETION_GUIDANCE} A foreground dialog is currently detected; dismiss it before attempting any background control.`
+        : COMPUTER_COMPLETION_GUIDANCE,
       elements, tree, degraded, verification,
       summary: verification
         ? `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: verification query "${verificationQuery}" ${verification.matched ? `matched ${matchCount} semantic element${matchCount === 1 ? '' : 's'}` : 'was not found in native text; inspect the attached screenshot before deciding whether the state is complete'}`
@@ -1185,7 +1480,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       this.targets.retargetWindow(target.pid, refreshed.windowId);
       // Capture the pre-action baseline BEFORE observeTarget overwrites it with the fresh frame.
       const prev = this.prevFrameHash;
-      const observed = await this.observeTarget(refreshed, cwd, session, { action: 'observe', maxElements: 24 });
+      // A 24-element budget was exhausted by the System Settings sidebar before the first main-pane
+      // control appeared. Preserve enough fresh targets for details/info/disclosure controls while
+      // the sidecar still performs the same bounded 1000-element internal scan.
+      const observed = await this.observeTarget(refreshed, cwd, session, {
+        action: 'observe', maxElements: POST_ACTION_ELEMENT_BUDGET,
+      });
       // Judge the action by the SCREEN, not by the driver's success return (Stage 6).
       const progressCheck = classifyVerification({
         ok: true, prevFrameHash: prev, nextFrameHash: observed.frameHash,
@@ -1216,12 +1516,37 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       return {
         screenshot: observed.screenshot, frameHash: observed.frameHash,
         width: observed.width, height: observed.height,
+        coordinateSpace: observed.coordinateSpace,
+        completionGuidance: observed.completionGuidance,
         elements: observed.elements, degraded: observed.degraded, windowId: refreshed.windowId,
         progressCheck, actionResult: toActionResult(progressCheck),
         recoveryDecision, ...(recoveryHint ? { recoveryHint } : {}),
       };
     } catch (err: any) {
-      return { visualEvidenceError: bimaxBrand(String(err?.message || err)).slice(0, 500) };
+      const visualEvidenceError = bimaxBrand(String(err?.message || err)).slice(0, 500);
+      // The action may have changed the UI, so the pre-action frame and all handles are now stale.
+      // Invalidate them immediately; the observe-before-act gate will refuse another input until a
+      // real fresh capture succeeds.
+      this.observedTarget = null;
+      this.observedWindowFrame = null;
+      this.observedSurfaceKind = 'window';
+      this.indexedElements.clear();
+      this.observedElements = [];
+      this.prevFrameHash = undefined;
+      const progressCheck = classifyVerification({
+        ok: true,
+        hadScreenshot: false,
+        expectedApp: target.app || undefined,
+        targetWindowId: target.windowId,
+      });
+      this.recordAction(this.activeAction || 'action', target.app, progressCheck.outcome);
+      return {
+        visualEvidenceError,
+        progressCheck,
+        actionResult: toActionResult(progressCheck),
+        recoveryDecision: this.recovery.record(progressCheck.outcome),
+        recoveryHint: 'Perception is stale. Re-observe before any next input.',
+      };
     }
   }
 
@@ -1238,7 +1563,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       const visible = windows.filter((w: any) => w?.is_on_screen !== false
         && Number(w?.bounds?.width || 0) > 100 && Number(w?.bounds?.height || 0) > 100);
       if (visible.length > 0) {
-        const good = visible.find((w: any) => Number(w.window_id) === target.windowId) || visible[0];
+        const area = (w: any) => Number(w?.bounds?.width || 0) * Number(w?.bounds?.height || 0);
+        const largest = visible.reduce((best: any, candidate: any) => area(candidate) > area(best) ? candidate : best, visible[0]);
+        const current = visible.find((w: any) => Number(w.window_id) === target.windowId);
+        // In System Settings a modal sheet is listed before the main window, but the sidecar PNG is
+        // the full composed main window. Pinning the sheet id therefore compressed every screenshot
+        // coordinate into its tiny frame. Use the main surface for capture/mapping and retain the
+        // sheet bounds as a modal input guard.
+        const isSystemSettings = /(?:system settings|com\.apple\.systempreferences)/i.test(target.app);
+        const dialog = isSystemSettings
+          ? visible.find((w: any) => Number(w.window_id) !== Number(largest.window_id)
+            && area(w) >= 20_000 && area(w) < area(largest) * 0.5)
+          : undefined;
+        this.transientDialogFrame = dialog ? {
+          x: Number(dialog.bounds.x), y: Number(dialog.bounds.y),
+          w: Number(dialog.bounds.width), h: Number(dialog.bounds.height),
+        } : null;
+        const good = current && area(current) >= area(largest) * 0.5 ? current : largest;
         return { ...target, windowId: Number(good?.window_id || 0) || target.windowId };
       }
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1))); // let it finish rendering
@@ -1247,6 +1588,19 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // degenerate strip; a slightly stale-but-real window captures better than a 35px menu-bar proxy.
     if (windows.length === 0 || target.windowId) return target;
     return { ...target, windowId: Number(windows[0]?.window_id || 0) || target.windowId };
+  }
+
+  private async hasUsableTargetWindow(target: ComputerTarget): Promise<boolean> {
+    try {
+      const data = await this.call('list_windows', { pid: target.pid });
+      const windows = Array.isArray(data?.windows) ? data.windows : [];
+      return windows.some((w: any) => Number(w?.window_id) === target.windowId
+        && w?.is_on_screen !== false
+        && Number(w?.bounds?.width || 0) > 100
+        && Number(w?.bounds?.height || 0) > 100);
+    } catch {
+      return false;
+    }
   }
 
   /** Resolve a human app name for a pid from the sidecar's app list. launch_app sometimes returns
@@ -1281,7 +1635,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
    * visibly originate from the agent's cursor instead of firing while it rests over the terminal.
    * A cursor a prior click already placed inside the window is left exactly where it is. */
   private async ensureCursorInTargetWindow(target: ComputerTarget, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<void> {
-    const frame = this.observedWindowFrame;
+    const frame = await this.liveWindowFrame(target);
     if (!frame || !frame.w || !frame.h) return;
     if (!this.observedTarget || this.observedTarget.pid !== target.pid) return;
     try {
@@ -1307,7 +1661,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   public async run(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
-    return ensureActionResult(await this.runInner(cmd, ctx));
+    const result = ensureActionResult(await this.runInner(cmd, ctx));
+    if (result.visualEvidenceError && ACTING_VERBS.has(cmd.action)) {
+      result.summary = `${cmd.action} was delivered, but the fresh post-action screen could not be captured. Re-observe before any next input: ${result.visualEvidenceError}`;
+    }
+    if (result.ok && (ACTING_VERBS.has(cmd.action) || cmd.action === 'observe' || cmd.action === 'screenshot')) {
+      this.failedActingStreak = 0;
+    } else if (!result.ok && ACTING_VERBS.has(cmd.action) && !/\brefused:/.test(result.summary || '')) {
+      // Our own latch refusals are not new delivery failures — counting them would let the
+      // three-strike guard inflate itself while the model is already being told to re-observe.
+      this.failedActingStreak++;
+    }
+    return result;
   }
 
   private async runInner(cmd: DesktopCommand, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<DesktopResult> {
@@ -1329,6 +1694,22 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       // the working foreground path — this adds the guard and the ownership bookkeeping around it.
       const ACTING = ['click', 'type', 'key', 'set_value', 'drag', 'scroll', 'move', 'hover', 'hold', 'mouse_down', 'mouse_up'];
       if (ACTING.includes(cmd.action)) {
+        // Hard observe-before-act gate. Naming a pid/app is not visual evidence, and a failed
+        // post-action capture invalidates the old frame. `move` changes no application state.
+        const needsFreshFrame = cmd.action !== 'move';
+        const frameMatchesTarget = !!target
+          && !!this.observedTarget
+          && this.observedTarget.pid === target.pid
+          && this.observedTarget.windowId === target.windowId
+          && !!this.observedTarget.width
+          && !!this.observedTarget.height;
+        if (needsFreshFrame && !frameMatchesTarget) {
+          return {
+            ok: false, action: cmd.action, driver,
+            error: 'a fresh screenshot of the exact target window is required before input — open or observe it first, then choose one action from that frame',
+            summary: `${cmd.action} refused: observe the target window first`,
+          };
+        }
         const surface = this.surfaces.active();
         if (surface?.focusOwner === 'user') {
           return { ok: false, action: cmd.action, driver, error: 'computer use is paused for user takeover — resume before the agent acts', summary: `${cmd.action} refused: you currently have control` };
@@ -1341,6 +1722,14 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return { ok: false, action: cmd.action, driver,
             error: `computer-use recovery budget exhausted — the last actions produced no visible progress (${c.noProgress} no-change, ${c.recoveries} recoveries); re-observe (screenshot/observe) and target a different element before acting again, or ask the user`,
             summary: `${cmd.action} refused: no progress after repeated attempts — re-observe before acting again` };
+        }
+        // Immediate failures and visual no-progress are independent latches. When both are active,
+        // preserve the more specific recovery-budget diagnosis; otherwise the generic three-strike
+        // guard would mask it after a failed observe and make recovery state appear to have changed.
+        if (this.failedActingStreak >= 3) {
+          return { ok: false, action: cmd.action, driver,
+            error: 'three consecutive input actions failed — do not click again until you re-observe or reopen the intended app and use handles from that fresh target',
+            summary: `${cmd.action} refused: repeated input failures require a fresh observation` };
         }
         const hasAxHandle = !!(cmd.elementToken || cmd.elementIndex != null || cmd.query?.trim());
         const choice = chooseMechanism(
@@ -1369,7 +1758,24 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             accessibility: ax ? ax.status === 'pass' : null,
             screenRecording: screen ? screen.status === 'pass' : null,
           };
-          return { ok: data?.overall !== 'failed', action: cmd.action, driver, ...this.lastStatus, details: data, summary: `Bimax Computer Use ${data?.overall || 'ready'}` };
+          // Embedded mode intentionally runs as a child of ai.bimax.cli, so the helper executable
+          // has no standalone CFBundleIdentifier. TCC grants belong to the responsible host. The
+          // upstream health report calls that expected identity shape a failure even when every
+          // real observation/input capability passes; do not misreport a fully working runtime as
+          // degraded for that one inapplicable check.
+          const failedChecks = checks.filter((check: any) => check?.status === 'fail');
+          const embeddedIdentityOnly = this.lastStatus.accessibility === true
+            && this.lastStatus.screenRecording === true
+            && failedChecks.length === 1
+            && failedChecks[0]?.name === 'bundle_identity';
+          const overall = embeddedIdentityOnly ? 'ready' : (data?.overall || 'ready');
+          const details = embeddedIdentityOnly
+            ? {
+              ...data, overall: 'ready', attribution: 'embedded_host',
+              note: 'Bundle identity is supplied by the responsible Bimax host; native permissions and capabilities passed.',
+            }
+            : data;
+          return { ok: overall !== 'failed', action: cmd.action, driver, ...this.lastStatus, details, summary: `Bimax Computer Use ${overall}` };
         }
         case 'request_access': {
           const data = await this.call('check_permissions', { prompt: true });
@@ -1419,9 +1825,17 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         }
         case 'open': {
           if (!cmd.app?.trim() && !cmd.bundleId?.trim()) throw new Error('open needs app or bundleId');
+          const requestedApp = cmd.app?.trim();
+          // Finder is a special always-running system process. The sidecar's name lookup can miss it
+          // even though bundle-id launch works, which made the natural `open Finder` request fail.
+          // Normalize only this well-known macOS alias; keep every other caller-supplied app exact.
+          const requestedBundleId = cmd.bundleId?.trim()
+            || (requestedApp?.toLocaleLowerCase() === 'finder' ? 'com.apple.finder' : undefined);
+          const appIdentity = `${requestedApp || ''}|${requestedBundleId || ''}`.toLocaleLowerCase();
+          const macSingleton = /(?:^|\|)(?:finder|system settings|com\.apple\.finder|com\.apple\.systempreferences)(?:$|\|)/.test(appIdentity);
           const data = await this.call('launch_app', {
-            ...(cmd.bundleId?.trim() ? { bundle_id: cmd.bundleId.trim() } : { name: cmd.app!.trim() }),
-            ...(cmd.newInstance ? { creates_new_application_instance: true } : {}),
+            ...(requestedBundleId ? { bundle_id: requestedBundleId } : { name: requestedApp! }),
+            ...(cmd.newInstance && !macSingleton ? { creates_new_application_instance: true } : {}),
           });
           const window = Array.isArray(data?.windows) ? data.windows[0] : undefined;
           let opened: ComputerTarget = {
@@ -1442,6 +1856,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // authority a fresh budget for the new app.
           this.prevFrameHash = undefined;
           this.noChangeStreak = 0;
+          this.failedActingStreak = 0;
           this.recovery.reset();
           // launch_app intentionally suppresses activation. In visible mode that left the new app
           // off-screen while open() claimed it was ready, so observe walked the global menu bar and
@@ -1483,6 +1898,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             }
             opened = await this.refreshTargetWindow(opened);
             this.targets.set(opened);
+            // Finder can be genuinely frontmost while exposing only its 35px menu/desktop proxy —
+            // there is no document window to click or capture. Open a normal Finder window once,
+            // reacquire it, and refuse to claim success if the surface is still unusable.
+            if (process.platform === 'darwin' && opened.app.toLocaleLowerCase() === 'finder'
+              && !await this.hasUsableTargetWindow(opened)) {
+              const newWindow = await this.fallback.run({ action: 'key', combo: 'cmd+n', app: opened.app }, ctx);
+              if (!newWindow.ok) throw new Error(newWindow.error || newWindow.summary);
+              await new Promise(resolve => setTimeout(resolve, 350));
+              opened = await this.refreshTargetWindow({ ...opened, windowId: undefined });
+              this.targets.set(opened);
+              if (!opened.windowId || !await this.hasUsableTargetWindow(opened)) {
+                throw new Error('Finder opened without a usable window after Cmd+N; no click-safe surface is available');
+              }
+            }
           } else if (!opened.windowId) {
             opened = await this.refreshTargetWindow(opened);
             this.targets.set(opened);
@@ -1490,6 +1919,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           const evidence = opened.windowId
             ? await this.postActionEvidence(opened, cwd, session)
             : { visualEvidenceError: 'opened application has no capturable window yet' };
+          if (evidence.visualEvidenceError) {
+            throw new Error(evidence.visualEvidenceError);
+          }
           // postActionEvidence may have re-acquired a better window — read the owned truth back.
           opened = this.targets.current() ?? opened;
           // The agent owns input on this surface only when it is genuinely frontmost in visible mode.
@@ -1544,6 +1976,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           let coordinateSource = '';
           if (cmd.query?.trim()) {
             const resolved = this.resolveObservedElement(cmd.query, target);
+            this.assertClickableSemanticTarget(resolved);
             resolvedLabel = resolved.label || cmd.query;
             const point = this.elementCenterInScreenshot(resolved.frame);
             if (point) {
@@ -1554,8 +1987,19 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               coordinateSource = 'native label frame';
             } else if (resolved.elementToken) args.element_token = resolved.elementToken;
             else if (resolved.elementIndex != null) args.element_index = resolved.elementIndex;
-          } else if (cmd.elementToken) args.element_token = cmd.elementToken;
-          else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
+          } else if (cmd.elementToken || cmd.elementIndex != null) {
+            const resolved = this.resolveObservedHandle(target, cmd);
+            this.assertClickableSemanticTarget(resolved);
+            resolvedLabel = resolved.label || resolved.value || '';
+            if (delivery === 'foreground') {
+              const point = this.elementCenterInScreenshot(resolved.frame);
+              if (!point) throw new Error('element has no visible screenshot rectangle; observe again or choose a visible x/y point');
+              args.x = point.x;
+              args.y = point.y;
+              coordinateSource = 'semantic element frame';
+            } else if (cmd.elementToken) args.element_token = cmd.elementToken;
+            else args.element_index = Math.floor(cmd.elementIndex!);
+          }
           else {
             if (cmd.x == null || cmd.y == null) throw new Error('click needs query, elementToken/elementIndex, or x+y');
             if (!this.observedTarget || this.observedTarget.pid !== target.pid || this.observedTarget.windowId !== target.windowId) {
@@ -1579,24 +2023,39 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // a real global CGEvent: front the pinned window, glide the macOS cursor, click, then use
           // the same sidecar session for the fresh post-action capture.
           if (delivery === 'foreground' && args.x != null && args.y != null) {
-            const globalPoint = this.screenshotPixelToGlobalPoint({ x: Number(args.x), y: Number(args.y) });
-            if (globalPoint) {
-              await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
-              await new Promise(resolve => setTimeout(resolve, 100));
-              const native = await this.fallback.run({
-                action: 'click', x: globalPoint.x, y: globalPoint.y,
-                button: cmd.button || 'left', count: cmd.count || 1,
-                modifier: cmd.modifier,
-                app: target.app, normalized: false,
-              }, ctx);
-              if (!native.ok) throw new Error(native.error || native.summary);
-              const evidence = await this.postActionEvidence(target, cwd, session);
-              return {
-                ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
-                details: { path: 'native-global-cgevent', x: globalPoint.x, y: globalPoint.y }, ...evidence,
-                summary: `visible native cursor click${resolvedLabel ? ` on "${resolvedLabel}"` : ''} delivered to ${target.app || `pid ${target.pid}`}; fresh screen attached`,
-              };
+            const screenshotPoint = { x: Number(args.x), y: Number(args.y) };
+            const globalPoint = await this.preparePhysicalPoint(target, screenshotPoint);
+            const native = await this.fallback.run({
+              action: 'click', x: globalPoint.x, y: globalPoint.y,
+              button: cmd.button || 'left', count: cmd.count || 1,
+              modifier: cmd.modifier,
+              app: target.app, normalized: false,
+            }, ctx);
+            if (!native.ok) throw new Error(native.error || native.summary);
+            this.verifyPhysicalClick(target, globalPoint, native);
+            // A right-click usually opens a context menu — a separate OS window a window-scoped PNG
+            // cannot show. Return the full display so the model actually SEES the menu it opened.
+            const evidence = (cmd.button === 'right')
+              ? await this.displayObservation(target, ctx)
+              : await this.postActionEvidence(target, cwd, session);
+            // WindowServer can keep a just-dismissed sheet enumerable for a short grace period.
+            // Trust the verified physical activation of an explicit dismissal control so the stale
+            // window record does not block the very next click on the now-visible parent page.
+            if (/^(?:done|close|cancel|ok)$/i.test(resolvedLabel.trim())) {
+              this.transientDialogFrame = null;
+              evidence.completionGuidance = COMPUTER_COMPLETION_GUIDANCE;
             }
+            return {
+              ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
+              details: {
+                path: 'native-global-cgevent', screenshotPoint,
+                requestedGlobalPoint: globalPoint,
+                landedGlobalPoint: native.x != null && native.y != null ? { x: native.x, y: native.y } : undefined,
+                inputVerified: native.x != null && native.y != null,
+              },
+              ...evidence,
+              summary: `physical mouse click${resolvedLabel ? ` on "${resolvedLabel}"` : ''} delivered to ${target.app || `pid ${target.pid}`}; fresh screen attached`,
+            };
           }
           // Do not pre-position with move_cursor here. Click coordinates are window-local pixels,
           // while move_cursor consumes screen-space overlay coordinates; forwarding x/y directly
@@ -1613,7 +2072,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         case 'type': {
           if (!target) return this.fallback.run(cmd, ctx);
           if (delivery === 'foreground') {
-            await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
+            await this.ensurePhysicalTargetFrontmost(target);
             await this.ensureCursorInTargetWindow(target, ctx);
             const native = await this.fallback.run({ action: 'type', text: cmd.text || '', app: target.app }, ctx);
             if (!native.ok) throw new Error(native.error || native.summary);
@@ -1638,11 +2097,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           const keys = (cmd.combo || '').split('+').map(k => k.trim().toLowerCase()).filter(Boolean);
           if (!keys.length) throw new Error('key needs combo');
           if (delivery === 'foreground') {
-            await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
+            await this.ensurePhysicalTargetFrontmost(target);
             await this.ensureCursorInTargetWindow(target, ctx);
             const native = await this.fallback.run({ action: 'key', combo: cmd.combo, app: target.app }, ctx);
             if (!native.ok) throw new Error(native.error || native.summary);
             const evidence = await this.postActionEvidence(target, cwd, session);
+            // Escape is the keyboard twin of the Done/Close/Cancel click: it semantically dismisses
+            // the foreground sheet, and WindowServer may keep the dead sheet enumerable for a short
+            // grace period. Without this, the dialog guard kept refusing clicks on the visible page.
+            if (keys.length === 1 && (keys[0] === 'escape' || keys[0] === 'esc')) {
+              this.transientDialogFrame = null;
+              evidence.completionGuidance = COMPUTER_COMPLETION_GUIDANCE;
+            }
             return {
               ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
               details: { path: 'native-global-cgevent' }, ...evidence,
@@ -1671,8 +2137,16 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         }
         case 'drag': {
           if (!target) return this.fallback.run(cmd, ctx);
-          if (cmd.x == null || cmd.y == null || cmd.toX == null || cmd.toY == null) {
-            throw new Error('drag needs x+y and toX+toY');
+          // Source and destination each accept the same semantic grounding as click: an element
+          // handle from the newest observation (query/elementToken/elementIndex for the source,
+          // toQuery/toElementToken/toElementIndex for the destination) or a raw screenshot pixel.
+          const hasSourceHandle = !!(cmd.query?.trim() || cmd.elementToken || cmd.elementIndex != null);
+          const hasDestHandle = !!(cmd.toQuery?.trim() || cmd.toElementToken || cmd.toElementIndex != null);
+          if (!hasSourceHandle && (cmd.x == null || cmd.y == null)) {
+            throw new Error('drag needs a source: query/elementToken/elementIndex from the newest observation, or x+y screenshot pixels');
+          }
+          if (!hasDestHandle && (cmd.toX == null || cmd.toY == null)) {
+            throw new Error('drag needs a destination: toQuery/toElementToken/toElementIndex from the newest observation, or toX+toY screenshot pixels');
           }
           if (!this.observedTarget || this.observedTarget.pid !== target.pid || this.observedTarget.windowId !== target.windowId) {
             throw new Error('drag needs a fresh image of this exact window');
@@ -1680,22 +2154,38 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           const width = this.observedTarget.width;
           const height = this.observedTarget.height;
           if (!width || !height) throw new Error('latest screenshot has no usable dimensions');
-          const from = {
-            x: cmd.normalized ? scaleNormalizedPoint(cmd.x, width - 1) : Math.round(cmd.x),
-            y: cmd.normalized ? scaleNormalizedPoint(cmd.y, height - 1) : Math.round(cmd.y),
+          const resolveDragPoint = (
+            spec: { query?: string; elementToken?: string; elementIndex?: number }, end: 'source' | 'destination',
+          ): { x: number; y: number } => {
+            const resolved = spec.query?.trim()
+              ? this.resolveObservedElement(spec.query, target)
+              : this.resolveObservedHandle(target, { elementToken: spec.elementToken, elementIndex: spec.elementIndex });
+            const point = this.elementCenterInScreenshot(resolved.frame);
+            if (!point) throw new Error(`drag ${end} element has no visible screenshot rectangle; observe again or use a visible screenshot pixel instead`);
+            return point;
           };
-          const to = {
-            x: cmd.normalized ? scaleNormalizedPoint(cmd.toX, width - 1) : Math.round(cmd.toX),
-            y: cmd.normalized ? scaleNormalizedPoint(cmd.toY, height - 1) : Math.round(cmd.toY),
-          };
+          const from = hasSourceHandle
+            ? resolveDragPoint(cmd, 'source')
+            : {
+              x: cmd.normalized ? scaleNormalizedPoint(cmd.x!, width - 1) : Math.round(cmd.x!),
+              y: cmd.normalized ? scaleNormalizedPoint(cmd.y!, height - 1) : Math.round(cmd.y!),
+            };
+          const to = hasDestHandle
+            ? resolveDragPoint({ query: cmd.toQuery, elementToken: cmd.toElementToken, elementIndex: cmd.toElementIndex }, 'destination')
+            : {
+              x: cmd.normalized ? scaleNormalizedPoint(cmd.toX!, width - 1) : Math.round(cmd.toX!),
+              y: cmd.normalized ? scaleNormalizedPoint(cmd.toY!, height - 1) : Math.round(cmd.toY!),
+            };
           if ([from.x, from.y, to.x, to.y].some(value => !Number.isFinite(value))
             || from.x < 0 || from.y < 0 || to.x < 0 || to.y < 0
             || from.x >= width || to.x >= width || from.y >= height || to.y >= height) {
             throw new Error(`drag points must stay inside the latest image (${width}x${height})`);
           }
           if (delivery === 'foreground') {
-            const globalFrom = this.screenshotPixelToGlobalPoint(from);
-            const globalTo = this.screenshotPixelToGlobalPoint(to);
+            await this.ensurePhysicalTargetFrontmost(target);
+            const wf = await this.liveWindowFrame(target);
+            const globalFrom = this.screenshotPixelToGlobalPoint(from, wf);
+            const globalTo = this.screenshotPixelToGlobalPoint(to, wf);
             if (globalFrom && globalTo) {
               // Drive the drag through the explicit state machine: verify the SOURCE is inside the
               // window before the button ever goes down (dragging from empty space is a mistake), run
@@ -1703,7 +2193,6 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               // native failure, cancel and post a compensating mouse-up so a half-drag can't wedge the
               // pointer. The full phase trace ships in details.dragTrace for observability.
               const machine = new DragMachine(globalFrom, globalTo);
-              const wf = this.observedWindowFrame;
               machine.locateSource();
               const sourceInside = !wf || pointInFrame(globalFrom, wf);
               machine.verifySource(sourceInside, sourceInside ? 'source is inside the target window' : 'source point is outside the target window');
@@ -1714,10 +2203,6 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
                   summary: `drag refused: source is outside ${target.app || `pid ${target.pid}`}`,
                 };
               }
-              await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
-              // Activation is asynchronous on macOS. Without a short settle, a drag immediately
-              // after screenshot capture can land while the window is visible but not yet key.
-              await new Promise(resolve => setTimeout(resolve, 150));
               machine.mouseDown().startDrag().moveThrough([globalTo]).locateDestination();
               // A destination outside the source window is a LEGITIMATE cross-window drag, so this is
               // informational — the machine always completes the release rather than abandoning it.
@@ -1769,9 +2254,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               y: cmd.y == null ? Math.round(this.observedTarget.height / 2)
                 : cmd.normalized ? scaleNormalizedPoint(cmd.y, this.observedTarget.height - 1) : Math.round(cmd.y),
             };
-            const globalPoint = this.screenshotPixelToGlobalPoint(point);
+            const globalPoint = await this.preparePhysicalPoint(target, point);
             if (globalPoint) {
-              await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId });
               const native = await this.fallback.run({
                 action: 'scroll', x: globalPoint.x, y: globalPoint.y,
                 dx: cmd.dx || 0, dy: cmd.dy || 0, app: target.app, normalized: false,
@@ -1801,12 +2285,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // application — that is the separate, high-impact quit_app action below.
           if (!target) return this.fallback.run(cmd, ctx);
           const closingWindowId = target.windowId;
-          const keys = process.platform === 'darwin' ? ['cmd', 'w'] : ['ctrl', 'w'];
-          await this.call('hotkey', { pid: target.pid, window_id: closingWindowId, session, keys, delivery_mode: 'background' });
-          await new Promise(resolve => setTimeout(resolve, 350));
-          const windows = await this.call('list_windows', { pid: target.pid });
-          const remaining: any[] = Array.isArray(windows?.windows) ? windows.windows : [];
-          if (closingWindowId && remaining.some((w: any) => Number(w?.window_id) === closingWindowId)) {
+          const combo = process.platform === 'darwin' ? 'cmd+w' : 'ctrl+w';
+          await this.ensurePhysicalTargetFrontmost(target);
+          const delivered = await this.fallback.run({ action: 'key', combo, app: target.app }, ctx);
+          if (!delivered.ok) throw new Error(delivered.error || delivered.summary);
+          // Close animations and the WindowServer's stale-enumeration grace period both outlive a
+          // single fixed delay; poll before declaring the close failed (same phenomenon that kept
+          // dismissed sheets enumerable for a tick).
+          let remaining: any[] = [];
+          let stillListed = true;
+          for (const settleMs of [350, 450, 700]) {
+            await new Promise(resolve => setTimeout(resolve, settleMs));
+            const windows = await this.call('list_windows', { pid: target.pid });
+            remaining = Array.isArray(windows?.windows) ? windows.windows : [];
+            stillListed = !!closingWindowId && remaining.some((w: any) => Number(w?.window_id) === closingWindowId);
+            if (!stillListed) break;
+          }
+          if (stillListed) {
             throw new Error(`window ${closingWindowId} of ${target.app || `pid ${target.pid}`} did not close after Cmd+W — it may have an unsaved-changes prompt open; observe to see its current state`);
           }
           // The app keeps running. Retarget to its next window when one exists; otherwise drop the target.
@@ -1817,6 +2312,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           } else if (this.targets.owns(target.pid) && remaining.length === 0) {
             this.surfaces.remove(`native:${target.pid}`);
             this.targets.clear();
+            this.syncLivePip();
           }
           return {
             ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: closingWindowId,
@@ -1828,8 +2324,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // High impact: quits the ENTIRE application and may discard unsaved state. The tool layer
           // gates this behind an explicit approval; the runtime verifies the quit actually happened.
           if (!target) return this.fallback.run({ ...cmd, action: 'quit_app' }, ctx);
-          const keys = process.platform === 'darwin' ? ['cmd', 'q'] : ['alt', 'f4'];
-          await this.call('hotkey', { pid: target.pid, window_id: target.windowId, session, keys, delivery_mode: 'background' });
+          const combo = process.platform === 'darwin' ? 'cmd+q' : 'alt+f4';
+          await this.ensurePhysicalTargetFrontmost(target);
+          const delivered = await this.fallback.run({ action: 'key', combo, app: target.app }, ctx);
+          if (!delivered.ok) throw new Error(delivered.error || delivered.summary);
           await new Promise(resolve => setTimeout(resolve, 350));
           const windows = await this.call('list_windows', { pid: target.pid });
           if (Array.isArray(windows?.windows) && windows.windows.length > 0) {
@@ -1837,6 +2335,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           }
           this.surfaces.remove(`native:${target.pid}`);
           this.targets.clear();
+          this.syncLivePip();
           return {
             ok: true, action: cmd.action, driver, app: target.app, pid: target.pid,
             actionResult: { delivered: true, observed: 'confirmed', postcondition: { query: 'application windows no longer listed', matched: true }, confidence: 'proven' },

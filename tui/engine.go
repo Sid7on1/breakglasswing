@@ -17,6 +17,7 @@ import (
 // build leaves embeddedEngine nil; we also guard against a stray tiny placeholder.
 func hasEmbeddedEngine() bool      { return len(embeddedEngine) > 1<<20 }
 func hasEmbeddedComputerUse() bool { return len(embeddedComputerUse) > 1<<20 }
+func hasEmbeddedLivePip() bool     { return len(embeddedLivePip) > 64<<10 }
 
 func engineCacheRoots() []string {
 	roots := make([]string, 0, 3)
@@ -115,6 +116,39 @@ func extractEmbeddedComputerUse() (string, error) {
 	return extractEmbeddedComputerUseFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
 }
 
+func extractEmbeddedLivePipFromRoots(roots []string, suffix string) (string, error) {
+	var lastErr error
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		dir := filepath.Join(root, "bimax")
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		path := filepath.Join(dir, "bimax-live-pip-"+suffix)
+		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedLivePip)) {
+			pruneStaleSiblings(dir, "bimax-live-pip-", "bimax-live-pip-"+suffix)
+			return path, nil
+		}
+		if err := os.WriteFile(path, embeddedLivePip, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		pruneStaleSiblings(dir, "bimax-live-pip-", "bimax-live-pip-"+suffix)
+		return path, nil
+	}
+	return "", fmt.Errorf("no writable live-pip cache directory: %w", lastErr)
+}
+
+func extractEmbeddedLivePip() (string, error) {
+	sum := sha256.Sum256(embeddedLivePip)
+	return extractEmbeddedLivePipFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
+}
+
 // ResolveRoot picks the directory the engine subprocess STARTS in. For the shipped binary that's the
 // user's cwd (self-contained, no source needed). For the dev runner (npx tsx src/index.ts) it must
 // be the BiMax source repo — found, in order: $BIMAX_REPO_ROOT, the repo next to the binary itself
@@ -189,6 +223,18 @@ type Engine struct {
 	Msgs  chan Outbound
 }
 
+// appendEnvDefault adds a launcher policy only when the caller did not explicitly choose a value.
+// Keeping this pure also makes the packaged-engine defaults regression-testable without spawning.
+func appendEnvDefault(env []string, key, value string) []string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
 // StartEngine launches the engine rooted at repoRoot. Override the command via $BIMAX_ENGINE_CMD
 // (e.g. the compiled binary); defaults to the dev runner. Engine stderr (boot logs) is sent to
 // tui/engine.log so it never corrupts the alt-screen UI or the NDJSON stdout stream.
@@ -213,6 +259,12 @@ func StartEngine(repoRoot string) (*Engine, error) {
 	}
 	c.Dir = repoRoot
 	c.Env = append(os.Environ(), "BIMAX_HEADLESS=1")
+	// codebase-memory is an optional MCP enhancement over the native SQLite graph. In Bun's
+	// self-contained engine its failed stdio handshake can monopolize the event loop for the full
+	// five-minute MCP timeout, preventing the TUI from ever receiving `ready`. Packaged TUI sessions
+	// therefore keep it off by default; users who want to experiment can explicitly launch with
+	// BIMAX_DISABLE_CODEMEM=0. The native graph remains loaded and fully usable either way.
+	c.Env = appendEnvDefault(c.Env, "BIMAX_DISABLE_CODEMEM", "1")
 	// The native sidecar is an implementation detail: the engine only sees the Bimax-owned path and
 	// contract. Telemetry is disabled at the process boundary before the sidecar can ever start.
 	if override := os.Getenv("BIMAX_COMPUTER_USE_DRIVER"); override != "" {
@@ -223,6 +275,15 @@ func StartEngine(repoRoot string) (*Engine, error) {
 			return nil, extractErr
 		}
 		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+driverPath)
+	}
+	if override := os.Getenv("BIMAX_LIVE_PIP_HELPER"); override != "" {
+		c.Env = append(c.Env, "BIMAX_LIVE_PIP_HELPER="+override)
+	} else if hasEmbeddedLivePip() {
+		pipPath, extractErr := extractEmbeddedLivePip()
+		if extractErr != nil {
+			return nil, extractErr
+		}
+		c.Env = append(c.Env, "BIMAX_LIVE_PIP_HELPER="+pipPath)
 	}
 	c.Env = append(c.Env, "CUA_DRIVER_RS_TELEMETRY_ENABLED=0", "CUA_TELEMETRY_ENABLED=0")
 	// The engine must START in repoRoot so the dev runner (`tsx src/index.ts`) resolves, but the

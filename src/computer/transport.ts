@@ -1,8 +1,9 @@
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { openClient, isDeadConnectionError } from '../mcp/client';
 import { withTimeout } from '../utils/withTimeout';
 import { cliEvents } from '../cli/events';
-import { loadConfig } from '../cli/config';
 
 /**
  * Driver transport for the embedded native sidecar (Bimax Computer Use).
@@ -60,6 +61,47 @@ function mcpStructured(result: any): any {
 const COLD_START_TIMEOUT_MS = 45_000;
 const RPC_TIMEOUT_MS = 30_000;
 
+/** The packaged TUI extracts a >40MB content-addressed binary; anything smaller is a stub/corrupt. */
+const MIN_DRIVER_BYTES = 1 << 20;
+
+/** Mirror of the Go launcher's engineCacheRoots(): where the packaged TUI extracts the driver. */
+function driverCacheRoots(): string[] {
+  const override = process.env.BIMAX_CACHE_DIR?.trim();
+  if (override) return [override];
+  const roots: string[] = [];
+  if (process.platform === 'darwin') roots.push(path.join(os.homedir(), 'Library', 'Caches'));
+  else if (process.platform === 'linux') roots.push(process.env.XDG_CACHE_HOME?.trim() || path.join(os.homedir(), '.cache'));
+  roots.push(os.tmpdir());
+  return roots;
+}
+
+/**
+ * Find the sidecar driver without the launcher's help. The packaged TUI extracts the embedded
+ * driver to <cacheRoot>/bimax/bimax-computer-use-<hash> and passes its path via
+ * BIMAX_COMPUTER_USE_DRIVER — but dev builds embed nothing, so a dev engine run used to silently
+ * degrade to the primitive fallback even with a perfectly good driver sitting in the cache from a
+ * prior packaged run. The env var stays the explicit override; this scan is the fallback.
+ * Newest binary wins when several roots have one (the launcher prunes stale siblings per dir).
+ */
+export function discoverCachedDriver(): string | null {
+  let best: { path: string; mtimeMs: number } | null = null;
+  for (const root of driverCacheRoots()) {
+    const dir = path.join(root, 'bimax');
+    let entries: string[];
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      if (!name.startsWith('bimax-computer-use-')) continue;
+      const candidate = path.join(dir, name);
+      try {
+        const stat = fs.statSync(candidate);
+        if (!stat.isFile() || stat.size < MIN_DRIVER_BYTES) continue;
+        if (!best || stat.mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs: stat.mtimeMs };
+      } catch { /* raced deletion — skip */ }
+    }
+  }
+  return best?.path ?? null;
+}
+
 export class SidecarTransport implements SidecarTransportPort {
   private clientPromise: Promise<any> | null = null;
   /** Heartbeat: updated on every sidecar call so a watchdog can spot a wedged session. */
@@ -67,9 +109,19 @@ export class SidecarTransport implements SidecarTransportPort {
 
   constructor(private readonly session: string) {}
 
+  /** Cached cache-scan result; null = scanned and found nothing (re-scanned on demand). */
+  private discoveredDriver: string | null = null;
+
   private driverPath(): string | null {
     const configured = process.env.BIMAX_COMPUTER_USE_DRIVER?.trim();
-    return configured && fs.existsSync(configured) ? configured : null;
+    if (configured) {
+      // Explicit opt-out: never use the sidecar, not even a cache-discovered one.
+      if (/^(0|off|none|disabled)$/i.test(configured)) return null;
+      return fs.existsSync(configured) ? configured : null;
+    }
+    if (this.discoveredDriver && fs.existsSync(this.discoveredDriver)) return this.discoveredDriver;
+    this.discoveredDriver = discoverCachedDriver();
+    return this.discoveredDriver;
   }
 
   public available(): boolean { return this.driverPath() != null; }
@@ -91,9 +143,10 @@ export class SidecarTransport implements SidecarTransportPort {
       // close event from a SUPERSEDED connection must never destroy its healthy replacement —
       // unconditional nulling here would strand duplicate live sidecars behind a respawn loop.
       const promise: Promise<any> = withTimeout<any>((async () => {
-        const cfg = await loadConfig();
         const driverArgs = ['mcp', '--embedded', '--host-bundle-id', 'ai.bimax.cli'];
-        if (cfg.computerPip !== false && process.platform === 'darwin') driverArgs.push('--experimental-pip');
+        // Live PiP is owned by NativeLivePip, which continuously streams the exact target window
+        // through ScreenCaptureKit. Do not enable the driver's post-action screenshot viewer: two
+        // preview processes would race and the old one is not a continuous capture surface.
         const client = await openClient({
           name: 'bimax-computer-use',
           command: driver,
@@ -107,15 +160,12 @@ export class SidecarTransport implements SidecarTransportPort {
           },
         });
         await client.callTool({ name: 'start_session', arguments: { session: this.session } });
-        // Cursor policy follows the delivery mode. VISIBLE mode drives the ONE real macOS cursor, so
-        // the sidecar overlay is hidden (never two pointers). BACKGROUND mode never moves the real
-        // cursor — so the sidecar's own agent cursor is SHOWN so the user can see where the agent is
-        // acting, including while they work in another window.
-        const showAgentCursor = cfg.computerVisible === false;
+        // There is exactly one cursor: the native OS cursor. Never show the sidecar overlay cursor;
+        // it is a visualization, not proof that an input event reached the target application.
         try {
           await client.callTool({
             name: 'set_agent_cursor_enabled',
-            arguments: { enabled: showAgentCursor, cursor_id: this.session },
+            arguments: { enabled: false, cursor_id: this.session },
           });
         } catch { /* pinned driver supports this; older local overrides remain usable */ }
         return client;

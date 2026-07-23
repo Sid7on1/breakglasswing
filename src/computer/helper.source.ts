@@ -41,25 +41,31 @@ func jstr(_ s: String) -> String {
 
 func num(_ s: String) -> Double { guard let v = Double(s) else { die("bad number: " + s) }; return v }
 
+let eventSource = CGEventSource(stateID: .hidSystemState)
+
 func post(_ event: CGEvent?) {
   guard let e = event else { die("could not create CGEvent (missing Accessibility permission?)") }
   e.post(tap: .cghidEventTap)
-  usleep(12_000)
+  usleep(6_000)
 }
 
-// Glide the visible cursor from wherever it is to the target instead of teleporting: the human
-// watching the run can follow what is about to be clicked. ~16 steps x 10ms ≈ 160ms per travel.
+// Distance-adaptive eased glide over the ONE real macOS cursor (HID event source, no overlay).
+// A human hand resolves a short precise hop in a couple of frames but takes a longer, continuous
+// path across the screen; apps tracking hover/appearance see plausible intermediate samples either
+// way. Total travel time stays bounded (~15-90ms) so multi-hour runs never crawl.
 func glide(to target: CGPoint, button: CGMouseButton = .left) {
   let from = CGEvent(source: nil)?.location ?? target
-  let steps = 16
+  let distance = hypot(target.x - from.x, target.y - from.y)
+  if distance < 3 { return } // already on target — no theatrical wiggle
+  let steps = max(3, min(14, Int(distance / 90.0) + 3))
   for i in 1...steps {
     let t = Double(i) / Double(steps)
-    // Ease-out: fast leave, gentle arrival — reads as intentional, not as a laggy warp.
-    let e = 1.0 - (1.0 - t) * (1.0 - t)
+    // Smoothstep ease-in-out: gentle start, fast middle, gentle arrival — like a real hand.
+    let e = t * t * (3.0 - 2.0 * t)
     let p = CGPoint(x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e)
-    let m = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: button)
+    let m = CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: button)
     m?.post(tap: .cghidEventTap)
-    usleep(10_000)
+    usleep(distance > 500 ? 6_000 : 4_000)
   }
 }
 
@@ -161,31 +167,32 @@ case "click":
   if button == "right" { mb = .right; down = .rightMouseDown; up = .rightMouseUp }
   else if button == "middle" { mb = .center; down = .otherMouseDown; up = .otherMouseUp }
   glide(to: p, button: mb)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: mb))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: mb))
   for c in 1...count {
-    let d = CGEvent(mouseEventSource: nil, mouseType: down, mouseCursorPosition: p, mouseButton: mb)
+    let d = CGEvent(mouseEventSource: eventSource, mouseType: down, mouseCursorPosition: p, mouseButton: mb)
     d?.flags = flags
     d?.setIntegerValueField(.mouseEventClickState, value: Int64(c)); post(d)
-    let u = CGEvent(mouseEventSource: nil, mouseType: up, mouseCursorPosition: p, mouseButton: mb)
+    let u = CGEvent(mouseEventSource: eventSource, mouseType: up, mouseCursorPosition: p, mouseButton: mb)
     u?.flags = flags
     u?.setIntegerValueField(.mouseEventClickState, value: Int64(c)); post(u)
   }
-  print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
+  let landed = CGEvent(source: nil)?.location ?? p
+  print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName())),\\"x\\":\\(Int(landed.x)),\\"y\\":\\(Int(landed.y))}")
 
 case "drag":
   guard args.count >= 6 else { die("drag x1 y1 x2 y2") }
   let a = CGPoint(x: num(args[2]), y: num(args[3]))
   let b = CGPoint(x: num(args[4]), y: num(args[5]))
   glide(to: a)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: a, mouseButton: .left))
-  post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: a, mouseButton: .left))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left))
   let steps = 14
   for i in 1...steps {
     let t = Double(i) / Double(steps)
     let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
-    post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left))
+    post(CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDragged, mouseCursorPosition: p, mouseButton: .left))
   }
-  post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: b, mouseButton: .left))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: b, mouseButton: .left))
   print("{\\"ok\\":true}")
 
 case "scroll":
@@ -194,7 +201,7 @@ case "scroll":
   // Glide the visible cursor over the scroll target first, so the human sees WHERE the agent is
   // scrolling instead of the content moving under a cursor parked somewhere else on screen.
   glide(to: p)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
   // Positive dy = scroll DOWN (content moves up); CGEvent wheel1 positive = up, so negate.
   let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                   wheel1: Int32(-num(args[5])), wheel2: Int32(-num(args[4])), wheel3: 0)
@@ -223,7 +230,7 @@ case "hover":
   guard args.count >= 4 else { die("hover x y [ms]") }
   let hp = CGPoint(x: num(args[2]), y: num(args[3]))
   glide(to: hp)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: hp, mouseButton: .left))
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: hp, mouseButton: .left))
   let hoverMs = args.count >= 5 ? Int(num(args[4])) : 400
   usleep(UInt32(max(0, min(5000, hoverMs)) * 1000))
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
@@ -239,11 +246,11 @@ case "hold":
   var hmb = CGMouseButton.left; var hdown = CGEventType.leftMouseDown; var hup = CGEventType.leftMouseUp
   if holdBtn == "right" { hmb = .right; hdown = .rightMouseDown; hup = .rightMouseUp }
   glide(to: holdP, button: hmb)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: holdP, mouseButton: hmb))
-  let hd = CGEvent(mouseEventSource: nil, mouseType: hdown, mouseCursorPosition: holdP, mouseButton: hmb)
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: holdP, mouseButton: hmb))
+  let hd = CGEvent(mouseEventSource: eventSource, mouseType: hdown, mouseCursorPosition: holdP, mouseButton: hmb)
   hd?.setIntegerValueField(.mouseEventClickState, value: 1); post(hd)
   usleep(UInt32(max(50, min(5000, holdMs)) * 1000))
-  let hu = CGEvent(mouseEventSource: nil, mouseType: hup, mouseCursorPosition: holdP, mouseButton: hmb)
+  let hu = CGEvent(mouseEventSource: eventSource, mouseType: hup, mouseCursorPosition: holdP, mouseButton: hmb)
   hu?.setIntegerValueField(.mouseEventClickState, value: 1); post(hu)
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
 
@@ -254,8 +261,8 @@ case "mousedown":
   var dmb = CGMouseButton.left; var dtype = CGEventType.leftMouseDown
   if dbtn == "right" { dmb = .right; dtype = .rightMouseDown } else if dbtn == "middle" { dmb = .center; dtype = .otherMouseDown }
   glide(to: dp, button: dmb)
-  post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: dp, mouseButton: dmb))
-  let dd = CGEvent(mouseEventSource: nil, mouseType: dtype, mouseCursorPosition: dp, mouseButton: dmb)
+  post(CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: dp, mouseButton: dmb))
+  let dd = CGEvent(mouseEventSource: eventSource, mouseType: dtype, mouseCursorPosition: dp, mouseButton: dmb)
   dd?.setIntegerValueField(.mouseEventClickState, value: 1); post(dd)
   print("{\\"ok\\":true}")
 
@@ -266,9 +273,9 @@ case "mouseup":
   var umb = CGMouseButton.left; var utype = CGEventType.leftMouseUp; var udrag = CGEventType.leftMouseDragged
   if ubtn == "right" { umb = .right; utype = .rightMouseUp; udrag = .rightMouseDragged } else if ubtn == "middle" { umb = .center; utype = .otherMouseUp; udrag = .otherMouseDragged }
   // A button may still be held from a prior mousedown; DRAG (not plain move) so the release lands here.
-  let um = CGEvent(mouseEventSource: nil, mouseType: udrag, mouseCursorPosition: up_p, mouseButton: umb)
+  let um = CGEvent(mouseEventSource: eventSource, mouseType: udrag, mouseCursorPosition: up_p, mouseButton: umb)
   um?.post(tap: .cghidEventTap); usleep(8_000)
-  let uu = CGEvent(mouseEventSource: nil, mouseType: utype, mouseCursorPosition: up_p, mouseButton: umb)
+  let uu = CGEvent(mouseEventSource: eventSource, mouseType: utype, mouseCursorPosition: up_p, mouseButton: umb)
   uu?.setIntegerValueField(.mouseEventClickState, value: 1); post(uu)
   print("{\\"ok\\":true}")
 
@@ -304,4 +311,4 @@ extension Array {
 `;
 
 /** Bump when the protocol changes so stale cached binaries are never reused. */
-export const DESKTOP_HELPER_VERSION = 6; // v6: hover, atomic hold, mousedown/mouseup primitives
+export const DESKTOP_HELPER_VERSION = 8; // v8: distance-adaptive human-like glide (v7: HID-source clicks + landed coordinates)

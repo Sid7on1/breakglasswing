@@ -9,7 +9,7 @@ describe('model catalog', () => {
     // deliberately NOT recommended (asserted below).
     expect(ids).toEqual(expect.arrayContaining([
       'mistralai/mistral-small-4-119b-2603', 'qwen/qwen3.5-397b-a17b', 'z-ai/glm-5.2',
-      'openai/gpt-oss-120b', 'minimaxai/minimax-m3', 'stepfun-ai/step-3.7-flash',
+      'deepseek-ai/deepseek-v4-pro', 'openai/gpt-oss-120b', 'minimaxai/minimax-m3', 'stepfun-ai/step-3.7-flash',
       'qwen/qwen3.5-122b-a10b', 'nvidia/nemotron-nano-12b-v2-vl', 'sarvamai/sarvam-m',
     ]));
     expect(ids).not.toContain('stepfun-ai/step-3.5-flash'); // invalid on NIM
@@ -22,8 +22,8 @@ describe('model catalog', () => {
     const ids = MODEL_CATALOG.map(m => m.value);
     expect(ids).toContain('z-ai/glm-5.2');
     expect(ids).not.toContain('zai/glm-5.2'); // the 404 typo
-    // 2026-07-19: timed out (90s+ cold) or 404'd for a free NIM account — kept out of the picker.
-    for (const bad of ['deepseek-ai/deepseek-v4-pro', 'deepseek-ai/deepseek-v4-flash', 'google/gemma-4-31b-it']) {
+    // DeepSeek V4 Pro is retained as an explicit opt-in; these unverified variants stay hidden.
+    for (const bad of ['deepseek-ai/deepseek-v4-flash', 'google/gemma-4-31b-it']) {
       expect(ids).not.toContain(bad);
     }
     expect(ids).toContain('moonshotai/kimi-k2.6');

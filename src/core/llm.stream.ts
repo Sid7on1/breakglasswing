@@ -169,7 +169,11 @@ export function classifyStreamError(e: any): { status: number; recoverable: bool
   // Transient: stalled streams, server errors, or a one-off bad model emission the
   // provider rejected. Bounded by the loop's retry cap, so this can be liberal.
   const transientMsg = /Unterminated string|Expecting value|is out of range|single tool-call|tool call/i.test(msg);
-  if (status === 408 || status >= 500 || transientMsg) {
+  // NVIDIA's edge occasionally returns a bare 410 while the same model remains listed and accepts
+  // an identical request moments later. Retry only the body-less form; a descriptive 410 still
+  // means the resource is genuinely gone and must remain fatal.
+  const transientNvidiaEdge410 = status === 410 && /no body/i.test(msg);
+  if (status === 408 || status >= 500 || transientMsg || transientNvidiaEdge410) {
     return { status, recoverable: true, kind: 'transient' };
   }
 
