@@ -27,6 +27,41 @@ function fakeRuntime(overrides: Partial<DesktopResult> = {}): DesktopRuntimePort
   };
 }
 
+describe('live preview state is reported, not left to imagination', () => {
+  // The preview is presentation-only — no verb can look at it. Asked what it was showing, a model
+  // with nothing to read answered anyway, naming an app after every switch in two real sessions.
+  // An observation therefore carries the runtime's own view of the preview.
+  const runtimeWithPip = (pip: any): DesktopRuntimePort => ({
+    run: jest.fn(async (cmd: any): Promise<DesktopResult> => ({
+      ok: true, action: cmd.action, driver: 'fake', summary: `${cmd.action} done`,
+    })),
+    quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true }),
+    frontmostApp: jest.fn().mockResolvedValue('Notes'),
+    pipStatus: jest.fn(async () => pip),
+  } as any);
+
+  it('names the surface the preview is actually showing', async () => {
+    const tool = createComputerTool(governor, runtimeWithPip({ enabled: true, running: true, surface: 'Calculator window 6748' }));
+    const out = JSON.parse(await tool.execute({ action: 'observe' }, undefined as any));
+    expect(out.preview).toContain('Calculator window 6748');
+  });
+
+  it('says so when the preview is enabled but not running', async () => {
+    const tool = createComputerTool(governor, runtimeWithPip({ enabled: true, running: false }));
+    const out = JSON.parse(await tool.execute({ action: 'observe' }, undefined as any));
+    expect(out.preview).toMatch(/not currently running/);
+  });
+
+  it('never fails an observation because the preview could not be read', async () => {
+    const broken = runtimeWithPip(null);
+    (broken as any).pipStatus = jest.fn(async () => { throw new Error('pip is gone'); });
+    const tool = createComputerTool(governor, broken);
+    const out = JSON.parse(await tool.execute({ action: 'observe' }, undefined as any));
+    expect(out.ok).toBe(true);
+    expect(out.preview).toBeUndefined();
+  });
+});
+
 describe('ComputerTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -77,6 +112,21 @@ describe('ComputerTool', () => {
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       tool: 'ComputerTool', action: 'click', app: 'Notes', isDestructive: false,
     }));
+  });
+
+  it('normalizes verb synonyms BEFORE gating, so an alias cannot bypass approval', async () => {
+    setApprovals('always');
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+
+    // "press" is a synonym for the GATED verb `key`. Were the alias resolved downstream of the
+    // gate, this would sail through as an unrecognized, ungated action and then execute as a
+    // keystroke — an approval bypass reachable from plain model vocabulary.
+    await tool.execute({ action: 'press', combo: 'return', app: 'Notes' } as any, { cwd: process.cwd() });
+    expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
+      tool: 'ComputerTool', action: 'key',
+    }));
+    expect((runtime.run as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({ action: 'key' }));
   });
 
   it('always approvals mode keeps routine acting verbs prompt-worthy', async () => {

@@ -138,3 +138,29 @@ func TestComputerCallsNeverCollapseAwayTheirScreens(t *testing.T) {
 		t.Fatalf("computer calls collapsed: got %d rows, want %d", len(rows), len(run))
 	}
 }
+
+// The card must name what the capture actually covers. Calling a window capture "screen" is how a
+// one-window PNG got described to a user as a full-display screenshot of two apps.
+func TestScreenshotCardNamesTheCaptureScope(t *testing.T) {
+	t.Setenv("BIMAX_COMPUTER_THUMBS", "")
+	window := writeTestScreenshot(t, "window-1785001713014.png", 8, 8)
+	got := renderToolCall(ToolCall{
+		ToolName: "ComputerTool", Status: "success",
+		Output: `{"ok":true,"summary":"physical mouse click delivered to TextEdit","screenshot":"` + window + `"}`,
+	}, 80)
+	if !strings.Contains(got, "▣ window") {
+		t.Fatalf("window capture should be labelled a window: %q", got)
+	}
+	if strings.Contains(got, "▣ screen") {
+		t.Fatalf("window capture must not be labelled a screen: %q", got)
+	}
+
+	display := writeTestScreenshot(t, "shot-1785001713014.png", 8, 8)
+	got = renderToolCall(ToolCall{
+		ToolName: "ComputerTool", Status: "success",
+		Output: `{"ok":true,"summary":"physical mouse click delivered to TextEdit","screenshot":"` + display + `"}`,
+	}, 80)
+	if !strings.Contains(got, "▣ display") {
+		t.Fatalf("full-display capture should be labelled a display: %q", got)
+	}
+}

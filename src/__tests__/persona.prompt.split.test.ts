@@ -3,6 +3,7 @@ import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
 import { AgentPersona, explicitlyRequiresComputerUse, isolateComputerUseHistory, requiresComputerChecklist } from '../cli/personas/base.persona';
+import { appSlotPattern } from '../computer/installed.apps';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
@@ -119,6 +120,32 @@ describe('explicit computer-use history isolation', () => {
     expect(explicitlyRequiresComputerUse('open src/computer/desktop.runtime.ts and fix the Finder window code')).toBe(false);
     expect(explicitlyRequiresComputerUse('how does Safari handle cookies? go check the docs')).toBe(false);
     expect(explicitlyRequiresComputerUse('open System Settings and check my battery')).toBe(true);
+  });
+
+  it('recognizes operating an installed app that no hardcoded list would have named', () => {
+    // The regression: the gate only knew finder|safari|system settings, so a request to send a
+    // file through a messaging app read as ordinary chat — and the model answered it by claiming
+    // it could not send files at all, with the ComputerTool sitting right there unused.
+    // These assert the RULE (verb + app slot), driven by whatever is really installed here.
+    const roster = ['WhatsApp', 'Telegram', 'Notes', 'Google Chrome', 'TV'];
+    const pattern = appSlotPattern(roster)!;
+    expect(pattern.test('send any random jpeg to my mom2 on whats app')).toBe(true); // spacing varies
+    expect(pattern.test('send a jpeg to mom2 on whatsapp')).toBe(true);
+    expect(pattern.test('open telegram and reply to her')).toBe(true);
+    expect(pattern.test('copy that text into notes')).toBe(true);
+    expect(pattern.test('switch to google chrome')).toBe(true);
+    // A bare app name outside the slot must NOT count: single-word app names that are also
+    // ordinary English words would otherwise turn any sentence containing them into GUI work.
+    expect(pattern.test('the release notes are ready')).toBe(false);
+    expect(pattern.test('summarize my notes about the outage')).toBe(false);
+    // Names too short to be evidence are dropped rather than matching every "to tv" in a sentence.
+    expect(appSlotPattern(['TV'])).toBeNull();
+  });
+
+  it('needs both a GUI verb and a named surface before isolating history', () => {
+    expect(explicitlyRequiresComputerUse('send the release notes to the team')).toBe(false);
+    expect(explicitlyRequiresComputerUse('my mac has been slow lately')).toBe(false); // no verb
+    expect(explicitlyRequiresComputerUse('show me my screen')).toBe(true);
   });
 
   it('recognizes compound computer work that needs an engine-persistent checklist', () => {

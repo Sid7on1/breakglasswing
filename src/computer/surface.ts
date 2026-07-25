@@ -157,26 +157,35 @@ export class SurfaceRegistry {
   private activeId: string | null = null;
   private seq = 0;
 
-  /** Register (or replace) a surface. Returns the stored record. */
-  register(input: Partial<ExecutionSurface> & { kind: SurfaceKind }): ExecutionSurface {
+  /**
+   * Register (or replace) a surface and make it active. Returns the stored record.
+   *
+   * Registration implies activation because the runtime registers the surface it just targeted.
+   * Activating only when nothing was active yet meant that opening a second app registered it but
+   * left `active()` pinned to the FIRST one — so PiP capture and the persisted session state both
+   * kept naming an app the agent had moved on from. Pass `activate: false` to register a surface
+   * the session merely knows about without redirecting the active pointer at it.
+   */
+  register(input: Partial<ExecutionSurface> & { kind: SurfaceKind; activate?: boolean }): ExecutionSurface {
     const now = Date.now();
-    const id = input.id || `${input.kind}-${++this.seq}`;
-    const traits = defaultSurfaceTraits(input.kind);
+    const { activate = true, ...spec } = input;
+    const id = spec.id || `${spec.kind}-${++this.seq}`;
+    const traits = defaultSurfaceTraits(spec.kind);
     const existing = this.surfaces.get(id);
     const surface: ExecutionSurface = {
       ...traits,
       ...existing,
-      ...input,
+      ...spec,
       id,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       // Explicit trait overrides win over both defaults and the prior record.
-      focusOwner: input.focusOwner ?? existing?.focusOwner ?? traits.focusOwner,
-      captureSafe: input.captureSafe ?? existing?.captureSafe ?? traits.captureSafe,
-      backgroundCapable: input.backgroundCapable ?? existing?.backgroundCapable ?? traits.backgroundCapable,
+      focusOwner: spec.focusOwner ?? existing?.focusOwner ?? traits.focusOwner,
+      captureSafe: spec.captureSafe ?? existing?.captureSafe ?? traits.captureSafe,
+      backgroundCapable: spec.backgroundCapable ?? existing?.backgroundCapable ?? traits.backgroundCapable,
     };
     this.surfaces.set(id, surface);
-    if (!this.activeId) this.activeId = id;
+    if (activate || !this.activeId) this.activeId = id;
     return surface;
   }
 

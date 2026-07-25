@@ -19,12 +19,28 @@ export interface LivePipStatus {
   surface?: string;
   frames?: number;
   error?: string;
+  /** Measured preview throughput/latency from the capture process — absent until the first report. */
+  stats?: {
+    fps: number;
+    latencyMsP50: number;
+    latencyMsP95: number;
+    /** Frames superseded before reaching the layer. Healthy at low rates; a rising share means the
+     *  main thread cannot keep up with capture. */
+    droppedStale: number;
+    /** Frames skipped because the layer was not consuming (panel occluded/off-screen). */
+    droppedNotReady: number;
+    at: number;
+  };
 }
 
 export interface LivePipPort {
   sync(target: LivePipTarget | null, enabled: boolean): void;
   stop(): Promise<void>;
   status(): LivePipStatus;
+  /** The preview process's pid, so a hit test can recognise the panel as the thing under a point. */
+  pid?(): number | null;
+  /** Ask the panel to move clear of this rectangle (global points, top-left origin). */
+  avoid?(rect: { x: number; y: number; w: number; h: number }): void;
 }
 
 type DesiredPreview = { target: LivePipTarget | null; enabled: boolean; generation: number };
@@ -61,6 +77,25 @@ export class NativeLivePip implements LivePipPort {
     };
     if (enabled && key && key === this.childKey && this.child && this.child.exitCode == null) return;
     void this.apply(this.desired);
+  }
+
+  /** The preview process's pid — null when no panel is running. */
+  public pid(): number | null {
+    return this.child && this.child.exitCode == null ? (this.child.pid ?? null) : null;
+  }
+
+  /**
+   * Ask the panel to step clear of `rect`.
+   *
+   * The panel floats above every application window and accepts mouse events, so any synthesized
+   * click inside it is delivered to the panel instead of the app being driven. Moving it is the
+   * only remedy: Apple documents floating windows as remaining above a raised window.
+   */
+  public avoid(rect: { x: number; y: number; w: number; h: number }): void {
+    const child = this.child;
+    if (!child || child.exitCode != null || !child.stdin?.writable) return;
+    try { child.stdin.write(`avoid ${Math.round(rect.x)} ${Math.round(rect.y)} ${Math.round(rect.w)} ${Math.round(rect.h)}\n`); }
+    catch { /* the preview is cosmetic; never fail an action because it would not move */ }
   }
 
   public status(): LivePipStatus {
@@ -104,7 +139,7 @@ export class NativeLivePip implements LivePipPort {
       '--window-id', String(target.windowId),
       '--label', target.label,
     ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
     });
     this.child = child;
@@ -135,6 +170,20 @@ export class NativeLivePip implements LivePipPort {
           cliEvents.emit('status', `Live PiP streaming ${target.label}`);
         } else if (event?.event === 'frame_progress' && Number(event.frames) > 0) {
           this.state = { ...this.state, running: true, frames: Number(event.frames), error: undefined };
+        } else if (event?.event === 'pip_stats') {
+          // Measured once a second by the capture process. Kept on the port so "the preview is
+          // real-time" is a readable number rather than an assertion.
+          this.state = {
+            ...this.state, running: true, frames: Number(event.frames) || this.state.frames, error: undefined,
+            stats: {
+              fps: Number(event.fps) || 0,
+              latencyMsP50: Number(event.latency_ms_p50) || 0,
+              latencyMsP95: Number(event.latency_ms_p95) || 0,
+              droppedStale: Number(event.dropped_stale) || 0,
+              droppedNotReady: Number(event.dropped_not_ready) || 0,
+              at: Date.now(),
+            },
+          };
         }
       }
     });

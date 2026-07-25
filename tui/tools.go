@@ -141,7 +141,26 @@ func renderScreenshotCard(path, summary string) string {
 		}
 		_ = f.Close()
 	}
-	return subtleStyle.Render("▣ screen " + dims + "· " + name)
+	return subtleStyle.Render("▣ " + captureScope(name) + " " + dims + "· " + name)
+}
+
+// captureScope names what a capture actually covers, read from the file the engine wrote: a
+// window-scoped PNG is `window-<ts>.png`, a whole-display one is `shot-<ts>.png`.
+//
+// This card used to say "screen" for every capture. A window capture of TextEdit was therefore
+// presented as `▣ screen 1568×1538`, which reads as a full-screen grab — and in a real session the
+// model went on to describe that file to the user as "a full-display screenshot showing both
+// Calculator and TextEdit windows". It showed one window. The label should not be the part of the
+// transcript that makes a false claim easy to believe.
+func captureScope(name string) string {
+	switch {
+	case strings.HasPrefix(name, "window-"):
+		return "window"
+	case strings.HasPrefix(name, "shot-"):
+		return "display"
+	default:
+		return "capture"
+	}
 }
 
 // renderScreenshotThumbnail turns a native PNG into a compact true-colour terminal image. Each

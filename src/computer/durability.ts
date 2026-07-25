@@ -18,6 +18,10 @@ export interface ActionRecord {
   app?: string;
   outcome?: string; // a VerificationOutcome, when known
   at: number;
+  /** The frame this action was planned from (see frame.ts). Recording it is what makes the history
+   * an audit trail rather than a list of verbs: "which picture was this click chosen from" is the
+   * first question asked when a click lands somewhere unexpected. */
+  frameId?: string;
 }
 
 export interface ActionHistorySummary {
@@ -46,8 +50,8 @@ export class ActionHistory {
 
   constructor(private readonly keep = 50) {}
 
-  record(action: string, opts: { app?: string; outcome?: string } = {}): ActionRecord {
-    const rec: ActionRecord = { seq: ++this.seq, action, app: opts.app, outcome: opts.outcome, at: Date.now() };
+  record(action: string, opts: { app?: string; outcome?: string; frameId?: string } = {}): ActionRecord {
+    const rec: ActionRecord = { seq: ++this.seq, action, app: opts.app, outcome: opts.outcome, at: Date.now(), frameId: opts.frameId };
     this.records.push(rec);
     if (this.records.length > this.keep) this.records.splice(0, this.records.length - this.keep);
     return rec;

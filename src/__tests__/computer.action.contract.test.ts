@@ -15,6 +15,22 @@ import { BimaxComputerRuntime } from '../computer/desktop.runtime';
 import { classifyVerification, toActionResult } from '../computer/verification';
 import { __resetConfigForTests } from '../cli/config';
 
+/**
+ * A native fallback stub for tests that build a runtime directly.
+ *
+ * The runtime asks the native helper for the frontmost app before the sidecar (4ms versus 642ms),
+ * so a runtime built without one interrogates the REAL desktop and then tries to activate apps that
+ * only exist in the fixture. Tests must describe their own desktop.
+ */
+const hermeticFallback = () => ({
+  run: jest.fn(async (cmd: any) => ({
+    ok: true, action: cmd.action, driver: 'native-helper', app: cmd.app, x: 10, y: 10,
+    summary: `${cmd.action} delivered`,
+  })),
+  quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+  frontmostApp: async () => 'Calculator',
+} as any);
+
 describe('ActionResult contract (pure)', () => {
   it('pixel no-change is delivered-but-unproven, never a failure', () => {
     const v = classifyVerification({ ok: true, prevFrameHash: 'a', nextFrameHash: 'a', hadScreenshot: true });
@@ -89,7 +105,7 @@ describe('recovery latch semantics (runtime)', () => {
   });
 
   async function latchRuntime() {
-    const runtime = new BimaxComputerRuntime();
+    const runtime = new BimaxComputerRuntime(hermeticFallback());
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' }); // ground the frame
     // Repeated no-effect clicks until the recovery authority latches stop-failure.
@@ -127,7 +143,7 @@ describe('recovery latch semantics (runtime)', () => {
   }, 30000);
 
   it('invalidates stale perception when post-action capture fails', async () => {
-    const runtime = new BimaxComputerRuntime();
+    const runtime = new BimaxComputerRuntime(hermeticFallback());
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
 
@@ -152,7 +168,7 @@ describe('recovery latch semantics (runtime)', () => {
   }, 30000);
 
   it('refuses first input before any target observation', async () => {
-    const runtime = new BimaxComputerRuntime();
+    const runtime = new BimaxComputerRuntime(hermeticFallback());
     const result = await runtime.run(
       { action: 'click', x: 10, y: 10, pid: 42, windowId: 7, app: 'Calculator', deliveryMode: 'background' },
       { cwd: '/tmp' },
@@ -162,7 +178,7 @@ describe('recovery latch semantics (runtime)', () => {
   });
 
   it('static verbs (wait/hover/move) never feed the no-progress latch', async () => {
-    const runtime = new BimaxComputerRuntime();
+    const runtime = new BimaxComputerRuntime(hermeticFallback());
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
     // Many pixel-identical waits — legitimately static — must not accrue a stuck state.

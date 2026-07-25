@@ -28,6 +28,7 @@
     "test:computer:finder": "tsx scripts/smoke-finder-mouse.ts",
     "test:computer:pip": "tsx scripts/smoke-live-pip.ts",
     "test:computer:all": "tsx scripts/smoke-computer-all.ts",
+    "test:computer:soak": "tsx scripts/soak-computer-use.ts",
     "test:acp": "node scripts/smoke-acp.mjs",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",
