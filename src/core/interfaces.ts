@@ -4,11 +4,6 @@
  * enabling dependency injection and testability.
  */
 
-export interface IDatabase {
-  connect(uri: string): Promise<void>;
-  saveEvent(payload: any): Promise<void>;
-}
-
 export interface IGovernor {
   approveTaskExecution(taskType: string, payload: any): Promise<void>;
 }

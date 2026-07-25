@@ -233,11 +233,10 @@ All run in **isolated git worktrees** so your branch is never touched until you 
   and auto checkpoints.
 - **`test.healer.ts` — `TestHealer`** (`/heal`): run tests; if red, a fix agent iterates in
   a worktree until green, then surfaces the patch on a branch.
-- **`rollback.ts` — `Rollback`** + **`versioner.ts` — `Versioner`**: backup/restore for
-  edits (powers `/undo`, `/backups`, `/diff-file`).
-- **`fs.adapter.ts`**, **`validator.ts`**, **`tester.ts`**, **`index.ts` — `SandboxManager`**:
-  filesystem abstraction, candidate validation, and test execution used by the sandboxed
-  flows above.
+- **`verify.loop.ts`**: the verify-after-edit loop used by the flows above.
+
+`/undo`, `/backups` and `/diff-file` are served by **`cli/fileEditor.ts`** (`undoLast`,
+`getBackups`, `previewDiff`), not by the sandbox.
 
 ## 9. Autonomous mode (`src/task`, `src/core`, `src/api`, `src/actions`, `src/auth`)
 
@@ -280,10 +279,11 @@ Install and integrate third-party capabilities **directly from GitHub**:
 - **`credits/credits.free.ts` — `FreeCreditsTracker`** and **`session.tracker.ts` —
   `SessionTracker`**: track free credits and per-session usage; power `/cost`.
 
-## 12. Persistence & state (`src/storage`, `src/state`)
+## 12. Persistence & state (`src/mind`, `src/state`)
 
-- **`storage/db.connection.ts` — `DatabaseConnection`**: local event/session store.
-- **`storage/state.sync.ts` — `StateSyncEngine`**: file-stat-based sync of working state.
+- **`mind/event.ledger.ts` — `EventLedger`** (`getEventLedger()`): the durable event store,
+  SQLite at `~/.bimax/ledger.db`. This is the only event store; a second, unused JSONL
+  implementation under `src/storage/` was removed in the dead-code sweep.
 - **`state/app.state.ts` / `store.ts`**: the UI's reactive store (`MessageEntry`,
   `LogEntry`, `ToolCallEntry`); bridges `cliEvents` → UI. Session save/resume (`/sessions`,
   `/resume`) and transcript replay (`/replay`) persist to `.breakglass/`.

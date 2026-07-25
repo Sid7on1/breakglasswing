@@ -28,8 +28,10 @@ different fingerprints — breaking any dedup or cache keyed on the fingerprint.
 **Fix:** `stableStringify` emits object keys sorted at every level before hashing.
 *Note:* fingerprint values change once; any persisted fingerprints reset (harmless).
 
-### 3. Validator shell injection + staging collision  `src/sandbox/validator.ts`
+### 3. Validator shell injection + staging collision  `src/sandbox/validator.ts` — FILE SINCE DELETED
 **Severity:** High (security) / Medium (concurrency)
+*Superseded:* `src/sandbox/validator.ts` had no live importers and was removed in the dead-code
+sweep, so this hardening no longer ships anywhere. Kept for the record.
 The validator interpolated a file path into a shell string
 (`npx tsc ... "${stagingFile}"` via `exec`). A path containing shell metacharacters
 (`"`, `$(...)`, backticks) could execute arbitrary commands — serious for an autonomous
@@ -41,18 +43,16 @@ agent that may act on model/attacker-influenced paths. It also named the temp fi
 
 ## Observations for the verified pass (not yet changed)
 
-- **`validator.ts` — single-file `tsc` yields false negatives.** Passing one file to `tsc`
-  ignores `tsconfig` and can't resolve project imports, so most real multi-import modules
-  will "fail" validation on `Cannot find module`. Consider `--noEmit` against the project
-  with the staged file swapped in, or an in-memory `ts` program with the project's options.
+- ~~**`validator.ts` — single-file `tsc` yields false negatives.**~~ **Moot** — file deleted
+  (no live importers). Recorded so a future audit does not re-find it.
 - **`classifier.ts` — error detail lost.** The final `throw` omits `lastError`; on a non-200
   path `lastError` isn't updated, so the retry warning to the model is empty. Include the
   last failure reason in the fatal message.
-- **`db.connection.ts` — one corrupt WAL line drops all events.** `getRawEvents` `JSON.parse`s
-  each line inside a single try; a single partial/corrupt line makes the whole call return
-  `[]`. Parse per-line and skip bad lines.
-- **`rollback.ts` — edge case.** If the target file doesn't exist in the `__EMPTY_MARKER__`
-  branch, `fs.unlink` throws and jumps to the outer catch, leaving the backup file behind.
+- ~~**`db.connection.ts` — one corrupt WAL line drops all events.**~~ **Moot** — the whole
+  `src/storage/` module was dead code and is deleted. The real event store is
+  `src/mind/event.ledger.ts` (SQLite), which does not share this bug.
+- ~~**`rollback.ts` — edge case.**~~ **Moot** — file deleted (no live importers). `/undo` and
+  `/backups` are served by `cli/fileEditor.ts`, which was never this code path.
 - **`plugin.evaluator.ts` — uses `console.log` instead of `Logger`** (inconsistent logging).
 
 ## Ruled out (checked, NOT bugs)
