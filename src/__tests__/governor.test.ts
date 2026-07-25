@@ -2,6 +2,7 @@ import { Governor } from '../governor/governor';
 import { GovernorVetoError } from '../core/errors';
 import { EventBus } from '../core/event.bus';
 import { GlobalPrompter } from '../cli/prompter';
+import { cliEvents } from '../cli/events';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 
@@ -57,6 +58,45 @@ describe('Governor', () => {
       await governor.budget.recordSpend(4.5);
       await expect(governor.approveTaskExecution('API_CALL', { estimatedCost: 1.0 }))
         .rejects.toThrow(GovernorVetoError);
+    });
+
+    // The cap used to be silent until it fired, so the first signal a user got was a veto mid-task
+    // — observed stopping a real run at 15/16 completed steps, which reads as a crash rather than a
+    // budget decision. Warn while there is still budget left to act on.
+    it('warns once as the cap approaches, while there is still budget to act on', async () => {
+      const seen: string[] = [];
+      const onStatus = (m: string) => seen.push(m);
+      cliEvents.on('status', onStatus);
+      try {
+        await governor.budget.recordSpend(3.0);   // 60% — too early to warn
+        expect(seen.filter(m => /Daily budget/.test(m))).toHaveLength(0);
+
+        await governor.budget.recordSpend(1.2);   // 84% — warn, with budget still remaining
+        const warnings = seen.filter(m => /Daily budget/.test(m));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/84% used/);
+        expect(warnings[0]).toMatch(/\$0\.80 left/);
+        expect(warnings[0]).toMatch(/MAX_DAILY_SPEND/);
+
+        await governor.budget.recordSpend(0.2);   // still under the cap — must not nag
+        expect(seen.filter(m => /Daily budget/.test(m))).toHaveLength(1);
+      } finally {
+        cliEvents.off('status', onStatus);
+      }
+    });
+
+    it('stays quiet when the governor is disabled — nothing will be blocked', async () => {
+      const seen: string[] = [];
+      const onStatus = (m: string) => seen.push(m);
+      cliEvents.on('status', onStatus);
+      governor.budget.enabled = false;
+      try {
+        await governor.budget.recordSpend(4.9);
+        expect(seen.filter(m => /Daily budget/.test(m))).toHaveLength(0);
+      } finally {
+        governor.budget.enabled = true;
+        cliEvents.off('status', onStatus);
+      }
     });
   });
 

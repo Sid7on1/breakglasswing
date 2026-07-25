@@ -263,7 +263,9 @@ export class AgentLoop {
       // another bounded override after observing the budget this call consumed.
       nextOutputTokenBudget = undefined;
 
-      const toolCalls: { id: string; name: string; args: string }[] = [];
+      // `truncated` is set when the model hit the output-token ceiling while still writing this
+      // call's arguments — see the parse-failure branch, which needs to tell the two causes apart.
+      const toolCalls: { id: string; name: string; args: string; truncated?: boolean }[] = [];
       let currentContent = '';
       // Set when the partial turn must be discarded and re-asked (after compaction or
       // a transient-error retry); triggers the `continue` below.
@@ -601,7 +603,7 @@ export class AgentLoop {
         const parallel = executableCalls.filter(tc => this.tools.getTool(tc.name)?.isConcurrencySafe);
         const sequential = executableCalls.filter(tc => !this.tools.getTool(tc.name)?.isConcurrencySafe);
 
-        const executeTool = async (tc: { id: string, name: string, args: string }) => {
+        const executeTool = async (tc: { id: string, name: string, args: string, truncated?: boolean }) => {
           const toolSpan = tracer.startSpan(`execute_tool ${tc.name}`, {
             'gen_ai.operation.name': 'execute_tool',
             'gen_ai.tool.name': tc.name,
@@ -730,7 +732,19 @@ export class AgentLoop {
           try {
             argsObj = JSON.parse(tc.args || '{}');
           } catch (e) {
-            return finish(`Failed to parse arguments: ${tc.args}`, true);
+            // Distinguish the two causes, because the fix differs and the model can only act on one
+            // of them. A call cut off at the output-token ceiling is OUR limit being reached — the
+            // model did nothing wrong and re-emitting the same call verbatim would fail again;
+            // splitting the work is what helps. Genuinely malformed JSON is a re-emit.
+            return finish(
+              tc.truncated
+                ? `Tool call was cut off at the output-token limit, so its arguments are incomplete JSON `
+                  + `(received ${(tc.args || '').length} characters). Nothing was executed. Re-issue it as a `
+                  + `smaller call — fewer arguments, or the work split across several calls.`
+                : `Failed to parse arguments as JSON, so nothing was executed. Re-issue the call with `
+                  + `valid JSON. Received: ${tc.args}`,
+              true,
+            );
           }
 
           const tool = this.tools.getTool(tc.name);

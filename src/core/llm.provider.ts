@@ -24,7 +24,10 @@ export interface ChatOptions {
 export type ChatEvent =
   | { type: 'token'; text: string }
   | { type: 'thinking'; text: string } // Model's internal reasoning — never show as the reply
-  | { type: 'tool_call'; id: string; name: string; args: string } // Note: args comes in as a string
+  // Note: args comes in as a string. `truncated` marks a call the model was still writing when it
+  // hit the output-token ceiling — its arguments are cut mid-JSON, so a parse failure here is OUR
+  // limit being reached, not the model emitting garbage, and the two need different advice.
+  | { type: 'tool_call'; id: string; name: string; args: string; truncated?: boolean }
   // Live, still-streaming tool call — args is the partial (possibly invalid) JSON accumulated so
   // far. Emitted only when the model supports partial-JSON tool streaming (caps.partialJsonTools);
   // display-only, the authoritative call still arrives as a final `tool_call`. Consumers that don't

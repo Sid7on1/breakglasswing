@@ -11,7 +11,7 @@ import { cliEvents } from '../cli/events';
 // focused on the adapter class). Imported for internal use and re-exported so existing importers
 // and tests (which import these from ./llm.adapter) keep working unchanged.
 import {
-  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
+  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, finalizeToolCalls, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy, hasMeaningfulStreamPayload,
 } from './llm.stream';
 import type { ToolCallSlot } from './llm.stream';
@@ -29,7 +29,7 @@ export function isProviderFault(status: number | null | undefined): boolean {
   return LLM_RETRY_POLICY.shouldRetry(status);
 }
 export {
-  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, classifyStreamError,
+  markCacheBreakpoint, withCacheControl, applyCacheBreakpoints, applyToolCallDelta, finalizeToolCalls, classifyStreamError,
   ThinkTagFilter, stripThink, extractJson, chooseThinkStrategy, hasMeaningfulStreamPayload,
 };
 export type { ToolCallSlot };
@@ -1022,15 +1022,27 @@ export class LlmAdapter implements LLMProvider {
       if (tail.thinking) yield { type: 'thinking', text: tail.thinking };
       if (tail.text) yield { type: 'token', text: tail.text };
 
-      // Yield every accumulated tool call, in index order, now that the stream is complete and each
-      // one's arguments are whole. (Skips empty slots a provider may have opened without a name.)
-      for (const [, slot] of [...toolAcc.entries()].sort((a, b) => a[0] - b[0])) {
-        if (slot.name) yield { type: 'tool_call', id: slot.id || `call-${Date.now()}-${slot.name}`, name: slot.name, args: slot.args };
+      // Yield every accumulated tool call, in index order, now that the stream is complete.
+      // (Skips empty slots a provider may have opened without a name.)
+      //
+      // "each one's arguments are whole" holds only when the model chose to stop. If it hit the
+      // output-token ceiling instead, the call it was still writing is cut mid-JSON — observed live
+      // as `{"action": "click", "elementIndex": 14, "frameId": "f20-65050-67`, which the agent loop
+      // reported as "Failed to parse arguments", i.e. as the model's fault. Only the LAST call can
+      // be the partial one, so mark it and let the loop give advice that matches the real cause.
+      for (const slot of finalizeToolCalls(toolAcc, finishReason)) {
+        yield {
+          type: 'tool_call',
+          id: slot.id || `call-${Date.now()}-${slot.name}`,
+          name: slot.name,
+          args: slot.args,
+          ...(slot.truncated ? { truncated: true } : {}),
+        };
       }
 
-      // Output-limit truncation: the model stopped because it hit max_tokens, not because it finished.
-      // Only signal it when there were NO tool calls (a tool-call turn legitimately stops to act, and
-      // the loop continues on its own). Surfaced so the answer isn't silently presented as complete.
+      // Output-limit truncation with no tool call at all: the answer itself is cut off. Signalled
+      // separately because the loop's recovery differs — it auto-continues the reply rather than
+      // reporting a tool failure.
       if (finishReason === 'length' && toolAcc.size === 0) {
         yield { type: 'truncated' };
       }

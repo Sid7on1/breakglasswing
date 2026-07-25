@@ -1,6 +1,7 @@
 import { Logger } from '../utils';
 import { SafetyPolicy } from './policy.engine';
 import { GovernorVetoError } from '../core/errors';
+import { cliEvents } from '../cli/events';
 import * as fsSync from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -22,6 +23,10 @@ export class BudgetVeto {
   // cap silently killing every LLM response ("Budget limit exceeded" with no output). The Governor
   // keeps this in sync with its mode.
   public enabled: boolean = true;
+  /** Fraction of the daily cap at which the user is warned that a long run is about to be stopped. */
+  private static readonly WARN_AT = 0.8;
+  /** The day the approaching-cap warning was last shown, so it appears once rather than per call. */
+  private warnedOn: string | null = null;
 
   constructor() {
     const creditsDir = path.join(process.cwd(), '.breakglass/credits');
@@ -97,7 +102,34 @@ export class BudgetVeto {
       this.currentDailySpend += actualCostUsd;
       await this.savePersistentSpendAsync();
       Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
+      this.warnIfApproachingCap();
     });
+  }
+
+  /**
+   * Tell the user BEFORE the cap stops them, once per day.
+   *
+   * The cap was previously silent until it fired: spend crossed only into a Logger.info line the
+   * user never sees, and the first signal was a veto mid-task — observed killing a real run at
+   * 15/16 completed steps, which reads as a crash rather than a budget decision. A warning at 80%
+   * is the difference between raising the cap now and losing the work in progress.
+   *
+   * Caller holds the budget mutex. Never throws: a warning that breaks a turn would be worse than
+   * the silence it replaces.
+   */
+  private warnIfApproachingCap(): void {
+    if (!this.enabled) return;
+    const cap = SafetyPolicy.maxDailySpendUsd;
+    if (!(cap > 0) || this.warnedOn === this.spendDate) return;
+    if (this.currentDailySpend < cap * BudgetVeto.WARN_AT) return;
+    this.warnedOn = this.spendDate;
+    const remaining = Math.max(0, cap - this.currentDailySpend);
+    try {
+      cliEvents.emit('status',
+        `Daily budget ${Math.round((this.currentDailySpend / cap) * 100)}% used `
+        + `($${this.currentDailySpend.toFixed(2)} of $${cap.toFixed(2)}, $${remaining.toFixed(2)} left). `
+        + `Raise it with MAX_DAILY_SPEND or disable the cap with /governor off before starting long work.`);
+    } catch { /* the warning is an observer — never let it break a turn */ }
   }
 
   async checkVeto(estimatedCostUsd: number): Promise<void> {
@@ -130,6 +162,7 @@ export class BudgetVeto {
       this.currentDailySpend += actualCostUsd;
       await this.savePersistentSpendAsync();
       Logger.info(`[Governor] Budget updated: $${this.currentDailySpend.toFixed(2)} / $${SafetyPolicy.maxDailySpendUsd.toFixed(2)}`);
+      this.warnIfApproachingCap();
       return result;
     });
   }

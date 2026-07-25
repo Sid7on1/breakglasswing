@@ -135,6 +135,30 @@ export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?:
 }
 
 /**
+ * Put the accumulated tool calls in emission order and mark the one the output ceiling cut off.
+ *
+ * `finish_reason: 'length'` means the model stopped because it ran out of output budget, not
+ * because it was done. If that happened while it was writing a tool call, that call's arguments are
+ * cut mid-JSON — seen live as `{"action": "click", "elementIndex": 14, "frameId": "f20-65050-67`,
+ * which the agent loop then reported as "Failed to parse arguments", blaming the model for our
+ * limit. Only the LAST call can be the partial one: earlier calls were completed before the model
+ * moved on to it.
+ *
+ * Pure — exported for testing.
+ */
+export function finalizeToolCalls(
+  acc: Map<number, ToolCallSlot>,
+  finishReason: string | null | undefined,
+): Array<ToolCallSlot & { truncated?: boolean }> {
+  const named = [...acc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, slot]) => slot)
+    .filter(slot => slot.name);
+  if (finishReason !== 'length' || named.length === 0) return named;
+  return named.map((slot, i) => (i === named.length - 1 ? { ...slot, truncated: true } : slot));
+}
+
+/**
  * Classify an error thrown while streaming a chat completion so the agent loop knows
  * whether — and how — to recover. Pure (no side effects) so it can be unit-tested.
  *

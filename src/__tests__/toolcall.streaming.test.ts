@@ -1,4 +1,4 @@
-import { applyToolCallDelta, hasMeaningfulStreamPayload, ToolCallSlot } from '../core/llm.adapter';
+import { applyToolCallDelta, finalizeToolCalls, hasMeaningfulStreamPayload, ToolCallSlot } from '../core/llm.adapter';
 
 describe('hasMeaningfulStreamPayload — first-token attribution', () => {
   it('ignores transport preambles and usage-only frames', () => {
@@ -61,5 +61,41 @@ describe('applyToolCallDelta — streaming tool-call accumulation', () => {
     ]);
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].args)).toEqual({ pattern: 'todo' });
+  });
+});
+
+describe('finalizeToolCalls — output-ceiling truncation', () => {
+  const acc = (...slots: Array<Partial<ToolCallSlot>>) => {
+    const m = new Map<number, ToolCallSlot>();
+    slots.forEach((s, i) => m.set(i, { id: `c${i}`, name: 'ComputerTool', args: '{}', ...s }));
+    return m;
+  };
+
+  it('marks the call the model was still writing when the ceiling hit', () => {
+    // The real emission: args cut mid-string, which the loop reported as the MODEL emitting
+    // garbage. It is our output limit being reached, and the advice for the two differs.
+    const out = finalizeToolCalls(acc({ args: '{"action": "click", "elementIndex": 14, "frameId": "f20-65050-67' }), 'length');
+    expect(out).toHaveLength(1);
+    expect(out[0].truncated).toBe(true);
+    expect(() => JSON.parse(out[0].args)).toThrow();
+  });
+
+  it('marks only the LAST call — earlier ones completed before the model moved on', () => {
+    const out = finalizeToolCalls(acc({ args: '{"a":1}' }, { args: '{"b":2}' }, { args: '{"c":' }), 'length');
+    expect(out.map(c => !!c.truncated)).toEqual([false, false, true]);
+  });
+
+  it('marks nothing when the model stopped because it was done', () => {
+    const out = finalizeToolCalls(acc({ args: '{"a":1}' }, { args: '{"b":2}' }), 'stop');
+    expect(out.every(c => !c.truncated)).toBe(true);
+  });
+
+  it('keeps emission in index order and drops unnamed slots', () => {
+    const m = new Map<number, ToolCallSlot>([
+      [1, { id: 'b', name: 'BashTool', args: '{}' }],
+      [0, { id: 'a', name: 'ReadFileTool', args: '{}' }],
+      [2, { id: '', name: '', args: '' }],
+    ]);
+    expect(finalizeToolCalls(m, 'stop').map(c => c.name)).toEqual(['ReadFileTool', 'BashTool']);
   });
 });
