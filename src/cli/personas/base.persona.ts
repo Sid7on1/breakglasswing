@@ -28,6 +28,7 @@ import { getExemplarStore } from '../../mind/exemplar.store';
 import { getPolicyArms } from '../../mind/policy.arms';
 import { getHarnessTuner } from '../../mind/harness.tuner';
 import { mentionsInstalledApp } from '../../computer/installed.apps';
+import { COMPUTER_USE_PLAYBOOK } from './computer.playbook';
 
 export interface PersonaConfig {
   name: string;
@@ -475,6 +476,11 @@ Rules:
     let modelPrompt = prompt;
     if (explicitlyRequiresComputerUse(prompt)) {
       this.messages = isolateComputerUseHistory(this.messages);
+      // The scenario guidance (multi-app, arranging, drag, Spaces, clipboard, composers) used to
+      // ride inside ComputerTool's schema, so EVERY request paid for it — measured at 3,461 of the
+      // ~12,000 tokens of tool schemas sent per turn. None of it is needed to choose the tool, only
+      // to use it well, so it arrives here instead: on the turns that actually touch the desktop.
+      modelPrompt += `\n\n${COMPUTER_USE_PLAYBOOK}`;
       modelPrompt += '\n\n[Fresh computer-use constraint: Complete this turn only from screenshots captured after this request. Prior shell, browser, assistant, memory, and tool values are not evidence. Navigate until the requested screen and value are visibly present; otherwise report that visual verification failed.]';
       if (requiresComputerChecklist(prompt)) {
         modelPrompt += '\n\n[Long-horizon computer task: Before the first ComputerTool action, create a TodoWriteTool item for every requested UI phase and final end state. Verify and complete each item in order. A partial answer is a failed turn: do not reply while any item is pending or in progress.]';

@@ -50,6 +50,10 @@ program
   .option('-y, --yes', 'Skip all permission prompts')
   .option('--print-with-tools', 'Include tool call output in print mode')
   .option('--acp', 'Run as an Agent Client Protocol agent over stdio (embed in Zed/editors)')
+  // Checked below as `cliFlags.headless`, and routed to by bin/bimax.js, but never registered here —
+  // so `bimax --headless` died in the argument parser ("unknown option") and only BIMAX_HEADLESS=1
+  // worked. The flag the launcher documents has to exist.
+  .option('--headless', 'Run the engine over the NDJSON stdio protocol for an embedded front-end')
   .option('--dangerously-skip-permissions', 'Skip all permission prompts');
 
 program.parse(process.argv);
