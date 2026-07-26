@@ -82,7 +82,7 @@ export interface MechanismChoice {
 
 /** Acting verbs that move a pointer or send keystrokes (vs. observation/discovery verbs). */
 const POINTER_VERBS = new Set(['click', 'drag', 'scroll', 'move', 'hover', 'hold', 'mouse_down', 'mouse_up']);
-const KEYBOARD_VERBS = new Set(['type', 'key']);
+const KEYBOARD_VERBS = new Set(['type', 'key', 'copy', 'paste']);
 
 /** Per-kind defaults for the capture/background/owner physics. */
 export function defaultSurfaceTraits(kind: SurfaceKind): Pick<ExecutionSurface, 'focusOwner' | 'captureSafe' | 'backgroundCapable'> {
@@ -122,6 +122,13 @@ export function chooseMechanism(
   // A pure AX value set can always go through accessibility without foregrounding.
   if (isAxSet) {
     return { mechanism: 'accessibility', requiresForeground: false, reason: 'accessibility value set — delivered without moving the physical cursor or stealing focus' };
+  }
+
+  // Window placement is delivered through Accessibility, but the runtime deliberately fronts the
+  // target first (fullscreen changes are otherwise silently refused by macOS). Reflect that real
+  // focus ownership instead of labelling the action as observation-only.
+  if (action === 'arrange') {
+    return { mechanism: 'accessibility', requiresForeground: true, reason: 'window management through accessibility — target is brought frontmost before placement' };
   }
 
   if (isPointer || isKeyboard) {

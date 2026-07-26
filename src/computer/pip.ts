@@ -17,6 +17,9 @@ export interface LivePipStatus {
   continuous: boolean;
   captureSafe: boolean;
   surface?: string;
+  /** Exact window the preview is DESIRED to show. Exposing identity (not just a human label) lets
+   * the runtime prove preview, perception, and input all refer to the same target. */
+  target?: { pid: number; windowId: number };
   frames?: number;
   error?: string;
   /** Measured preview throughput/latency from the capture process — absent until the first report. */
@@ -34,7 +37,9 @@ export interface LivePipStatus {
 }
 
 export interface LivePipPort {
-  sync(target: LivePipTarget | null, enabled: boolean): void;
+  /** Resolves once the previous preview process is gone and the replacement has been started.
+   * Callers that do not participate in an input-target switch may intentionally ignore it. */
+  sync(target: LivePipTarget | null, enabled: boolean): void | Promise<void>;
   stop(): Promise<void>;
   status(): LivePipStatus;
   /** The preview process's pid, so a hit test can recognise the panel as the thing under a point. */
@@ -64,7 +69,7 @@ export class NativeLivePip implements LivePipPort {
     captureSafe: false,
   };
 
-  public sync(target: LivePipTarget | null, enabled: boolean): void {
+  public async sync(target: LivePipTarget | null, enabled: boolean): Promise<void> {
     const clean = target && target.pid > 0 && target.windowId > 0 ? target : null;
     const key = clean ? `${clean.pid}:${clean.windowId}` : null;
     this.desired = { target: clean, enabled, generation: this.desired.generation + 1 };
@@ -73,10 +78,11 @@ export class NativeLivePip implements LivePipPort {
       enabled,
       captureSafe: !!clean,
       surface: clean?.label,
+      target: clean ? { pid: clean.pid, windowId: clean.windowId } : undefined,
       error: undefined,
     };
     if (enabled && key && key === this.childKey && this.child && this.child.exitCode == null) return;
-    void this.apply(this.desired);
+    await this.apply(this.desired);
   }
 
   /** The preview process's pid — null when no panel is running. */
@@ -104,7 +110,7 @@ export class NativeLivePip implements LivePipPort {
 
   public async stop(): Promise<void> {
     this.desired = { target: null, enabled: false, generation: this.desired.generation + 1 };
-    this.state = { enabled: false, running: false, continuous: true, captureSafe: false };
+    this.state = { enabled: false, running: false, continuous: true, captureSafe: false, target: undefined };
     await this.stopChild();
   }
 
@@ -123,6 +129,7 @@ export class NativeLivePip implements LivePipPort {
         continuous: true,
         captureSafe: true,
         surface: request.target.label,
+        target: { pid: request.target.pid, windowId: request.target.windowId },
         error: 'native ScreenCaptureKit PiP helper is unavailable',
       };
       cliEvents.emit('status', 'Continuous computer-use PiP is unavailable; desktop control remains active');
@@ -150,6 +157,7 @@ export class NativeLivePip implements LivePipPort {
       continuous: true,
       captureSafe: true,
       surface: target.label,
+      target: { pid: target.pid, windowId: target.windowId },
     };
 
     let stderr = '';

@@ -197,7 +197,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
 
   const fakeFallback = () => {
     const run = jest.fn(async (cmd: any) => ({
-      ok: true, action: cmd.action, driver: 'native-helper', app: cmd.app, x: 10, y: 10,
+      ok: true, action: cmd.action, driver: 'native-helper', app: cmd.app, x: cmd.x, y: cmd.y,
       summary: `${cmd.action} delivered`,
     }));
     return {
@@ -221,7 +221,10 @@ describe('routing: one driver implementation per action, one ActionResult', () =
         fs.writeFileSync(SHOT, `frame-${Date.now()}-${Math.random()}`); // always-fresh frame
         return ok({
           screenshot_file_path: SHOT, screenshot_width: 500, screenshot_height: 700,
-          elements: [{ element_index: 1, role: 'AXWindow', frame: { x: 0, y: 0, w: 500, h: 700 } }],
+          elements: [
+            { element_index: 0, role: 'AXWindow', frame: { x: 0, y: 0, w: 500, h: 700 } },
+            { element_index: 1, role: 'AXButton', label: 'Test target', frame: { x: 0, y: 0, w: 40, h: 40 } },
+          ],
         });
       }
       if (name === 'list_windows') return ok({ windows: [{ window_id: 7, is_on_screen: true, bounds: { width: 500, height: 700 } }] });
@@ -247,7 +250,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
     const runtime = new BimaxComputerRuntime(fallback);
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
-    const clicked = await runtime.run({ action: 'click', x: 10, y: 10 }, { cwd: '/tmp' });
+    const clicked = await runtime.run({ action: 'click', elementIndex: 1 }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     expect(callTool.mock.calls.some(([a]) => a.name === 'click')).toBe(false);
     const fallbackInputCalls = (fallback.run as jest.Mock).mock.calls.filter(([c]) => INPUT_VERBS.has(c.action));
@@ -260,7 +263,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
     const runtime = new BimaxComputerRuntime(fallback);
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
-    const clicked = await runtime.run({ action: 'click', x: 10, y: 10, deliveryMode: 'background' }, { cwd: '/tmp' });
+    const clicked = await runtime.run({ action: 'click', elementIndex: 1, deliveryMode: 'background' }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     expect(callTool.mock.calls.some(([a]) => a.name === 'click')).toBe(true);
     expect((fallback.run as jest.Mock).mock.calls.filter(([c]) => INPUT_VERBS.has(c.action))).toHaveLength(0);
@@ -273,7 +276,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
     const runtime = new BimaxComputerRuntime(fallback);
     await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
-    const clicked = await runtime.run({ action: 'click', x: 10, y: 10 }, { cwd: '/tmp' });
+    const clicked = await runtime.run({ action: 'click', elementIndex: 1 }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     // Input delivered exactly once, by the native driver.
     const nativeClicks = (fallback.run as jest.Mock).mock.calls.filter(([c]) => c.action === 'click');
