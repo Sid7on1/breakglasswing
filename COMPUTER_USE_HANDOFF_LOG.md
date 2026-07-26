@@ -197,3 +197,38 @@ Clicking the sheet's own Cancel button was refused:
 Either the sheet was observed mid-animation and this is preflight working exactly as designed, or
 sheet-hosted element frames do not map into the same space as window elements. Not yet determined.
 Worth resolving, because clicking a save/confirm sheet is an extremely common interaction.
+
+## 5. Fixes landed
+
+Three commits on top of the nine inherited ones:
+
+| Commit | What |
+|---|---|
+| `27a65743` | `test(computer)`: pins delivered-vs-observed on the key path — the click path had this test, the key path did not |
+| `852d056c` | `fix(scripts)`: the live receipt check now polls for the save sheet, re-observes before clicking, proves the sheet is gone, and falls back to Escape reporting `manualCleanupRequired` rather than claiming success |
+| `4cfe37e1` | `feat(scripts)`: the cross-app probe and this log |
+
+Gates after the fixes: **17/17 suites, 264/264 tests** (263 inherited + 1 new), `tsc --noEmit`
+clean, `eslint --quiet` clean.
+
+## 6. Open items, in the order I would take them
+
+1. **Shape/contour perception has never fired live** (4.2). Zero shape regions across five apps.
+   Needs a deliberate target — an app whose AX tree exposes unlabeled controls that survive to the
+   ambiguity trigger — before the feature can be called proven.
+2. **WhatsApp yields a menu-bar-only tree** with no window content, no frame, and no Vision
+   trigger. The worst tree of the five is the one the ambiguity path missed. This is the single
+   biggest correctness gap found.
+3. **Sheet-hosted controls may not hit-test** (4.5). Either preflight correctly caught a
+   mid-animation sheet, or sheet element frames map into a different space. Clicking a save or
+   confirm sheet is common enough that this needs an answer.
+4. **Driver 0.12.6** — still pinned at 0.12.3, correctly. Do not touch until 1–3 are settled;
+   there is no reason to add sidecar variance while perception gaps are open.
+5. The nine inherited commits are gated at the tip only, not individually. If bisectable history
+   matters, that needs a pass.
+
+## 7. Standing note on live verification
+
+Anything that drives the real desktop must leave it clean, and must be able to *prove* it left it
+clean. Two of the four issues in this session came from a cleanup step that reported success it had
+not verified. The receipt architecture applies to the test scripts too, not just the runtime.
