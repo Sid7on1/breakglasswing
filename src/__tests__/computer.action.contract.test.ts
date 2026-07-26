@@ -212,6 +212,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
     process.env.BIMAX_COMPUTER_USE_DRIVER = process.execPath;
     process.env.BIMAX_COMPUTER_RECORD = '0';
     process.env.BIMAX_COMPUTER_PIP = '0';
+    process.env.BIMAX_COMPUTER_VISIBLE = '1';
     fs.writeFileSync(SHOT, `frame-${Date.now()}-${Math.random()}`);
     (openClient as jest.Mock).mockResolvedValue({ callTool, close: jest.fn() });
     callTool.mockImplementation(async ({ name }: any) => {
@@ -243,7 +244,7 @@ describe('routing: one driver implementation per action, one ActionResult', () =
 
   const INPUT_VERBS = new Set(['click', 'type', 'key', 'drag', 'scroll', 'move', 'hover', 'hold', 'mouse_down', 'mouse_up']);
 
-  it('a saved legacy background preference cannot select synthetic input', async () => {
+  it('a saved background-first preference keeps input off the physical cursor', async () => {
     process.env.BIMAX_COMPUTER_VISIBLE = '0';
     __resetConfigForTests();
     const fallback = fakeFallback();
@@ -252,9 +253,9 @@ describe('routing: one driver implementation per action, one ActionResult', () =
     await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
     const clicked = await runtime.run({ action: 'click', elementIndex: 1 }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
-    expect(callTool.mock.calls.some(([a]) => a.name === 'click')).toBe(false);
+    expect(callTool.mock.calls.some(([a]) => a.name === 'click')).toBe(true);
     const fallbackInputCalls = (fallback.run as jest.Mock).mock.calls.filter(([c]) => INPUT_VERBS.has(c.action));
-    expect(fallbackInputCalls.filter(([c]) => c.action === 'click')).toHaveLength(1);
+    expect(fallbackInputCalls.filter(([c]) => c.action === 'click')).toHaveLength(0);
     expect(clicked.actionResult).toBeDefined(); // exactly one ActionResult, from evidence
   });
 

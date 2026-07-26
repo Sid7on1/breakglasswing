@@ -219,4 +219,25 @@ describe('buildScreenshotObservation completion contract', () => {
       fs.unlinkSync(screenshot);
     }
   });
+
+  it('labels a second desktop image as context-only and keeps coordinates on the target frame', () => {
+    const target = path.join(os.tmpdir(), 'bimax-target-frame.png');
+    const display = path.join(os.tmpdir(), 'bimax-display-context.png');
+    fs.writeFileSync(target, Buffer.from([1, 2, 3, 4]));
+    fs.writeFileSync(display, Buffer.from([5, 6, 7, 8]));
+    try {
+      const observation = buildScreenshotObservation(target, {
+        source: 'ComputerTool', action: 'observe', width: 500, height: 700,
+        displayScreenshot: display, displayWidth: 1440, displayHeight: 900,
+      });
+      expect(observation?.content.filter(part => part.type === 'image_url')).toHaveLength(2);
+      const labels = observation?.content.filter(part => part.type === 'text').map(part => (part as any).text).join('\n');
+      expect(labels).toMatch(/Image 1 is the TARGET ACTION FRAME/);
+      expect(labels).toMatch(/Image 2 is DISPLAY CONTEXT ONLY/);
+      expect(labels).toMatch(/Never use Image 2 pixels/);
+    } finally {
+      fs.unlinkSync(target);
+      fs.unlinkSync(display);
+    }
+  });
 });

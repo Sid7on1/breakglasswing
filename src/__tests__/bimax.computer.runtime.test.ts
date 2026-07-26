@@ -23,6 +23,9 @@ describe('BimaxComputerRuntime', () => {
     process.env.BIMAX_COMPUTER_USE_DRIVER = process.execPath;
     process.env.BIMAX_COMPUTER_RECORD = '0';
     process.env.BIMAX_COMPUTER_PIP = '0';
+    // Isolate the suite from the developer machine's global config. Individual background tests
+    // opt out explicitly through deliveryMode or override this env value.
+    process.env.BIMAX_COMPUTER_VISIBLE = '1';
     __resetConfigForTests();
     (openClient as jest.Mock).mockResolvedValue({ callTool, close: jest.fn() });
     callTool.mockImplementation(async ({ name }: any) => {
@@ -50,6 +53,7 @@ describe('BimaxComputerRuntime', () => {
     delete process.env.BIMAX_COMPUTER_USE_DRIVER;
     delete process.env.BIMAX_COMPUTER_RECORD;
     delete process.env.BIMAX_COMPUTER_PIP;
+    delete process.env.BIMAX_COMPUTER_VISIBLE;
     __resetConfigForTests();
   });
 
@@ -101,6 +105,45 @@ describe('BimaxComputerRuntime', () => {
       arguments: { enabled: false, cursor_id: expect.stringMatching(/^bimax-/) },
     });
     expect((openClient as jest.Mock).mock.calls[0][0].args).not.toContain('--experimental-pip');
+  });
+
+  it('honors background-first config without fronting the app and prefers semantic handles', async () => {
+    process.env.BIMAX_COMPUTER_VISIBLE = '0';
+    __resetConfigForTests();
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'WhatsApp', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/whatsapp.png', screenshot_width: 500, screenshot_height: 700,
+        elements: [
+          { element_index: 1, element_token: 'composer', role: 'AXTextArea', label: 'Message composer', frame: { x: 40, y: 620, w: 380, h: 50 } },
+          { element_index: 2, element_token: 'send', role: 'AXButton', label: 'Send', frame: { x: 440, y: 620, w: 40, h: 40 } },
+        ],
+      });
+      if (name === 'type_text' || name === 'click') return result({ effect: 'delivered' });
+      return result({ ok: true });
+    });
+    const nativeRun = jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action }));
+    const runtime = new BimaxComputerRuntime({
+      run: nativeRun,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Codex',
+    } as any);
+
+    const opened = await runtime.run({ action: 'open', app: 'WhatsApp' });
+    expect(opened.ok).toBe(true);
+    await runtime.run({ action: 'type', query: 'Message composer', text: 'hi' });
+    await runtime.run({ action: 'click', query: 'Send' });
+
+    expect(callTool.mock.calls.some(([arg]) => arg.name === 'bring_to_front')).toBe(false);
+    expect(nativeRun.mock.calls.some(([cmd]) => ['click', 'type', 'key'].includes(cmd.action))).toBe(false);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'type_text', arguments: expect.objectContaining({ delivery_mode: 'background', element_token: 'composer' }),
+    }));
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'click', arguments: expect.objectContaining({ delivery_mode: 'background', element_token: 'send' }),
+    }));
   });
 
   it('attaches native sRGB evidence and reports bounded temporal element changes', async () => {
@@ -280,7 +323,10 @@ describe('BimaxComputerRuntime', () => {
     expect(scoped.recording?.scope).toContain('window 7');
     const startCall = callTool.mock.calls.filter(([a]) => a.name === 'start_recording').pop()?.[0];
     expect(startCall.arguments).toEqual(expect.objectContaining({ pid: 42, window_id: 7 }));
-    expect(await runtime.pipStatus()).toEqual(expect.objectContaining({ captureSafe: true, surface: expect.stringContaining('window 7') }));
+    expect(await runtime.pipStatus()).toEqual(expect.objectContaining({
+      captureSafe: true,
+      surface: expect.stringMatching(/window 7/i),
+    }));
   });
 
   it('ends the native session at a turn boundary so PiP cannot linger', async () => {
@@ -452,7 +498,7 @@ describe('BimaxComputerRuntime', () => {
     const clicked = await runtime.run({ action: 'click', query: 'Chats', deliveryMode: 'background' }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     const click = callTool.mock.calls.filter(([a]) => a.name === 'click').map(([a]) => a.arguments).pop();
-    expect(click).toEqual(expect.objectContaining({ x: 40, y: 100 })); // the exact "Chats" button
+    expect(click).toEqual(expect.objectContaining({ element_index: 1 })); // exact semantic control
   });
 
   it('resolves a click query to the clickable control, not an identically-named heading', async () => {
@@ -467,7 +513,7 @@ describe('BimaxComputerRuntime', () => {
     const clicked = await runtime.run({ action: 'click', query: 'Chats', deliveryMode: 'background' }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     const click = callTool.mock.calls.filter(([a]) => a.name === 'click').map(([a]) => a.arguments).pop();
-    expect(click).toEqual(expect.objectContaining({ x: 40, y: 100 })); // the button, not the heading
+    expect(click).toEqual(expect.objectContaining({ element_index: 2 })); // the button, not the heading
   });
 
   it('names unlabeled icon buttons so each is distinctly addressable', async () => {
@@ -496,7 +542,7 @@ describe('BimaxComputerRuntime', () => {
     const clicked = await runtime.run({ action: 'click', query: target, deliveryMode: 'background' }, { cwd: '/tmp' });
     expect(clicked.ok).toBe(true);
     const click = callTool.mock.calls.filter(([a]) => a.name === 'click').map(([a]) => a.arguments).pop();
-    expect(click).toEqual(expect.objectContaining({ x: 295, y: 615 }));
+    expect(click).toEqual(expect.objectContaining({ element_index: 3 }));
   });
 
   it('re-acquires the previous turn\'s window so a follow-up request is not stranded', async () => {
@@ -1595,7 +1641,7 @@ describe('BimaxComputerRuntime', () => {
     const calls = callTool.mock.calls.filter(([arg]) => arg.name === 'click').map(([arg]) => arg.arguments);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual(expect.objectContaining({ pid: 42, window_id: 7, x: 100, y: 100 }));
-    expect(calls[1]).toEqual(expect.objectContaining({ pid: 42, window_id: 7, x: 60, y: 40 }));
+    expect(calls[1]).toEqual(expect.objectContaining({ pid: 42, window_id: 7, element_token: 'storage-token' }));
   });
 
   it('maps a captured label frame into model-visible screenshot pixels', async () => {
@@ -1631,10 +1677,10 @@ describe('BimaxComputerRuntime', () => {
       expect.objectContaining({ element_index: 10, frame: { x: 100, y: 100, w: 200, h: 80 } }),
     ]));
     const clicked = await runtime.run({ action: 'click', query: 'General', deliveryMode: 'background' });
-    expect(clicked.summary).toContain('native label frame');
+    expect(clicked.summary).toContain('accessibility element token');
     const clicks = callTool.mock.calls.filter(([arg]) => arg.name === 'click').map(([arg]) => arg.arguments);
     expect(clicks).toHaveLength(1);
-    expect(clicks[0]).toEqual(expect.objectContaining({ x: 200, y: 140, pid: 42, window_id: 7 }));
+    expect(clicks[0]).toEqual(expect.objectContaining({ element_token: 'general', pid: 42, window_id: 7 }));
   });
 
   it('keeps enough post-action elements to reach controls beyond a long sidebar', async () => {
@@ -1699,7 +1745,7 @@ describe('BimaxComputerRuntime', () => {
 
     await runtime.run({ action: 'click', query: 'Battery Health · Normal', deliveryMode: 'background' });
     const click = callTool.mock.calls.find(([arg]) => arg.name === 'click')?.[0];
-    expect(click.arguments).toEqual(expect.objectContaining({ x: 635, y: 115, pid: 42, window_id: 7 }));
+    expect(click.arguments).toEqual(expect.objectContaining({ element_token: 'battery-detail', pid: 42, window_id: 7 }));
   });
 
   it('refuses semantic clicks on structural accessibility containers', async () => {
@@ -2407,6 +2453,150 @@ describe('BimaxComputerRuntime', () => {
     expect(menuNative?.[0]).toEqual(expect.objectContaining({ x: 400, y: 300 }));
     expect(callTool.mock.calls.filter(([arg]) => arg.name === 'bring_to_front').length).toBe(frontsBefore);
     fs.rmSync(displayPng, { force: true });
+  });
+
+  it('attaches human display context while keeping the target window as the action frame', async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const writePngHeader = (file: string, width: number, height: number) => {
+      const png = Buffer.alloc(24);
+      png.write('\x89PNG\r\n\x1a\n', 0, 'binary');
+      png.write('IHDR', 12, 'ascii');
+      png.writeUInt32BE(width, 16);
+      png.writeUInt32BE(height, 20);
+      fs.writeFileSync(file, png);
+    };
+    const windowPng = path.join(os.tmpdir(), `bimax-human-window-${Date.now()}.png`);
+    const displayPng = path.join(os.tmpdir(), `bimax-human-display-${Date.now()}.png`);
+    writePngHeader(windowPng, 500, 350);
+    writePngHeader(displayPng, 1440, 900);
+    const targetFrame = { x: 100, y: 50, w: 500, h: 350 };
+
+    const nativeRun = jest.fn(async (cmd: any) => {
+      if (cmd.action === 'screenshot') {
+        return { ok: true, action: cmd.action, driver: 'native-helper', screenshot: displayPng, width: 1440, height: 900, summary: 'display captured' };
+      }
+      if (cmd.action === 'screens') {
+        return { ok: true, action: cmd.action, driver: 'native-helper', screens: [{ index: 1, main: true, scale: 2, frame: { x: 0, y: 0, w: 720, h: 450 }, visible: { x: 0, y: 13, w: 720, h: 425 } }], summary: 'screens' };
+      }
+      if (cmd.action === 'window_frame') {
+        return { ok: true, action: cmd.action, driver: 'native-helper', windowFrame: targetFrame, summary: 'focused window frame' };
+      }
+      if (cmd.action === 'window_at') {
+        return {
+          ok: true, action: cmd.action, driver: 'native-helper', summary: 'target owns point',
+          windowAt: {
+            owner_pid: 42, owner_name: 'App', window_id: 7,
+            top_owner_name: 'App', top_window_id: 7, layer: 0,
+            bounds: targetFrame,
+            element_chain: [{ pid: 42, role: 'AXButton', title: 'Send', frame: { x: 150, y: 100, w: 80, h: 40 } }],
+          },
+        };
+      }
+      return { ok: true, action: cmd.action, driver: 'native-helper', x: cmd.x, y: cmd.y, app: 'App', summary: cmd.action };
+    });
+    const native: any = {
+      run: nativeRun,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'App',
+    };
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'bring_to_front' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'App', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'App', active: true }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 100, y: 50, width: 500, height: 350 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: windowPng, screenshot_width: 500, screenshot_height: 350,
+        elements: [
+          { element_index: 0, role: 'AXWindow', label: 'Document', frame: targetFrame },
+          { element_index: 1, element_token: 'send', role: 'AXButton', label: 'Send', enabled: true, frame: { x: 150, y: 100, w: 80, h: 40 } },
+        ],
+      });
+      return result({ ok: true });
+    });
+
+    try {
+      const runtime = new BimaxComputerRuntime(native);
+      await runtime.run({ action: 'open', app: 'App', deliveryMode: 'foreground' });
+      const observed = await runtime.run({ action: 'observe' });
+
+      expect(observed.screenshot).toBe(windowPng);
+      expect(observed.displayScreenshot).toBe(displayPng);
+      expect(observed).toEqual(expect.objectContaining({
+        width: 500, height: 350, displayWidth: 1440, displayHeight: 900, windowId: 7,
+      }));
+      expect((observed.details as any)?.perception?.view).toEqual(expect.objectContaining({
+        mode: 'dual-frame', actionVisual: 'exact-window', contextVisual: 'display', semantics: 'exact-window',
+      }));
+      const send = (observed.elements as any[]).find(element => element.label === 'Send');
+      // Coordinates stay local to the clean target-window image; the Retina display is context only.
+      expect(send.frame).toEqual({ x: 50, y: 50, w: 80, h: 40 });
+
+      const frontsBefore = callTool.mock.calls.filter(([arg]) => arg.name === 'bring_to_front').length;
+      const clicked = await runtime.run({ action: 'click', elementToken: 'send', deliveryMode: 'foreground' });
+      expect(clicked.ok).toBe(true);
+      expect(nativeRun).toHaveBeenCalledWith(expect.objectContaining({ action: 'click', x: 190, y: 120 }), undefined);
+      // Foreground mode may raise before physical input; background mode (covered separately) does not.
+      expect(callTool.mock.calls.filter(([arg]) => arg.name === 'bring_to_front').length).toBeGreaterThanOrEqual(frontsBefore);
+    } finally {
+      fs.rmSync(windowPng, { force: true });
+      fs.rmSync(displayPng, { force: true });
+    }
+  });
+
+  it('adopts the Accessibility-focused non-modal window when a same-app click creates one', async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const windowPng = path.join(os.tmpdir(), `bimax-focused-window-${Date.now()}.png`);
+    const png = Buffer.alloc(24);
+    png.write('\x89PNG\r\n\x1a\n', 0, 'binary');
+    png.write('IHDR', 12, 'ascii');
+    png.writeUInt32BE(600, 16);
+    png.writeUInt32BE(500, 20);
+    fs.writeFileSync(windowPng, png);
+    const first = { window_id: 7, is_on_screen: true, bounds: { x: 40, y: 40, width: 600, height: 500 } };
+    const created = { window_id: 9, is_on_screen: true, bounds: { x: 90, y: 90, width: 600, height: 500 } };
+    let liveWindows = [first];
+
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'bring_to_front' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'App', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'App', active: true }] });
+      if (name === 'list_windows') return result({ windows: liveWindows });
+      if (name === 'get_window_state') {
+        const id = Number(args?.window_id || 0);
+        const bounds = id === 9 ? { x: 90, y: 90, w: 600, h: 500 } : { x: 40, y: 40, w: 600, h: 500 };
+        return result({
+          screenshot_file_path: windowPng, screenshot_width: 600, screenshot_height: 500,
+          elements: [{ element_index: 0, role: 'AXWindow', label: `Document ${id}`, frame: bounds }],
+        });
+      }
+      return result({ ok: true });
+    });
+    const native: any = {
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'App',
+      run: jest.fn(async (cmd: any) => {
+        if (cmd.action === 'window_frame') {
+          const bounds = liveWindows.length > 1 ? created.bounds : first.bounds;
+          return { ok: true, action: cmd.action, driver: 'native-helper', windowFrame: { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height }, summary: 'focused frame' };
+        }
+        if (cmd.action === 'window_at') return { ok: true, action: cmd.action, driver: 'native-helper', summary: 'no reliable centre hit' };
+        if (cmd.action === 'screens') return { ok: true, action: cmd.action, driver: 'native-helper', screens: [{ index: 1, main: true, scale: 2, frame: { x: 0, y: 0, w: 1440, h: 900 }, visible: { x: 0, y: 25, w: 1440, h: 850 } }], summary: 'screens' };
+        if (cmd.action === 'screenshot') return { ok: true, action: cmd.action, driver: 'native-helper', screenshot: windowPng, summary: 'display' };
+        return { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+      }),
+    };
+
+    try {
+      const runtime = new BimaxComputerRuntime(native);
+      await runtime.run({ action: 'open', app: 'App' });
+      liveWindows = [first, created];
+      const observed = await runtime.run({ action: 'observe', includeScreenshot: false });
+      expect(observed.windowId).toBe(9);
+      expect((observed.elements as any[])[0]?.label).toBe('Document 9');
+      expect(runtime.activeSurface()).toEqual(expect.objectContaining({ windowId: 9 }));
+    } finally {
+      fs.rmSync(windowPng, { force: true });
+    }
   });
 
   it('escape dismissal clears the transient dialog guard like a Done/Close click', async () => {

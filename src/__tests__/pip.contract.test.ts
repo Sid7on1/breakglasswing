@@ -5,12 +5,15 @@ import { NativeLivePip } from '../computer/pip';
 describe('continuous native PiP contract', () => {
   const root = path.resolve(__dirname, '../..');
 
-  it('uses a continuous ScreenCaptureKit window filter rather than the legacy screenshot viewer', () => {
+  it('uses a continuous ScreenCaptureKit exact-window filter rather than a whole-display preview', () => {
     const swift = fs.readFileSync(path.join(root, 'native', 'BimaxLivePip.swift'), 'utf8');
     const transport = fs.readFileSync(path.join(root, 'src', 'computer', 'transport.ts'), 'utf8');
 
     expect(swift).toContain('SCStreamOutput');
     expect(swift).toContain('SCContentFilter(desktopIndependentWindow: target)');
+    expect(swift).not.toContain('SCContentFilter(display: display');
+    expect(swift).toContain('styleMask: [.borderless, .resizable, .nonactivatingPanel]');
+    expect(swift).not.toContain('HUMAN VIEW');
     expect(swift).toContain('first_frame');
     expect(transport).not.toContain("driverArgs.push('--experimental-pip')");
   });

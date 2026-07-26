@@ -66,6 +66,8 @@ private final class PreviewView: NSView {
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = NSColor.black.cgColor
         layer?.addSublayer(displayLayer)
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
     }
 
     required init?(coder: NSCoder) {
@@ -217,37 +219,32 @@ private final class PreviewApplication: NSObject, NSApplicationDelegate, NSWindo
 
     private func buildWindow() {
         let preview = PreviewView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
-        let label = NSTextField(labelWithString: "LIVE  \(arguments.label)")
-        label.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byTruncatingMiddle
-        label.maximumNumberOfLines = 1
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 346))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 12
+        container.layer?.masksToBounds = true
         preview.translatesAutoresizingMaskIntoConstraints = false
-        label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(preview)
-        container.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
-            label.heightAnchor.constraint(equalToConstant: 16),
             preview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             preview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            preview.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
+            preview.topAnchor.constraint(equalTo: container.topAnchor),
             preview.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 346),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel],
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.borderless, .resizable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Bimax Live Preview"
+        panel.title = "Bimax Live Preview · \(arguments.label)"
         panel.contentView = container
-        panel.contentMinSize = NSSize(width: 280, height: 200)
+        panel.contentMinSize = NSSize(width: 240, height: 160)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
@@ -338,6 +335,8 @@ private final class PreviewApplication: NSObject, NSApplicationDelegate, NSWindo
             throw PreviewError("preview output was not initialized")
         }
 
+        // PiP is the operator's clean app preview, not the model's desktop safety frame. Keep the
+        // exact target window visible even while another application remains frontmost.
         let filter = SCContentFilter(desktopIndependentWindow: target)
         let configuration = SCStreamConfiguration()
         let scale: CGFloat = 2

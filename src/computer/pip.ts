@@ -17,8 +17,7 @@ export interface LivePipStatus {
   continuous: boolean;
   captureSafe: boolean;
   surface?: string;
-  /** Exact window the preview is DESIRED to show. Exposing identity (not just a human label) lets
-   * the runtime prove preview, perception, and input all refer to the same target. */
+  /** Exact window the preview is DESIRED to show. */
   target?: { pid: number; windowId: number };
   frames?: number;
   error?: string;
@@ -54,8 +53,8 @@ type DesiredPreview = { target: LivePipTarget | null; enabled: boolean; generati
  * Presentation-only native ScreenCaptureKit preview.
  *
  * This process never provides model pixels or input coordinates. The computer runtime keeps those
- * on its exact per-action PNG path; this helper filters directly to the owned window id and renders
- * the stream in an AppKit floating panel. Compile/spawn failures are isolated from computer actions.
+ * on its exact per-action precision path; this helper filters directly to the owned window id and
+ * renders a clean content-first stream. Compile/spawn failures are isolated from computer actions.
  */
 export class NativeLivePip implements LivePipPort {
   private desired: DesiredPreview = { target: null, enabled: false, generation: 0 };

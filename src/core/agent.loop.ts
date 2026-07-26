@@ -814,6 +814,9 @@ export class AgentLoop {
           action?: string;
           width?: number;
           height?: number;
+          displayScreenshot?: string;
+          displayWidth?: number;
+          displayHeight?: number;
         }> = [];
         let sawComputerResult = false;
         for (const tc of toolCalls) {
@@ -833,6 +836,9 @@ export class AgentLoop {
                 action: typeof metadata?.action === 'string' ? metadata.action : undefined,
                 width: Number.isFinite(Number(metadata?.width)) ? Number(metadata.width) : undefined,
                 height: Number.isFinite(Number(metadata?.height)) ? Number(metadata.height) : undefined,
+                displayScreenshot: typeof metadata?.displayScreenshot === 'string' ? metadata.displayScreenshot : undefined,
+                displayWidth: Number.isFinite(Number(metadata?.displayWidth)) ? Number(metadata.displayWidth) : undefined,
+                displayHeight: Number.isFinite(Number(metadata?.displayHeight)) ? Number(metadata.displayHeight) : undefined,
               });
             }
             if (tc.name === 'ComputerTool') sawComputerResult = true;

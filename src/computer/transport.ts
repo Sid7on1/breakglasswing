@@ -206,7 +206,7 @@ export class SidecarTransport implements SidecarTransportPort {
         if (daemonSocket) driverArgs.push('--socket', daemonSocket);
         // Live PiP is owned by NativeLivePip, which continuously streams the exact target window
         // through ScreenCaptureKit. Do not enable the driver's post-action screenshot viewer: two
-        // preview processes would race and the old one is not a continuous capture surface.
+        // preview processes would race and the old one is not continuous.
         const client = await openClient({
           name: 'bimax-computer-use',
           command: driver,

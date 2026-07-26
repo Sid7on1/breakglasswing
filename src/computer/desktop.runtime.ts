@@ -199,6 +199,11 @@ export interface DesktopResult {
   error?: string;
   screenshot?: string;
   width?: number; height?: number;
+  /** Secondary composited display context. `screenshot` remains the exact target/action frame;
+   * this image shows occlusion, sheets, menus, Dock and other applications like a human sees them.
+   * Its pixels are context-only and must never be used as ComputerTool x/y coordinates. */
+  displayScreenshot?: string;
+  displayWidth?: number; displayHeight?: number;
   /** Stable digest of captured pixels, used to measure actual visual progress. */
   frameHash?: string;
   /** Identity of the frame these coordinates belong to (see frame.ts). Echo it back on the acting
@@ -874,7 +879,7 @@ export interface DesktopRuntimePort {
   history?(): ActionHistorySummary;
   /** Long-run durability (Stage 7): current bounded-state footprint (nothing accumulates unbounded). */
   memoryFootprint?(): { historyKept: number; observedElements: number; indexedElements: number; surfaces: number };
-  /** PiP presentation status (Stage 2): enabled? which surface? is it capture-safe (window-scoped)? */
+  /** PiP presentation status: enabled, target display/window identity, and honest privacy scope. */
   pipStatus?(): Promise<LivePipStatus>;
   /** What the next record_start would capture — so the approval layer can phrase the prompt honestly. */
   recordingScopePreview?(): { scope: string; captureSafe: boolean };
@@ -1768,9 +1773,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private lastOwnedTarget: ComputerTarget | null = null;
   /** Which surface the newest image describes. Context menus/popovers are separate OS windows that
    * a window-scoped PNG can never show, so right-click switches to a full-display observation:
-   * image pixels == global display points (identity frame), and physical input skips activation
+   * pixels map through that display's global point bounds, and physical input skips activation
    * because bring_to_front would dismiss the very menu the model is about to click. */
-  private observedSurfaceKind: 'window' | 'display' = 'window';
+  private observedSurfaceKind: 'window' | 'display-transient' = 'window';
   /** System Settings reports a sheet as the first app window while its screenshot is composed in
    * the larger parent-window coordinate space. Track the sheet independently so pixels keep mapping
    * through the parent and background clicks can be rejected instead of silently doing nothing. */
@@ -1848,7 +1853,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       app: target.app || undefined,
       pid: target.pid,
       windowId: target.windowId,
-      bounds: this.observedWindowFrame ? { ...this.observedWindowFrame } : undefined,
+      // A human-view observation maps the model image through the whole display, but the active
+      // execution surface is still the exact native window. Keep those geometries distinct or a
+      // display observation makes arrange/PiP avoidance believe the window fills the desktop.
+      bounds: (this.observedLiveWindowFrame || this.observedWindowFrame)
+        ? { ...(this.observedLiveWindowFrame || this.observedWindowFrame)! }
+        : undefined,
       ...(opts.focusOwner ? { focusOwner: opts.focusOwner } : {}),
     });
     if (opts.syncPip !== false) this.syncLivePip();
@@ -1872,9 +1882,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return this.lastSwitch ? this.lastSwitch.phaseDurations() : [];
   }
 
-  /** The capture-safe agent surface that recording/PiP should be scoped to (Stage 2 + 8): a native
-   * window we can capture WITHOUT exposing unrelated windows. Returns null when the only thing to
-   * capture is the whole desktop — the caller must then be honest that the capture is not scoped. */
+  /** The exact agent window used for capture-safe recording and for selecting PiP's target display.
+   * Returns null when no stable native window exists; whole-display recording then needs approval. */
   private captureSurface(): { pid: number; windowId: number; label: string } | null {
     const s = this.surfaces.active();
     if (s?.kind === 'native-window' && s.captureSafe && s.pid && s.windowId) {
@@ -1919,8 +1928,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return {
       ...current,
       enabled: cfg.computerPip === true,
-      captureSafe: !!this.captureSurface(),
-      surface: this.captureSurface()?.label || current.surface,
+      // PiP is deliberately the composited human view now, so it can include unrelated windows.
+      // Recording remains separately window-scoped and capture-safe via captureSurface().
+      captureSafe: current.captureSafe,
+      surface: current.surface || (this.captureSurface() ? `Human view · ${this.captureSurface()!.label}` : undefined),
     };
   }
 
@@ -2145,13 +2156,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return this.transport.call(name, args);
   }
 
-  /** Native applications always receive physical foreground input. The retired background mode
-   * animated an overlay cursor but SwiftUI/System Settings frequently ignored its synthetic event.
-   * Explicit deliveryMode remains only as an internal test/diagnostic seam; model arguments are
-   * stripped by ComputerTool and persisted legacy preferences cannot select the unreliable path. */
+  /** The user owns the visibility policy. Foreground uses the physical cursor; background uses
+   * semantic AX handles first and the PID-scoped sidecar only when no handle exists. ComputerTool
+   * strips model-supplied deliveryMode, so only config (or this internal test seam) can choose it. */
   private async defaultDelivery(cmd: DesktopCommand): Promise<'background' | 'foreground'> {
     if (cmd.deliveryMode) return cmd.deliveryMode;
-    return 'foreground';
+    const cfg = await loadConfig().catch(() => ({ computerVisible: true } as any));
+    return cfg.computerVisible === false ? 'background' : 'foreground';
   }
 
   /** Single-use whole-display approval tokens. Minted ONLY by authorizeFullDisplayRecording()
@@ -2386,15 +2397,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       };
       if (frame && [frame.x, frame.y, frame.w, frame.h].every(Number.isFinite) && frame.w > 0 && frame.h > 0) return frame;
     } catch { /* the observed AX frame remains a safe fallback */ }
-    return this.observedWindowFrame;
+    return this.observedLiveWindowFrame || this.observedWindowFrame;
   }
 
-  /** Capture the FULL display (point-scaled: image pixels == global points) as the newest
-   * observation. Used after right-click: the context menu is its own OS window, invisible in any
-   * window-scoped PNG — without this the model chose its next click blind. Element handles are
-   * cleared because their frames were expressed in the previous window image. */
+  /** Capture the target's FULL display as the newest observation. Used after right-click: the
+   * context menu is its own OS window, invisible in any window-scoped PNG — without this the model
+   * chose its next click blind. Display pixels are mapped through real point geometry (including
+   * Retina scale and non-zero secondary-display origins). */
   private async displayObservation(target: ComputerTarget, ctx?: { cwd?: string; signal?: AbortSignal }): Promise<Record<string, any>> {
-    const shot = await this.fallback.run({ action: 'screenshot', display: 1 }, ctx);
+    const targetWindowBounds = this.observedLiveWindowFrame || this.observedWindowFrame;
+    let screens: ScreenInfo[] = [];
+    try {
+      const read = await this.fallback.run({ action: 'screens' }, ctx);
+      screens = Array.isArray(read.screens) ? read.screens : [];
+    } catch { /* primary-display fallback below */ }
+    const screen = screenForRect(targetWindowBounds || undefined, screens);
+    const displayIndex = screen?.index || 1;
+    const shot = await this.fallback.run({ action: 'screenshot', display: displayIndex }, ctx);
     if (!shot.ok || !shot.screenshot) {
       return { visualEvidenceError: shot.error || 'full-display capture failed after opening the transient surface' };
     }
@@ -2404,9 +2423,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     this.indexedElements.clear();
     this.observedElements = [];
     this.observedTarget = { pid: target.pid, windowId: target.windowId, degraded: true, width: dims.width, height: dims.height };
-    this.observedWindowFrame = { x: 0, y: 0, w: dims.width, h: dims.height };
-    this.observedLiveWindowFrame = null;
-    this.observedSurfaceKind = 'display';
+    this.observedWindowFrame = screen?.frame
+      ? { ...screen.frame }
+      : { x: 0, y: 0, w: dims.width, h: dims.height };
+    this.observedSurfaceKind = 'display-transient';
     const frameHash = this.screenshotHash(shot.screenshot);
     if (frameHash) this.prevFrameHash = frameHash;
     const frame = this.mintFrame({
@@ -2418,7 +2438,86 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       screenshot: shot.screenshot, frameHash, frameId: frame?.frameId, width: dims.width, height: dims.height,
       elements: [], degraded: true,
       coordinateSpace: { xY: 'screenshot_pixels', elementFrames: 'screenshot_pixels', normalized: '0-1000' },
-      completionGuidance: `${COMPUTER_COMPLETION_GUIDANCE} This image is the FULL DISPLAY because a context menu/popover may be open as its own window: click the visible menu item by x/y in THIS image, or press key escape to dismiss it. Element handles from earlier window observations are no longer valid.`,
+      completionGuidance: `${COMPUTER_COMPLETION_GUIDANCE} This image is the FULL DISPLAY because a context menu/popover may be open as its own window: click the visible menu item by x/y in THIS image, or press key escape to dismiss it. Element handles from earlier window observations are no longer valid. Display ${displayIndex} geometry is applied automatically, including Retina scaling.`,
+    };
+  }
+
+  /** Attach the complete display as context while preserving the exact target window as the one
+   * and only action/coordinate frame. This is a genuine two-image observation: the model can see
+   * the same desktop a human sees without losing the clean, high-resolution app view required for
+   * background operation. Semantic handles, frame ids and receipts remain window-scoped. */
+  private async humanDisplayObservation(
+    target: ComputerTarget,
+    observed: DesktopResult,
+    ctx?: { cwd?: string; signal?: AbortSignal },
+  ): Promise<DesktopResult> {
+    const targetWindowBounds = this.observedLiveWindowFrame || this.observedWindowFrame;
+    if (!targetWindowBounds?.w || !targetWindowBounds?.h || !observed.screenshot) return observed;
+
+    let screens: ScreenInfo[] = [];
+    try {
+      const read = await this.fallback.run({ action: 'screens' }, ctx);
+      screens = Array.isArray(read.screens) ? read.screens : [];
+    } catch { /* primary-display fallback below remains valid */ }
+    const screen = screenForRect(targetWindowBounds || undefined, screens);
+    const displayIndex = screen?.index || 1;
+    let shot: DesktopResult;
+    try {
+      shot = await this.fallback.run({ action: 'screenshot', display: displayIndex }, ctx);
+    } catch (err: any) {
+      return {
+        ...observed,
+        details: {
+          ...(observed.details as any || {}),
+          perception: {
+            ...((observed.details as any)?.perception || {}),
+            view: { mode: 'window-fallback', visual: 'exact-window', semantics: 'exact-window', reason: String(err?.message || err).slice(0, 240) },
+          },
+        },
+      };
+    }
+    if (!shot.ok || !shot.screenshot) {
+      return {
+        ...observed,
+        details: {
+          ...(observed.details as any || {}),
+          perception: {
+            ...((observed.details as any)?.perception || {}),
+            view: { mode: 'window-fallback', visual: 'exact-window', semantics: 'exact-window', reason: shot.error || 'display capture unavailable' },
+          },
+        },
+      };
+    }
+    let dims: { width: number; height: number } | null = null;
+    try { dims = pngDimensionsFromBytes(fs.readFileSync(shot.screenshot)); } catch { /* handled below */ }
+    const displayImage = {
+      width: dims?.width || Number(shot.width || 0),
+      height: dims?.height || Number(shot.height || 0),
+    };
+    if (!displayImage.width || !displayImage.height) return observed;
+    const displayBounds: Frame = screen?.frame || { x: 0, y: 0, w: displayImage.width, h: displayImage.height };
+    return {
+      ...observed,
+      displayScreenshot: shot.screenshot,
+      displayWidth: displayImage.width,
+      displayHeight: displayImage.height,
+      details: {
+        ...(observed.details as any || {}),
+        perception: {
+          ...((observed.details as any)?.perception || {}),
+          view: {
+            mode: 'dual-frame', actionVisual: 'exact-window', contextVisual: 'display', semantics: 'exact-window',
+            display: displayIndex, displayBounds, targetWindowBounds,
+            frontmostApp: shot.app,
+          },
+        },
+      },
+      completionGuidance: [
+        observed.completionGuidance || COMPUTER_COMPLETION_GUIDANCE,
+        `The primary image and all x/y coordinates belong only to ${target.app || `pid ${target.pid}`} window ${target.windowId}.`,
+        'A second composited DISPLAY CONTEXT image shows what the human sees, including occlusion, sheets, popovers, menu bar and Dock; never use its pixels for x/y.',
+      ].join(' '),
+      summary: `${observed.summary}; exact target frame plus human-view display ${displayIndex} context attached`,
     };
   }
 
@@ -2427,10 +2526,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     screenshotPoint: { x: number; y: number },
     expectedElement?: ObservedElement,
   ): Promise<{ x: number; y: number; preflight?: PointPreflight }> {
-    if (this.observedSurfaceKind === 'display') {
-      // The newest image is the whole display at point scale (identity mapping). Skip activation:
-      // bring_to_front would dismiss the open menu/popover the model is clicking, and the dialog
-      // guard is window-scoped evidence that does not apply to a display-wide frame.
+    if (this.observedSurfaceKind === 'display-transient') {
+      // A context menu/popover is a separate OS window. Raising or re-focusing the parent would
+      // dismiss the transient surface before the click, so this narrowly-scoped mode maps the
+      // visible display point directly. It is never used for ordinary human-view observations.
       const global = this.screenshotPixelToGlobalPoint(screenshotPoint, this.observedWindowFrame);
       if (!global) throw new Error('could not map the display point; take a fresh screenshot');
       return global;
@@ -3161,7 +3260,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // Everything through frame minting is represented by this observation. Only a later event may
     // invalidate it; taking the baseline earlier would race the AX/tree and screenshot reads.
     this.observedAxEventEpoch = this.axEventEpoch;
-    return {
+    const windowObservation: DesktopResult = {
       ok: true, action: cmd.action === 'screenshot' ? 'screenshot' : 'observe', driver: BIMAX_DRIVER_LABEL,
       app: target.app, pid: target.pid, windowId: target.windowId,
       screenshot: screenshotFile, frameHash, frameId: frame?.frameId,
@@ -3199,6 +3298,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           ? `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: native text is degraded; use the attached screenshot as the source of truth`
           : `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: fresh screenshot + ${elements.length} optional native targets`,
     };
+    return cmd.includeScreenshot === false
+      ? windowObservation
+      : this.humanDisplayObservation(target, windowObservation, { cwd });
   }
 
   /** OpenAI-style action loop: every delivered input immediately yields the next pixels. This saves
@@ -3343,7 +3445,29 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         // blocked anyway, while a phantom guard blocks EVERY click in the app. So anything short of
         // a positive OS confirmation — no candidate, no helper, no permission — means no guard.
         this.transientDialogFrame = candidate ? await this.confirmedModalFrame(target) : null;
-        const good = current && area(current) >= area(largest) * 0.5 ? current : largest;
+        // WindowServer identifies the visible same-process surfaces, while Accessibility identifies
+        // which normal window is focused. Join them by geometry so a click-created document becomes
+        // the target even when the older document is the same size (or larger).
+        let focused: any | undefined;
+        try {
+          const probe = await this.fallback.run({ action: 'window_frame', pid: target.pid });
+          const rect = probe.ok ? probe.windowFrame : undefined;
+          const focusedFrame = rect && Number(rect.w) > 0 && Number(rect.h) > 0
+            ? { x: Number(rect.x), y: Number(rect.y), w: Number(rect.w), h: Number(rect.h) }
+            : undefined;
+          focused = focusedFrame
+            ? visible.find((w: any) => frameMatches(focusedFrame, {
+                x: Number(w?.bounds?.x || 0), y: Number(w?.bounds?.y || 0),
+                w: Number(w?.bounds?.width || 0), h: Number(w?.bounds?.height || 0),
+              }, 4))
+            : undefined;
+          // A focused sheet blocks its parent but is not a stable capture surface. Keep the parent
+          // plus its exact modal guard rather than shrinking the capture coordinate space to it.
+          if (focused && this.transientDialogFrame && frameMatches(focusedFrame!, this.transientDialogFrame, 4)) {
+            focused = undefined;
+          }
+        } catch { /* AX unavailable: retain the current/largest WindowServer fallback below */ }
+        const good = focused || (current && area(current) >= area(largest) * 0.5 ? current : largest);
         return { ...target, windowId: Number(good?.window_id || 0) || target.windowId };
       }
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1))); // let it finish rendering
@@ -4407,13 +4531,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // only: no input can ride on it, because acting verbs still demand a fresh frame that
           // only this observation can produce, and the governor still gates them individually.
           let capture = target ?? await this.reacquireLastTarget();
-          // A target with a pid but no windowId (the app opened before its window was enumerable)
-          // must NOT silently full-display capture — that grabbed the terminal instead of the app
-          // the model is driving. Try to acquire the real window first; only a genuinely
-          // window-less app falls back, and only for the whole-screen `screenshot` verb.
-          if (capture?.pid && !capture.windowId) {
+          // Reconcile every explicit observation with AX focus + the visible same-app window list.
+          // This both acquires a late-rendering first window and adopts a newly focused document;
+          // only a genuinely window-less app falls back, and only for `screenshot`.
+          if (capture?.pid) {
             const refreshed = await this.refreshTargetWindow(capture);
-            if (refreshed.windowId) {
+            if (refreshed.windowId && refreshed.windowId !== capture.windowId) {
               capture = refreshed;
               this.targets.retargetWindow(capture.pid, refreshed.windowId);
             }
@@ -4462,7 +4585,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             this.assertClickableSemanticTarget(resolved);
             resolvedLabel = resolved.label || cmd.query;
             const point = this.elementCenterInScreenshot(resolved.frame);
-            if (point) {
+            if (delivery === 'background' && resolved.elementToken) {
+              args.element_token = resolved.elementToken;
+              coordinateSource = 'accessibility element token';
+            } else if (delivery === 'background' && resolved.elementIndex != null) {
+              args.element_index = resolved.elementIndex;
+              coordinateSource = 'accessibility element index';
+            } else if (point) {
               // Use the visible rectangle as the action target. Native AX activation is retained only
               // for controls without geometry; it is slower and frequently reports a no-op in Settings.
               args.x = point.x;
@@ -4655,7 +4784,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           }
           const args: any = { pid: target.pid, text: cmd.text || '', session, delivery_mode: delivery };
           if (target.windowId) args.window_id = target.windowId;
-          if (cmd.elementToken) args.element_token = cmd.elementToken;
+          if (cmd.query?.trim()) {
+            const resolved = this.resolveObservedElement(cmd.query, target);
+            if (resolved.elementToken) args.element_token = resolved.elementToken;
+            else if (resolved.elementIndex != null) args.element_index = resolved.elementIndex;
+            else throw new Error(`"${cmd.query}" has no actionable accessibility handle; observe again or click the field before typing`);
+          } else if (cmd.elementToken) args.element_token = cmd.elementToken;
           else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
           else if (cmd.x != null && cmd.y != null) { args.x = cmd.x; args.y = cmd.y; }
           const data = await this.call('type_text', args);

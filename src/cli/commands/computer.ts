@@ -57,11 +57,13 @@ globalCommandRegistry.register({
     }
 
     if (sub === 'visible') {
-      // Background native input was retired: its overlay cursor animated even when SwiftUI ignored
-      // the synthetic event. Keep the command as a migration alias for old saved configurations.
-      await saveConfig({ computerVisible: true });
+      const cfg = await loadConfig();
+      const next = !cfg.computerVisible;
+      await saveConfig({ computerVisible: next });
       await globalDesktopRuntime.dispose?.();
-      context.addSystemMessage('success', 'Computer use uses one real native cursor for every mouse and keyboard action. Unreliable background input is retired.');
+      context.addSystemMessage('success', next
+        ? 'Computer input is visible: target windows come forward and the physical mouse/keyboard performs actions.'
+        : 'Computer input is background-first: semantic Accessibility handles are preferred, the physical cursor stays with you, and each step is checked from a fresh target-window frame.');
       return { type: 'none' };
     }
 
@@ -209,9 +211,11 @@ globalCommandRegistry.register({
       category: 'Behavior',
     });
     options.push({
-      label: '✓ Input: native mouse + keyboard',
+      label: cfg.computerVisible ? '✓ Input: visible native cursor' : '✓ Input: background-first',
       value: '/computer visible',
-      desc: 'one physical cursor; synthetic background input is retired',
+      desc: cfg.computerVisible
+        ? 'target comes forward; Enter switches to background semantic delivery'
+        : 'AX handles first, target remains behind your work; Enter switches to visible cursor',
       category: 'Behavior',
     });
 
