@@ -114,6 +114,18 @@ describe('ComputerTool', () => {
     }));
   });
 
+  it('does not let pointer movement, scrolling, or permission requests bypass the governor', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    for (const action of ['scroll', 'move', 'hover', 'request_access'] as const) {
+      await tool.execute({ action, x: 10, y: 20, dy: 120 }, { cwd: process.cwd() });
+    }
+    const gated = (governor.approveTaskExecution as jest.Mock).mock.calls
+      .filter(([kind]) => kind === 'COMPUTER_CONTROL')
+      .map(([, payload]) => payload.action);
+    expect(gated).toEqual(['scroll', 'move', 'hover', 'request_access']);
+  });
+
   it('normalizes verb synonyms BEFORE gating, so an alias cannot bypass approval', async () => {
     setApprovals('always');
     const runtime = fakeRuntime();
@@ -208,6 +220,30 @@ describe('ComputerTool', () => {
       .filter(([kind]) => kind === 'COMPUTER_CONTROL')
       .map(([, payload]) => payload);
     expect(approvals.every((payload: any) => payload.app === 'Calculator')).toBe(true);
+  });
+
+  it('scopes copy, paste, and arrange to the owned app instead of the approval UI', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'open', app: 'Calculator' }, { cwd: process.cwd() });
+    jest.clearAllMocks();
+
+    await tool.execute({ action: 'copy' }, { cwd: process.cwd() });
+    await tool.execute({ action: 'paste' }, { cwd: process.cwd() });
+    await tool.execute({ action: 'arrange', layout: 'left' }, { cwd: process.cwd() });
+
+    const calls = (runtime.run as jest.Mock).mock.calls.map(([cmd]) => cmd);
+    expect(calls).toEqual([
+      expect.objectContaining({ action: 'copy', app: 'Calculator' }),
+      expect.objectContaining({ action: 'paste', app: 'Calculator' }),
+      expect.objectContaining({ action: 'arrange', app: 'Calculator' }),
+    ]);
+    const approvals = (governor.approveTaskExecution as jest.Mock).mock.calls
+      .filter(([kind]) => kind === 'COMPUTER_CONTROL')
+      .map(([, payload]) => payload);
+    expect(approvals).toHaveLength(3);
+    expect(approvals.every((payload: any) => payload.app === 'Calculator')).toBe(true);
+    expect(runtime.frontmostApp).not.toHaveBeenCalled();
   });
 
   it('flags high-impact intent (send/purchase/delete wording) so the governor always prompts', async () => {

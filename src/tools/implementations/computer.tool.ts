@@ -10,7 +10,11 @@ import { buildTool, BuiltTool } from '../tool.factory';
 // 'clipboard' is gated alongside the acting verbs even though a bare read changes nothing: the
 // pasteboard routinely holds whatever the USER last copied — a password out of a password manager,
 // a card number — and reading it pulls that into the transcript.
-const GATED_ACTIONS = new Set(['click', 'drag', 'type', 'key', 'set_value', 'open', 'focus', 'close', 'quit_app', 'record_start', 'hold', 'mouse_down', 'mouse_up', 'copy', 'paste', 'clipboard', 'arrange', 'desktop']);
+const GATED_ACTIONS = new Set([
+  'request_access', 'open', 'focus', 'click', 'drag', 'scroll', 'move', 'hover', 'hold',
+  'mouse_down', 'mouse_up', 'type', 'key', 'set_value', 'copy', 'paste', 'clipboard',
+  'arrange', 'desktop', 'close', 'quit_app', 'record_start',
+]);
 
 export function createComputerTool(
   governor: IGovernor,
@@ -28,8 +32,9 @@ MANDATORY LOOP
 1. open or observe the intended window and inspect the attached fresh frame.
 2. Choose exactly ONE smallest safe action from that frame.
 3. Call ComputerTool once. Never emit a second ComputerTool call in the same assistant turn.
-4. Inspect the returned post-action frame and progressCheck/actionResult.
-5. Repeat until the newest frame proves the requested end state, or report the blocker.
+4. When the intended next state has native text, pass expect + expectMode so this same call proves it.
+5. Inspect the returned post-action frame and progressCheck/actionResult.
+6. Repeat until the newest frame proves the requested end state, or report the blocker.
 
 Every state-changing action requires a fresh frame of the exact target; if capture fails, re-observe before any more input. Use only handles from the newest result: query or elementToken first, then elementIndex, then raw screenshot x/y — never copy an element frame into x/y. coordinateSpace describes the returned image; normalized=true maps 0-1000 into that image. Every observation returns a frameId: pass it back on the action you planned from it, so a stale frame is refused instead of mis-clicked.
 
@@ -53,7 +58,7 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         button: { type: 'string', enum: ['left', 'right', 'middle'] },
         modifier: { type: 'array', items: { type: 'string', enum: ['cmd', 'shift', 'alt', 'ctrl', 'fn'] }, description: 'click: optional held modifier keys, e.g. ["cmd"] for Finder multi-selection.' },
         count: { type: 'number', description: 'click: 1 (default), 2 = double, 3 = triple.' },
-        text: { type: 'string', description: 'type: literal text, full unicode.' },
+        text: { type: 'string', description: 'type: literal text, full unicode. Pair with query/elementToken when a visible editable field should be focused atomically before typing.' },
         combo: { type: 'string', description: 'key: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
         app: { type: 'string', description: 'Intended application name (e.g. "Notes"). Actions default to the most recently opened app.' },
         bundleId: { type: 'string', description: 'open: exact macOS bundle id; preferred when known.' },
@@ -61,7 +66,9 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         windowId: { type: 'number', description: 'Target window id returned by open/windows.' },
         elementIndex: { type: 'number', description: 'Fresh semantic handle from the latest observe. Preferred over guessing x/y; the runtime physically clicks its visible center.' },
         elementToken: { type: 'string', description: 'Opaque fresh semantic handle from observe; preferred over elementIndex and raw x/y. The runtime physically clicks its visible center.' },
-        query: { type: 'string', description: 'observe: filter/verify optional native text. click/drag/set_value: resolve a native label from the newest observation (drag: the SOURCE element).' },
+        query: { type: 'string', description: 'observe: filter/verify native text. click/drag/set_value: resolve a native label from the newest observation. type: resolve, preflight, and focus an editable field before sending text (drag: the SOURCE element).' },
+        expect: { type: 'string', description: 'Acting verbs: native text whose presence/absence in the automatic post-action observation proves the intended result. Separate from query, which names what to act on.' },
+        expectMode: { type: 'string', enum: ['present', 'absent'], description: 'How to verify expect after the action. present is default; absent performs an exhaustive accessibility scan before proving disappearance.' },
         maxElements: { type: 'number', description: 'observe: compact model-visible element budget, 1–2000 (the runtime scans deeper internally).' },
         includeScreenshot: { type: 'boolean', description: 'observe: false for a cheap tree-only verification refresh.' },
         value: { type: 'string', description: 'set_value: exact native control value. Sliders accept 0..1, 0%..100%, maximum/full, or minimum/mute. clipboard: text to place on the clipboard.' },
@@ -84,7 +91,10 @@ Success requires visible or semantic evidence from the newest frame, not the dri
       // aliased high-impact verb (press→key, launch→open) still faces the governor. Doing this any
       // later would turn the alias into an approval bypass.
       args = { ...args, action: normalizeDesktopAction(args.action) as DesktopCommand['action'] };
-      const intendedApp = args.app?.trim() || (['click', 'drag', 'scroll', 'type', 'key', 'set_value', 'close', 'quit_app', 'hover', 'hold', 'mouse_down', 'mouse_up'].includes(args.action) ? targetApp : '');
+      const intendedApp = args.app?.trim() || ([
+        'click', 'drag', 'scroll', 'type', 'key', 'set_value', 'copy', 'paste', 'arrange',
+        'close', 'quit_app', 'hover', 'hold', 'mouse_down', 'mouse_up',
+      ].includes(args.action) ? targetApp : '');
       // Strip every field the model must NEVER control:
       //   - deliveryMode: a user-owned /computer preference (a hallucinated arg could silently
       //     switch to the sidecar's synthetic overlay path);
