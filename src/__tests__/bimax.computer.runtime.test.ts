@@ -2668,6 +2668,50 @@ describe('BimaxComputerRuntime', () => {
     }
   });
 
+  // A keystroke swallowed by an app-modal sheet is delivered and has no effect. Driving the runtime
+  // directly during cross-app verification, a cleanup loop read `ok: true` as "it closed" and
+  // pressed cmd+w five times against a save dialog that ate every one. The runtime was right and
+  // the caller was wrong — but only because `delivered` is kept separate from `observed`. This
+  // pins that separation on the KEY path; the test above covers clicks only.
+  it('reports a no-effect key press as delivered but unproven, never as success', async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const tmp = path.join(os.tmpdir(), `bimax-key-noop-${Date.now()}.png`);
+    fs.writeFileSync(tmp, Buffer.from([9, 9, 9, 9])); // identical bytes each observe → no-change
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'TextEdit', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'TextEdit', active: true }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({ screenshot_file_path: tmp, screenshot_width: 500, screenshot_height: 700, elements: [{ element_index: 0, role: 'AXWindow', frame: { x: 0, y: 0, w: 500, h: 700 } }] });
+      return result({ ok: true });
+    });
+    // A local native fake: the shared simulatedNative() reports whichever app the surrounding
+    // fixtures last activated, and the foreground key path refuses to act unless the target is
+    // genuinely frontmost.
+    const native = {
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'TextEdit',
+    } as any;
+    try {
+      const runtime = new BimaxComputerRuntime(native);
+      await runtime.run({ action: 'open', app: 'TextEdit' });
+      const observed = await runtime.run({ action: 'observe' });
+      const pressed = await runtime.run({ action: 'key', combo: 'cmd+w', frameId: observed.frameId, deliveryMode: 'foreground' });
+
+      expect(pressed.ok).toBe(true); // the command ran — that is all ok means
+      expect(pressed.actionReceipt?.commit.delivered).toBe(true); // the keystroke really was posted
+      // …and none of that is allowed to read as the action having worked.
+      expect(pressed.progressCheck?.outcome).toBe('no-change');
+      expect(pressed.actionResult).toEqual(expect.objectContaining({ observed: 'no-change', confidence: 'unknown' }));
+      expect(pressed.actionResult?.confidence).not.toBe('proven');
+      expect(pressed.summary).toMatch(/did NOT change/i);
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
+
   it('bounds a stuck agent: refuses to keep acting once the recovery budget is exhausted, until it re-observes', async () => {
     const fs = require('fs'), os = require('os'), path = require('path');
     const tmp = path.join(os.tmpdir(), `bimax-recov-${Date.now()}.png`);
