@@ -213,15 +213,23 @@ clean, `eslint --quiet` clean.
 
 ## 6. Open items, in the order I would take them
 
-1. **Shape/contour perception has never fired live** (4.2). Zero shape regions across five apps.
-   Needs a deliberate target — an app whose AX tree exposes unlabeled controls that survive to the
-   ambiguity trigger — before the feature can be called proven.
-2. **WhatsApp yields a menu-bar-only tree** with no window content, no frame, and no Vision
-   trigger. The worst tree of the five is the one the ambiguity path missed. This is the single
-   biggest correctness gap found.
-3. **Sheet-hosted controls may not hit-test** (4.5). Either preflight correctly caught a
-   mid-animation sheet, or sheet element frames map into a different space. Clicking a save or
-   confirm sheet is common enough that this needs an answer.
+**These are universal invariants, not per-application work.** The goal is universal computer use;
+no app gets a special case, a workflow, or a name in the code. Applications appear below only as
+the instruments that exposed a broken property, and are interchangeable with any other app that
+exposes the same one. If a fix here needs to know which app it is talking to, the fix is wrong.
+
+1. **An observation that captures no window content does not trigger the ambiguity path.** The
+   trigger is supposed to fire on a thin or degraded tree; an observation consisting purely of
+   menu-bar elements, with no window content and no frame, is the degenerate case of exactly that,
+   and it fired nothing. Instrument: WhatsApp (4.2). Property to fix: Vision must engage whenever
+   window content is absent or unusable, however the tree got that way.
+2. **Unlabeled controls produce no shape evidence anywhere** (4.2). Zero shape regions in five
+   apps. Either the trigger is narrower than intended or the shape pass is not reached. Property to
+   prove: an unlabeled control yields contour/rectangle/shape-class evidence, in any app.
+3. **A control hosted in a sheet may not hit-test to itself** (4.5). Either preflight correctly
+   caught a mid-animation sheet, or sheet-hosted element frames map into a different space than
+   window elements. Property to settle: an element's reported frame hit-tests to that element,
+   regardless of what kind of container hosts it.
 4. **Driver 0.12.6** — still pinned at 0.12.3, correctly. Do not touch until 1–3 are settled;
    there is no reason to add sidecar variance while perception gaps are open.
 5. The nine inherited commits are gated at the tip only, not individually. If bisectable history
