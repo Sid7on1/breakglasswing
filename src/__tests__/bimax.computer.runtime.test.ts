@@ -2668,6 +2668,100 @@ describe('BimaxComputerRuntime', () => {
     }
   });
 
+  // An accessibility walk that returns nothing but menu-bar nodes has not observed the window — it
+  // has observed the application's menu bar. Measured live, one app produced a 255-element
+  // "observation" that was 100% AXMenuItem/AXMenu, with no window content and no frame, returned as
+  // a successful observe. Two properties follow, and neither may name an application.
+  describe('an observation with no window content is a failed acquisition, not a thin tree', () => {
+    const menuOnly = [
+      { element_index: 1, role: 'AXMenuBar', label: 'menu bar' },
+      { element_index: 2, role: 'AXMenuBarItem', label: 'File' },
+      { element_index: 3, role: 'AXMenu', label: 'File' },
+      { element_index: 4, role: 'AXMenuItem', label: 'New Window' },
+      { element_index: 5, role: 'AXMenuItem', label: 'Close' },
+    ];
+    const realWindow = [
+      { element_index: 0, role: 'AXWindow', label: 'Document', frame: { x: 0, y: 0, w: 500, h: 700 } },
+      { element_index: 6, role: 'AXButton', label: 'Send', frame: { x: 10, y: 10, w: 60, h: 24 } },
+    ];
+
+    it('re-derives the top window once and observes that instead', async () => {
+      const fs = require('fs'), os = require('os'), path = require('path');
+      const tmp = path.join(os.tmpdir(), `bimax-menuonly-${Date.now()}.png`);
+      fs.writeFileSync(tmp, Buffer.from([1, 2, 3, 4]));
+      // Window 7 is acquired at open, then replaced by window 11 before the observation runs — the
+      // ordinary case of a window being closed and re-created underneath us. Observing 7 therefore
+      // enumerates only the menu bar. Ownership (pid) never changes; only the window component does.
+      const windowStateCalls: number[] = [];
+      const sized = (id: number) => ({ window_id: id, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } });
+      let liveWindows = [sized(7)];
+      callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+        if (name === 'start_session') return result({ ok: true });
+        if (name === 'launch_app') return result({ name: 'App', pid: 42, windows: [{ window_id: 7 }] });
+        if (name === 'bring_to_front') return result({ activated: true });
+        if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'App', active: true }] });
+        if (name === 'list_windows') return result({ windows: liveWindows });
+        if (name === 'get_window_state') {
+          const windowId = Number(args?.window_id || 0);
+          windowStateCalls.push(windowId);
+          return result({
+            screenshot_file_path: tmp, screenshot_width: 500, screenshot_height: 700,
+            elements: windowId === 11 ? realWindow : menuOnly,
+          });
+        }
+        return result({ ok: true });
+      });
+      try {
+        const runtime = new BimaxComputerRuntime(simulatedNative());
+        await runtime.run({ action: 'open', app: 'App' }); // pins window 7
+        liveWindows = [sized(11)]; // …which is then closed and replaced before we observe
+        windowStateCalls.length = 0;
+        const observed = await runtime.run({ action: 'observe' });
+
+        expect(windowStateCalls).toContain(11); // it went and got the real window
+        expect(observed.windowId).toBe(11);
+        expect(observed.degraded).toBeFalsy();
+        expect((observed.elements as any[]).some(e => e.label === 'Send')).toBe(true);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    });
+
+    it('never offers menu-bar nodes as the targets of a window-scoped observation', async () => {
+      const fs = require('fs'), os = require('os'), path = require('path');
+      const tmp = path.join(os.tmpdir(), `bimax-menulie-${Date.now()}.png`);
+      fs.writeFileSync(tmp, Buffer.from([5, 6, 7, 8]));
+      // No other window exists, so reacquisition cannot help: the honest result is a degraded,
+      // screenshot-only observation — not five menu items dressed up as window targets. They would
+      // be addressable by token/index while the semantic resolver refuses to consider them.
+      callTool.mockImplementation(async ({ name }: any) => {
+        if (name === 'start_session') return result({ ok: true });
+        if (name === 'launch_app') return result({ name: 'App', pid: 42, windows: [{ window_id: 7 }] });
+        if (name === 'bring_to_front') return result({ activated: true });
+        if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'App', active: true }] });
+        if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+        if (name === 'get_window_state') return result({
+          screenshot_file_path: tmp, screenshot_width: 500, screenshot_height: 700, elements: menuOnly,
+        });
+        return result({ ok: true });
+      });
+      try {
+        const runtime = new BimaxComputerRuntime(simulatedNative());
+        await runtime.run({ action: 'open', app: 'App' });
+        const observed = await runtime.run({ action: 'observe' });
+
+        expect(observed.degraded).toBe(true);
+        expect(observed.elements).toEqual([]);
+        const roles = (observed.elements as any[]).map(e => e.role);
+        expect(roles).not.toContain('AXMenuItem');
+        expect(roles).not.toContain('AXMenuBarItem');
+        expect(observed.screenshot).toBeTruthy(); // the screenshot remains the source of truth
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    });
+  });
+
   // A keystroke swallowed by an app-modal sheet is delivered and has no effect. Driving the runtime
   // directly during cross-app verification, a cleanup loop read `ok: true` as "it closed" and
   // pressed cmd+w five times against a save dialog that ate every one. The runtime was right and

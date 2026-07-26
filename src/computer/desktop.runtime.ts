@@ -2758,6 +2758,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     session: string,
     cmd: Pick<DesktopCommand, 'action' | 'query' | 'maxElements' | 'includeScreenshot'>,
     windowReconcileAttempt = 0,
+    windowAcquireAttempt = 0,
   ): Promise<DesktopResult> {
     if (!target.windowId) throw new Error('observe needs pid + windowId; open or select an application window first');
     this.watchTargetAccessibility(target);
@@ -2840,6 +2841,26 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       data = await requestMeasured(DRIVER_MAX_SCAN);
       rawElements = withoutWindowChrome(sanitizeDriverElements(Array.isArray(data?.elements) ? data.elements : []));
       windowElements = windowElementsOf(rawElements);
+    }
+    // A walk that yields not one window element has not observed the window — it has observed the
+    // application's menu bar. That is a FAILED WINDOW ACQUISITION, not a thin tree: the window this
+    // observation is scoped to may have been closed, replaced by a new one, or never became real.
+    // Measured live, this produced an "observation" of 255 elements that were 100% menu items, with
+    // no window content and no frame to mint, handed back as a successful observe.
+    //
+    // Re-derive the application's current top window once and observe that instead. Ownership
+    // (pid/app) is untouched — only the window component is re-derived, exactly as the Cmd+N and
+    // zero-pixel recoveries already do. Bounded to one attempt so a genuinely AX-silent window
+    // still returns a screenshot-only observation rather than looping.
+    if (windowElements.length === 0 && windowAcquireAttempt === 0) {
+      try {
+        const reacquired = await this.refreshTargetWindow({ ...target, windowId: undefined });
+        if (reacquired.windowId && reacquired.windowId !== target.windowId) {
+          target.windowId = reacquired.windowId;
+          this.targets.retargetWindow(target.pid, reacquired.windowId);
+          return this.observeTarget(target, cwd, session, cmd, windowReconcileAttempt, 1);
+        }
+      } catch { /* fall through to the honest degraded observation below */ }
     }
     const screenshotFile = String(data?.screenshot_file_path || screenshot);
     let pngDimensions: { width: number; height: number } | null = null;
@@ -3090,7 +3111,14 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       : (windowElements.length > 0
         ? [...windowElements.filter((element: any) => ACTIONABLE_AX_ROLES.has(String(element?.role || ''))),
           ...windowElements.filter((element: any) => !ACTIONABLE_AX_ROLES.has(String(element?.role || '')))]
-        : rawElements);
+        // When there are no window elements, rawElements is by construction exactly the menu-role
+        // nodes windowElementsOf just excluded — the application's menu bar, whose frames live
+        // outside this window entirely. Offering them as the targets of a window-scoped observation
+        // is a lie, and a costly one: they are registered in indexedElements below, so the model can
+        // address one, while observedElements deliberately excludes them so the semantic resolver
+        // refuses to reason about them. Return no targets and let the screenshot be the truth, which
+        // is what the degraded guidance already instructs.
+        : []);
     const elements = orderedElements.slice(0, maxElements).map((element: any) => {
       const compact: Record<string, unknown> = {};
       for (const key of ['element_index', 'element_token', 'role', 'label', 'context_label', 'value', 'description', 'enabled', 'focused', 'frame']) {
