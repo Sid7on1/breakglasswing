@@ -2668,6 +2668,76 @@ describe('BimaxComputerRuntime', () => {
     }
   });
 
+  // Live probing across five applications produced shapeRegions: 0 every time, which first read as
+  // a gap. It was not: shape regions are foveated into ACTIONABLE controls that carry no label, and
+  // every window probed had fully labeled controls, so the shape list was legitimately empty. The
+  // path had simply never been exercised with input that reaches it. This does that, without
+  // needing an application that happens to ship unlabeled buttons.
+  it('foveates shape analysis into actionable controls that carry no label', async () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const tmp = path.join(os.tmpdir(), `bimax-shapes-${Date.now()}.png`);
+    fs.writeFileSync(tmp, Buffer.from([3, 1, 4, 1, 5]));
+    // Five actionable controls, none labeled — a toolbar of bare icons, in no particular app.
+    const icons = [0, 1, 2, 3, 4].map(i => ({
+      element_index: i + 1, element_token: `icon-${i}`, role: 'AXButton', label: '',
+      frame: { x: 20 + i * 40, y: 12, w: 32, h: 32 },
+    }));
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'App', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'App', active: true }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: tmp, screenshot_width: 500, screenshot_height: 700,
+        elements: [{ element_index: 0, role: 'AXWindow', label: 'Window', frame: { x: 0, y: 0, w: 500, h: 700 } }, ...icons],
+      });
+      return result({ ok: true });
+    });
+
+    let analysisRegions: any[] = [];
+    const native = {
+      run: jest.fn(async (cmd: any) => {
+        if (cmd.action === 'visual_analysis') {
+          analysisRegions = cmd.regions || [];
+          const shapeIds = analysisRegions.filter((r: any) => String(r.id).startsWith('shape-'));
+          return {
+            ok: true, action: cmd.action, driver: 'native-helper', summary: 'analysed',
+            visualAnalysis: {
+              texts: [],
+              shapes: shapeIds.map((r: any) => ({
+                id: r.id, contourCount: 12, topLevelCount: 3, rectangleCount: 1, kind: 'roundish',
+                occupiedFrame: { x: r.x, y: r.y, w: r.w, h: r.h },
+              })),
+              latencyMs: 21,
+            },
+          };
+        }
+        return { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+      }),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'App',
+    } as any;
+
+    try {
+      const runtime = new BimaxComputerRuntime(native);
+      await runtime.run({ action: 'open', app: 'App' });
+      const observed = await runtime.run({ action: 'observe' });
+      const foveated = (observed.details as any)?.perception?.foveated;
+
+      expect(foveated.triggered).toBe(true); // a tree of unnamed actionables is the ambiguity case
+      expect(foveated.shapeRegions).toBe(5); // one fovea per unlabeled control, not one per element
+      // The window-wide OCR pass and the per-control shape regions are distinct requests.
+      expect(analysisRegions.filter((r: any) => r.id === 'ocr-window')).toHaveLength(1);
+      expect(analysisRegions.filter((r: any) => String(r.id).startsWith('shape-'))).toHaveLength(5);
+      // Shape regions are screenshot pixels of the control, never the whole window.
+      const first = analysisRegions.find((r: any) => r.id === 'shape-0');
+      expect(first).toEqual(expect.objectContaining({ w: 32, h: 32 }));
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
+
   // An accessibility walk that returns nothing but menu-bar nodes has not observed the window — it
   // has observed the application's menu bar. Measured live, one app produced a 255-element
   // "observation" that was 100% AXMenuItem/AXMenu, with no window content and no frame, returned as
