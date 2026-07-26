@@ -31,6 +31,65 @@ async function actFresh(
   return result;
 }
 
+const DISCARD_LABEL = /^(?:don['’]t save|delete|discard)$/i;
+
+const discardButtonIn = (result: DesktopResult): any =>
+  (result.elements as any[] || []).find(element =>
+    element?.role === 'AXButton' && DISCARD_LABEL.test(String(element?.label || '').trim()));
+
+/**
+ * Close the disposable document for real.
+ *
+ * The save sheet ANIMATES IN. An earlier version of this script looked for the discard button once,
+ * ~150 ms after cmd+w, found nothing, and reported "TextEdit closed the untitled document
+ * directly" — while a modal sheet was in fact sliding onto the user's screen and stayed there,
+ * blocking the app. A cleanup step that can report success without the app being clean is worse
+ * than no cleanup step. So: poll for the sheet, and prove afterwards that it is gone.
+ */
+async function discardAfterClose(
+  runtime: BimaxComputerRuntime, cwd: string, closed: DesktopResult,
+): Promise<Record<string, unknown>> {
+  let state = closed.elements?.length ? closed : await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+  let discard = discardButtonIn(state);
+  // Up to ~2.4 s of polling. The sheet is either there or the document truly closed silently.
+  for (let attempt = 0; attempt < 8 && !discard; attempt++) {
+    await sleep(300);
+    state = await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+    if (!state.ok) continue;
+    discard = discardButtonIn(state);
+  }
+  if (!discard) return { prompt: 'not shown; TextEdit closed the untitled document directly', polledMs: 2400 };
+
+  // Re-observe immediately before clicking: the sheet may still be animating, and a handle taken
+  // mid-slide resolves to whatever sits behind its final position.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const fresh = await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+    const button = fresh.ok ? discardButtonIn(fresh) : null;
+    if (!button) break;
+    const clicked = await actFresh(runtime, {
+      action: 'click', ...handleFor(button), frameId: fresh.frameId, deliveryMode: 'foreground',
+    }, cwd);
+    await sleep(500);
+    const after = await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+    if (after.ok && !discardButtonIn(after)) {
+      return { label: button.label, receipt: clicked.actionReceipt, attempts: attempt + 1, sheetGone: true };
+    }
+  }
+
+  // Escape is Cancel — it cannot lose anything, and it at least unblocks the app rather than
+  // leaving a modal sheet on the user's desktop.
+  const stuck = await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+  await runtime.run({ action: 'key', combo: 'escape', frameId: stuck.frameId, deliveryMode: 'foreground' }, { cwd });
+  await sleep(500);
+  const final = await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
+  const stillUp = final.ok ? !!discardButtonIn(final) : null;
+  return {
+    error: 'could not discard the disposable document; pressed Escape to unblock the app',
+    sheetStillOpen: stillUp,
+    manualCleanupRequired: stillUp !== false,
+  };
+}
+
 async function main(): Promise<void> {
   if (process.platform !== 'darwin') throw new Error('live receipt verification is macOS-only');
   const runtime = new BimaxComputerRuntime();
@@ -110,20 +169,7 @@ async function main(): Promise<void> {
     const closed = requireOk(await actFresh(runtime, {
       action: 'key', combo: 'cmd+w', frameId: typed.frameId, deliveryMode: 'foreground',
     }, cwd), 'close disposable document');
-    await sleep(150);
-    const closeState = closed.elements?.length
-      ? closed
-      : await runtime.run({ action: 'observe', maxElements: 500 }, { cwd });
-    const discard = (closeState.elements as any[] || []).find(element =>
-      element?.role === 'AXButton' && /^(?:don['’]t save|delete|discard)$/i.test(String(element?.label || '').trim()));
-    if (discard) {
-      const discardedResult = requireOk(await actFresh(runtime, {
-        action: 'click', ...handleFor(discard), frameId: closeState.frameId, deliveryMode: 'foreground',
-      }, cwd), 'discard disposable document');
-      evidence.discard = { label: discard.label, receipt: discardedResult.actionReceipt };
-    } else {
-      evidence.discard = { prompt: 'not shown; TextEdit closed the untitled document directly' };
-    }
+    evidence.discard = await discardAfterClose(runtime, cwd, closed);
     discarded = true;
 
     process.stdout.write(`${JSON.stringify({ ok: true, ...evidence }, null, 2)}\n`);
@@ -137,11 +183,12 @@ async function main(): Promise<void> {
           const closed = await actFresh(runtime, {
             action: 'key', combo: 'cmd+w', frameId: fresh.frameId, deliveryMode: 'foreground',
           }, cwd);
-          const discard = (closed.elements as any[] || []).find(element =>
-            element?.role === 'AXButton' && /^(?:don['’]t save|delete|discard)$/i.test(String(element?.label || '').trim()));
-          if (discard) await actFresh(runtime, {
-            action: 'click', ...handleFor(discard), frameId: closed.frameId, deliveryMode: 'foreground',
-          }, cwd);
+          // Same polling contract as the success path: a failed run must not leave a modal sheet
+          // sitting on the user's desktop, which is exactly what the old single-shot check did.
+          const outcome = await discardAfterClose(runtime, cwd, closed);
+          if (outcome.manualCleanupRequired) {
+            process.stderr.write('cleanup: a TextEdit save dialog is still open and needs to be dismissed manually\n');
+          }
         }
       } catch { /* original failure remains the actionable report */ }
     }
