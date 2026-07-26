@@ -241,8 +241,9 @@ exposes the same one. If a fix here needs to know which app it is talking to, th
    caught a mid-animation sheet, or sheet-hosted element frames map into a different space than
    window elements. Property to settle: an element's reported frame hit-tests to that element,
    regardless of what kind of container hosts it.
-4. **Driver 0.12.6** — still pinned at 0.12.3, correctly. Do not touch until 1–3 are settled;
-   there is no reason to add sidecar variance while perception gaps are open.
+4. **Driver 0.12.6 — dropped, not wanted.** Decided 2026-07-26: stay on 0.12.3. The upgrade buys
+   nothing the current work needs and would add sidecar variance for free. The staged-candidate
+   procedure in the original handoff stays on the shelf until there is a concrete reason to run it.
 5. The nine inherited commits are gated at the tip only, not individually. If bisectable history
    matters, that needs a pass.
 
@@ -251,3 +252,35 @@ exposes the same one. If a fix here needs to know which app it is talking to, th
 Anything that drives the real desktop must leave it clean, and must be able to *prove* it left it
 clean. Two of the four issues in this session came from a cleanup step that reported success it had
 not verified. The receipt architecture applies to the test scripts too, not just the runtime.
+
+## 8. Item 1 fixed — window acquisition (`27e17cfd`)
+
+Root cause, from reading the code rather than probing further: `windowElementsOf` strips menu roles,
+so a walk that returns only menu nodes leaves `windowElements` empty. That set `degraded = true` and
+the observation then **fell back to the raw element list** — which, by construction, is exactly the
+menu nodes that were just excluded. Their frames lie outside the window entirely.
+
+The sharper half: those elements were registered in `indexedElements` (addressable by
+token/index, so a model could target one) while `observedElements` deliberately excluded them, so
+the semantic resolver refused to reason about the very targets the observation was offering. And
+with no window frame, `mintFrame` returned null — no `frameId` — so nothing downstream could even
+refuse a stale coordinate.
+
+Two changes, both universal, neither aware of any application:
+
+1. **Acquisition.** No window element after the ceiling rescan → re-derive the app's current top
+   window once and observe that instead. Only the window component changes; pid/app ownership is
+   untouched, the same move the Cmd+N and zero-pixel recoveries already make. Bounded to one
+   attempt, so a genuinely AX-silent window still returns a screenshot-only observation.
+2. **Honesty.** A window-scoped observation with no window content returns **no targets** and leans
+   on the screenshot — which is what its own degraded guidance already tells the model to do.
+
+Both tests were run against the unfixed runtime and fail there. The first version of the
+acquisition test passed without the fix — `open` performs its own capture and had already landed on
+the good window — so the fixture was rebuilt to replace the window *after* acquisition. A test that
+passes against the unfixed code pins nothing.
+
+Gates: **17/17 suites, 266/266 tests**, `tsc --noEmit` clean, `eslint --quiet` clean.
+
+**Remaining:** item 2 (shape path needs a unit-level proof with unlabeled controls) and item 3
+(sheet-hosted controls hit-testing). Item 4 is dropped.
