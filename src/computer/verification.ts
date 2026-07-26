@@ -20,6 +20,7 @@ export type VerificationOutcome =
   | 'confirmed'    // a specific expectation was proven (semantic query matched)
   | 'changed'      // the screen visibly changed (the action had an effect)
   | 'no-change'    // the post-action frame is identical to the pre-action frame — no visible effect
+  | 'expectation-missed' // pixels may have changed, but an explicit semantic postcondition did not
   | 'wrong-window' // the app/window in front is not the one we targeted (focus stolen / wrong target)
   | 'unverified'   // the action landed but there is no fresh screenshot to prove the outcome
   | 'failed';      // the driver itself reported failure
@@ -49,6 +50,8 @@ export interface VerificationInput {
   actualWindowId?: number;
   /** Result of a semantic verification query, when the caller supplied one. */
   queryMatched?: boolean;
+  /** True only when queryMatched is a required postcondition rather than an optional observation. */
+  queryRequired?: boolean;
 }
 
 /**
@@ -74,6 +77,15 @@ export function classifyVerification(i: VerificationInput): VerificationResult {
   }
   if (i.queryMatched === true) {
     return { outcome: 'confirmed', frameChanged: i.prevFrameHash != null && i.nextFrameHash !== i.prevFrameHash, windowStable, queryMatched: true, note: 'verification query matched concrete on-screen text' };
+  }
+  if (i.queryRequired && i.queryMatched === false) {
+    return {
+      outcome: 'expectation-missed',
+      frameChanged: i.prevFrameHash != null && i.nextFrameHash !== i.prevFrameHash,
+      windowStable,
+      queryMatched: false,
+      note: 'the screen was captured, but the required semantic postcondition was not satisfied',
+    };
   }
   if (i.prevFrameHash != null && i.nextFrameHash === i.prevFrameHash) {
     return { outcome: 'no-change', frameChanged: false, windowStable, queryMatched: i.queryMatched, note: 'the screen is pixel-identical to before the action — it had no visible effect' };

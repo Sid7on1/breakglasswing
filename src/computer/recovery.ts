@@ -61,6 +61,10 @@ export class RecoveryController {
         this.noProgress++;
         if (this.noProgress >= this.budget.maxNoProgress) return this.giveUp();
         return this.recoverOrGiveUp();
+      case 'expectation-missed':
+        this.noProgress++;
+        if (this.noProgress >= this.budget.maxNoProgress) return this.giveUp();
+        return this.recoverOrGiveUp();
       case 'wrong-window':
         return this.recoverOrGiveUp();
       case 'unverified':

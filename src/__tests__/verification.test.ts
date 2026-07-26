@@ -25,6 +25,14 @@ describe('classifyVerification — never trust the driver, judge the screen', ()
     expect(classifyVerification({ ...base, nextFrameHash: 'b', prevFrameHash: 'a', queryMatched: true }).outcome).toBe('confirmed');
   });
 
+  it('distinguishes an explicit missed postcondition from an arbitrary pixel change', () => {
+    const r = classifyVerification({
+      ...base, prevFrameHash: 'before', nextFrameHash: 'after', queryMatched: false, queryRequired: true,
+    });
+    expect(r.outcome).toBe('expectation-missed');
+    expect(r.frameChanged).toBe(true);
+  });
+
   it('no-change when the post-action frame is identical (driver "succeeded" but nothing happened)', () => {
     const r = classifyVerification({ ...base, prevFrameHash: 'same', nextFrameHash: 'same' });
     expect(r.outcome).toBe('no-change');
