@@ -17,6 +17,7 @@ export const DESKTOP_HELPER_SOURCE = `
 import AppKit
 import CoreGraphics
 import Foundation
+import Vision
 
 func die(_ message: String) -> Never {
   FileHandle.standardError.write(("error: " + message + "\\n").data(using: .utf8)!)
@@ -40,6 +41,61 @@ func jstr(_ s: String) -> String {
 }
 
 func num(_ s: String) -> Double { guard let v = Double(s) else { die("bad number: " + s) }; return v }
+
+func printJSON(_ object: Any) {
+  guard JSONSerialization.isValidJSONObject(object),
+        let data = try? JSONSerialization.data(withJSONObject: object, options: []),
+        let text = String(data: data, encoding: .utf8) else { die("could not encode JSON result") }
+  print(text)
+}
+
+// ---- colour fingerprints ---------------------------------------------------------------------
+// A screenshot may carry Display P3 or another embedded profile. Drawing it into this bitmap makes
+// CoreGraphics perform the profile conversion once, so every RGB value below has stable sRGB
+// semantics instead of being an unlabelled device value.
+
+struct ColourBucket {
+  var count = 0
+  var red = 0
+  var green = 0
+  var blue = 0
+}
+
+func linearSRGB(_ byte: Int) -> Double {
+  let value = Double(byte) / 255.0
+  return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+}
+
+func rgbToOKLab(_ rgb: [Int]) -> [Double] {
+  let r = linearSRGB(rgb[0]), g = linearSRGB(rgb[1]), b = linearSRGB(rgb[2])
+  let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+  let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+  let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+  let lr = cbrt(l), mr = cbrt(m), sr = cbrt(s)
+  return [
+    0.2104542553 * lr + 0.7936177850 * mr - 0.0040720468 * sr,
+    1.9779984951 * lr - 2.4285922050 * mr + 0.4505937099 * sr,
+    0.0259040371 * lr + 0.7827717662 * mr - 0.8086757660 * sr,
+  ]
+}
+
+func basicColourName(_ lab: [Double]) -> String {
+  let lightness = lab[0]
+  let chroma = hypot(lab[1], lab[2])
+  if lightness < 0.18 { return "black" }
+  if lightness > 0.92 && chroma < 0.05 { return "white" }
+  if chroma < 0.035 { return "gray" }
+  var hue = atan2(lab[2], lab[1]) * 180.0 / Double.pi
+  if hue < 0 { hue += 360 }
+  if hue < 40 || hue >= 350 { return "red" }
+  if hue < 75 { return "orange" }
+  if hue < 115 { return "yellow" }
+  if hue < 175 { return "green" }
+  if hue < 230 { return "cyan" }
+  if hue < 285 { return "blue" }
+  if hue < 330 { return "purple" }
+  return "magenta"
+}
 
 let eventSource = CGEventSource(stateID: .hidSystemState)
 
@@ -203,6 +259,120 @@ func axFrame(_ window: AXUIElement) -> CGRect? {
   return CGRect(origin: origin, size: size)
 }
 
+func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+  var raw: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
+        let value = raw else { return nil }
+  if let text = value as? String { return text }
+  if let number = value as? NSNumber { return number.stringValue }
+  return nil
+}
+
+func axBool(_ element: AXUIElement, _ attribute: String) -> Bool? {
+  var raw: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
+        let value = raw as? NSNumber else { return nil }
+  return value.boolValue
+}
+
+/** Metadata-only identity: enough to prove ownership without copying a user's field contents. */
+func axElementIdentity(_ element: AXUIElement) -> [String: Any] {
+  var object: [String: Any] = [:]
+  var pid: pid_t = 0
+  if AXUIElementGetPid(element, &pid) == .success { object["pid"] = Int(pid) }
+  if let value = axString(element, kAXRoleAttribute) { object["role"] = value }
+  if let value = axString(element, kAXSubroleAttribute) { object["subrole"] = value }
+  if let value = axString(element, kAXTitleAttribute), !value.isEmpty { object["title"] = value }
+  if let value = axString(element, kAXDescriptionAttribute), !value.isEmpty { object["description"] = value }
+  if let value = axString(element, "AXIdentifier"), !value.isEmpty { object["identifier"] = value }
+  if let value = axBool(element, kAXEnabledAttribute) { object["enabled"] = value }
+  if let value = axBool(element, kAXFocusedAttribute) { object["focused"] = value }
+  if let rect = axFrame(element) {
+    object["frame"] = ["x": Int(rect.minX), "y": Int(rect.minY), "w": Int(rect.width), "h": Int(rect.height)]
+  }
+  var settable = DarwinBoolean(false)
+  let canSetValue = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+  let role = object["role"] as? String ?? ""
+  object["editable"] = canSetValue || ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(role)
+  // Do not emit the value itself. Length + selection movement are sufficient to prove input landed
+  // while keeping passwords, messages, and document contents out of action diagnostics.
+  var valueRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+     let text = valueRef as? String { object["valueLength"] = text.count }
+  var rangeRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+     let rawRange = rangeRef, CFGetTypeID(rawRange) == AXValueGetTypeID() {
+    var range = CFRange(location: 0, length: 0)
+    if AXValueGetValue(rawRange as! AXValue, .cfRange, &range) {
+      object["selectedRange"] = ["location": range.location, "length": range.length]
+    }
+  }
+  var actionRef: CFArray?
+  if AXUIElementCopyActionNames(element, &actionRef) == .success,
+     let actions = actionRef as? [String], !actions.isEmpty { object["actions"] = actions }
+  return object
+}
+
+func axElementChain(_ element: AXUIElement, limit: Int = 6) -> [[String: Any]] {
+  var chain: [[String: Any]] = []
+  var current: AXUIElement? = element
+  for _ in 0..<limit {
+    guard let item = current else { break }
+    chain.append(axElementIdentity(item))
+    var parentRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(item, kAXParentAttribute as CFString, &parentRef) == .success,
+          let parentRaw = parentRef else { break }
+    let parent = parentRaw as! AXUIElement
+    if CFEqual(item, parent) { break }
+    current = parent
+  }
+  return chain
+}
+
+func writeJSONLine(_ object: Any) {
+  guard JSONSerialization.isValidJSONObject(object),
+        var data = try? JSONSerialization.data(withJSONObject: object, options: []) else { return }
+  data.append(0x0a)
+  FileHandle.standardOutput.write(data)
+}
+
+func registerChangingElement(_ observer: AXObserver, _ element: AXUIElement) {
+  let notifications = [
+    kAXValueChangedNotification,
+    kAXSelectedChildrenChangedNotification,
+    kAXSelectedTextChangedNotification,
+    kAXUIElementDestroyedNotification,
+  ]
+  for notification in notifications {
+    _ = AXObserverAddNotification(observer, element, notification as CFString, nil)
+  }
+}
+
+func accessibilityObserverCallback(
+  _ observer: AXObserver,
+  _ element: AXUIElement,
+  _ notification: CFString,
+  _ refcon: UnsafeMutableRawPointer?
+) {
+  let name = notification as String
+  // Focus changes identify the next element whose value/selection mutations matter. Subscribe at
+  // the event boundary instead of polling an entire app tree after every action.
+  if name == (kAXFocusedUIElementChangedNotification as String) {
+    var focusedRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+       let raw = focusedRef {
+      registerChangingElement(observer, raw as! AXUIElement)
+    }
+  }
+  writeJSONLine([
+    "ok": true,
+    "pid": axElementIdentity(element)["pid"] ?? 0,
+    "notification": name,
+    "timestamp_ms": Int(Date().timeIntervalSince1970 * 1000),
+    "element": axElementIdentity(element),
+  ])
+}
+
 func axSetPoint(_ window: AXUIElement, _ attribute: String, _ point: CGPoint) {
   var p = point
   guard let value = AXValueCreate(.cgPoint, &p) else { return }
@@ -273,6 +443,42 @@ guard args.count >= 2 else { die("usage: bimax-desktop <command> [args]") }
 
 switch args[1] {
 
+case "watch-events":
+  guard args.count >= 3 else { die("watch-events <pid>") }
+  let watchedPid = pid_t(num(args[2]))
+  guard AXIsProcessTrusted() else { die("Accessibility permission is not granted") }
+  var observerRef: AXObserver?
+  guard AXObserverCreate(watchedPid, accessibilityObserverCallback, &observerRef) == .success,
+        let observer = observerRef else { die("could not create accessibility observer") }
+  let app = AXUIElementCreateApplication(watchedPid)
+  let appNotifications = [
+    kAXFocusedUIElementChangedNotification,
+    kAXFocusedWindowChangedNotification,
+    kAXWindowCreatedNotification,
+    kAXUIElementDestroyedNotification,
+  ]
+  for notification in appNotifications {
+    _ = AXObserverAddNotification(observer, app, notification as CFString, nil)
+  }
+  var focusedRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+     let raw = focusedRef { registerChangingElement(observer, raw as! AXUIElement) }
+  var windowsRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+     let windows = windowsRef as? [AXUIElement] {
+    for window in windows {
+      for notification in [kAXMovedNotification, kAXResizedNotification, kAXTitleChangedNotification, kAXUIElementDestroyedNotification] {
+        _ = AXObserverAddNotification(observer, window, notification as CFString, nil)
+      }
+    }
+  }
+  CFRunLoopAddSource(CFRunLoopGetCurrent(), AXObserverGetRunLoopSource(observer), .defaultMode)
+  writeJSONLine(["ok": true, "pid": Int(watchedPid), "notification": "observer-ready",
+                 "timestamp_ms": Int(Date().timeIntervalSince1970 * 1000)])
+  while NSRunningApplication(processIdentifier: watchedPid) != nil {
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.5))
+  }
+
 case "status":
   let screen = CGPreflightScreenCaptureAccess()
   let ax = AXIsProcessTrusted()
@@ -297,6 +503,24 @@ case "cursor":
 
 case "frontmost":
   print("{\\"ok\\":true,\\"app\\":\\(jstr(frontmostName()))}")
+
+case "focused-element":
+  guard let app = NSWorkspace.shared.frontmostApplication else {
+    printJSON(["ok": true, "focused": NSNull(), "chain": []])
+    break
+  }
+  let focusedApp = AXUIElementCreateApplication(app.processIdentifier)
+  var focusedRef: CFTypeRef?
+  if AXUIElementCopyAttributeValue(focusedApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+     let raw = focusedRef {
+    let element = raw as! AXUIElement
+    let chain = axElementChain(element)
+    printJSON(["ok": true, "app": app.localizedName ?? "", "pid": Int(app.processIdentifier),
+               "focused": chain.first ?? [:], "chain": chain])
+  } else {
+    printJSON(["ok": true, "app": app.localizedName ?? "", "pid": Int(app.processIdentifier),
+               "focused": NSNull(), "chain": []])
+  }
 
 case "move":
   guard args.count >= 4 else { die("move x y") }
@@ -525,6 +749,7 @@ case "window-at":
   // that would actually receive the event, so click-through windows correctly fall through.
   var owner = ""
   var opid: pid_t = 0
+  var elementChain: [[String: Any]] = []
   let sys = AXUIElementCreateSystemWide()
   var hitEl: AXUIElement?
   if AXUIElementCopyElementAtPosition(sys, Float(px), Float(py), &hitEl) == .success, let el = hitEl {
@@ -533,10 +758,12 @@ case "window-at":
       opid = epid
       owner = NSRunningApplication(processIdentifier: epid)?.localizedName ?? ""
     }
+    elementChain = axElementChain(el)
   }
   // The stack answer is reported ALONGSIDE it, never instead of it: it is what names an obstruction
   // for a human ("the Live Preview is over that point") once AX has established there really is one.
   var topName = "", topId = 0, topLayer = 0
+  var topBounds: [String: Int]? = nil
   if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
     for w in list {
       guard let b = w[kCGWindowBounds as String] as? [String: Any],
@@ -549,11 +776,17 @@ case "window-at":
       topId = (w[kCGWindowNumber as String] as? Int) ?? 0
       topLayer = layer
       topName = (w[kCGWindowOwnerName as String] as? String) ?? ""
+      topBounds = ["x": Int(bx), "y": Int(by), "w": Int(bw), "h": Int(bh)]
       break
     }
   }
-  print("{\\"ok\\":true,\\"window\\":{\\"owner_pid\\":\\(opid),\\"owner_name\\":\\(jstr(owner))"
-    + ",\\"top_window_id\\":\\(topId),\\"top_owner_name\\":\\(jstr(topName)),\\"top_layer\\":\\(topLayer)}}")
+  var window: [String: Any] = [
+    "owner_pid": Int(opid), "owner_name": owner, "window_id": topId, "layer": topLayer,
+    "top_window_id": topId, "top_owner_name": topName, "top_layer": topLayer,
+    "element_chain": elementChain,
+  ]
+  if let bounds = topBounds { window["bounds"] = bounds }
+  printJSON(["ok": true, "window": window])
 
 case "window-raise":
   // Raise ONE window of an app, not merely the app. AX exposes no window id, so the caller passes
@@ -652,6 +885,244 @@ case "window-fullscreen":
   }
   let settled = axFullScreen(fwin)
   print("{\\"ok\\":true,\\"supported\\":\\(accepted),\\"fullscreen\\":\\(settled),\\"matched\\":\\(settled == wantFull)}")
+
+// Decode a window screenshot once and sample a small, inset grid inside each AX rectangle. The
+// inset avoids borders, shadows, focus rings, and neighbouring controls; median/dominant colours
+// make the result robust to text and glyph pixels inside the element.
+case "visual-signatures":
+  guard args.count >= 3,
+        let payloadData = Data(base64Encoded: args[2]),
+        let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+        let imagePath = payload["imagePath"] as? String,
+        let regions = payload["regions"] as? [[String: Any]] else {
+    die("visual-signatures <base64-json {imagePath,regions}>")
+  }
+  guard let nsImage = NSImage(contentsOfFile: imagePath) else { die("could not load screenshot: " + imagePath) }
+  var proposed = CGRect(origin: .zero, size: nsImage.size)
+  guard let image = nsImage.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else {
+    die("could not decode screenshot pixels")
+  }
+  let pixelWidth = image.width, pixelHeight = image.height
+  let bytesPerRow = pixelWidth * 4
+  var pixels = [UInt8](repeating: 0, count: bytesPerRow * pixelHeight)
+  let colourSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+  pixels.withUnsafeMutableBytes { storage in
+    let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).union(.byteOrder32Big)
+    guard let context = CGContext(data: storage.baseAddress, width: pixelWidth, height: pixelHeight,
+                                  bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                                  space: colourSpace, bitmapInfo: info.rawValue) else {
+      die("could not allocate sRGB screenshot bitmap")
+    }
+    // CGContext's user space is bottom-left, while screenshot/AX pixels are top-left. Flip exactly
+    // once while drawing so a region at y=0 samples the visible top of the PNG.
+    context.translateBy(x: 0, y: CGFloat(pixelHeight))
+    context.scaleBy(x: 1, y: -1)
+    context.draw(image, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+  }
+
+  func rgbAt(_ x: Int, _ y: Int) -> [Int] {
+    let offset = max(0, min(pixelHeight - 1, y)) * bytesPerRow + max(0, min(pixelWidth - 1, x)) * 4
+    return [Int(pixels[offset]), Int(pixels[offset + 1]), Int(pixels[offset + 2])]
+  }
+
+  var signatures: [[String: Any]] = []
+  for region in regions.prefix(160) {
+    guard let id = region["id"] as? String,
+          let x = region["x"] as? NSNumber, let y = region["y"] as? NSNumber,
+          let w = region["w"] as? NSNumber, let h = region["h"] as? NSNumber else { continue }
+    let requestedArea = max(1.0, w.doubleValue * h.doubleValue)
+    let left = max(0, min(pixelWidth - 1, Int(floor(x.doubleValue))))
+    let top = max(0, min(pixelHeight - 1, Int(floor(y.doubleValue))))
+    let right = max(left, min(pixelWidth - 1, Int(ceil(x.doubleValue + w.doubleValue)) - 1))
+    let bottom = max(top, min(pixelHeight - 1, Int(ceil(y.doubleValue + h.doubleValue)) - 1))
+    let regionWidth = right - left + 1, regionHeight = bottom - top + 1
+    let insetX = regionWidth >= 8 ? max(1, regionWidth / 8) : 0
+    let insetY = regionHeight >= 8 ? max(1, regionHeight / 8) : 0
+    let sampleLeft = min(right, left + insetX), sampleRight = max(sampleLeft, right - insetX)
+    let sampleTop = min(bottom, top + insetY), sampleBottom = max(sampleTop, bottom - insetY)
+    var samplePixels: [[Int]] = []
+    var seen = Set<Int>()
+    for gy in 0..<7 {
+      for gx in 0..<7 {
+        let sx = sampleLeft + Int(round(Double(sampleRight - sampleLeft) * Double(gx) / 6.0))
+        let sy = sampleTop + Int(round(Double(sampleBottom - sampleTop) * Double(gy) / 6.0))
+        let key = sy * pixelWidth + sx
+        if seen.insert(key).inserted { samplePixels.append(rgbAt(sx, sy)) }
+      }
+    }
+    guard !samplePixels.isEmpty else { continue }
+    let median = (0..<3).map { channel -> Int in
+      let sorted = samplePixels.map { $0[channel] }.sorted()
+      return sorted[sorted.count / 2]
+    }
+    let center = rgbAt((left + right) / 2, (top + bottom) / 2)
+    let lab = rgbToOKLab(median)
+    let luminance = 0.2126 * linearSRGB(median[0]) + 0.7152 * linearSRGB(median[1]) + 0.0722 * linearSRGB(median[2])
+    var buckets: [Int: ColourBucket] = [:]
+    for rgb in samplePixels {
+      let key = (rgb[0] >> 5) << 6 | (rgb[1] >> 5) << 3 | (rgb[2] >> 5)
+      var bucket = buckets[key] ?? ColourBucket()
+      bucket.count += 1; bucket.red += rgb[0]; bucket.green += rgb[1]; bucket.blue += rgb[2]
+      buckets[key] = bucket
+    }
+    let rankedBuckets = buckets.values.sorted { $0.count > $1.count }.prefix(3)
+    let dominant: [[String: Any]] = rankedBuckets.map { bucket in
+      ["rgb": [bucket.red / bucket.count, bucket.green / bucket.count, bucket.blue / bucket.count],
+       "coverage": Double(bucket.count) / Double(samplePixels.count)]
+    }
+    var entropy = 0.0
+    for bucket in buckets.values {
+      let probability = Double(bucket.count) / Double(samplePixels.count)
+      entropy -= probability * log2(probability)
+    }
+    if samplePixels.count > 1 { entropy /= log2(Double(samplePixels.count)) }
+    let clampedArea = Double(regionWidth * regionHeight)
+    let boundsCoverage = min(1.0, clampedArea / requestedArea)
+    let confidence = min(1.0, Double(samplePixels.count) / 25.0) * boundsCoverage
+    signatures.append([
+      "id": id, "center_rgb": center, "median_rgb": median, "dominant": dominant,
+      "oklab": lab, "luminance": luminance, "chroma": hypot(lab[1], lab[2]),
+      "color_name": basicColourName(lab), "entropy": entropy,
+      "confidence": confidence, "sample_count": samplePixels.count,
+      "source_color_space": "sRGB",
+    ])
+  }
+  printJSON(["ok": true, "width": pixelWidth, "height": pixelHeight,
+             "color_space": "sRGB", "signatures": signatures])
+
+// Foveated, entirely on-device perception. OCR runs once over the requested search region; shape
+// analysis runs only over the small ambiguous/unlabelled control rectangles supplied by the
+// runtime. It deliberately emits geometric fingerprints, not invented icon names.
+case "visual-analysis":
+  guard args.count >= 3,
+        let payloadData = Data(base64Encoded: args[2]),
+        let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+        let imagePath = payload["imagePath"] as? String,
+        let regions = payload["regions"] as? [[String: Any]] else {
+    die("visual-analysis <base64-json {imagePath,regions,query}>")
+  }
+  guard let nsImage = NSImage(contentsOfFile: imagePath) else { die("could not load screenshot: " + imagePath) }
+  var proposed = CGRect(origin: .zero, size: nsImage.size)
+  guard let image = nsImage.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else {
+    die("could not decode screenshot pixels")
+  }
+  let imageWidth = CGFloat(image.width), imageHeight = CGFloat(image.height)
+  let query = (payload["query"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+  let started = Date()
+
+  func regionOfInterest(_ region: [String: Any]) -> CGRect? {
+    guard let x = region["x"] as? NSNumber, let y = region["y"] as? NSNumber,
+          let w = region["w"] as? NSNumber, let h = region["h"] as? NSNumber else { return nil }
+    let left = max(0, min(imageWidth, CGFloat(x.doubleValue)))
+    let top = max(0, min(imageHeight, CGFloat(y.doubleValue)))
+    let right = max(left, min(imageWidth, CGFloat(x.doubleValue + w.doubleValue)))
+    let bottom = max(top, min(imageHeight, CGFloat(y.doubleValue + h.doubleValue)))
+    guard right > left, bottom > top else { return nil }
+    return CGRect(x: left / imageWidth, y: 1 - bottom / imageHeight,
+                  width: (right - left) / imageWidth, height: (bottom - top) / imageHeight)
+  }
+
+  func pixelFrame(_ normalized: CGRect) -> [String: Int] {
+    let x = max(0, min(imageWidth, normalized.minX * imageWidth))
+    let y = max(0, min(imageHeight, (1 - normalized.maxY) * imageHeight))
+    let right = max(x, min(imageWidth, normalized.maxX * imageWidth))
+    let bottom = max(y, min(imageHeight, (1 - normalized.minY) * imageHeight))
+    return ["x": Int(round(x)), "y": Int(round(y)),
+            "w": max(1, Int(round(right - x))), "h": max(1, Int(round(bottom - y)))]
+  }
+
+  func pixelFrameInRegion(_ normalized: CGRect, _ roi: CGRect) -> [String: Int] {
+    // VNContour.normalizedPath is normalized to its request ROI, unlike OCR bounding boxes which
+    // are image-normalized. Compose ROI→image before converting bottom-left Vision coordinates to
+    // top-left screenshot pixels.
+    let imageNormalized = CGRect(
+      x: roi.minX + normalized.minX * roi.width,
+      y: roi.minY + normalized.minY * roi.height,
+      width: normalized.width * roi.width,
+      height: normalized.height * roi.height
+    )
+    return pixelFrame(imageNormalized)
+  }
+
+  var analysisErrors: [String] = []
+  func performVision(_ request: VNRequest, _ name: String) {
+    do {
+      // A fresh handler per request avoids Vision rejecting/reusing state after OCR when contour
+      // and rectangle requests follow on the same image.
+      try VNImageRequestHandler(cgImage: image, orientation: .up, options: [:]).perform([request])
+    } catch {
+      analysisErrors.append(name + ": " + String(String(describing: error).prefix(160)))
+    }
+  }
+  var texts: [[String: Any]] = []
+  // The first region is the OCR fovea. For a missing semantic query this is the full window; the
+  // runtime does not pay OCR cost on routine, already-resolved observations.
+  if let first = regions.first, let roi = regionOfInterest(first) {
+    let request = VNRecognizeTextRequest()
+    request.regionOfInterest = roi
+    request.recognitionLevel = query.isEmpty ? .fast : .accurate
+    request.usesLanguageCorrection = !query.isEmpty
+    performVision(request, "ocr")
+    for observation in (request.results ?? []).prefix(100) {
+      guard let candidate = observation.topCandidates(1).first,
+            !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+      texts.append(["text": candidate.string, "confidence": candidate.confidence,
+                    "frame": pixelFrame(observation.boundingBox)])
+    }
+  }
+
+  var shapes: [[String: Any]] = []
+  for region in regions.dropFirst().prefix(16) {
+    guard let id = region["id"] as? String, let roi = regionOfInterest(region) else { continue }
+    let darkOnLight = VNDetectContoursRequest()
+    darkOnLight.regionOfInterest = roi
+    darkOnLight.contrastAdjustment = 1.0
+    darkOnLight.detectsDarkOnLight = true
+    darkOnLight.maximumImageDimension = 256
+    let lightOnDark = VNDetectContoursRequest()
+    lightOnDark.regionOfInterest = roi
+    lightOnDark.contrastAdjustment = 1.0
+    lightOnDark.detectsDarkOnLight = false
+    lightOnDark.maximumImageDimension = 256
+    let rectangles = VNDetectRectanglesRequest()
+    rectangles.regionOfInterest = roi
+    rectangles.maximumObservations = 8
+    rectangles.minimumConfidence = 0.45
+    rectangles.minimumSize = 0.08
+    performVision(darkOnLight, "dark-on-light contours")
+    performVision(lightOnDark, "light-on-dark contours")
+    performVision(rectangles, "rectangles")
+    // Dark mode reverses the foreground/background polarity. Run both and retain the observation
+    // with more structure so icon fingerprints work across themes without guessing from RGB.
+    let contourObservation = [darkOnLight.results?.first, lightOnDark.results?.first]
+      .compactMap { $0 }
+      .max { $0.contourCount < $1.contourCount }
+    let contourCount = contourObservation?.contourCount ?? 0
+    let topLevel = contourObservation?.topLevelContourCount ?? 0
+    let rectangleCount = rectangles.results?.count ?? 0
+    var occupied = CGRect.null
+    if let observation = contourObservation {
+      for contour in observation.topLevelContours.prefix(64) {
+        occupied = occupied.union(contour.normalizedPath.boundingBox)
+      }
+    }
+    let aspect = occupied.isNull || occupied.height <= 0 ? roi.width / max(roi.height, 0.0001) : occupied.width / occupied.height
+    let kind: String
+    if contourCount == 0 { kind = "empty" }
+    else if aspect > 2.0 { kind = "horizontal" }
+    else if aspect < 0.5 { kind = "vertical" }
+    else if rectangleCount > 0 && aspect >= 0.75 && aspect <= 1.35 { kind = "square" }
+    else if rectangleCount == 0 && topLevel <= 3 && contourCount <= 16 && aspect >= 0.7 && aspect <= 1.4 { kind = "roundish" }
+    else { kind = "complex" }
+    var shape: [String: Any] = [
+      "id": id, "contourCount": contourCount, "topLevelCount": topLevel,
+      "rectangleCount": rectangleCount, "kind": kind,
+    ]
+    if !occupied.isNull { shape["occupiedFrame"] = pixelFrameInRegion(occupied, roi) }
+    shapes.append(shape)
+  }
+  printJSON(["ok": true, "texts": texts, "shapes": shapes, "errors": analysisErrors,
+             "latency_ms": Int(Date().timeIntervalSince(started) * 1000)])
 
 // ---- desktop surface ---------------------------------------------------------------------------
 // The desktop is not an ordinary window: the file manager publishes it as a full-screen AXScrollArea
@@ -780,4 +1251,4 @@ extension Array {
 `;
 
 /** Bump when the protocol changes so stale cached binaries are never reused. */
-export const DESKTOP_HELPER_VERSION = 17; // v17: cursor arrival is waited for and reported, not assumed (v16: glide always lands on the exact endpoint; v15: window hit test + single-window raise; v14: Chromium AXManualAccessibility opt-in; v13: AX modal-blocker probe; v12: desktop icons; v11: drag dwell pacing; v10: AX window geometry + screens)
+export const DESKTOP_HELPER_VERSION = 23; // v23: ROI-correct contour geometry; v22: isolated Vision requests with surfaced errors; v21: dual-polarity contours; v20: event-driven AX invalidation + foveated OCR/shape fingerprints
