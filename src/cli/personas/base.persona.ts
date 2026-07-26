@@ -41,6 +41,9 @@ export interface PersonaConfig {
 // request — "send this to X on <app>" — is a computer-use task end to end, and reading it as chat
 // is exactly how the agent came to claim it could not send files to a messaging app at all.
 const GUI_OPERATION_VERB = /\b(?:open|navigate|go|click|drag|drop|select|scroll|inspect|check|look|poke|show|tell|find|verify|type|press|send|share|forward|message|reply|respond|text|dm|post|attach|upload|download|copy|paste|put|move|place|arrange|resize|tile|split|maximi[sz]e|minimi[sz]e|fullscreen|focus|switch|quit)\b/i;
+const GUI_SURFACE_OBJECT = /\b(?:app|application|window|screen|desktop|dock|menu ?bar|control cent(?:er|re)|notification(?:s| cent(?:er|re))?|settings|sidebar|toolbar|button|icon|field|composer|dialog|popover|tab|file picker|downloads?|trash|clipboard|wifi|bluetooth|brightness|volume|battery)\b/i;
+const ENGINEERING_CONTEXT = /\b(?:code|codebase|repo|source|script|test|spec|bug|function|class|method|variable|folder path|diff|commit|branch|implement|refactor|debug|compile|build)\b|\.[a-z]{2,4}(?:\b|$)/i;
+const INFORMATIONAL_QUESTION = /\b(?:explain|how\s+(?:do|does|did|would|could|can|to)\b|what(?:'s|\s+is|\s+are)\b|why\s+(?:do|does|is|are)\b|difference between)/i;
 
 export function explicitlyRequiresComputerUse(prompt: string): boolean {
   if (/\b(?:use|using|with|via)\s+(?:the\s+)?computer(?:\s+use)?\b/i.test(prompt)) return true;
@@ -50,17 +53,35 @@ export function explicitlyRequiresComputerUse(prompt: string): boolean {
   // Computer tool that was already available. But merely MENTIONING an app must not route: questions
   // about how software behaves and engineering work on files/tests (this codebase itself contains
   // Finder/Safari-related sources) would otherwise have their real conversation evidence isolated.
-  const engineeringContext = /\b(?:code|codebase|repo|source|script|test|spec|bug|function|class|method|variable|file|folder path|diff|commit|branch|implement|refactor|debug|compile|build)\b|\.[a-z]{2,4}(?:\b|$)/i;
-  const informationalQuestion = /\b(?:explain|how\s+(?:do|does|did|would|could|can|to)\b|what(?:'s|\s+is|\s+are)\b|why\s+(?:do|does|is|are)\b|difference between)/i;
-  if (engineeringContext.test(prompt) || informationalQuestion.test(prompt)) return false;
+  if (ENGINEERING_CONTEXT.test(prompt) || INFORMATIONAL_QUESTION.test(prompt)) return false;
   if (!GUI_OPERATION_VERB.test(prompt)) return false;
   // The machine itself, named directly. These are OS surfaces, not applications, so no amount of
   // app discovery would find them.
   if (/\b(?:my\s+(?:mac|computer|laptop|machine|screen|desktop)|system settings|menu ?bar|the dock)\b/i.test(prompt)) return true;
+  // Users should not need to name an app for ordinary visible UI work: "make the window bigger",
+  // "check notifications", and "open the file picker" already identify a live GUI surface. This
+  // stays conservative by requiring BOTH an operation verb and a concrete UI/OS object.
+  if (GUI_SURFACE_OBJECT.test(prompt)) return true;
   // Any application actually installed here, named in a slot that means "operate it" — which is
   // what replaced the old hardcoded finder|safari list. See installed.apps.ts: the previous list
   // was a guess about which apps the user owns, and it guessed wrong for every app not on it.
   return mentionsInstalledApp(prompt);
+}
+
+/** A short/deictic follow-up inherits computer-use routing only when the recent conversation
+ * contains real ComputerTool evidence. This makes "click that", "continue", and "make it full
+ * screen" work naturally without turning the same phrases in an ordinary chat into desktop input. */
+export function continuesComputerUse(prompt: string, messages: any[]): boolean {
+  if (ENGINEERING_CONTEXT.test(prompt) || INFORMATIONAL_QUESTION.test(prompt)) return false;
+  const recent = messages.slice(-12).some(message => {
+    if (isScreenshotObservationMessage(message)) return true;
+    if (Array.isArray(message?.tool_calls)
+      && message.tool_calls.some((call: any) => call?.function?.name === 'ComputerTool')) return true;
+    return message?.role === 'tool' && /bimax-computer-use|"action"\s*:\s*"(?:open|focus|observe|click|type|arrange)"/i.test(String(message.content || ''));
+  });
+  if (!recent) return false;
+  return GUI_OPERATION_VERB.test(prompt)
+    || /^(?:(?:okay|ok|yes|yeah|now|then|please)\s+)*(?:do it|continue|go ahead|try again|that one|the other one|switch back|finish it|make it (?:bigger|smaller|full ?screen))\b/i.test(prompt.trim());
 }
 
 export function requiresComputerChecklist(prompt: string): boolean {
@@ -474,7 +495,9 @@ Rules:
     }
 
     let modelPrompt = prompt;
-    if (explicitlyRequiresComputerUse(prompt)) {
+    const computerUseTurn = explicitlyRequiresComputerUse(prompt)
+      || continuesComputerUse(prompt, this.messages);
+    if (computerUseTurn) {
       this.messages = isolateComputerUseHistory(this.messages);
       // The scenario guidance (multi-app, arranging, drag, Spaces, clipboard, composers) used to
       // ride inside ComputerTool's schema, so EVERY request paid for it — measured at 3,461 of the

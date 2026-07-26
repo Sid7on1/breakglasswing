@@ -2,7 +2,7 @@ import { IGovernor } from '../core/interfaces';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
-import { AgentPersona, explicitlyRequiresComputerUse, isolateComputerUseHistory, requiresComputerChecklist } from '../cli/personas/base.persona';
+import { AgentPersona, continuesComputerUse, explicitlyRequiresComputerUse, isolateComputerUseHistory, requiresComputerChecklist } from '../cli/personas/base.persona';
 import { appSlotPattern } from '../computer/installed.apps';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
@@ -146,6 +146,25 @@ describe('explicit computer-use history isolation', () => {
     expect(explicitlyRequiresComputerUse('send the release notes to the team')).toBe(false);
     expect(explicitlyRequiresComputerUse('my mac has been slow lately')).toBe(false); // no verb
     expect(explicitlyRequiresComputerUse('show me my screen')).toBe(true);
+  });
+
+  it('recognizes ordinary GUI intent without requiring an app name or click-by-click wording', () => {
+    expect(explicitlyRequiresComputerUse('check my notifications')).toBe(true);
+    expect(explicitlyRequiresComputerUse('make the window fullscreen')).toBe(true);
+    expect(explicitlyRequiresComputerUse('open the file picker')).toBe(true);
+    expect(explicitlyRequiresComputerUse('what is a notification center?')).toBe(false);
+  });
+
+  it('routes vague follow-ups only when recent ComputerTool evidence gives them a live surface', () => {
+    const computerContext: any[] = [
+      { role: 'assistant', tool_calls: [{ function: { name: 'ComputerTool' } }] },
+      { role: 'tool', content: '{"ok":true,"driver":"bimax-computer-use","action":"observe"}' },
+    ];
+    expect(continuesComputerUse('click that one', computerContext)).toBe(true);
+    expect(continuesComputerUse('okay now make it fullscreen', computerContext)).toBe(true);
+    expect(continuesComputerUse('continue', computerContext)).toBe(true);
+    expect(continuesComputerUse('continue', [])).toBe(false);
+    expect(continuesComputerUse('fix the runtime code', computerContext)).toBe(false);
   });
 
   it('recognizes compound computer work that needs an engine-persistent checklist', () => {
