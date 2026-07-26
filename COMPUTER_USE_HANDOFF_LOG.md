@@ -284,3 +284,46 @@ Gates: **17/17 suites, 266/266 tests**, `tsc --noEmit` clean, `eslint --quiet` c
 
 **Remaining:** item 2 (shape path needs a unit-level proof with unlabeled controls) and item 3
 (sheet-hosted controls hit-testing). Item 4 is dropped.
+
+## 9. Items 2 and 3 closed (`a448da1d`) — neither was a defect
+
+**Item 3, sheet hit-testing — answered, no fix needed.** The hypothesis was that sheet-hosted
+element frames map through a different space than window elements. False, and provably so from the
+code: there is exactly one transform, `globalFrameToScreenshot` / `screenshotToGlobal`, keyed on the
+window frame, and it knows nothing about what kind of container an element lives in. A sheet's
+control carries a global screen rect like every other element and round-trips like every other
+element. A round-trip test now pins that, including the case where the sheet has moved between
+observation and click — which does not round-trip, and is exactly the divergence preflight refuses
+on. So the live refusal was the guard working, not a coordinate bug.
+
+**Item 2, shape foveation — behaviour was correct, coverage was missing.** Shape regions are
+foveated into actionable controls carrying no label. Every window probed live had fully labeled
+controls, so the empty shape list was right. The path is now exercised by a test that supplies
+unlabeled actionable controls directly, rather than by hunting for an application that ships them —
+which would have been per-app testing by the back door.
+
+Gates: **18/18 suites, 276/276 tests**, `tsc --noEmit` clean, `eslint --quiet` clean.
+
+## 10. Where this ended
+
+Branch `computer-use/perception-and-receipts`, 19 commits, unmerged and unpushed.
+
+Fixed this session:
+
+* Window acquisition — an observation with no window content is now a failed acquisition that
+  re-derives the window, and never offers menu-bar nodes as window targets (`27e17cfd`).
+* The live receipt script no longer reports a discard it did not perform (`852d056c`).
+
+Answered, no change needed: sheet hit-testing, shape foveation, and the keyboard delivery contract —
+all three looked like defects and none were. Two of them were my own measurement error.
+
+Still genuinely open:
+
+* The nine inherited commits are gated at the tip only. History is not proven bisectable.
+* Driver 0.12.6 dropped by decision, not by evidence. If it is ever wanted, the staged-candidate
+  procedure in the original handoff still applies.
+* Cross-app coverage is five applications on one machine, one run. It is enough to have found real
+  bugs; it is not a broad guarantee.
+
+The honest summary: the architecture held up under every check it was put through. Most of what
+looked broken was either the test harness around it or the person reading the output.
