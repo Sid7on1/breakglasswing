@@ -218,14 +218,25 @@ no app gets a special case, a workflow, or a name in the code. Applications appe
 the instruments that exposed a broken property, and are interchangeable with any other app that
 exposes the same one. If a fix here needs to know which app it is talking to, the fix is wrong.
 
-1. **An observation that captures no window content does not trigger the ambiguity path.** The
-   trigger is supposed to fire on a thin or degraded tree; an observation consisting purely of
-   menu-bar elements, with no window content and no frame, is the degenerate case of exactly that,
-   and it fired nothing. Instrument: WhatsApp (4.2). Property to fix: Vision must engage whenever
-   window content is absent or unusable, however the tree got that way.
-2. **Unlabeled controls produce no shape evidence anywhere** (4.2). Zero shape regions in five
-   apps. Either the trigger is narrower than intended or the shape pass is not reached. Property to
-   prove: an unlabeled control yields contour/rectangle/shape-class evidence, in any app.
+1. **An observation containing no window content is returned as a successful observation.** Menu-bar
+   elements only, no window content, no `frameId` — handed back as a valid frame instead of being
+   treated as a failed window acquisition. Instrument: WhatsApp (4.2).
+
+   Originally filed as "the ambiguity path does not trigger". Reading the code corrects that:
+   `canSampleVisuals` requires `observedWindowFrame` and screenshot dimensions
+   (`desktop.runtime.ts:2941`), so with no captured window there are no pixels and Vision *cannot*
+   run. No trigger change fixes it. The defect is upstream, in window acquisition — the existing
+   zero-pixel / window-reacquisition recovery should have fired and did not. Property to fix: an
+   observation with no window content is a failed acquisition, never a usable frame.
+
+2. **DOWNGRADED — `shapeRegions: 0` across five apps was correct behaviour, not a gap.** Shape
+   regions are built from `unnamedActionables`: elements with an actionable role AND an empty or
+   `unlabeled` label (`desktop.runtime.ts:2996`). Every window probed had fully labeled controls, so
+   the shape list was legitimately empty and only the OCR region ran. My original reading — "the
+   trigger is narrower than intended or the shape pass is not reached" — was wrong.
+
+   What is still true: the shape path has never executed with real input. That wants a unit-level
+   proof driving genuinely unlabeled actionable controls, not another live hunt.
 3. **A control hosted in a sheet may not hit-test to itself** (4.5). Either preflight correctly
    caught a mid-animation sheet, or sheet-hosted element frames map into a different space than
    window elements. Property to settle: an element's reported frame hit-tests to that element,
