@@ -10,6 +10,10 @@ import {
 } from '../telemetry/perf';
 import { IGraphStore } from '../graph/models';
 import { globalDesktopRuntime } from '../computer/desktop.runtime';
+// The real saveConfig, not deps.saveConfig: healing must pass origin:'runtime' so the volatility
+// guard drops the write when the model came from BGW_MODEL (a test/benchmark session), and the
+// injected dep does not carry that option.
+import { saveConfig } from '../cli/config';
 
 /**
  * Confidence-in-margin (turn-end form): from the epistemic-ledger delta across a turn, decide what
@@ -156,7 +160,10 @@ export class HeadlessSession {
           await active.converse(query, onToken, { useLite: true, signal: this.turnAbort.signal });
         } catch {
           streamed = ''; // discard any partial lite output; the full harness re-runs the turn cleanly
-          await this.runFullHarness(active, query, !!opts.autonomous, onToken);
+          // forceHeavy: the lite lane just failed, and the router would send this same trivial query
+          // straight back to the same lite model. Retrying the thing that just broke is not a
+          // fallback — escalate to the work model so the retry can actually succeed.
+          await this.runFullHarness(active, query, !!opts.autonomous, onToken, true);
         }
       } else {
         await this.runFullHarness(active, query, !!opts.autonomous, onToken);
@@ -165,6 +172,13 @@ export class HeadlessSession {
       // Prefer the streamed text; fall back to the message-slice only if nothing streamed.
       const content = this.cleanTurnText(streamed) || this.collectTurnText(active, before);
       if (content) cliEvents.emit('message', this.msg('assistant', content));
+      // A turn that ends with NOTHING is the worst failure mode there is: the UI returns to Ready and
+      // the user cannot tell whether the agent ignored them, crashed, or is still working. Every path
+      // that produces no text and no error must still say something actionable.
+      else if (!this.turnAbort.signal.aborted) {
+        cliEvents.emit('message', this.msg('system',
+          '⚠ The model returned an empty response. Check /model — the configured model may not be served by your provider — or retry.', 'error'));
+      }
       cliEvents.emit('cost_update', totalChars);
       // Whatever partial work streamed before the interrupt is kept; tell the user it stopped early.
       if (this.turnAbort.signal.aborted) cliEvents.emit('message', this.msg('system', '⏹ Turn interrupted.'));
@@ -182,6 +196,21 @@ export class HeadlessSession {
       } else if (/rejected the API key|unauthorized/i.test(detail)) {
         // Auth-dead pool (expired key): the adapter fails fast now; make the failure actionable.
         cliEvents.emit('message', this.msg('system', `⚠ ${detail}`, 'error'));
+      } else if (/is not served by provider|model.{0,20}(not found|not available|does not exist)/i.test(detail)) {
+        // A stale model pin. The adapter already writes the actionable form of this ("run /model to
+        // pick an id <provider> serves"), but it only reached the hidden log view, so the turn looked
+        // like an unexplained silence. This is THE failure the user actually hits after a provider
+        // rotates its catalog — it belongs in the transcript.
+        cliEvents.emit('message', this.msg('system', `⚠ ${detail}`, 'error'));
+        // Startup healing trusts /models, which can list an id the provider then 404s. THIS is the
+        // moment we learn the truth, so re-heal now that the adapter has marked the id unservable.
+        // The turn is not replayed: it may already have run tools, and re-running those to recover
+        // from a model error is not a trade the user agreed to. Repair, then say it's safe to retry.
+        void this.healAfterModelFailure();
+      } else {
+        // Anything else still ends the turn with no reply. Surface a short form rather than leaving
+        // the transcript blank; the full text stays in the log line emitted below.
+        cliEvents.emit('message', this.msg('system', `⚠ Turn failed: ${detail}`, 'error'));
       }
       cliEvents.emit('log', { id: Date.now(), level: 'error', text: `Agent error: ${detail}`, timestamp: new Date() });
     } finally {
@@ -215,7 +244,30 @@ export class HeadlessSession {
    * between this and the lightweight `converse` lane. Streams tokens through `onToken` (which also
    * feeds the perf timeline and the wire) and marks the routing/assembly phase boundaries.
    */
-  private async runFullHarness(active: AgentPersona, query: string, autonomous: boolean, onToken: (t: string) => void): Promise<void> {
+  /**
+   * Re-run model healing after a live call proved a configured model unservable, and tell the user
+   * what changed. Startup healing can only ask the provider what it CLAIMS to serve; a real 404 is
+   * the only proof that a listed id is a lie. Best-effort and never throws — this runs while the
+   * turn is already failing, and a failure to self-repair must not replace the original error.
+   */
+  private async healAfterModelFailure(): Promise<void> {
+    try {
+      const adapter: any = this.deps.options.llmAdapter;
+      if (typeof adapter?.healModels !== 'function') return;
+      const healed = await adapter.healModels() as Array<{ slot: string; from: string; to: string }>;
+      if (!healed.length) return;
+      const SLOT_KEY: Record<string, string> = { work: 'model', quick: 'liteModel', vision: 'visionModel' };
+      const patch: Record<string, string> = {};
+      for (const h of healed) patch[SLOT_KEY[h.slot]] = h.to;
+      try { saveConfig(patch as any, { origin: 'runtime' }); } catch { /* persistence optional */ }
+      const lines = healed.map(h => `  • ${h.slot}: "${h.from}" → "${h.to}"`);
+      cliEvents.emit('message', this.msg('system',
+        `Switched to a model your provider actually serves — send that again:\n${lines.join('\n')}`, 'info'));
+      cliEvents.emit('config_changed');
+    } catch { /* self-repair is best-effort */ }
+  }
+
+  private async runFullHarness(active: AgentPersona, query: string, autonomous: boolean, onToken: (t: string) => void, forceHeavy = false): Promise<void> {
     // Routing is local and deterministic (no model call) — it resolves in ~0ms. Kicked off before
     // @-mention expansion purely so the decision is ready the moment expansion completes.
     const tierPromise = decideTier(this.deps.options.llmAdapter, query, this.pinnedTier)
@@ -225,12 +277,13 @@ export class HeadlessSession {
     try { agentQuery = (await expandFileAtMentions(agentQuery, process.cwd())).text; } catch { /* best-effort */ }
     try { agentQuery = (await expandAtMentions(agentQuery, this.deps.graphStore, process.cwd())).text; } catch { /* best-effort */ }
 
-    let useLite = true;
+    let useLite = !forceHeavy;
     try {
       const decision = await tierPromise;
-      useLite = decision.tier === 'lite';
-      cliEvents.emit('model_tier', { tier: decision.tier, pinned: this.pinnedTier });
-    } catch { /* routing is best-effort; fall back to lite */ }
+      const tier = forceHeavy ? 'heavy' as const : decision.tier;
+      useLite = tier === 'lite';
+      cliEvents.emit('model_tier', { tier, pinned: this.pinnedTier });
+    } catch { /* routing is best-effort; fall back to lite (or heavy when forced) */ }
     markRouted();
 
     cliEvents.emit('spinner_state', 'thinking', 'Thinking…');

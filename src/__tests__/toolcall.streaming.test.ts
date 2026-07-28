@@ -62,6 +62,52 @@ describe('applyToolCallDelta — streaming tool-call accumulation', () => {
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].args)).toEqual({ pattern: 'todo' });
   });
+
+  // Framing verified live against NVIDIA NIM on 2026-07-27 (two calls, sixteen deltas): distinct
+  // calls get distinct indices and each reassembles into valid JSON. These two guard the decoding
+  // contract that observation established.
+  it('reassembles each call from a real NVIDIA delta sequence into valid JSON', () => {
+    const out = accumulate([
+      { index: 0, id: 'tn3k9Eavm', function: { name: 'ComputerTool', arguments: '' } },
+      { index: 0, function: { arguments: '{"action": "' } },
+      { index: 0, function: { arguments: 'open' } },
+      { index: 0, function: { arguments: '", "app": "' } },
+      { index: 0, function: { arguments: 'Calculator' } },
+      { index: 0, function: { arguments: '"}' } },
+      { index: 1, id: 'kxe7ILNXg', function: { name: 'ComputerTool', arguments: '' } },
+      { index: 1, function: { arguments: '{"action": "' } },
+      { index: 1, function: { arguments: 'type", "text": "12*12"}' } },
+    ]);
+
+    expect(out).toHaveLength(2);
+    expect(JSON.parse(out[0].args)).toEqual({ action: 'open', app: 'Calculator' });
+    expect(JSON.parse(out[1].args)).toEqual({ action: 'type', text: '12*12' });
+    expect(out.map(c => c.id)).toEqual(['tn3k9Eavm', 'kxe7ILNXg']);
+  });
+
+  it('still treats a repeated id on a reused index as ONE call, not two', () => {
+    // Guard against over-correcting: minimax/NIM repeat the id on every delta of a single call.
+    const out = accumulate([
+      { index: 0, id: 'call_1', function: { name: 'WebSearchTool', arguments: '{"query": "a' } },
+      { index: 0, id: 'call_1', function: { arguments: 'b' } },
+      { index: 0, id: 'call_1', function: { arguments: 'c"}' } },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].args)).toEqual({ query: 'abc' });
+  });
+
+  it('keeps honouring real distinct indices when the provider uses them properly', () => {
+    // Interleaved parallel calls on a well-behaved provider must not be re-keyed by the fix.
+    const out = accumulate([
+      { index: 0, id: 'a', function: { name: 'ReadFileTool', arguments: '{"path":' } },
+      { index: 1, id: 'b', function: { name: 'BashTool', arguments: '{"command":' } },
+      { index: 0, function: { arguments: '"a.ts"}' } },
+      { index: 1, function: { arguments: '"ls"}' } },
+    ]);
+    expect(out).toHaveLength(2);
+    expect(JSON.parse(out[0].args)).toEqual({ path: 'a.ts' });
+    expect(JSON.parse(out[1].args)).toEqual({ command: 'ls' });
+  });
 });
 
 describe('finalizeToolCalls — output-ceiling truncation', () => {

@@ -63,6 +63,22 @@ describe('ActionResult contract (pure)', () => {
     expect(wrong.observed).toBe('wrong-window');
     expect(wrong.failureReason).toMatch(/Notes/);
   });
+
+  it('treats a visible application rejection as delivered input but failed operation', () => {
+    const rejected = toActionResult(classifyVerification({
+      ok: true,
+      prevFrameHash: 'before',
+      nextFrameHash: 'error-dialog',
+      hadScreenshot: true,
+      observedFailure: 'This photo could not be sent. Please choose a different photo.',
+    }));
+    expect(rejected).toEqual(expect.objectContaining({
+      delivered: true,
+      observed: 'rejected',
+      confidence: 'unknown',
+      failureReason: expect.stringMatching(/could not be sent/i),
+    }));
+  });
 });
 
 describe('recovery latch semantics (runtime)', () => {

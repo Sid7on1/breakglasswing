@@ -21,6 +21,7 @@ import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
 import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations, contentToText, isScreenshotObservationMessage } from './multimodal';
+import { commitProvenAfter, computerToolResults, lastContentEntryIndex } from '../computer/action.evidence';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -96,6 +97,40 @@ export function computerPercentageCompletionNudge(messages: Message[], proposedA
   return `[COMPUTER COMPLETION GATE] The user's ${requestedDatum} is still missing; "${proposedAnswer.slice(0, 160)}" does not contain a numeric percentage. Do not stop or repeat that category. The newest observation exposes the relevant visible control: elementIndex ${Number(best.element.element_index)}, "${best.label}". Call ComputerTool click on that fresh elementIndex now, inspect the returned screen, and answer only after the numeric percentage is visible or the detail view proves it unavailable.`;
 }
 
+/** Refuse a messaging-task success claim when the recorded ComputerTool sequence never committed
+ * the freshly typed/pasted content. This is deliberately mechanical: it does not guess from pixels
+ * or trust prose. A successful Return/Enter key or a semantic Send/Submit/Post click must occur in
+ * the same app after the latest type/paste, and its result must carry a fresh screenshot. Honest
+ * blocker/failure reports remain allowed so an inaccessible app cannot trap the loop forever. */
+export function computerCommitCompletionNudge(messages: Message[], proposedAnswer: string): string {
+  const request = [...messages].reverse().find(message => message.role === 'user'
+    && !isScreenshotObservationMessage(message)
+    && !/\[COMPUTER (?:COMMIT|COMPLETION) GATE\]/.test(contentToText(message.content as any)));
+  const requestText = request ? contentToText(request.content as any) : '';
+  // "text" and "share" are deliberately absent: "read the text in Notes" is not a send request, and
+  // this gate must not hold a finished read-only task hostage.
+  const asksToCommit = /\b(?:send|sends|sent|message|messages|reply|replies|respond|post|posts|dm)\b/i.test(requestText);
+  if (!asksToCommit || /\b(?:blocked|couldn['’]?t|cannot|can['’]?t|failed|not sent|permission denied)\b/i.test(proposedAnswer)) return '';
+
+  const results = computerToolResults(messages).filter(result => result?.ok !== false);
+  if (results.length === 0) return '';
+
+  // Same definition of "committed" the todo gate uses — one rule, imported, so the two gates cannot
+  // drift into disagreeing about what counts as proof.
+  const inputIndex = lastContentEntryIndex(results);
+  if (commitProvenAfter(results, inputIndex)) return '';
+
+  const latest = results[results.length - 1];
+  const inputApp = inputIndex >= 0 ? String(results[inputIndex]?.app || '') : '';
+  const next = inputIndex < 0
+    ? 'Continue navigating to the intended conversation/record and type or paste the requested content into its actual composer.'
+    : `The content was entered in ${inputApp || 'the target app'} but no later successful Return/Enter or semantic Send/Submit/Post action with a changed fresh frame proves it was committed.`;
+  // Name the precise escape hatch. If the commit control is an unlabeled icon — which this project's
+  // persona warns is the common case — no label can read as a commit, and `expect` is the only way to
+  // prove the send rather than argue about it.
+  return `[COMPUTER COMMIT GATE] The user's messaging task is not yet proven complete; the latest recorded UI action was ${String(latest?.action || 'unknown')}. ${next} Commit it now with key combo="return" in the composer, or click the send control with expect="<text that will appear in the transcript>" so the runtime proves the postcondition directly — that is what an unlabeled send icon requires. Do not claim success until the post-commit frame shows the content in the transcript/record and the composer is cleared.`;
+}
+
 export class AgentLoop {
   private contextManager: ContextManager;
   public messages: Message[] = [];
@@ -125,7 +160,7 @@ export class AgentLoop {
    * The fallback model to fail over to, or null when there's nothing sensible to do: none
    * configured, already failed over, or the fallback IS the currently failing model.
    */
-  private fallbackModelFor(): string | null {
+  private async fallbackModelFor(): Promise<string | null> {
     if (this.fallbackApplied) return null;
     // Env beats config so headless/autonomous runs (and tests) can arm the chain per-process.
     let fb = String(process.env.BIMAX_FALLBACK_MODEL || '').trim();
@@ -135,7 +170,42 @@ export class AgentLoop {
         fb = String((require('../cli/config') as typeof import('../cli/config')).getConfig().fallbackModel || '').trim();
       } catch { return null; }
     }
-    const current = String((this.llm as any)?.userModel || (this.llm as any)?.defaultModel || '');
+    const llm = this.llm as any;
+    const current = String(llm?.userModel || llm?.defaultModel || '');
+
+    // Failing over is the machine choosing a model on the user's behalf, so it obeys the same
+    // safety policy as healing. Two ways a configured fallback disqualifies itself:
+    //   • the provider already rejected it outright this session (proven dead), or
+    //   • the catalog flags it avoidAutoSelect (documented to time out or to not call tools).
+    // Honouring such a fallback converts a visible model error into an invisible 180s hang, which
+    // is strictly worse: the user sees a spinner and no reply. (Live case: the configured fallback
+    // was stepfun-ai/step-3.7-flash, which sent no response headers for 180s.)
+    if (fb) {
+      let unsafe = false;
+      try { unsafe = !!llm?.isUnservable?.(fb); } catch { /* optional capability */ }
+      if (!unsafe) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { MODEL_CATALOG } = require('../cli/models') as typeof import('../cli/models');
+        unsafe = MODEL_CATALOG.some(m => m.value === fb && m.avoidAutoSelect);
+      }
+      if (unsafe) {
+        Logger.warn(`[AgentLoop] Configured fallback model "${fb}" is not a safe automatic target; deriving one instead.`);
+        fb = '';
+      }
+    }
+
+    // No usable configured fallback — derive one from the curated policy, restricted to what the
+    // provider actually serves. Better a working model than none: the alternative is a dead turn.
+    if (!fb) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { autoSelectCandidates } = require('../cli/models') as typeof import('../cli/models');
+        const served = await llm?.listProviderModels?.();
+        if (Array.isArray(served) && served.length) {
+          fb = autoSelectCandidates('coding', served).find((id: string) => id !== current) || '';
+        }
+      } catch { /* derivation is best-effort */ }
+    }
     return fb && fb !== current ? fb : null;
   }
 
@@ -414,13 +484,24 @@ export class AgentLoop {
             // rejection — try the configured fallback model ONCE. This is what keeps a day-long
             // autonomous run alive through a model outage or a rate-limit storm: switch the whole
             // session to the fallback, restore the retry budget, and re-ask the same turn.
-            const fb = this.fallbackModelFor();
+            const fb = await this.fallbackModelFor();
             if (fb) {
               this.fallbackApplied = true;
               (this.llm as any).applyConfig?.({ model: fb });
               transientRetries = 0;
               cliEvents.emit('status', `Model failing — switched to fallback "${fb}"`);
               cliEvents.emit('log', { id: Date.now(), level: 'warn', text: `Active model kept failing (${event.message}); failed over to fallback model "${fb}".`, timestamp: new Date() });
+              // Persist it. Without this the dead pin survives restart, and because /models still
+              // lists it, startup healing calls it healthy — so every future session burns a
+              // guaranteed-404 round trip before failing over to this same model again.
+              // origin:'runtime' keeps the volatility guard's protection for BGW_MODEL sessions.
+              // Awaited, not fire-and-forget: an unawaited write outlives the turn and can land
+              // after the process (or a test's environment) has torn down.
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                await (require('../cli/config') as typeof import('../cli/config')).saveConfig({ model: fb } as any, { origin: 'runtime' });
+                cliEvents.emit('config_changed');
+              } catch { /* persistence optional */ }
               discardTurn = true;
               break;
             }
@@ -921,12 +1002,15 @@ export class AgentLoop {
         // Loop continues so LLM can react to tool results
       } else {
         const computerCompletionNudge = currentContent
-          ? computerPercentageCompletionNudge(this.messages, currentContent)
+          ? computerCommitCompletionNudge(this.messages, currentContent)
+            || computerPercentageCompletionNudge(this.messages, currentContent)
           : '';
         if (computerCompletionNudge && computerCompletionNudges < MAX_COMPUTER_COMPLETION_NUDGES) {
           computerCompletionNudges++;
           this.messages.push({ role: 'user', content: computerCompletionNudge });
-          cliEvents.emit('status', 'Exact percentage not yet verified — continuing through the relevant detail control');
+          cliEvents.emit('status', computerCompletionNudge.includes('[COMPUTER COMMIT GATE]')
+            ? 'Message/upload not yet committed — continuing to a proven post-commit frame'
+            : 'Exact percentage not yet verified — continuing through the relevant detail control');
           continue;
         }
         // A turn with no tool call that collapsed to pure filler gave the user

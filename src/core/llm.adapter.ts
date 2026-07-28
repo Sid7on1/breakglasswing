@@ -6,6 +6,7 @@ import { capabilitiesFor, ModelCapabilities, anthropicBetaHeaders } from './capa
 import { contentToText } from './multimodal';
 import { globalTelemetry } from '../telemetry/telemetry';
 import { cliEvents } from '../cli/events';
+import { autoSelectCandidates, isAvoidAutoSelect } from '../cli/models';
 
 // Streaming & response-parsing helpers now live in ./llm.stream (extracted to keep this file
 // focused on the adapter class). Imported for internal use and re-exported so existing importers
@@ -186,7 +187,7 @@ export class LlmAdapter implements LLMProvider {
   // static catalog, so a provider without a /models endpoint degrades to the old behaviour.
   private liveModelsCache: string[] | null = null;
   public async listProviderModels(refresh = false): Promise<string[]> {
-    if (this.liveModelsCache && !refresh) return this.liveModelsCache;
+    if (this.liveModelsCache && !refresh) return this.liveModelsCache.filter(id => !this.unservable.has(id));
     try {
       const keyResult = await this.apiKeyManager.getNextKey();
       if (!keyResult.keyStr) return [];
@@ -194,36 +195,103 @@ export class LlmAdapter implements LLMProvider {
       const page = await client.models.list();
       const ids = (page.data || []).map(m => m.id).filter(Boolean).sort();
       this.liveModelsCache = ids;
-      return ids;
+      return ids.filter(id => !this.unservable.has(id));
     } catch (e: any) {
       Logger.warn(`[LlmAdapter] listProviderModels failed (${e?.message}); falling back to static catalog.`);
       return [];
     }
   }
 
-  // If the configured model isn't one the provider actually serves, switch to a valid one so the very
-  // first turn doesn't 400 forever (the classic symptom: a config.json pinned to a model from a
-  // different provider — e.g. an NVIDIA id while the key is OpenRouter). Returns {from,to} when it
-  // switched so the caller can notify + persist; null when nothing was wrong. Best-effort: a provider
-  // without a /models endpoint returns [] above, so we leave the config untouched.
-  public async healModel(): Promise<{ from: string; to: string } | null> {
-    const ids = await this.listProviderModels();
-    if (ids.length === 0) return null;
-    const current = this.userModel || this.defaultModel;
-    if (current && ids.includes(current)) return null; // already valid
+  // Models the provider LISTS but does not actually serve. Being in `/models` is not proof that
+  // chat/completions will accept the id: NVIDIA lists `01-ai/yi-large` and then 404s every
+  // completion for it. That gap is what let a "healed" config stay broken — the healer saw the id
+  // in the list, called the slot healthy, and never touched it again.
+  //
+  // Populated from real API rejections (see markUnservable), so it records what the provider did,
+  // not what it advertised. Session-scoped: a genuinely transient outage is forgotten on restart.
+  private readonly unservable = new Set<string>();
 
-    // Prefer the provider/key's own default if the provider actually serves it; else first available.
-    let fallback = ids[0];
+  /** Record that the provider rejected this model id outright, so nothing picks it again. */
+  public markUnservable(model: string): void {
+    if (!model || this.unservable.has(model)) return;
+    this.unservable.add(model);
+    Logger.warn(`[LlmAdapter] Provider rejected model "${model}" as unavailable; excluding it from selection this session.`);
+  }
+
+  /** True when the provider has rejected this id during this session. */
+  public isUnservable(model: string): boolean { return this.unservable.has(model); }
+
+  // If a configured model isn't one the provider actually serves, switch it to a valid one so turns
+  // don't 400/404/410 forever (the classic symptom: a config.json pinned to a model from a different
+  // provider — e.g. an NVIDIA id while the key is OpenRouter).
+  //
+  // Heals ALL THREE slots, not just the work model. Healing only the work slot was a silent-death
+  // bug: a greeting routes to the QUICK slot, so a stale liteModel meant every "hi" hit an unserved
+  // model and the turn ended with no reply at all while the work model looked healthy.
+  //
+  // The replacement is always drawn from the curated catalog (filtered to what the provider serves),
+  // never from `ids[0]`. Alphabetical order carries no meaning: on NVIDIA it picks `01-ai/yi-large`,
+  // which IS in /models but 404s on chat/completions — healing to it just moved the failure. When no
+  // curated model for a slot is served, the pin is left alone and the caller tells the user to run
+  // /model; a wrong automatic pick is worse than an honest prompt.
+  //
+  // Returns one entry per slot actually changed (empty = nothing to do). Best-effort: a provider
+  // without a /models endpoint returns [] above, so we leave every slot untouched.
+  public async healModels(): Promise<Array<{ slot: 'work' | 'quick' | 'vision'; from: string; to: string }>> {
+    const ids = await this.listProviderModels();
+    if (ids.length === 0) return [];
+    const served = new Set(ids);
+
+    // The key's own provider default, if the provider genuinely serves it.
+    let keyDefault: string | undefined;
     try {
       const kr = await this.apiKeyManager.getNextKey();
-      if (kr.model && ids.includes(kr.model)) fallback = kr.model;
-    } catch { /* use first available */ }
+      if (kr.model && served.has(kr.model)) keyDefault = kr.model;
+    } catch { /* optional */ }
 
-    const from = current || '(unset)';
-    this.userModel = fallback;
-    this.defaultModel = fallback;
-    Logger.warn(`[LlmAdapter] Configured model "${from}" not served by provider; switched to "${fallback}".`);
-    return { from, to: fallback };
+    // Ranking policy lives with the catalog (models.ts:autoSelectCandidates) — it is catalog
+    // knowledge, not adapter knowledge, and is unit-tested there. The key's own default is
+    // consulted only if the curated policy has nothing to offer.
+    const replacementFor = (tier: 'coding' | 'lite' | 'vision'): string | undefined =>
+      autoSelectCandidates(tier, served)[0] ?? keyDefault;
+
+    const healed: Array<{ slot: 'work' | 'quick' | 'vision'; from: string; to: string }> = [];
+    const heal = (
+      slot: 'work' | 'quick' | 'vision',
+      current: string | undefined,
+      tier: 'coding' | 'lite' | 'vision',
+      assign: (to: string) => void,
+    ) => {
+      // An unset optional slot is not broken — it just falls back to the work model at call time.
+      if (!current) return;
+      // Three ways a pin is broken, in increasing subtlety:
+      //   1. the provider does not list it at all;
+      //   2. the provider lists it but has actually rejected it this session (`unservable`);
+      //   3. the provider serves it, but the catalog records it as unfit to be chosen automatically
+      //      — it times out, 400s on the real workload, or cannot call tools.
+      // Case 3 matters because these pins are almost always the residue of an EARLIER automatic
+      // pick, and leaving one in place is what kept computer use dead: the vision slot pointed at a
+      // model that 400s on every tools+image request, so every screenshot step failed. The switch
+      // is announced with a /model pointer, so an explicit choice can always be re-pinned.
+      const reason = !served.has(current) ? 'is not served by the provider'
+        : this.unservable.has(current) ? 'was rejected by the provider at call time'
+        : isAvoidAutoSelect(current) ? 'is served but is not fit for automatic use (see the catalog note)'
+        : null;
+      if (!reason) return;
+      const to = replacementFor(tier);
+      if (!to || to === current) {
+        Logger.warn(`[LlmAdapter] ${slot} model "${current}" ${reason}, but no curated replacement is available; leaving it pinned.`);
+        return;
+      }
+      assign(to);
+      Logger.warn(`[LlmAdapter] ${slot} model "${current}" ${reason}; switched to "${to}".`);
+      healed.push({ slot, from: current, to });
+    };
+
+    heal('work', this.userModel || this.defaultModel, 'coding', to => { this.userModel = to; this.defaultModel = to; });
+    heal('quick', this.liteModel, 'lite', to => { this.liteModel = to; });
+    heal('vision', this.visionModel, 'vision', to => { this.visionModel = to; });
+    return healed;
   }
 
   /**
@@ -365,6 +433,10 @@ export class LlmAdapter implements LLMProvider {
         !(/model/i.test(raw) && /not.{0,4}found|not.{0,4}a.{0,4}valid|does not exist|invalid|unknown|no such|unavailable/i.test(raw))) return;
     const model = attemptedModel || this.pickModel(kr, lite);
     const provider = kr.provider || 'the active provider';
+    // The provider just told us this id is not real. Record it so /models membership can no longer
+    // vouch for it: NVIDIA lists ids it then 404s, and trusting the listing is what let a healed
+    // config stay permanently broken.
+    this.markUnservable(model);
     e.message = `Model "${model}" is not served by provider "${provider}". ` +
       `Run /model to pick an id ${provider} serves, or /provider to switch to the provider that has it. ` +
       `(API said: ${raw.trim()})`;

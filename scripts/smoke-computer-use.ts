@@ -53,7 +53,12 @@ async function main() {
     }, null, 2));
   } finally {
     if (opened) {
-      const closed = await runtime.run({ action: 'close' });
+      // quit_app, not close: `close` is window-scoped (Cmd+W) by design, and an app whose main
+      // window is not user-closable — Calculator is exactly that — survives it. Using close here
+      // made every run of this smoke leave a live Calculator behind on the developer's desktop and
+      // report a confusing "did not close after Cmd+W" failure. This script LAUNCHED the app, so
+      // quitting it is the correct symmetric cleanup.
+      const closed = await runtime.run({ action: 'quit_app' });
       if (!closed.ok) console.error(`cleanup: ${closed.error || closed.summary}`);
     }
     await runtime.dispose();

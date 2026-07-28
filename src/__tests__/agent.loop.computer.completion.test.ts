@@ -1,4 +1,4 @@
-import { AgentLoop, computerPercentageCompletionNudge } from '../core/agent.loop';
+import { AgentLoop, computerCommitCompletionNudge, computerPercentageCompletionNudge } from '../core/agent.loop';
 import { ToolRegistry } from '../tools/tool.registry';
 import { ChatEvent, LLMProvider, Message } from '../core/llm.provider';
 import * as fs from 'fs';
@@ -131,5 +131,35 @@ describe('computer action pacing', () => {
     } finally {
       fs.rmSync(screenshot, { force: true });
     }
+  });
+});
+
+describe('computer message commit gate', () => {
+  const result = (value: Record<string, unknown>): Message => ({
+    role: 'tool', tool_call_id: String(value.action || 'call'),
+    content: JSON.stringify({ ok: true, driver: 'bimax-computer-use 0.12.3', ...value }),
+  });
+
+  it('continues after typing until a later commit action has fresh visual proof', () => {
+    const base: Message[] = [
+      { role: 'user', content: 'open WhatsApp and send hi to Mom' },
+      result({ action: 'open', app: 'WhatsApp', screenshot: '/tmp/open.png' }),
+      result({ action: 'type', app: 'WhatsApp', screenshot: '/tmp/typed.png' }),
+    ];
+    expect(computerCommitCompletionNudge(base, 'Sent hi to Mom.')).toMatch(/COMPUTER COMMIT GATE/);
+    expect(computerCommitCompletionNudge([
+      ...base,
+      result({ action: 'key', app: 'WhatsApp', summary: 'pressed return in WhatsApp', screenshot: '/tmp/sent.png' }),
+    ], 'Sent hi to Mom.')).toBe('');
+  });
+
+  it('does not count a Return used in an earlier app as the message commit', () => {
+    const messages: Message[] = [
+      { role: 'user', content: 'search in Safari, then send the result on WhatsApp' },
+      result({ action: 'type', app: 'Safari', screenshot: '/tmp/query.png' }),
+      result({ action: 'key', app: 'Safari', summary: 'pressed return in Safari', screenshot: '/tmp/search.png' }),
+      result({ action: 'type', app: 'WhatsApp', screenshot: '/tmp/typed.png' }),
+    ];
+    expect(computerCommitCompletionNudge(messages, 'Done.')).toMatch(/no later successful Return\/Enter/);
   });
 });

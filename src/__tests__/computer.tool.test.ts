@@ -141,6 +141,18 @@ describe('ComputerTool', () => {
     expect((runtime.run as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({ action: 'key' }));
   });
 
+  it('accepts browser-style press key payloads as native key combos', async () => {
+    setApprovals('always');
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+
+    await tool.execute({ action: 'press', key: 'return', app: 'Safari' } as any, { cwd: process.cwd() });
+
+    expect((runtime.run as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
+      action: 'key', combo: 'return', app: 'Safari',
+    }));
+  });
+
   it('always approvals mode keeps routine acting verbs prompt-worthy', async () => {
     setApprovals('always');
     const tool = createComputerTool(governor, fakeRuntime());

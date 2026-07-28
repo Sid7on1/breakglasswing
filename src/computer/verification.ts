@@ -19,6 +19,7 @@ function sameApp(a?: string, b?: string): boolean {
 export type VerificationOutcome =
   | 'confirmed'    // a specific expectation was proven (semantic query matched)
   | 'changed'      // the screen visibly changed (the action had an effect)
+  | 'rejected'     // input landed, but the application visibly rejected the requested operation
   | 'no-change'    // the post-action frame is identical to the pre-action frame — no visible effect
   | 'expectation-missed' // pixels may have changed, but an explicit semantic postcondition did not
   | 'wrong-window' // the app/window in front is not the one we targeted (focus stolen / wrong target)
@@ -52,6 +53,10 @@ export interface VerificationInput {
   queryMatched?: boolean;
   /** True only when queryMatched is a required postcondition rather than an optional observation. */
   queryRequired?: boolean;
+  /** Explicit failure text visible in the fresh application frame (normally a dialog/toast).
+   * This is stronger than a pixel change: an app saying it could not send/save/open something is
+   * proof the requested operation failed even though the click itself was delivered perfectly. */
+  observedFailure?: string;
 }
 
 /**
@@ -71,6 +76,14 @@ export function classifyVerification(i: VerificationInput): VerificationResult {
   }
   if (i.targetWindowId != null && i.actualWindowId != null && i.targetWindowId !== i.actualWindowId) {
     return { outcome: 'wrong-window', frameChanged: false, windowStable: false, note: `expected window ${i.targetWindowId} but observed ${i.actualWindowId}` };
+  }
+  if (i.observedFailure) {
+    return {
+      outcome: 'rejected',
+      frameChanged: i.prevFrameHash != null && i.nextFrameHash != null && i.nextFrameHash !== i.prevFrameHash,
+      windowStable,
+      note: `application visibly rejected the operation: ${i.observedFailure}`,
+    };
   }
   if (!i.hadScreenshot || i.nextFrameHash == null) {
     return { outcome: 'unverified', frameChanged: false, windowStable, note: 'action landed but no fresh screenshot was captured to prove the outcome' };
@@ -131,7 +144,7 @@ export function toActionResult(
     (postcondition?.matched || v.outcome === 'confirmed') ? 'proven'
       : (v.outcome === 'changed' && v.windowStable && v.frameChanged) ? 'likely'
         : 'unknown';
-  const failureReason = v.outcome === 'failed' || v.outcome === 'wrong-window' ? v.note : undefined;
+  const failureReason = v.outcome === 'failed' || v.outcome === 'rejected' || v.outcome === 'wrong-window' ? v.note : undefined;
   return { delivered, observed: v.outcome, ...(postcondition ? { postcondition } : {}), confidence, ...(failureReason ? { failureReason } : {}) };
 }
 

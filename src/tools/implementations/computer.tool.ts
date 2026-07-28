@@ -59,7 +59,8 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         modifier: { type: 'array', items: { type: 'string', enum: ['cmd', 'shift', 'alt', 'ctrl', 'fn'] }, description: 'click: optional held modifier keys, e.g. ["cmd"] for Finder multi-selection.' },
         count: { type: 'number', description: 'click: 1 (default), 2 = double, 3 = triple.' },
         text: { type: 'string', description: 'type: literal text, full unicode. Pair with query/elementToken when a visible editable field should be focused atomically before typing.' },
-        combo: { type: 'string', description: 'key: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
+        combo: { type: 'string', description: 'key/press: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
+        key: { type: 'string', description: 'Compatibility alias for combo when action is key/press. Prefer combo.' },
         app: { type: 'string', description: 'Intended application name (e.g. "Notes"). Actions default to the most recently opened app.' },
         bundleId: { type: 'string', description: 'open: exact macOS bundle id; preferred when known.' },
         pid: { type: 'number', description: 'Target process id returned by open/apps/windows.' },
@@ -86,11 +87,20 @@ Success requires visible or semantic evidence from the newest frame, not the dri
       },
       required: ['action'],
     },
-    execute: async (args: DesktopCommand, context?: any) => {
+    execute: async (args: DesktopCommand & { key?: string }, context?: any) => {
       // Fold verb synonyms onto real actions FIRST — before the gating decision below — so an
       // aliased high-impact verb (press→key, launch→open) still faces the governor. Doing this any
       // later would turn the alias into an approval bypass.
-      args = { ...args, action: normalizeDesktopAction(args.action) as DesktopCommand['action'] };
+      const normalizedAction = normalizeDesktopAction(args.action) as DesktopCommand['action'];
+      // Models trained on browser-computer APIs often emit {action:"press", key:"return"} while
+      // this native runtime calls that field `combo`. The verb was normalized but the payload was
+      // not, producing the absurd "key needs combo" refusal for a perfectly explicit Return. Fold
+      // both halves of the compatibility form together before approval and execution.
+      args = {
+        ...args,
+        action: normalizedAction,
+        ...(normalizedAction === 'key' && !args.combo && args.key ? { combo: args.key } : {}),
+      };
       const intendedApp = args.app?.trim() || ([
         'click', 'drag', 'scroll', 'type', 'key', 'set_value', 'copy', 'paste', 'arrange',
         'close', 'quit_app', 'hover', 'hold', 'mouse_down', 'mouse_up',

@@ -1,4 +1,4 @@
-import { MODEL_CATALOG, modelMenuOptions, DEFAULT_CODING_MODEL, DEFAULT_LITE_MODEL } from '../cli/models';
+import { MODEL_CATALOG, modelMenuOptions, DEFAULT_CODING_MODEL, DEFAULT_LITE_MODEL, autoSelectCandidates, isReasoningModel } from '../cli/models';
 
 describe('model catalog', () => {
   it('includes the verified working models across tiers', () => {
@@ -35,10 +35,87 @@ describe('model catalog', () => {
     expect(ids).toContain(DEFAULT_LITE_MODEL);
   });
 
+  it('no default points at a model the healer is forbidden to choose', () => {
+    // A default that is avoidAutoSelect is self-contradictory: it ships every new config pointing
+    // at a model we have already decided is too unreliable to select on a user's behalf.
+    const avoided = new Set(MODEL_CATALOG.filter(m => m.avoidAutoSelect).map(m => m.value));
+    expect(avoided.has(DEFAULT_CODING_MODEL)).toBe(false);
+    expect(avoided.has(DEFAULT_LITE_MODEL)).toBe(false);
+  });
+
+  it('the quick-slot default is a plain model, never a reasoner', () => {
+    // The slot exists to answer "hi" instantly. This is the rule the catalog states for itself;
+    // it regressed once already when the default was set to a reasoning model.
+    expect(isReasoningModel(DEFAULT_LITE_MODEL)).toBe(false);
+  });
+
   it('modelMenuOptions marks the current model and carries category labels', () => {
     const opts = modelMenuOptions('mistralai/mistral-small-4-119b-2603');
     const cur = opts.find(o => o.value === 'mistralai/mistral-small-4-119b-2603');
     expect(cur!.label.startsWith('●')).toBe(true);
     expect(opts.every(o => typeof o.category === 'string' && o.category.length > 0)).toBe(true);
+  });
+});
+
+// The auto-selection policy the self-healer uses when a configured model has gone stale. Every
+// case here is a property of the policy, not a pinned model id, so re-probing the catalog and
+// changing which models are recommended cannot silently invalidate these.
+describe('autoSelectCandidates — what the healer is allowed to pick for you', () => {
+  const allIds = MODEL_CATALOG.map(m => m.value);
+
+  it('only ever offers models the provider actually serves', () => {
+    const served = ['openai/gpt-oss-120b', 'stepfun-ai/step-3.7-flash'];
+    for (const slot of ['coding', 'lite', 'vision'] as const) {
+      expect(autoSelectCandidates(slot, served).every(id => served.includes(id))).toBe(true);
+    }
+  });
+
+  it('never auto-picks a model flagged avoidAutoSelect, even when it is the only one served', () => {
+    const avoided = MODEL_CATALOG.filter(m => m.avoidAutoSelect).map(m => m.value);
+    expect(avoided.length).toBeGreaterThan(0); // guard: the flag must actually be in use
+    for (const slot of ['coding', 'lite', 'vision'] as const) {
+      expect(autoSelectCandidates(slot, avoided)).toEqual([]);
+    }
+  });
+
+  it('returns nothing rather than picking an arbitrary provider id', () => {
+    // The regression this encodes: the old healer used servedIds[0], which on NVIDIA is
+    // "01-ai/yi-large" — listed by /models but a 404 on chat/completions. An empty result is the
+    // correct answer, so the caller can leave the pin alone and tell the user to run /model.
+    expect(autoSelectCandidates('coding', ['01-ai/yi-large', 'some/unknown-model'])).toEqual([]);
+    expect(autoSelectCandidates('coding', [])).toEqual([]);
+  });
+
+  it('prefers a model from the requested slot over one borrowed from another slot', () => {
+    const visionOnly = MODEL_CATALOG.find(m => m.tier === 'vision' && !m.avoidAutoSelect)!.value;
+    const codingOnly = MODEL_CATALOG.find(m => m.tier === 'coding' && !m.avoidAutoSelect)!.value;
+    expect(autoSelectCandidates('coding', [visionOnly, codingOnly])[0]).toBe(codingOnly);
+  });
+
+  it('still borrows from another slot rather than leaving a slot unhealed', () => {
+    const visionOnly = MODEL_CATALOG.find(m => m.tier === 'vision' && !m.avoidAutoSelect)!.value;
+    expect(autoSelectCandidates('coding', [visionOnly])).toEqual([visionOnly]);
+  });
+
+  it('ranks plain models above reasoning models within the quick slot', () => {
+    // The quick slot exists to answer "hi" instantly; a reasoner there hides 20-30s of thought.
+    // The ordering guarantee applies to the slot's OWN models — models borrowed from another slot
+    // are a last resort and keep catalog order, so they are excluded here.
+    const inSlot = new Set(MODEL_CATALOG.filter(m => m.tier === 'lite').map(m => m.value));
+    const quick = autoSelectCandidates('lite', allIds).filter(id => inSlot.has(id));
+    const firstReasoner = quick.findIndex(isReasoningModel);
+    const lastPlain = quick.map(isReasoningModel).lastIndexOf(false);
+    if (firstReasoner !== -1 && lastPlain !== -1) expect(lastPlain).toBeLessThan(firstReasoner);
+  });
+
+  it('a served plain quick model outranks a served quick reasoner', () => {
+    const plain = MODEL_CATALOG.find(m => m.tier === 'lite' && !m.avoidAutoSelect && !isReasoningModel(m.value))?.value;
+    const reasoner = MODEL_CATALOG.find(m => m.tier === 'lite' && !m.avoidAutoSelect && isReasoningModel(m.value))?.value;
+    if (plain && reasoner) expect(autoSelectCandidates('lite', [reasoner, plain])[0]).toBe(plain);
+  });
+
+  it('produces no duplicates', () => {
+    const out = autoSelectCandidates('coding', allIds);
+    expect(out.length).toBe(new Set(out).size);
   });
 });

@@ -1,6 +1,24 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { AgentLoop } from '../core/agent.loop';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LLMProvider, ChatEvent } from '../core/llm.provider';
+
+// A successful failover PERSISTS the new model, so these tests must never see the developer's real
+// ~/.breakglass/config.json. Without this they rewrite it — which is exactly what happened once:
+// a test run silently repointed a real machine's `model` at the catalog default.
+let tmpBreakglass: string;
+const realBreakglassDir = process.env.BIMAX_BREAKGLASS_DIR;
+beforeAll(() => {
+  tmpBreakglass = fs.mkdtempSync(path.join(os.tmpdir(), 'bgw-fallback-cfg-'));
+  process.env.BIMAX_BREAKGLASS_DIR = tmpBreakglass;
+});
+afterAll(() => {
+  if (realBreakglassDir === undefined) delete process.env.BIMAX_BREAKGLASS_DIR;
+  else process.env.BIMAX_BREAKGLASS_DIR = realBreakglassDir;
+  try { fs.rmSync(tmpBreakglass, { recursive: true, force: true }); } catch { /* best-effort */ }
+});
 
 /**
  * Model fallback chain (the Claude Code `fallbackModel` analogue): when the active model keeps
@@ -84,6 +102,58 @@ describe('AgentLoop — fallback model chain', () => {
 
     expect(calls).toBe(2); // primary once, fallback once — then surfaced, never spun
     expect(out).toContain('The provider returned an error');
+  });
+
+  // Failing over is the machine picking a model on the user's behalf, so it must obey the same
+  // safety policy as healing. The live failure this encodes: the configured fallback was
+  // stepfun-ai/step-3.7-flash, which sends no response headers for 180s — so a visible model error
+  // turned into a spinner that never resolved and a turn that never replied.
+  describe('never fails over to a model that cannot serve the turn', () => {
+    const hardFail: ChatEvent = { type: 'error', message: 'model decommissioned', recoverable: false } as ChatEvent;
+
+    it('skips a fallback the provider already rejected this session', async () => {
+      process.env.BIMAX_FALLBACK_MODEL = 'known-dead-model';
+      const { llm, applied } = makeFailoverLlm(hardFail);
+      // The adapter learned this id is a lie (listed by /models, 404s on completion).
+      (llm as any).isUnservable = (id: string) => id === 'known-dead-model';
+      (llm as any).listProviderModels = async () => [];
+
+      const loop = new AgentLoop(llm, new ToolRegistry(), null as any);
+      for await (const _ of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 10 })) { /* drain */ }
+
+      expect(applied.map(a => a.model)).not.toContain('known-dead-model');
+    });
+
+    it('skips a fallback the catalog bars from automatic selection', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { MODEL_CATALOG } = require('../cli/models') as typeof import('../cli/models');
+      const avoided = MODEL_CATALOG.find(m => m.avoidAutoSelect)!.value;
+      process.env.BIMAX_FALLBACK_MODEL = avoided;
+      const { llm, applied } = makeFailoverLlm(hardFail);
+      (llm as any).listProviderModels = async () => [];
+
+      const loop = new AgentLoop(llm, new ToolRegistry(), null as any);
+      for await (const _ of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 10 })) { /* drain */ }
+
+      expect(applied.map(a => a.model)).not.toContain(avoided);
+    });
+
+    it('derives a served model when the configured fallback is unusable', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { MODEL_CATALOG } = require('../cli/models') as typeof import('../cli/models');
+      const avoided = MODEL_CATALOG.find(m => m.avoidAutoSelect)!.value;
+      const good = MODEL_CATALOG.find(m => m.tier === 'coding' && !m.avoidAutoSelect)!.value;
+      process.env.BIMAX_FALLBACK_MODEL = avoided;
+      const { llm, applied } = makeFailoverLlm(hardFail);
+      (llm as any).listProviderModels = async () => [avoided, good];
+
+      const loop = new AgentLoop(llm, new ToolRegistry(), null as any);
+      let out = '';
+      for await (const t of loop.execute([{ role: 'user', content: 'go' }], 'sys', { maxIterations: 10 })) out += t;
+
+      expect(applied.map(a => a.model)).toEqual([good]);
+      expect(out).toContain(`Answered on ${good}.`);
+    });
   });
 
   it('does not fail over to the model that is already active', async () => {

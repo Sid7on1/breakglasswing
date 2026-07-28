@@ -123,6 +123,11 @@ export function hasMeaningfulStreamPayload(chunk: any): boolean {
  * providers (minimax/NIM) repeat `id` on every delta, so logic that treated "id present" as "new
  * call" mis-fired a fresh call per chunk and surfaced truncated args (`{"query": "`). Keying off
  * `index` (falling back to 0 when absent) accumulates correctly. Pure — exported for testing.
+ *
+ * Verified against NVIDIA NIM on 2026-07-27: distinct calls DO get distinct indices (0, then 1),
+ * and each call's arguments reassemble into valid JSON on their own. Partial-looking tool arguments
+ * in the UI are the `tool_call_partial` activity events, which are incomplete by design — not a
+ * decoding fault here.
  */
 export function applyToolCallDelta(acc: Map<number, ToolCallSlot>, tc: { index?: number; id?: string; function?: { name?: string; arguments?: string } }): number {
   const i = typeof tc.index === 'number' ? tc.index : 0;

@@ -408,15 +408,23 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   // covers that one turn. Persists the switch so the next launch is already correct.
   void (async () => {
     try {
-      const healed = await llmAdapter.healModel();
-      if (healed) {
+      const healed = await llmAdapter.healModels();
+      if (healed.length) {
         // origin:'runtime' — the volatility guard drops this write when the model came from
         // BGW_MODEL (test/benchmark/CI session), so healing can never contaminate the user's
         // real configuration. Real drift (a stale persisted pin) still persists its fix.
-        try { saveConfig({ model: healed.to } as any, { origin: 'runtime' }); } catch { /* persistence optional */ }
+        const SLOT_KEY: Record<string, string> = { work: 'model', quick: 'liteModel', vision: 'visionModel' };
+        const patch: Record<string, string> = {};
+        for (const h of healed as Array<{ slot: string; from: string; to: string }>) patch[SLOT_KEY[h.slot]] = h.to;
+        try { saveConfig(patch as any, { origin: 'runtime' }); } catch { /* persistence optional */ }
+        const lines = (healed as Array<{ slot: string; from: string; to: string }>)
+          .map(h => `  • ${h.slot}: "${h.from}" → "${h.to}"`);
         cliEvents.emit('message', {
           id: `heal-${Date.now()}`, role: 'system', level: 'info',
-          content: `Model "${healed.from}" isn't available on your provider — switched to "${healed.to}". Use /model to choose another.`,
+          // Deliberately not "aren't served by your provider": a slot also heals when the model IS
+          // served but can't do the job (e.g. one that 400s on every tools+image request), and
+          // claiming the provider doesn't have it would send the user chasing the wrong problem.
+          content: `${healed.length === 1 ? "A model pinned in your config can't run here" : `${healed.length} models pinned in your config can't run here`} — switched:\n${lines.join('\n')}\nUse /model to choose another.`,
           timestamp: new Date(),
         } as MessageEntry);
         cliEvents.emit('config_changed');

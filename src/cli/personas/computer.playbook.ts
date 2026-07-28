@@ -9,41 +9,112 @@
  *
  * The split rule: the schema carries what the model needs to pick the tool and call it correctly
  * (the loop contract, handle precedence, frameId). Everything scenario-specific lives here.
+ *
+ * SECOND SPLIT (relevance): the scenario sections were then injected ALL AT ONCE on every desktop
+ * turn, which is how a Calculator task ended in a refusal written in messaging vocabulary — the
+ * model read MESSAGE COMPOSERS as a precondition, found no composer, and concluded the task was
+ * impossible ("the Calculator app does not contain any message composers ... therefore I cannot
+ * perform any message typing"). Guidance for a situation that is not happening is not free: it is
+ * an invitation to pattern-match the task onto the wrong scenario. So scenario sections now ship
+ * only when the request implicates them, while the universal ones always ship.
  */
-export const COMPUTER_USE_PLAYBOOK = `[Desktop operation playbook — this task involves the user's computer.]
 
-MULTIPLE APPS
-open launches an app, registers it, and makes it active. Every app opened this session STAYS registered, but only the active one receives input, because coordinates and element handles are grounded in the active app's newest frame. To switch between apps already open, use focus (app or pid) — it activates the app and returns a fresh frame, without the re-launch that open would cause. Re-opening a running app risks a second instance and discards its current state, so reach for focus whenever the app is already open. A cross-app task is therefore: open A → work → open/focus B → work → focus A → continue. Naming a non-active app on an acting verb is refused and the error tells you which verb to use.
+interface PlaybookSection {
+  title: string;
+  body: string;
+  /** Present = scenario section, included only when the request matches. Absent = universal. */
+  when?: RegExp;
+}
 
-TARGET LOCK
-The PiP preview, newest screenshot/frameId, active surface, and physical mouse/keyboard target must always name the same pid+windowId. During focus/open the old PiP is intentionally hidden before the new target is released for input. If any result reports a target-lock or preview mismatch, do not compensate with coordinates: focus or observe the intended app again and use only that returned frame.
+const HEADER = `[Desktop operation playbook — this task involves the user's computer.]`;
 
-WINDOW PREPARATION
-Prepare the surface when precision requires it; do not wait for the user to dictate window geometry. If the screenshot is cramped, important controls are clipped, or several icon-only targets are too close to distinguish, first use arrange layout=maximize and inspect the returned resized frame. Use layout=fullscreen when the task benefits from an isolated Space or the user asks for fullscreen; prefer maximize for cross-app work because fullscreen hides the other windows. This rule is geometric and universal, not app-specific.
+// Universal sections describe the tool's own mechanics (target lock, evidence, how typing and
+// capture work) and are true of every desktop turn. Scenario sections describe a SITUATION; each
+// carries the matcher that decides whether this request is in that situation.
+const SECTIONS: PlaybookSection[] = [
+  {
+    // Universal despite being about "multiple" apps: the focus-vs-open rule prevents launching a
+    // second instance of an app that is ALREADY open, which applies to single-app tasks too.
+    title: 'MULTIPLE APPS',
+    body: `open launches an app, registers it, and makes it active. Every app opened this session STAYS registered, but only the active one receives input, because coordinates and element handles are grounded in the active app's newest frame. To switch between apps already open, use focus (app or pid) — it activates the app and returns a fresh frame, without the re-launch that open would cause. Re-opening a running app risks a second instance and discards its current state, so reach for focus whenever the app is already open. A cross-app task is therefore: open A → work → open/focus B → work → focus A → continue. Naming a non-active app on an acting verb is refused and the error tells you which verb to use.`,
+  },
+  {
+    title: 'TARGET LOCK',
+    body: `The PiP preview, newest screenshot/frameId, active surface, and physical mouse/keyboard target must always name the same pid+windowId. During focus/open the old PiP is intentionally hidden before the new target is released for input. If any result reports a target-lock or preview mismatch, do not compensate with coordinates: focus or observe the intended app again and use only that returned frame.`,
+  },
+  {
+    title: 'WINDOW PREPARATION',
+    body: `Prepare the surface when precision requires it; do not wait for the user to dictate window geometry. If the screenshot is cramped, important controls are clipped, or several icon-only targets are too close to distinguish, first use arrange layout=maximize and inspect the returned resized frame. Use layout=fullscreen when the task benefits from an isolated Space or the user asks for fullscreen; prefer maximize for cross-app work because fullscreen hides the other windows. This rule is geometric and universal, not app-specific.`,
+  },
+  {
+    title: 'THE DESKTOP',
+    when: /\b(desktop|wallpaper|stacks?|icons?\s+on\s+(?:the\s+)?screen|file\s+it\s+into)\b/i,
+    body: `The desktop is not an app window — it has no window id and window-scoped observation cannot see it. Use desktop: with no arguments it lists every item on it by name with its on-screen rectangle. To move one, pass query="<item name>" plus either toQuery="<name of a folder on the desktop>" to file it into that folder, or toX/toY screen points to reposition it. The move is verified by re-reading the desktop: an item that filed away disappears, a repositioned one has a new rectangle, and one that did not move at all is reported as a failure (usually the desktop is using Stacks or Sort By, which snaps items back).`,
+  },
+  {
+    title: 'ARRANGING WINDOWS',
+    when: /\b(arrange|resiz|maximi[sz]|minimi[sz]|full ?screen|side by side|tile|split|window (?:size|position)|move the window|left half|right half|quadrant|centre|center the)\b/i,
+    body: `arrange places the ACTIVE window: layout=left/right/top/bottom or a quadrant tiles it within the screen's usable area (below the menu bar, clear of the Dock), maximize fills that area, center restores a floating size, and bounds sets an exact rectangle. layout=fullscreen is the native macOS fullscreen Space, which is NOT the same as maximize — only fullscreen windows can be switched between with the Space shortcuts. To put two apps side by side: focus A → arrange left → focus B → arrange right. Apps enforce their own minimum sizes and size increments, so the result reports the ACHIEVED frame; when it differs from what was asked, the window is placed but may still overlap its neighbour — read windowFrame rather than assuming the request was honored. Fullscreen is only accepted for the frontmost app, and panels/utility windows cannot go fullscreen at all.`,
+  },
+  {
+    title: 'DRAGGING BETWEEN APPS',
+    when: /\b(drag|drop|move .*\b(?:into|onto|to)\b .*\b(?:app|window|folder)|reorder)\b/i,
+    body: `drag with toApp drops into another open app: the source point is read in the active window, the destination in toApp's window. Both windows must be visible SIMULTANEOUSLY, so arrange them first (focus A → arrange left, focus B → arrange right) — if the source window covers the drop point the drag is refused rather than dropped back onto the source. After the drop, toApp becomes the active target and its frame is attached. Delivery is not acceptance: an app silently ignores content types it does not handle, so confirm from the frame that the content actually arrived. For files specifically, the clipboard route (clipboard paths=[…] then paste) is more reliable than dragging and needs no window arrangement.`,
+  },
+  {
+    title: 'SPACES (fullscreen apps and extra desktops)',
+    when: /\b(space|spaces|mission control|expos[eé]|another desktop|virtual desktop|full ?screen)\b/i,
+    body: `Ctrl+Left / Ctrl+Right / Ctrl+1..9 are handled by macOS itself, not by the focused app: they change which Space — and therefore which windows — exist on screen. Send them with key. Afterwards the app you were working on may be on a Space that is no longer visible, so the runtime re-checks what is actually in front: if that app is already open in this session it becomes the active target and you get a fresh frame of it; otherwise there is NO active target and you must open or focus something before acting. Only fullscreen windows and additional desktops are switchable, so arrange layout=fullscreen first if you want an app to have its own Space. Ctrl+Up (Mission Control) and Ctrl+Down (App Exposé) cover the screen with an overlay — nothing is capturable until you press escape.`,
+  },
+  {
+    title: 'MOVING CONTENT BETWEEN APPS',
+    when: /\b(copy|paste|clipboard|attach|upload|import|export|transfer|move .*\btext\b|send .*\b(?:file|photo|image|document)\b)\b/i,
+    body: `The clipboard is the OS bridge and works the same for every application. copy presses the copy shortcut on the active app and VERIFIES it: the OS write counter must advance, so "nothing was selected" is reported as a failure instead of a silent no-op — select the content first, then copy. paste presses paste on the active app and checks the fresh frame for the pasted text. clipboard reads the clipboard, or writes it: value=text, or paths=[absolute file paths] to place the FILES themselves on it, which is how you hand an app a photo or document — a path written as text would only paste the filename. So moving text app-to-app is: focus source → select → copy → focus destination → click the field → paste. Sending a file is: clipboard paths=[…] → focus destination → click the field → paste (or use the app's own attach control and file picker when it does not accept a paste).`,
+  },
+  {
+    title: 'TEXT ENTRY',
+    body: `When an editable search, address, filename, message, comment, or document field is visible, use type with query="<field label>" and the text. That operation resolves, focuses, verifies, and types into the field atomically. Do not first click a nearby icon, menu, privacy card, attachment button, emoji button, or guessed element index just to establish focus. If the named field is absent, observe or maximize to acquire it; do not substitute the nearest control. Typing a newline character does NOT press Return or submit a search/form. Submit as a separate key action with combo="return", then inspect the returned frame. Text merely visible inside a search/address field is not a loaded results page and must not complete a search Todo item.`,
+  },
+  {
+    title: 'MESSAGE COMPOSERS',
+    when: /\b(message|messages|chat|whatsapp|imessage|slack|discord|telegram|signal|mail|email|gmail|outlook|reply|repl(?:y|ies)|comment|compose|composer|send|dm|post|thread|conversation|note to)\b/i,
+    body: `Any surface with a composer and a transcript above it (chat, mail, comments, notes with an entry field) works the same way: open the app → select the conversation or record → type with query="<composer label>" so the runtime atomically focuses and proves the editable field → COMMIT. Commit with key combo "return" in the composer; commit buttons are frequently unlabeled icons that a raw click misses. Selecting the conversation is NOT committing. Success is proven ONLY by a post-action frame showing the content in the transcript AND the composer cleared — text still in the composer, or nothing new in the transcript, means it was not sent; do not report success.`,
+  },
+  {
+    title: 'UNLABELED AND ICON-ONLY CONTROLS',
+    body: `An entry such as "unlabeled Button right of Type a message #4" is an honest positional identity synthesized from the fresh accessibility geometry, not a semantic name supplied by the app. Match it against the screenshot and use its elementIndex/token so the runtime clicks its center. Never infer that an unlabeled icon is Send, Attach, More, or Back merely from convention. If two candidates remain plausible: maximize and re-observe; use one hover to reveal a tooltip when appropriate; then choose only if the newest frame distinguishes it. Do not issue exploratory clicks—an unproven click is not discovery.`,
+  },
+  {
+    title: 'CAPTURE SCOPE',
+    body: `Ordinary observe/screenshot evidence and recording use the particular owned app window whenever one exists, which avoids leaking unrelated windows and keeps coordinates exact. Whole-display capture is reserved for OS-owned overlays that cannot appear in a window capture (for example a context menu) or a task that genuinely spans the display; video recording of the whole display requires explicit approval. PiP is presentation only and is never a coordinate surface.`,
+  },
+  {
+    title: 'EVIDENCE',
+    body: `Success requires visible or semantic postcondition evidence, not driver delivery, and the evidence must match the value type the user asked for. Read actionReceipt on physical input: its preflight proves the live window/element or editable focus before commit, and its postcondition records what was actually observed. When the intended next state has native text, attach expect="text" to the acting call; use expectMode=absent when disappearance proves success. This combines action and verification in one round and returns confidence=proven only when the postcondition actually matches. For sliders use set_value with a fresh query/element handle: maximum/full/100% = 1, minimum/mute/0% = 0 — never click or drag a slider to approximate an exact value. A right-click returns a full-display frame because the menu is its own OS window, and old window handles are invalid until the next observe. Dialogs and popovers block the controls behind them. Finish the whole workflow, including cleanup, before replying.`,
+  },
+];
 
-THE DESKTOP
-The desktop is not an app window — it has no window id and window-scoped observation cannot see it. Use desktop: with no arguments it lists every item on it by name with its on-screen rectangle. To move one, pass query="<item name>" plus either toQuery="<name of a folder on the desktop>" to file it into that folder, or toX/toY screen points to reposition it. The move is verified by re-reading the desktop: an item that filed away disappears, a repositioned one has a new rectangle, and one that did not move at all is reported as a failure (usually the desktop is using Stacks or Sort By, which snaps items back).
+const render = (sections: PlaybookSection[]): string =>
+  [HEADER, ...sections.map(s => `${s.title}\n${s.body}`)].join('\n\n');
 
-ARRANGING WINDOWS
-arrange places the ACTIVE window: layout=left/right/top/bottom or a quadrant tiles it within the screen's usable area (below the menu bar, clear of the Dock), maximize fills that area, center restores a floating size, and bounds sets an exact rectangle. layout=fullscreen is the native macOS fullscreen Space, which is NOT the same as maximize — only fullscreen windows can be switched between with the Space shortcuts. To put two apps side by side: focus A → arrange left → focus B → arrange right. Apps enforce their own minimum sizes and size increments, so the result reports the ACHIEVED frame; when it differs from what was asked, the window is placed but may still overlap its neighbour — read windowFrame rather than assuming the request was honored. Fullscreen is only accepted for the frontmost app, and panels/utility windows cannot go fullscreen at all.
+/**
+ * The complete corpus — every section, universal and scenario alike. This is the knowledge base;
+ * it is what guarantees nothing was DROPPED when guidance moved out of the tool schema. Prefer
+ * {@link computerUsePlaybookFor} for anything that actually goes on the wire.
+ */
+export const COMPUTER_USE_PLAYBOOK = render(SECTIONS);
 
-DRAGGING BETWEEN APPS
-drag with toApp drops into another open app: the source point is read in the active window, the destination in toApp's window. Both windows must be visible SIMULTANEOUSLY, so arrange them first (focus A → arrange left, focus B → arrange right) — if the source window covers the drop point the drag is refused rather than dropped back onto the source. After the drop, toApp becomes the active target and its frame is attached. Delivery is not acceptance: an app silently ignores content types it does not handle, so confirm from the frame that the content actually arrived. For files specifically, the clipboard route (clipboard paths=[…] then paste) is more reliable than dragging and needs no window arrangement.
+/** Scenario section titles, for tests and diagnostics. */
+export const SCENARIO_SECTION_TITLES = SECTIONS.filter(s => s.when).map(s => s.title);
 
-SPACES (fullscreen apps and extra desktops)
-Ctrl+Left / Ctrl+Right / Ctrl+1..9 are handled by macOS itself, not by the focused app: they change which Space — and therefore which windows — exist on screen. Send them with key. Afterwards the app you were working on may be on a Space that is no longer visible, so the runtime re-checks what is actually in front: if that app is already open in this session it becomes the active target and you get a fresh frame of it; otherwise there is NO active target and you must open or focus something before acting. Only fullscreen windows and additional desktops are switchable, so arrange layout=fullscreen first if you want an app to have its own Space. Ctrl+Up (Mission Control) and Ctrl+Down (App Exposé) cover the screen with an overlay — nothing is capturable until you press escape.
-
-MOVING CONTENT BETWEEN APPS
-The clipboard is the OS bridge and works the same for every application. copy presses the copy shortcut on the active app and VERIFIES it: the OS write counter must advance, so "nothing was selected" is reported as a failure instead of a silent no-op — select the content first, then copy. paste presses paste on the active app and checks the fresh frame for the pasted text. clipboard reads the clipboard, or writes it: value=text, or paths=[absolute file paths] to place the FILES themselves on it, which is how you hand an app a photo or document — a path written as text would only paste the filename. So moving text app-to-app is: focus source → select → copy → focus destination → click the field → paste. Sending a file is: clipboard paths=[…] → focus destination → click the field → paste (or use the app's own attach control and file picker when it does not accept a paste).
-
-MESSAGE COMPOSERS
-Any surface with a composer and a transcript above it (chat, mail, comments, notes with an entry field) works the same way: open the app → select the conversation or record → type with query="<composer label>" so the runtime atomically focuses and proves the editable field → COMMIT. Commit with key combo "return" in the composer; commit buttons are frequently unlabeled icons that a raw click misses. Selecting the conversation is NOT committing. Success is proven ONLY by a post-action frame showing the content in the transcript AND the composer cleared — text still in the composer, or nothing new in the transcript, means it was not sent; do not report success.
-
-UNLABELED AND ICON-ONLY CONTROLS
-An entry such as "unlabeled Button right of Type a message #4" is an honest positional identity synthesized from the fresh accessibility geometry, not a semantic name supplied by the app. Match it against the screenshot and use its elementIndex/token so the runtime clicks its center. Never infer that an unlabeled icon is Send, Attach, More, or Back merely from convention. If two candidates remain plausible: maximize and re-observe; use one hover to reveal a tooltip when appropriate; then choose only if the newest frame distinguishes it. Do not issue exploratory clicks—an unproven click is not discovery.
-
-CAPTURE SCOPE
-Ordinary observe/screenshot evidence and recording use the particular owned app window whenever one exists, which avoids leaking unrelated windows and keeps coordinates exact. Whole-display capture is reserved for OS-owned overlays that cannot appear in a window capture (for example a context menu) or a task that genuinely spans the display; video recording of the whole display requires explicit approval. PiP is presentation only and is never a coordinate surface.
-
-EVIDENCE
-Success requires visible or semantic postcondition evidence, not driver delivery, and the evidence must match the value type the user asked for. Read actionReceipt on physical input: its preflight proves the live window/element or editable focus before commit, and its postcondition records what was actually observed. When the intended next state has native text, attach expect="text" to the acting call; use expectMode=absent when disappearance proves success. This combines action and verification in one round and returns confidence=proven only when the postcondition actually matches. For sliders use set_value with a fresh query/element handle: maximum/full/100% = 1, minimum/mute/0% = 0 — never click or drag a slider to approximate an exact value. A right-click returns a full-display frame because the menu is its own OS window, and old window handles are invalid until the next observe. Dialogs and popovers block the controls behind them. Finish the whole workflow, including cleanup, before replying.`;
+/**
+ * The playbook this specific request should actually receive: every universal section, plus only
+ * the scenario sections the request implicates.
+ *
+ * Matching is deliberately generous — a scenario section that is present but unused costs tokens,
+ * while one that is missing costs a capability. When in doubt the matcher should fire.
+ */
+export function computerUsePlaybookFor(prompt: string): string {
+  const text = String(prompt || '');
+  return render(SECTIONS.filter(s => !s.when || s.when.test(text)));
+}

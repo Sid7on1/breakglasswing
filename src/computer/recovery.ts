@@ -57,6 +57,10 @@ export class RecoveryController {
       case 'failed':
         this.retries++;
         return this.retries > this.budget.maxRetries ? this.recoverOrGiveUp() : 'retry';
+      case 'rejected':
+        // Repeating an operation the app explicitly rejected (unsupported attachment, invalid
+        // format, permission dialog) is not a transient input retry. Change approach immediately.
+        return this.recoverOrGiveUp();
       case 'no-change':
         this.noProgress++;
         if (this.noProgress >= this.budget.maxNoProgress) return this.giveUp();
