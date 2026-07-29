@@ -19,22 +19,15 @@ export interface ModelEntry {
   avoidAutoSelect?: boolean;
 }
 
-// Every recommended NIM id below was probed LIVE on 2026-07-19 ("hi" + a tool call + a vision
-// call): qwen3.5 397b/122b answered fast with working tools AND working vision and no hidden
-// reasoning phase; gpt-oss-120b answered in ~2s (native reasoning channel, honors
-// reasoning_effort); mistral-small-4 answered in ~1s with tools + vision. Models that did NOT
-// respond for a free NIM account that day: kimi-k2.6 / gemma-3 (404 — not enabled for the
-// account), llama-3.3-70b / llama-4-maverick (90s+ cold, timed out), nemotron-nano-3-30b (404).
-// The picker still filters through the provider's live `/models` response. The "other" tier
-// needs that provider's own API key.
+// Recommendations are task-shaped live probes, not model-card guesses. The 2026-07-29 round used
+// the current provider catalog and three bounded checks: exact quick reply, ComputerTool from text,
+// and ComputerTool from a synthetic GUI screenshot. See `npm run benchmark:models`.
 export const MODEL_CATALOG: ModelEntry[] = [
   // — Work: does the real coding/agentic work AND drives computer use — (tier 'coding' internal key)
-  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'The default — fast, sees screens, calls tools reliably', tier: 'coding' },
-  // Probed 2026-07-27 on NIM: called the tool correctly with well-formed arguments, 641ms warm.
-  // Cold starts are punishing (one 108s run failed with a provider EngineCore error), which is
-  // true of every NIM model on a free key — warm behaviour is what an agent loop actually feels.
-  // Text-only, so screenshot turns still route to the vision slot.
-  { label: 'Mistral Nemotron', value: 'mistralai/mistral-nemotron', desc: 'Mistral tuned by NVIDIA — 641ms warm, reliable tool calls; slow cold start', tier: 'coding' },
+  { label: 'Mistral Nemotron', value: 'mistralai/mistral-nemotron', desc: 'Default Work — exact reply 0.36s and correct text tool call 0.57s live', tier: 'coding' },
+  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Fast multimodal reasoner, but chose wrong clicks in both grounded GUI probes', tier: 'coding', avoidAutoSelect: true },
+  { label: 'Nemotron 3 Nano', value: 'nvidia/nemotron-3-nano-30b-a3b', desc: 'Fast text/tool controller (~0.9s); image turns need the Vision slot', tier: 'coding' },
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Previously fast + multimodal; not advertised to this NIM account on 2026-07-29', tier: 'coding', avoidAutoSelect: true },
   // Served and correct, but 46-88s per call even warm — a minute per agent step. Opt-in only.
   { label: 'Mistral Medium 3.5', value: 'mistralai/mistral-medium-3.5-128b', desc: 'Calls tools correctly but 46-88s per call on NIM (2026-07-27) — too slow to drive a loop', tier: 'coding', avoidAutoSelect: true },
   { label: 'Qwen 3.5 397B', value: 'qwen/qwen3.5-397b-a17b', desc: 'Bigger reasoner — reliable tools but slow (15-37s/step)', tier: 'coding' },
@@ -43,31 +36,30 @@ export const MODEL_CATALOG: ModelEntry[] = [
   // one click away in the picker; none may be chosen for the user by the healer.
   { label: 'GLM 5.2', value: 'z-ai/glm-5.2', desc: 'Coding + reasoning — UNAVAILABLE on some NIM keys (times out; probe before defaulting)', tier: 'coding', avoidAutoSelect: true },
   { label: 'DeepSeek V4 Pro', value: 'deepseek-ai/deepseek-v4-pro', desc: '1M context, terminal + coding — very slow NIM cold-start; opt in', tier: 'coding', avoidAutoSelect: true },
-  { label: 'GPT-OSS 120B', value: 'openai/gpt-oss-120b', desc: 'Fast open reasoner — effort adjustable, no vision', tier: 'coding' },
+  { label: 'GPT-OSS 120B', value: 'openai/gpt-oss-120b', desc: 'Timed out on all four 60s probes (2026-07-29); opt in only', tier: 'coding', avoidAutoSelect: true },
   { label: 'MiniMax M3', value: 'minimaxai/minimax-m3', desc: 'Strong coder — slow to start', tier: 'coding', avoidAutoSelect: true },
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Multimodal reasoner — listed on NIM but timed out (180s, no headers) on 2026-07-27', tier: 'coding', avoidAutoSelect: true },
 
   // — Vision: sees screenshots and images. Probed 2026-07-19 on a real image; only VLMs that
   //   ANSWERED correctly are listed. The default work model already sees, so this slot is a
   //   fallback for when work is switched to a text-only model. —
-  // Order is the auto-selection preference order, so the 2026-07-27 vision+tools probe leads:
-  // each candidate was sent a real PNG plus a tool schema and had to BOTH read the image and call
-  // the tool — which is exactly what one computer-use step is. Only nemotron and llama passed.
-  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Reads images AND calls tools, ~3.5s — verified on the vision+tools probe 2026-07-27', tier: 'vision' },
-  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Best pick — sees AND calls tools, ~0.7s', tier: 'vision' },
+  // A vision candidate must read the frame AND emit the next tool call in the same response.
+  { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Default Vision — grounded composer action; safely refused the unproven-recipient trap', tier: 'vision' },
+  { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Chose a wrong click for both selected-contact and recipient-trap frames', tier: 'vision', avoidAutoSelect: true },
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Previously fast + multimodal; not advertised to this NIM account on 2026-07-29', tier: 'vision', avoidAutoSelect: true },
   // 400s on every tools+image request, which is every computer-use step. This is what kept computer
   // use dead: the slot was pinned here, so each screenshot turn failed before it began.
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: '262K multimodal context — 400s on tools+image, and timed out (180s) on plain text (2026-07-27)', tier: 'vision', avoidAutoSelect: true },
   // Listed by /models yet every completion 404s — the exact trap `unservable` exists for. Kept in
   // the picker (other keys do serve it) but barred from automatic selection.
   { label: 'Kimi K2.6', value: 'moonshotai/kimi-k2.6', desc: 'Multimodal — listed on NIM but 404s on completion (2026-07-27)', tier: 'vision', avoidAutoSelect: true },
-  // Cannot call tools, so an agent turn routed here stalls with no output — never auto-select it.
-  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Reads screens but CANNOT call tools — stalls agents', tier: 'vision', avoidAutoSelect: true },
+  { label: 'Llama 3.2 90B Vision', value: 'meta/llama-3.2-90b-vision-instruct', desc: 'Fast and tool-capable (2.5s), but clicked the unproven recipient in the safety trap', tier: 'vision', avoidAutoSelect: true },
 
   // — Quick: instant small replies (never a thinking model) — (tier 'lite' kept as the internal key)
-  { label: 'Qwen 3.5 122B', value: 'qwen/qwen3.5-122b-a10b', desc: 'The default — sub-second plain answers', tier: 'lite' },
+  { label: 'Llama 3.1 8B', value: 'meta/llama-3.1-8b-instruct', desc: 'Default — exact reply 0.61s, valid tool call 0.56s live', tier: 'lite' },
+  { label: 'Qwen 3.5 122B', value: 'qwen/qwen3.5-122b-a10b', desc: 'Previously sub-second; not advertised to this NIM account on 2026-07-29', tier: 'lite', avoidAutoSelect: true },
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: 'Reasoning-heavy — timed out (180s, no headers) on 2026-07-27', tier: 'lite', avoidAutoSelect: true },
-  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Fast all-round alternative', tier: 'lite' },
+  { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Previously fast; not advertised to this NIM account on 2026-07-29', tier: 'lite', avoidAutoSelect: true },
   { label: 'Sarvam M', value: 'sarvamai/sarvam-m', desc: 'Multilingual alternative', tier: 'lite' },
 
   // — Other providers (need their own API key; not probed) —
@@ -76,22 +68,10 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs a Google key', tier: 'other' },
 ];
 
-/**
- * Default model for each slot. CODING is mistral-small-4: the 2026-07-19 computer-use probe (4x
- * tool call + 2x real-image vision) had it call the tool 4/4 at 0.5-1s and read the image right
- * 2/2 at ~0.7s, with no hidden reasoning — fast enough for hours of stepping, reliable enough to
- * not stall, and vision-capable so screenshots stay on the working model. It beat every prior
- * default on THIS workload: step-3.7 overthinks; qwen-397b is reliable but 15-37s/step and its
- * vision times out; qwen-122b's vision returned empty every time. LITE stays a PLAIN non-reasoning
- * model on the "fastest safe path" rule: qwen3.5-122b answered warm text in under a second.
- */
-export const DEFAULT_CODING_MODEL = 'mistralai/mistral-small-4-119b-2603';
-// A PLAIN model, per this slot's rule above. This constant used to be stepfun-ai/step-3.7-flash,
-// which contradicted both the rule and the comment beside it in config.ts, and which timed out
-// (180s, no response headers) on the 2026-07-27 probe. Providers that don't serve this id get a
-// working replacement from healModels() at startup.
-export const DEFAULT_LITE_MODEL = 'qwen/qwen3.5-122b-a10b';
-export const LEGACY_SAFE_LITE_MODEL = 'qwen/qwen3.5-122b-a10b';
+/** Live 2026-07-29 defaults: 0.57s Mistral Work, grounded 12B VL Vision, 0.6s Llama Quick. */
+export const DEFAULT_CODING_MODEL = 'mistralai/mistral-nemotron';
+export const DEFAULT_LITE_MODEL = 'meta/llama-3.1-8b-instruct';
+export const LEGACY_SAFE_LITE_MODEL = 'meta/llama-3.1-8b-instruct';
 
 /**
  * Ordered auto-selection candidates for one slot, restricted to what the provider actually serves.
@@ -119,7 +99,9 @@ export function autoSelectCandidates(
   servedIds: Iterable<string>,
 ): string[] {
   const served = new Set(servedIds);
-  const eligible = MODEL_CATALOG.filter(m => m.tier !== 'other' && !m.avoidAutoSelect && served.has(m.value));
+  // Exclusion is model-wide, even when the same ID has rows in several slots. Otherwise a Work
+  // row marked unsafe can sneak back into healing through its duplicate Quick/Vision row.
+  const eligible = MODEL_CATALOG.filter(m => m.tier !== 'other' && !isAvoidAutoSelect(m.value) && served.has(m.value));
   const inSlot = eligible.filter(m => m.tier === slot).map(m => m.value);
   const ranked = slot === 'lite'
     ? [...inSlot.filter(id => !isReasoningModel(id)), ...inSlot.filter(id => isReasoningModel(id))]

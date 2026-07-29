@@ -11,10 +11,9 @@
  * (the loop contract, handle precedence, frameId). Everything scenario-specific lives here.
  *
  * SECOND SPLIT (relevance): the scenario sections were then injected ALL AT ONCE on every desktop
- * turn, which is how a Calculator task ended in a refusal written in messaging vocabulary — the
+ * turn, which is how a non-messaging task ended in a refusal written in messaging vocabulary — the
  * model read MESSAGE COMPOSERS as a precondition, found no composer, and concluded the task was
- * impossible ("the Calculator app does not contain any message composers ... therefore I cannot
- * perform any message typing"). Guidance for a situation that is not happening is not free: it is
+ * impossible. Guidance for a situation that is not happening is not free: it is
  * an invitation to pattern-match the task onto the wrong scenario. So scenario sections now ship
  * only when the request implicates them, while the universal ones always ship.
  */
@@ -77,8 +76,8 @@ const SECTIONS: PlaybookSection[] = [
   },
   {
     title: 'MESSAGE COMPOSERS',
-    when: /\b(message|messages|chat|whatsapp|imessage|slack|discord|telegram|signal|mail|email|gmail|outlook|reply|repl(?:y|ies)|comment|compose|composer|send|dm|post|thread|conversation|note to)\b/i,
-    body: `Any surface with a composer and a transcript above it (chat, mail, comments, notes with an entry field) works the same way: open the app → select the conversation or record → type with query="<composer label>" so the runtime atomically focuses and proves the editable field → COMMIT. Commit with key combo "return" in the composer; commit buttons are frequently unlabeled icons that a raw click misses. Selecting the conversation is NOT committing. Success is proven ONLY by a post-action frame showing the content in the transcript AND the composer cleared — text still in the composer, or nothing new in the transcript, means it was not sent; do not report success.`,
+    when: /\b(message|messages|chat|reply|repl(?:y|ies)|comment|compose|composer|send|dm|post|thread|conversation|note to)\b/i,
+    body: `Any surface with a composer and a transcript above it (chat, mail, comments, notes with an entry field) works the same way: open the app → PROVE the requested recipient from a visible/native contact label or exact search result → select that conversation or record → type the user's EXACT requested content with query="<composer label>" so the runtime atomically focuses and proves the editable field → COMMIT. Never assume the currently selected conversation is the requested person: an unnamed phone number, unrelated name, or old transcript is not recipient proof. If the exact recipient is not visible, type the requested recipient into the app's Search field and select only an exact matching result; ask the user if the results remain ambiguous. Commit with key combo "return" in the composer; commit buttons are frequently unlabeled icons that a raw click misses. Selecting the conversation is NOT committing. Pre-existing transcript content is context only and can never prove a send in this turn; never set expect to text already visible before the action. Success is proven ONLY by a post-commit frame showing the newly entered exact content in the proven recipient's transcript AND the composer cleared — different old content, text still in the composer, or nothing new in the transcript means it was not sent; do not report success.`,
   },
   {
     title: 'UNLABELED AND ICON-ONLY CONTROLS',
@@ -86,7 +85,7 @@ const SECTIONS: PlaybookSection[] = [
   },
   {
     title: 'CAPTURE SCOPE',
-    body: `Ordinary observe/screenshot evidence and recording use the particular owned app window whenever one exists, which avoids leaking unrelated windows and keeps coordinates exact. Whole-display capture is reserved for OS-owned overlays that cannot appear in a window capture (for example a context menu) or a task that genuinely spans the display; video recording of the whole display requires explicit approval. PiP is presentation only and is never a coordinate surface.`,
+    body: `Ordinary observe/screenshot evidence and record_start with captureScope=window use the particular owned app window whenever one exists, which avoids leaking unrelated windows and keeps coordinates exact. Use record_start captureScope=display only when the requested recording must match the whole screen a human sees, including overlapping windows; whole-display video requires explicit approval. OS-owned overlays that cannot appear in a window capture may also produce display context. PiP is presentation only and is never a coordinate surface.`,
   },
   {
     title: 'EVIDENCE',

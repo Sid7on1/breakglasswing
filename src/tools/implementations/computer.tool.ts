@@ -1,10 +1,11 @@
 import { cliEvents } from '../../cli/events';
 import { loadConfig } from '../../cli/config';
-import { globalDesktopRuntime, DesktopRuntimePort, DesktopCommand, normalizeDesktopAction } from '../../computer/desktop.runtime';
+import { globalDesktopRuntime, DesktopRuntimePort, DesktopCommand, normalizeDesktopAction, PUBLIC_DESKTOP_ACTIONS } from '../../computer/desktop.runtime';
 import { classifyDesktopActionImpact } from '../../browser/action.impact';
 import { IGovernor } from '../../core/interfaces';
 import { getTaintTracker } from '../../mind/taint';
 import { buildTool, BuiltTool } from '../tool.factory';
+import { computerResultForModel, renderComputerActionReference, validateModelComputerCommand } from '../../computer/action.contract';
 
 /** Acting verbs face the governor; observation (screenshot/cursor/status/…) is approval-free. */
 // 'clipboard' is gated alongside the acting verbs even though a bare read changes nothing: the
@@ -38,15 +39,18 @@ MANDATORY LOOP
 
 Every state-changing action requires a fresh frame of the exact target; if capture fails, re-observe before any more input. Use only handles from the newest result: query or elementToken first, then elementIndex, then raw screenshot x/y — never copy an element frame into x/y. coordinateSpace describes the returned image; normalized=true maps 0-1000 into that image. Every observation returns a frameId: pass it back on the action you planned from it, so a stale frame is refused instead of mis-clicked.
 
-Success requires visible or semantic evidence from the newest frame, not the driver reporting delivery. Detailed guidance for multi-app work, window arrangement, drag-and-drop, Spaces, the clipboard and message composers is supplied with the task when it involves the desktop.`,
+Success requires visible or semantic evidence from the newest frame, not the driver reporting delivery. Detailed guidance for multi-app work, window arrangement, drag-and-drop, Spaces, the clipboard and message composers is supplied with the task when it involves the desktop.
+
+ACTIONS (one call = one action)
+${renderComputerActionReference()}`,
     isDestructive: false,
     isConcurrencySafe: false,
     schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['status', 'request_access', 'apps', 'windows', 'open', 'focus', 'observe', 'screenshot', 'click', 'type', 'key', 'set_value', 'drag', 'scroll', 'hover', 'hold', 'mouse_down', 'mouse_up', 'cursor', 'frontmost', 'move', 'copy', 'paste', 'clipboard', 'arrange', 'desktop', 'close', 'quit_app', 'wait', 'record_start', 'record_status', 'record_stop'] },
-        x: { type: 'number', description: 'Exact pixel in the newest screenshot only. Prefer query/elementToken/elementIndex for controls.' },
-        y: { type: 'number', description: 'Exact pixel in the newest screenshot only. Prefer query/elementToken/elementIndex for controls.' },
+        action: { type: 'string', enum: [...PUBLIC_DESKTOP_ACTIONS], description: 'Choose exactly one action. Every action has its own Input and Returns contract in the tool description.' },
+        x: { type: 'number', description: 'click/type/drag/scroll/hover/hold/mouse*: pixel in Image 1; move: global screen point. Never use Image 2 display-context pixels.' },
+        y: { type: 'number', description: 'click/type/drag/scroll/hover/hold/mouse*: pixel in Image 1; move: global screen point. Never use Image 2 display-context pixels.' },
         toX: { type: 'number', description: 'drag: destination x pixel in the newest screenshot. Prefer toQuery/toElementToken/toElementIndex.' },
         toY: { type: 'number', description: 'drag: destination y pixel in the newest screenshot. Prefer toQuery/toElementToken/toElementIndex.' },
         toApp: { type: 'string', description: 'drag: destination APPLICATION for a cross-app drop (must already be open via open/focus). toX/toY are then read in THAT window, and omitting them drops on its centre. Both windows must be visible at once — arrange them side by side first.' },
@@ -56,12 +60,12 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         dx: { type: 'number', description: 'scroll: horizontal pixels (positive = right).' },
         dy: { type: 'number', description: 'scroll: vertical pixels (positive = down).' },
         button: { type: 'string', enum: ['left', 'right', 'middle'] },
-        modifier: { type: 'array', items: { type: 'string', enum: ['cmd', 'shift', 'alt', 'ctrl', 'fn'] }, description: 'click: optional held modifier keys, e.g. ["cmd"] for Finder multi-selection.' },
+        modifier: { type: 'array', items: { type: 'string', enum: ['cmd', 'shift', 'alt', 'ctrl', 'fn'] }, description: 'click: optional held modifier keys, e.g. ["cmd"] for multi-selection.' },
         count: { type: 'number', description: 'click: 1 (default), 2 = double, 3 = triple.' },
         text: { type: 'string', description: 'type: literal text, full unicode. Pair with query/elementToken when a visible editable field should be focused atomically before typing.' },
         combo: { type: 'string', description: 'key/press: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
         key: { type: 'string', description: 'Compatibility alias for combo when action is key/press. Prefer combo.' },
-        app: { type: 'string', description: 'Intended application name (e.g. "Notes"). Actions default to the most recently opened app.' },
+        app: { type: 'string', description: 'Exact application name, preferably as returned by apps/open. Actions default to the most recently opened app.' },
         bundleId: { type: 'string', description: 'open: exact macOS bundle id; preferred when known.' },
         pid: { type: 'number', description: 'Target process id returned by open/apps/windows.' },
         windowId: { type: 'number', description: 'Target window id returned by open/windows.' },
@@ -77,12 +81,13 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         layout: { type: 'string', enum: ['left', 'right', 'top', 'bottom', 'top-left', 'top-right', 'bottom-left', 'bottom-right', 'left-third', 'center-third', 'right-third', 'left-two-thirds', 'right-two-thirds', 'restore', 'maximize', 'center', 'fullscreen', 'unfullscreen'], description: 'arrange: where to put the active window. Halves/quadrants/thirds tile within the screen\'s usable area (thirds are for three-app layouts); maximize fills it; restore puts it back where it was before the last arrange; fullscreen is the native macOS fullscreen Space (unfullscreen leaves it). Pass display to move the window to another screen.' },
         bounds: { type: 'object', description: 'arrange: exact rectangle in screen points, e.g. {"x":0,"y":33,"w":735,"h":864}. Use layout instead unless you need a precise size.', properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' } }, required: ['x', 'y', 'w', 'h'] },
         session: { type: 'string', description: 'Optional stable Bimax cursor/session identity.' },
-        newInstance: { type: 'boolean', description: 'open: request an isolated app instance only when the user explicitly asks for a separate copy. Never use for Finder or System Settings.' },
+        newInstance: { type: 'boolean', description: 'open: request an isolated app instance only when the user explicitly asks for a separate copy. The runtime checks the live process state instead of assuming which apps permit duplication.' },
         display: { type: 'number', description: 'screenshot: display index, 1 = main. arrange: move the window to that display and tile it within that screen\'s usable area.' },
         ms: { type: 'number', description: 'wait: 50-5000 ms. hover/hold: how long to hover or hold the button (default 400/800 ms).' },
-        normalized: { type: 'boolean', description: 'Interpret click coordinates in a 0–1000 space scaled to the newest window screenshot.' },
-        frameId: { type: 'string', description: 'The frameId returned by the observation these coordinates were read from. Pass it on every click/drag/scroll/type so the runtime can refuse the action if the screen has moved on instead of clicking whatever now occupies those pixels.' },
+        normalized: { type: 'boolean', description: 'Interpret target-frame x/y in a 0–1000 space scaled to Image 1. Not valid for move or desktop global coordinates.' },
+        frameId: { type: 'string', description: 'Exact frameId that produced Image 1. Required with raw target-frame coordinates so stale pixels are refused.' },
         recordVideo: { type: 'boolean', description: 'record_start: include an MP4 screen recording (default true).' },
+        captureScope: { type: 'string', enum: ['window', 'display'], description: 'record_start: window (default) captures only the owned app window; display captures the whole human-visible display, including overlapping windows, and requires explicit approval.' },
         outputDir: { type: 'string', description: 'record_start: optional output directory; defaults under .bimax/computer/recordings.' },
       },
       required: ['action'],
@@ -101,6 +106,16 @@ Success requires visible or semantic evidence from the newest frame, not the dri
         action: normalizedAction,
         ...(normalizedAction === 'key' && !args.combo && args.key ? { combo: args.key } : {}),
       };
+      const invalid = validateModelComputerCommand(args);
+      if (invalid) {
+        return JSON.stringify({
+          ok: false,
+          action: args.action,
+          summary: `${args.action} refused: invalid action arguments`,
+          error: invalid,
+          expected: renderComputerActionReference().split('\n').find(line => line.startsWith(`${args.action}:`)),
+        });
+      }
       const intendedApp = args.app?.trim() || ([
         'click', 'drag', 'scroll', 'type', 'key', 'set_value', 'copy', 'paste', 'arrange',
         'close', 'quit_app', 'hover', 'hold', 'mouse_down', 'mouse_up',
@@ -116,8 +131,9 @@ Success requires visible or semantic evidence from the newest frame, not the dri
       // Whole-display recording detection BEFORE the approval prompt, so the user approves the
       // TRUE scope. Only a governor-approved prompt mints the single-use runtime token below.
       const wantsVideo = effectiveArgs.action === 'record_start' && effectiveArgs.recordVideo !== false;
-      const scopePreview = wantsVideo ? runtime.recordingScopePreview?.() : undefined;
-      const wholeDisplay = !!scopePreview && !scopePreview.captureSafe;
+      const scopePreview = wantsVideo ? runtime.recordingScopePreview?.(effectiveArgs.captureScope) : undefined;
+      const wholeDisplay = effectiveArgs.captureScope === 'display'
+        || (!!scopePreview && !scopePreview.captureSafe);
       if (GATED_ACTIONS.has(effectiveArgs.action)) {
         // Scope the approval to the app that will RECEIVE the input so the governor can offer
         // (and honor) a session grant for exactly that app — and hard-deny sensitive targets.
@@ -217,7 +233,7 @@ Success requires visible or semantic evidence from the newest frame, not the dri
           source: result.screenshot || 'ComputerTool', summary: result.summary,
         });
       }
-      return JSON.stringify(result, null, 2);
+      return JSON.stringify(computerResultForModel(result));
     },
   }, governor);
 }

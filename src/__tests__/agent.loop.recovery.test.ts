@@ -213,6 +213,98 @@ describe('AgentLoop — recovers from a silent empty turn', () => {
   });
 });
 
+describe('AgentLoop — required operation tool activation', () => {
+  it('retries a silent/refusal turn with the required tool instead of asking for plain text', async () => {
+    const registry = new ToolRegistry();
+    let executed = 0;
+    registry.register({
+      name: 'ComputerTool', description: 'desktop', schema: {},
+      isDestructive: false, isConcurrencySafe: false,
+      execute: async () => {
+        executed++;
+        return JSON.stringify({ ok: false, action: 'open', driver: 'bimax-computer-use', summary: 'permission denied' });
+      },
+    } as any);
+
+    let call = 0;
+    const seenSchemas: string[][] = [];
+    const mockLlm: LLMProvider = {
+      async *chat(messages: Message[], options?: any): AsyncGenerator<ChatEvent> {
+        call++;
+        seenSchemas.push((options?.tools || []).map((tool: any) => tool.name));
+        if (call === 1) {
+          yield { type: 'thinking', text: 'I cannot access personal apps' };
+        } else if (call === 2) {
+          expect(messages.some(message => message.role === 'user'
+            && String(message.content).includes('[OPERATION ACTIVATION GATE]'))).toBe(true);
+          yield { type: 'tool_call', id: 'open', name: 'ComputerTool', args: '{"action":"open","app":"Any App"}' };
+        } else {
+          yield { type: 'token', text: 'The operation is blocked by permission denial.' };
+        }
+        yield { type: 'done' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, registry, null as any);
+    let out = '';
+    for await (const token of loop.execute(
+      [{ role: 'user', content: 'operate the desktop' }],
+      'system',
+      {
+        maxIterations: 4,
+        contextMode: 'smart',
+        requireTool: 'ComputerTool',
+        toolNames: ['ComputerTool'],
+        skipRepoMap: true,
+      },
+    )) out += token;
+
+    expect(executed).toBe(1);
+    expect(out).toBe('The operation is blocked by permission denial.');
+    expect(out).not.toMatch(/cannot access personal apps/i);
+    expect(seenSchemas.every(names => names.length === 1 && names[0] === 'ComputerTool')).toBe(true);
+    expect(loop.messages.some(message => typeof message.content === 'string'
+      && message.content.includes('empty response'))).toBe(false);
+  });
+
+  it('allows a preparatory checklist tool before the required operation tool', async () => {
+    const registry = new ToolRegistry();
+    const executed: string[] = [];
+    for (const name of ['TodoWriteTool', 'ComputerTool']) {
+      registry.register({
+        name, description: name, schema: {}, isDestructive: false, isConcurrencySafe: false,
+        execute: async () => {
+          executed.push(name);
+          return name === 'ComputerTool'
+            ? JSON.stringify({ ok: false, driver: 'bimax-computer-use', summary: 'blocked' })
+            : 'checklist created';
+        },
+      } as any);
+    }
+
+    let call = 0;
+    const mockLlm: LLMProvider = {
+      async *chat(): AsyncGenerator<ChatEvent> {
+        call++;
+        if (call === 1) yield { type: 'tool_call', id: 'todo', name: 'TodoWriteTool', args: '{}' };
+        else if (call === 2) yield { type: 'tool_call', id: 'computer', name: 'ComputerTool', args: '{"action":"observe"}' };
+        else yield { type: 'token', text: 'Blocked by the observed runtime state.' };
+        yield { type: 'done' };
+      },
+    };
+
+    const loop = new AgentLoop(mockLlm, registry, null as any);
+    let out = '';
+    for await (const token of loop.execute(
+      [{ role: 'user', content: 'operate the desktop' }], 'system',
+      { maxIterations: 4, requireTool: 'ComputerTool', toolNames: ['TodoWriteTool', 'ComputerTool'] },
+    )) out += token;
+
+    expect(executed).toEqual(['TodoWriteTool', 'ComputerTool']);
+    expect(out).toBe('Blocked by the observed runtime state.');
+  });
+});
+
 /**
  * Cooperative cancellation: when the front-end interrupts a turn, the loop must stop at the next
  * safe boundary — it must not start the next tool batch and must not begin another iteration.

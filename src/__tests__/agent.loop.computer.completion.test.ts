@@ -162,4 +162,35 @@ describe('computer message commit gate', () => {
     ];
     expect(computerCommitCompletionNudge(messages, 'Done.')).toMatch(/no later successful Return\/Enter/);
   });
+
+  it('does not mistake recipient-search typing and Return for sending the requested text', () => {
+    const messages: Message[] = [
+      { role: 'user', content: 'send hi to my mom on Messages' },
+      { role: 'assistant', tool_calls: [{
+        id: 'search', type: 'function',
+        function: { name: 'ComputerTool', arguments: '{"action":"type","query":"Search","text":"mom"}' },
+      }] },
+      { ...result({ action: 'type', app: 'Messages', screenshot: '/tmp/search.png' }), tool_call_id: 'search' },
+      result({ action: 'key', app: 'Messages', summary: 'pressed return in Messages', screenshot: '/tmp/result.png' }),
+    ];
+    const nudge = computerCommitCompletionNudge(messages, 'Sent hi to Mom.');
+    expect(nudge).toMatch(/exact requested message is "hi"/);
+    expect(nudge).toMatch(/latest successful text-entry action entered "mom"/);
+  });
+
+  it('parses the recipient for an arbitrary app without a product-name allowlist', () => {
+    const messages: Message[] = [
+      { role: 'user', content: 'send hello to Alice on Quasar Chat' },
+      { role: 'assistant', tool_calls: [{
+        id: 'search', type: 'function',
+        function: { name: 'ComputerTool', arguments: '{"action":"type","query":"Search","text":"Alice"}' },
+      }] },
+      { ...result({ action: 'type', app: 'Quasar Chat', screenshot: '/tmp/search.png' }), tool_call_id: 'search' },
+      result({ action: 'key', app: 'Quasar Chat', summary: 'pressed return', screenshot: '/tmp/result.png' }),
+    ];
+    const nudge = computerCommitCompletionNudge(messages, 'Sent.');
+    expect(nudge).toMatch(/exact requested message is "hello"/);
+    expect(nudge).toMatch(/"Alice" conversation/);
+    expect(nudge).not.toContain('Quasar Chat conversation');
+  });
 });

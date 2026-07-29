@@ -105,6 +105,48 @@ describe('confidence-aware computer-use loop', () => {
     expect(result.recoveryDecision).toBe('recover');
   });
 
+  it('does not accept text already visible before an action as proof of a new effect', async () => {
+    const runtime = await openedRuntime();
+    // "Continue" is present in the input frame and remains present after the click. It is not a
+    // transition caused by this action, so it cannot certify a newly sent message or created item.
+    const result = await runtime.run({
+      action: 'click', query: 'Continue', expect: 'Continue', expectMode: 'present',
+      deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(result.ok).toBe(true);
+    expect(result.progressCheck?.outcome).toBe('expectation-missed');
+    expect(result.actionResult?.postcondition).toEqual({
+      query: 'new presence of "Continue"', matched: false,
+    });
+  });
+
+  it('refuses untargeted typing when Search and a composer are both editable', async () => {
+    const runtime = await openedRuntime();
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'get_window_state') return ok({
+        screenshot_file_path: BEFORE, screenshot_width: 700, screenshot_height: 500,
+        elements: [
+          { element_index: 1, role: 'AXSearchField', label: 'Search', editable: true, frame: { x: 20, y: 40, w: 200, h: 30 } },
+          { element_index: 2, role: 'AXTextArea', label: 'Text Message', editable: true, frame: { x: 300, y: 440, w: 300, h: 30 } },
+        ],
+      });
+      if (name === 'list_windows') return ok({ windows: [
+        { window_id: 7, is_on_screen: true, bounds: { x: 10, y: 20, width: 700, height: 500 } },
+      ] });
+      return ok({ ok: true });
+    });
+    await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    callTool.mockClear();
+
+    const refused = await runtime.run({
+      action: 'type', text: 'mom', deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatch(/multiple editable fields.*Search.*Text Message/i);
+    expect(callTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'type_text' }));
+    await runtime.dispose();
+  });
+
   it('starts observation cheaply and deepens only when a named target is beyond the first pass', async () => {
     const runtime = await openedRuntime();
     callTool.mockClear();
@@ -151,6 +193,56 @@ describe('confidence-aware computer-use loop', () => {
     expect(callTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
     await runtime.dispose();
     expect(stop).toHaveBeenCalled();
+  });
+
+  it('ignores frame-less app-level AXWindowCreated noise after observation', async () => {
+    let notify: ((event: any) => void) | undefined;
+    const fallback = {
+      ...native(),
+      watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+        notify = onEvent;
+        return jest.fn();
+      }),
+    } as any;
+    const runtime = new BimaxComputerRuntime(fallback);
+    await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    notify?.({
+      pid: 42, notification: 'AXWindowCreated', timestampMs: Date.now(),
+      element: { pid: 42, role: 'AXApplication', label: 'Demo' },
+    });
+
+    const clicked = await runtime.run({
+      action: 'click', query: 'Continue', frameId: observed.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(clicked.ok).toBe(true);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
+    await runtime.dispose();
+  });
+
+  it('still invalidates when AXWindowCreated identifies a concrete new window', async () => {
+    let notify: ((event: any) => void) | undefined;
+    const fallback = {
+      ...native(),
+      watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+        notify = onEvent;
+        return jest.fn();
+      }),
+    } as any;
+    const runtime = new BimaxComputerRuntime(fallback);
+    await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    notify?.({
+      pid: 42, notification: 'AXWindowCreated', timestampMs: Date.now(),
+      element: { pid: 42, role: 'AXWindow', frame: { x: 30, y: 40, w: 300, h: 200 } },
+    });
+
+    const refused = await runtime.run({
+      action: 'click', query: 'Continue', frameId: observed.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatch(/AXWindowCreated/);
+    await runtime.dispose();
   });
 
   it('uses on-device OCR only after native semantic search misses', async () => {

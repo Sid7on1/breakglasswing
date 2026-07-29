@@ -31,6 +31,11 @@ export interface ComputerActionResult {
   [key: string]: unknown;
 }
 
+export interface ComputerToolStep {
+  args: Record<string, unknown>;
+  result: ComputerActionResult;
+}
+
 /** Verbs that put content INTO a surface. A commit must come after the latest one of these. */
 const CONTENT_ENTRY_ACTIONS = new Set(['type', 'paste', 'set_value']);
 
@@ -57,6 +62,38 @@ export function computerToolResults(messages: Message[] | undefined): ComputerAc
         : [];
     } catch { return []; /* compacted or non-JSON tool result */ }
   });
+}
+
+/** Pair each recorded ComputerTool result with the arguments that caused it. Results alone say that
+ * some text was typed, but not which text; completion gates need the pair to distinguish typing a
+ * recipient into Search from typing the user's requested message into the composer. Missing or
+ * compacted calls are omitted so old transcripts continue to fail open. */
+export function computerToolSteps(messages: Message[] | undefined): ComputerToolStep[] {
+  if (!Array.isArray(messages)) return [];
+  const calls = new Map<string, Record<string, unknown>>();
+  const steps: ComputerToolStep[] = [];
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const call of message.tool_calls || []) {
+        if (call.function.name !== 'ComputerTool') continue;
+        try {
+          const args = JSON.parse(call.function.arguments);
+          if (args && typeof args === 'object' && !Array.isArray(args)) calls.set(call.id, args);
+        } catch { /* malformed calls never executed successfully */ }
+      }
+      continue;
+    }
+    if (message.role !== 'tool' || !message.tool_call_id || typeof message.content !== 'string') continue;
+    const args = calls.get(message.tool_call_id);
+    if (!args) continue;
+    try {
+      const parsed = JSON.parse(message.content);
+      if (String(parsed?.driver || '').startsWith('bimax-computer-use') && parsed?.action) {
+        steps.push({ args, result: parsed as ComputerActionResult });
+      }
+    } catch { /* compacted result: no evidence */ }
+  }
+  return steps;
 }
 
 /**

@@ -8,6 +8,8 @@ describe('model catalog', () => {
     // fast probed alternatives. Models that timed out or 404'd for a free account that day are
     // deliberately NOT recommended (asserted below).
     expect(ids).toEqual(expect.arrayContaining([
+      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', 'nvidia/nemotron-3-nano-30b-a3b',
+      'meta/llama-3.1-8b-instruct',
       'mistralai/mistral-small-4-119b-2603', 'qwen/qwen3.5-397b-a17b', 'z-ai/glm-5.2',
       'deepseek-ai/deepseek-v4-pro', 'openai/gpt-oss-120b', 'minimaxai/minimax-m3', 'stepfun-ai/step-3.7-flash',
       'qwen/qwen3.5-122b-a10b', 'nvidia/nemotron-nano-12b-v2-vl', 'sarvamai/sarvam-m',

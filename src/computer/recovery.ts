@@ -51,8 +51,10 @@ export class RecoveryController {
         this.terminal = 'stop-success';
         return 'stop-success';
       case 'changed':
-        // Real progress — reset the transient counters and keep going.
-        this.retries = 0; this.noProgress = 0;
+        // Real progress starts a new recovery epoch. Keeping `recoveries` from an earlier screen
+        // made unrelated harmless no-ops accumulate across a multi-step workflow until a later,
+        // correct action was refused. Only consecutive trouble should spend the bounded budget.
+        this.retries = 0; this.recoveries = 0; this.noProgress = 0;
         return 'continue';
       case 'failed':
         this.retries++;

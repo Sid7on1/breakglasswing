@@ -21,10 +21,23 @@ import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
 import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations, contentToText, isScreenshotObservationMessage } from './multimodal';
-import { commitProvenAfter, computerToolResults, lastContentEntryIndex } from '../computer/action.evidence';
+import { commitProvenAfter, computerToolResults, computerToolSteps, lastContentEntryIndex } from '../computer/action.evidence';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
+
+export interface AgentLoopOptions {
+  maxIterations?: number;
+  contextMode?: 'smart' | 'full';
+  useLite?: boolean;
+  signal?: AbortSignal;
+  /** Restrict the schemas exposed for a specialized turn (for example, desktop operation). */
+  toolNames?: readonly string[];
+  /** Do not inject code-navigation context into a turn that is not working on code. */
+  skipRepoMap?: boolean;
+  /** The turn may not terminate before this tool has actually been attempted. */
+  requireTool?: string;
+}
 
 /**
  * Coerce a model-emitted tool-call arguments string to VALID JSON before it enters the message
@@ -107,13 +120,36 @@ export function computerCommitCompletionNudge(messages: Message[], proposedAnswe
     && !isScreenshotObservationMessage(message)
     && !/\[COMPUTER (?:COMMIT|COMPLETION) GATE\]/.test(contentToText(message.content as any)));
   const requestText = request ? contentToText(request.content as any) : '';
-  // "text" and "share" are deliberately absent: "read the text in Notes" is not a send request, and
+  // "text" and "share" are deliberately absent: "read the text in a document" is not a send request, and
   // this gate must not hold a finished read-only task hostage.
   const asksToCommit = /\b(?:send|sends|sent|message|messages|reply|replies|respond|post|posts|dm)\b/i.test(requestText);
   if (!asksToCommit || /\b(?:blocked|couldn['’]?t|cannot|can['’]?t|failed|not sent|permission denied)\b/i.test(proposedAnswer)) return '';
 
   const results = computerToolResults(messages).filter(result => result?.ok !== false);
   if (results.length === 0) return '';
+
+  // For the common literal form "send <content> to <recipient>", verify the actual latest type call
+  // entered that content. This closes a subtle hole where typing "Mom" into Search and pressing
+  // Return looked like content-entry + commit even though the message composer was never touched.
+  const literal = requestText.match(/\b(?:send|text|message|dm)\s+(.+?)\s+to\s+(?:my\s+)?(.+)$/i);
+  const requestedContent = literal?.[1]?.trim().replace(/^['"“”]|['"“”]$/g, '');
+  // The trailing delivery surface is grammatical, not a product roster. Keeping a list here made
+  // recipient proof work only for apps known when this code was written. The active app is already
+  // scoped by ComputerTool evidence below, so strip any final "on/via/using <surface>" phrase.
+  const recipient = literal?.[2]?.replace(/\s+(?:on|via|using)\s+.+$/i, '').trim();
+  const isConcreteLiteral = !!requestedContent
+    && !/^(?:it|this|that|the result|the link|a message|something)$/i.test(requestedContent)
+    && !/\b(?:file|photo|image|jpeg|jpg|png|document|attachment|video|audio)\b/i.test(requestedContent);
+  if (isConcreteLiteral) {
+    const steps = computerToolSteps(messages).filter(step => step.result?.ok !== false);
+    const latestTyped = [...steps].reverse().find(step => /^(?:type|set_value)$/i.test(String(step.result.action || '')));
+    const actual = latestTyped
+      ? String(latestTyped.args.text ?? latestTyped.args.value ?? '').trim()
+      : '';
+    if (latestTyped && actual !== requestedContent) {
+      return `[COMPUTER COMMIT GATE] The user's exact requested message is "${requestedContent}", but the latest successful text-entry action entered "${actual}". That may be recipient/search navigation, not composer input. Prove the ${recipient ? `"${recipient}" ` : ''}conversation, type exactly "${requestedContent}" into its message composer, then commit and verify the new transcript entry. Do not claim success from old transcript content.`;
+    }
+  }
 
   // Same definition of "committed" the todo gate uses — one rule, imported, so the two gates cannot
   // drift into disagreeing about what counts as proof.
@@ -225,7 +261,7 @@ export class AgentLoop {
   async *execute(
     initialMessages: Message[],
     systemPrompt: string,
-    options?: { maxIterations?: number; contextMode?: 'smart' | 'full'; useLite?: boolean; signal?: AbortSignal },
+    options?: AgentLoopOptions,
     context?: any
   ): AsyncGenerator<string> {
     this.messages = [...initialMessages];
@@ -286,6 +322,9 @@ export class AgentLoop {
     const MAX_PERSISTENCE_NUDGES = 4;
     let computerCompletionNudges = 0;
     const MAX_COMPUTER_COMPLETION_NUDGES = 2;
+    let requiredToolUsed = false;
+    let requiredToolNudges = 0;
+    const MAX_REQUIRED_TOOL_NUDGES = 2;
     // Black-box recorder: every execute() is an episode — each LLM call in this run is
     // recorded (request hash + response stream) to a bundle under .bimax/episodes/,
     // self-flushing per call. /episodes replays it; BIMAX_RECORDER=0 disables.
@@ -312,13 +351,34 @@ export class AgentLoop {
       // 1. Layered context management (smart mode runs the cheap passes + summarize-on-pressure;
       //    full mode is a no-op here and relies on reactive compaction if the API rejects the size).
       this.messages = await this.contextManager.checkAndCompact(this.messages, contextMode);
+      if (options?.skipRepoMap) {
+        // ContextManager refreshes the code RepoMap on every round. It is valuable for coding, but
+        // actively harmful during a visual-control loop: it adds thousands of irrelevant tokens and
+        // invites weak models to inspect the repository instead of the live screen.
+        this.messages = this.messages.filter(message => !(
+          (message.role === 'system' || message.role === 'user')
+          && typeof message.content === 'string'
+          && message.content.startsWith('[RepoMap]')
+        ));
+      }
       // In smart mode the registry returns only the core working set + ToolSearch + any tools the
       // model has already surfaced via ToolSearchTool; in full mode it returns every schema. This
       // is recomputed each turn so a tool discovered mid-task becomes available immediately.
       const callOutputTokenBudget = nextOutputTokenBudget;
+      const allowedToolNames = options?.toolNames ? new Set(options.toolNames) : null;
+      // A specialized turn's explicit allow-list is authoritative. In smart mode ComputerTool is
+      // normally deferred, so filtering the smart working set by the allow-list accidentally sent
+      // no ComputerTool schema at all. Models then had to infer an invocation from prompt prose;
+      // stronger ones sometimes managed it, while weaker/VLM follow-up turns merely narrated the
+      // next action. Start from the full registry for an explicit allow-list, then narrow it.
+      const schemaPool = allowedToolNames
+        ? this.tools.getAllSchemas()
+        : this.tools.getSchemas({ mode: contextMode });
+      const schemas = schemaPool
+        .filter((schema: any) => !allowedToolNames || allowedToolNames.has(String(schema?.name || '')));
       const generator = recordedLlm.chat(this.messages, {
         system: systemPrompt,
-        tools: this.tools.getSchemas({ mode: contextMode }) as any,
+        tools: schemas as any,
         ...(callOutputTokenBudget !== undefined ? { maxTokens: callOutputTokenBudget } : {}),
         // Tier routing: when the turn was routed to the lite model, every step of this loop
         // (incl. tool-call follow-ups) runs on lite. Heavy turns leave this unset → coding model.
@@ -364,8 +424,14 @@ export class AgentLoop {
         if (signal?.aborted) return;
         if (event.type === 'token') {
           currentContent += event.text;
-          if (event.text) anyTextYielded = true;
-          yield event.text;
+          // On an operation turn, prose before the first required tool call is not an answer: it is
+          // commonly a canned "I cannot access your apps" refusal from a model that ignored the
+          // schema. Hold it back until the activation gate below can decide whether the tool was
+          // actually called, so a bad first sample never leaks a false capability claim to the UI.
+          if (!options?.requireTool || requiredToolUsed) {
+            if (event.text) anyTextYielded = true;
+            yield event.text;
+          }
         } else if (event.type === 'truncated') {
           // The model hit the output-token ceiling mid-answer (finish_reason: length), so this reply
           // is CUT OFF, not finished. Decided after the stream ends: auto-continue the turn (persist
@@ -616,6 +682,43 @@ export class AgentLoop {
         }
       }
 
+      // Specialized operation turns must begin by attempting their real capability. The generic
+      // empty-turn correction says "reply in plain text"; on a desktop task that instruction caused
+      // the exact observed failure: hidden reasoning ended empty, then the retry confidently claimed
+      // it had no app access. Re-ask for the required tool instead, bounded so a model that cannot
+      // call tools still terminates honestly. This is capability-level routing, not an app workflow.
+      if (options?.requireTool && !requiredToolUsed) {
+        const hasRequiredCall = toolCalls.some(tc => tc.name === options.requireTool);
+        if (hasRequiredCall) {
+          // Drop any pre-tool narration/refusal that was deliberately withheld above. The post-tool
+          // round will produce the real, evidence-backed user-facing answer.
+          currentContent = '';
+        } else if (toolCalls.length > 0) {
+          // Let bookkeeping/approval tools run before the operation tool. Multi-step desktop work
+          // may legitimately create a checklist or outcome contract first; the gate applies to
+          // termination, not to the exact ordering of preparatory tool calls.
+          currentContent = '';
+        } else if (requiredToolNudges < MAX_REQUIRED_TOOL_NUDGES) {
+          requiredToolNudges++;
+          currentContent = '';
+          this.messages.push({
+            role: 'user',
+            content:
+              `[OPERATION ACTIVATION GATE] This request requires ${options.requireTool}, which is ` +
+              `available in this session, but your last turn did not call it. Do not answer with ` +
+              `instructions or claim you lack access. Call ${options.requireTool} now with the ` +
+              `smallest safe first action grounded in the user's request.`,
+          });
+          cliEvents.emit('status', `Activating ${options.requireTool} for this operation…`);
+          continue;
+        } else {
+          const note = `\nThe active model did not invoke ${options.requireTool} after ${MAX_REQUIRED_TOOL_NUDGES} attempts, so the operation was not performed. Try a tool-capable model or retry the task.\n`;
+          anyTextYielded = true;
+          yield note;
+          return;
+        }
+      }
+
       if (currentContent) {
         this.messages.push({ role: 'assistant', content: currentContent });
       }
@@ -685,6 +788,7 @@ export class AgentLoop {
         const sequential = executableCalls.filter(tc => !this.tools.getTool(tc.name)?.isConcurrencySafe);
 
         const executeTool = async (tc: { id: string, name: string, args: string, truncated?: boolean }) => {
+          if (options?.requireTool && tc.name === options.requireTool) requiredToolUsed = true;
           const toolSpan = tracer.startSpan(`execute_tool ${tc.name}`, {
             'gen_ai.operation.name': 'execute_tool',
             'gen_ai.tool.name': tc.name,
@@ -895,6 +999,10 @@ export class AgentLoop {
           action?: string;
           width?: number;
           height?: number;
+          frameId?: string;
+          app?: string;
+          pid?: number;
+          windowId?: number;
           displayScreenshot?: string;
           displayWidth?: number;
           displayHeight?: number;
@@ -917,6 +1025,10 @@ export class AgentLoop {
                 action: typeof metadata?.action === 'string' ? metadata.action : undefined,
                 width: Number.isFinite(Number(metadata?.width)) ? Number(metadata.width) : undefined,
                 height: Number.isFinite(Number(metadata?.height)) ? Number(metadata.height) : undefined,
+                frameId: typeof metadata?.frameId === 'string' ? metadata.frameId : undefined,
+                app: typeof metadata?.app === 'string' ? metadata.app : undefined,
+                pid: Number.isFinite(Number(metadata?.pid)) ? Number(metadata.pid) : undefined,
+                windowId: Number.isFinite(Number(metadata?.windowId)) ? Number(metadata.windowId) : undefined,
                 displayScreenshot: typeof metadata?.displayScreenshot === 'string' ? metadata.displayScreenshot : undefined,
                 displayWidth: Number.isFinite(Number(metadata?.displayWidth)) ? Number(metadata.displayWidth) : undefined,
                 displayHeight: Number.isFinite(Number(metadata?.displayHeight)) ? Number(metadata.displayHeight) : undefined,

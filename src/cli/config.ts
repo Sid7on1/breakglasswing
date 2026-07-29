@@ -129,26 +129,14 @@ export interface CliConfig {
 
 const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
-  // Coding/heavy model: qwen3.5-397b (probed live 2026-07-19): tool calls work, VISION input works
-  // (so computer-use screenshots stay with the working model — no perception-model reroute), and it
-  // does NOT burn a hidden reasoning phase on every call the way step-3.7 does (step-3.7 ignores
-  // every server-side thinking off-switch and is a paid partner model on NIM).
-  // Probed live 2026-07-19 for the exact computer-use workload (4x tool call + 2x real-image
-  // vision): mistral-small-4 called the tool 4/4 at 0.5-1s AND read the image correctly 2/2 at
-  // ~0.7s, with NO hidden reasoning phase. It is fast enough for hours of stepping, reliable
-  // enough to not stall, and — crucially — SEES screenshots itself, so images stay on the working
-  // model instead of fragmenting to a separate perception model 3-4 steps in. The prior defaults
-  // failed this workload: step-3.7 overthinks every call, qwen-397b's vision times out, and
-  // qwen-122b returned EMPTY on every real vision question.
-  model: 'mistralai/mistral-small-4-119b-2603',
-  // Lite slot: PLAIN model, never a reasoner. qwen3.5-122b answered plain text in <1s on the
-  // 2026-07-19 probe; the old llama-3.1-70b default took 88s on a cold "hi" (NIM keeps it cold).
-  liteModel: 'qwen/qwen3.5-122b-a10b',
-  // Vision slot: '' because the WORK model above already sees images (pickModel only reroutes when
-  // the active model is text-only). Set one via /model vision if you switch work to a text-only
-  // model — prefer a VLM that can also call tools (mistral-small-4) over a describe-only perception
-  // model (llama-3.2-90b-vision), which stalls the agent loop.
-  visionModel: 'mistralai/mistral-small-4-119b-2603',
+  // Work: fastest prompt-faithful text controller in the grounded 2026-07-29 rerun (exact reply
+  // 0.36s, correct ComputerTool open 0.57s). Screenshot turns route to the explicit Vision slot.
+  model: 'mistralai/mistral-nemotron',
+  // Quick slot: plain model, never a reasoner. Live exact reply 0.61s; valid tool call 0.56s.
+  liteModel: 'meta/llama-3.1-8b-instruct',
+  // Vision: the only served candidate that both typed the exact message for a proven contact and
+  // refused to act blindly when the selected phone-number conversation was not the recipient.
+  visionModel: 'nvidia/nemotron-nano-12b-v2-vl',
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   subagentModel: '', // '' = sub-agents use the main model
 

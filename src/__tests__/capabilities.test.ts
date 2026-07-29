@@ -58,6 +58,13 @@ describe('capabilitiesFor — model capability resolution', () => {
     expect(capabilitiesFor('nvidia', 'meta/llama-3.1-70b-instruct').parallelToolCalls).toBe(false);
   });
 
+  it('treats the verified Quick Llama 3.1 8B as plain text-only content', () => {
+    const caps = capabilitiesFor('nvidia', 'meta/llama-3.1-8b-instruct');
+    expect(caps.plainContent).toBe(true);
+    expect(caps.visionInput).toBe(false);
+    expect(caps.parallelToolCalls).toBe(false);
+  });
+
   it('routes NVIDIA GUI/vision models with vision and their real context windows', () => {
     const omni = capabilitiesFor('nvidia', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning');
     expect(omni.visionInput).toBe(true);

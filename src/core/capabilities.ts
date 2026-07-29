@@ -328,6 +328,18 @@ const RULES: CapabilityRule[] = [
       contextWindow: 128_000,
     },
   },
+  // --- Llama 3.1 8B Instruct (NIM): verified direct-content quick model. Keep this specific rule
+  //     before the generic Llama family so the streaming filter never waits for reasoning tags the
+  //     model does not emit. Text-only: screenshot turns reroute to the configured Vision slot. ---
+  {
+    match: ['llama-3.1-8b-instruct'],
+    caps: {
+      plainContent: true,
+      parallelToolCalls: false,
+      visionInput: false,
+      contextWindow: 128_000,
+    },
+  },
   // --- Llama 3.x (NVIDIA NIM and others): large-ish window, but NIM rejects multi-tool turns. ---
   {
     match: ['llama-3', 'llama3'],

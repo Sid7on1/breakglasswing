@@ -1,7 +1,7 @@
 import { Message } from '../core/llm.provider';
 import {
   actionChangedTheScreen, appMentionedIn, appsInEvidence, clipboardWriteProven,
-  commitProvenAfter, computerToolResults, interactionProven, lastContentEntryIndex, scopeToApp,
+  commitProvenAfter, computerToolResults, computerToolSteps, interactionProven, lastContentEntryIndex, scopeToApp,
 } from '../computer/action.evidence';
 import { computerCommitCompletionNudge } from '../core/agent.loop';
 import { computerTodoCompletionError } from '../tools/implementations/todo.tool';
@@ -23,6 +23,22 @@ describe('computerToolResults', () => {
     expect(computerToolResults(messages).map(r => r.action)).toEqual(['open', 'type']);
     // Fail-open on a wiped transcript: an absent history must never strand a completed task.
     expect(computerToolResults(undefined)).toEqual([]);
+  });
+});
+
+describe('computerToolSteps', () => {
+  it('pairs executed ComputerTool arguments with their result', () => {
+    const messages: Message[] = [
+      { role: 'assistant', tool_calls: [{
+        id: 'type-1', type: 'function',
+        function: { name: 'ComputerTool', arguments: '{"action":"type","query":"Search","text":"Mom"}' },
+      }] },
+      { ...result({ action: 'type', app: 'Messages' }), tool_call_id: 'type-1' },
+    ];
+    expect(computerToolSteps(messages)).toEqual([expect.objectContaining({
+      args: expect.objectContaining({ action: 'type', text: 'Mom' }),
+      result: expect.objectContaining({ action: 'type', app: 'Messages' }),
+    })]);
   });
 });
 

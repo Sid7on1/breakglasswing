@@ -30,6 +30,20 @@ import { getHarnessTuner } from '../../mind/harness.tuner';
 import { mentionsInstalledApp } from '../../computer/installed.apps';
 import { computerUsePlaybookFor } from './computer.playbook';
 
+type PersonaPromptOptions = {
+  planMode?: boolean;
+  memory?: string;
+  exemplars?: string;
+  contextMode?: 'smart' | 'full';
+  computerUse?: boolean;
+  toolNames?: readonly string[];
+};
+
+// A desktop loop should see the controls needed to operate, track long work, and ask for a real
+// user decision. Coding/search/MCP schemas remain available on ordinary turns; excluding them here
+// prevents the model from wandering into the repository while it should be reading a fresh frame.
+const COMPUTER_TURN_TOOLS = ['ComputerTool', 'TodoWriteTool', 'OutcomeTool', 'AskUserTool'] as const;
+
 export interface PersonaConfig {
   name: string;
   roleDescription: string;
@@ -52,18 +66,18 @@ export function explicitlyRequiresComputerUse(prompt: string): boolean {
   // as ordinary Q&A made the model invent a missing-access/approval limitation instead of using the
   // Computer tool that was already available. But merely MENTIONING an app must not route: questions
   // about how software behaves and engineering work on files/tests (this codebase itself contains
-  // Finder/Safari-related sources) would otherwise have their real conversation evidence isolated.
+  // application-related sources) would otherwise have their real conversation evidence isolated.
   if (ENGINEERING_CONTEXT.test(prompt) || INFORMATIONAL_QUESTION.test(prompt)) return false;
   if (!GUI_OPERATION_VERB.test(prompt)) return false;
   // The machine itself, named directly. These are OS surfaces, not applications, so no amount of
   // app discovery would find them.
-  if (/\b(?:my\s+(?:mac|computer|laptop|machine|screen|desktop)|system settings|menu ?bar|the dock)\b/i.test(prompt)) return true;
+  if (/\b(?:my\s+(?:mac|computer|laptop|machine|screen|desktop)|menu ?bar|the dock)\b/i.test(prompt)) return true;
   // Users should not need to name an app for ordinary visible UI work: "make the window bigger",
   // "check notifications", and "open the file picker" already identify a live GUI surface. This
   // stays conservative by requiring BOTH an operation verb and a concrete UI/OS object.
   if (GUI_SURFACE_OBJECT.test(prompt)) return true;
   // Any application actually installed here, named in a slot that means "operate it" — which is
-  // what replaced the old hardcoded finder|safari list. See installed.apps.ts: the previous list
+  // what replaced the old hardcoded application list. See installed.apps.ts: the previous list
   // was a guess about which apps the user owns, and it guessed wrong for every app not on it.
   return mentionsInstalledApp(prompt);
 }
@@ -165,25 +179,26 @@ export abstract class AgentPersona {
    * placement rule as the RepoMap — see context.manager.ts). getSystemPrompt() still returns
    * everything joined for callers that use a single string (headless entry, /context sizing).
    */
-  public getSystemPrompt(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): string {
+  public getSystemPrompt(opts?: PersonaPromptOptions): string {
     const { staticPrefix, dynamicSuffix, turnContext } = this.getSystemPromptParts(opts);
     return [staticPrefix, dynamicSuffix, turnContext].filter(Boolean).join('\n\n');
   }
 
   /** The prompt's three cache segments: static (persona), session (env/tools), per-turn (volatile). */
-  public getSystemPromptParts(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): { staticPrefix: string; dynamicSuffix: string; turnContext: string } {
+  public getSystemPromptParts(opts?: PersonaPromptOptions): { staticPrefix: string; dynamicSuffix: string; turnContext: string } {
     return this.splitPrompt(this.buildSections(opts));
   }
 
   /** Marker prefix for the per-turn context message injected into the message stream. */
   public static readonly TURN_CONTEXT_MARKER = '[TurnContext]';
 
-  protected buildSections(opts?: { planMode?: boolean; memory?: string; exemplars?: string; contextMode?: 'smart' | 'full' }): Record<string, string> {
+  protected buildSections(opts?: PersonaPromptOptions): Record<string, string> {
     const cwd = this.cwd;
     const homedir = os.homedir();
 
     const insideCodebase = isCodebase(cwd);
     const contextMode = opts?.contextMode ?? 'smart';
+    const allowedToolNames = opts?.toolNames ? new Set(opts.toolNames) : null;
 
     // Tool schemas are delivered natively via the function-calling API. The prompt only needs a
     // short "when to reach for which tool" map. In smart mode we list ONLY the tools whose schemas
@@ -192,9 +207,15 @@ export abstract class AgentPersona {
     const line = (t: BuiltTool) => `- ${t.name}: ${(t.description || '').split('\n')[0]}`;
     // Only list tools whose schemas are actually on the wire this turn (isSent is the registry's single
     // source of truth) — so index-gated graph tools don't get advertised before the repo is indexed.
-    const sentTools = this.tools.filter(t => this.toolRegistry.isSent(t.name, contextMode));
+    // An explicit specialized-turn allow-list overrides smart-mode deferral. The matching schemas
+    // are forced onto the wire by AgentLoop, so the textual map must list that same exact set.
+    const sentTools = this.tools.filter(t => allowedToolNames
+      ? allowedToolNames.has(t.name)
+      : this.toolRegistry.isSent(t.name, contextMode));
     const deferredTools = contextMode === 'smart'
-      ? this.tools.filter(t => this.toolRegistry.isDeferred(t.name) && !this.toolRegistry.isDiscovered(t.name))
+      ? this.tools.filter(t => !allowedToolNames
+        && this.toolRegistry.isDeferred(t.name)
+        && !this.toolRegistry.isDiscovered(t.name))
       : [];
     const toolList = sentTools.map(line).join('\n');
 
@@ -262,8 +283,7 @@ Rules:
 (Composer/messaging specifics deliberately live in the playbook's MESSAGE COMPOSERS section, which
 ships only on turns that are actually about messaging. Carrying them here — in the always-on,
 cache-stable system prompt — put chat vocabulary in front of the model on EVERY desktop turn, and a
-Calculator task was refused because of it: "the Calculator app does not contain any message
-composers ... therefore I cannot perform any message typing". The anti-adjacent-click rule those
+non-messaging task was refused because the application did not expose a message composer. The anti-adjacent-click rule those
 lines also carried is preserved in the playbook's universal TEXT ENTRY section.)
 - A request to inspect or operate the user's own computer authorizes the requested routine read-only interaction. Use ComputerTool instead of claiming no access; the Governor separately asks for consequential actions.
 - For multi-phase work, create a checklist before the first UI action and complete an item only when a post-action frame proves it.
@@ -393,6 +413,41 @@ lines also carried is preserved in the playbook's universal TEXT ENTRY section.)
       sections.plan = `### PLAN MODE (ACTIVE — CRITICAL)\nYou are in read-only PLAN MODE. The Governor will reject every mutating action: writing or deleting files, and any non-read shell command. Do NOT attempt them — they will fail.\n- Use only read/search tools (read files, grep/glob, query the graph, fetch URLs, ask the user) to investigate.\n- When you understand the task, STOP and present a concrete, step-by-step implementation plan: the files you would change, what each change does, and any risks or open questions. Use a numbered list.\n- SAVE the plan: call PlanTool(action:"write", ...) — it is allowed in plan mode and persists to .bimax/plans/<slug>.md (git-tracked), so the plan survives the session and you can check off steps with PlanTool(action:"update_step") while executing. Tell the user the slug it saved under.\n- Do not claim you made any code changes. No source is written in plan mode (only the plan file itself).\n- End by telling the user they can approve and run \`/plan off\` to let you execute the plan.`;
     }
 
+    if (opts?.computerUse) {
+      // A specialized visual-control suffix keeps the stable identity/safety contract while
+      // removing codebase navigation, project instructions, skills, and MCP advertisements that
+      // cannot help choose the next action from a screenshot. This is surface-agnostic: the same
+      // compact context drives every application and every visual workflow.
+      sections.triage = `### ACTIVE DESKTOP OPERATION
+The latest user message is an instruction to operate the live computer. Start with ComputerTool and keep using fresh post-action evidence until the requested end state is proven or the runtime reports a concrete blocker. Never replace execution with manual instructions or a claim that personal apps are inaccessible.`;
+      sections.output = `### OUTPUT CONTRACT
+- Do not narrate intended actions; call the available tool.
+- Report completion only from tool evidence produced during this turn.
+- If blocked, name the concrete runtime or visible-UI blocker. Never invent a missing-access limitation.`;
+      sections.honesty = `### HONESTY
+Never claim an operation succeeded unless the current turn's ComputerTool results prove the requested end state.`;
+      sections.tools = `### AVAILABLE OPERATION TOOLS
+${toolList}
+
+Call only the tools exposed for this turn. Use ComputerTool for every live-screen observation and action. TodoWriteTool and OutcomeTool may track long work; AskUserTool is only for a decision that genuinely requires the user.`;
+      sections.engineering = '';
+      sections.pathRules = '';
+      sections.projectGuide = '';
+      sections.skills = '';
+      sections.mcp = '';
+      sections.loadOnDemand = '';
+      sections.goals = '';
+      sections.workspace = '';
+      sections.agentMode = '';
+      sections.memory = '';
+      sections.exemplars = '';
+      sections.selfKnowledge = '';
+      sections.habits = '';
+      sections.drives = '';
+      sections.calibration = '';
+      sections.harnessPatches = '';
+    }
+
     return sections;
   }
 
@@ -509,8 +564,8 @@ lines also carried is preserved in the playbook's universal TEXT ENTRY section.)
       // ~12,000 tokens of tool schemas sent per turn. None of it is needed to choose the tool, only
       // to use it well, so it arrives here instead: on the turns that actually touch the desktop.
       // Only the sections this request implicates. Shipping every scenario at once made the model
-      // map the task onto whichever scenario it recognised: a Calculator turn refused in messaging
-      // vocabulary because MESSAGE COMPOSERS was present and Calculator has no composer.
+      // map the task onto whichever scenario it recognised: a non-messaging turn was once refused
+      // in messaging vocabulary merely because MESSAGE COMPOSERS was always present.
       modelPrompt += `\n\n${computerUsePlaybookFor(prompt)}`;
       modelPrompt += '\n\n[Fresh computer-use constraint: Complete this turn only from screenshots captured after this request. Prior shell, browser, assistant, memory, and tool values are not evidence. Navigate until the requested screen and value are visibly present; otherwise report that visual verification failed.]';
       if (requiresComputerChecklist(prompt)) {
@@ -578,11 +633,28 @@ lines also carried is preserved in the playbook's universal TEXT ENTRY section.)
     // Cache split (see splitPrompt): the system prompt carries only the static persona + session
     // suffix, so its bytes are stable turn-over-turn and the provider's prompt-prefix cache holds.
     // The volatile per-turn blocks ride a [TurnContext] system message near the tail instead.
-    const parts = this.getSystemPromptParts({ planMode: options?.planMode, memory, exemplars, contextMode });
+    const parts = this.getSystemPromptParts({
+      planMode: options?.planMode,
+      memory,
+      exemplars,
+      contextMode,
+      computerUse: computerUseTurn,
+      toolNames: computerUseTurn ? COMPUTER_TURN_TOOLS : undefined,
+    });
     const systemPrompt = [parts.staticPrefix, parts.dynamicSuffix].filter(Boolean).join('\n\n');
     AgentPersona.injectTurnContext(this.messages, parts.turnContext);
 
-    const passOpts = { maxIterations, contextMode, useLite: options?.useLite, signal: options?.signal };
+    const passOpts = {
+      maxIterations,
+      contextMode,
+      useLite: options?.useLite,
+      signal: options?.signal,
+      ...(computerUseTurn ? {
+        toolNames: COMPUTER_TURN_TOOLS,
+        skipRepoMap: true,
+        requireTool: 'ComputerTool',
+      } : {}),
+    };
     executionLog += await this.runPass(loop, systemPrompt, passOpts, onToken);
 
     // Self-critic loop: review the work and, if defects are found, take one more pass.

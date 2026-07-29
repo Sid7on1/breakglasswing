@@ -9,6 +9,10 @@ import { createBrowserTool } from '../tools/implementations/browser.tool';
 import { BrowserRuntimePort } from '../browser/browser.runtime';
 import { getTaintTracker } from '../mind/taint';
 import { IGovernor } from '../core/interfaces';
+import { __resetConfigForTests, loadConfig } from '../cli/config';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 jest.mock('../cli/prompter', () => ({
   GlobalPrompter: {
@@ -228,6 +232,21 @@ describe('computer-use safety ladder', () => {
 
   describe('/computer status hub', () => {
     const command = () => (globalCommandRegistry as any).commands.get('/computer');
+    let configDir: string;
+
+    beforeEach(() => {
+      configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-computer-command-'));
+      process.env.BIMAX_BREAKGLASS_DIR = configDir;
+      delete process.env.BIMAX_COMPUTER_VISIBLE;
+      __resetConfigForTests();
+    });
+
+    afterEach(() => {
+      delete process.env.BIMAX_BREAKGLASS_DIR;
+      delete process.env.BIMAX_COMPUTER_VISIBLE;
+      __resetConfigForTests();
+      fs.rmSync(configDir, { recursive: true, force: true });
+    });
 
     function ctx(governor?: any) {
       return {
@@ -270,6 +289,33 @@ describe('computer-use safety ladder', () => {
       expect(res.type).toBe('none');
       expect(c.addSystemMessage).toHaveBeenCalledWith('success', expect.stringContaining('Revoked 1'));
       expect(governor.computerGrants()).toEqual([]);
+    });
+
+    it('/computer visible is idempotent and never toggles the physical cursor off', async () => {
+      const c = ctx();
+      await command().execute(['visible'], c);
+      await command().execute(['visible'], c);
+
+      expect((await loadConfig()).computerVisible).toBe(true);
+      expect(c.addSystemMessage).toHaveBeenLastCalledWith(
+        'success', expect.stringContaining('physical mouse/keyboard'),
+      );
+    });
+
+    it('uses an explicit background command and exposes the inverse action in the status row', async () => {
+      await command().execute(['background'], ctx());
+      expect((await loadConfig()).computerVisible).toBe(false);
+
+      const res = await command().execute([], ctx());
+      const input = res.options.find((o: any) => o.label.includes('Input:'));
+      expect(input.label).toContain('background-first');
+      expect(input.value).toBe('/computer visible');
+
+      await command().execute(['visible'], ctx());
+      const visibleRes = await command().execute([], ctx());
+      const visibleInput = visibleRes.options.find((o: any) => o.label.includes('Input:'));
+      expect(visibleInput.label).toContain('visible native cursor');
+      expect(visibleInput.value).toBe('/computer background');
     });
   });
 });

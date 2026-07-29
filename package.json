@@ -1,6 +1,6 @@
 {
   "name": "bimax",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "BiMax \u2014 Autonomous AI agent for your terminal",
   "bin": {
     "bimax": "bin/bimax.js"
@@ -36,6 +36,7 @@
     "benchmark:computer": "tsx scripts/benchmark-computer-targeting.ts",
     "benchmark:computer:color": "tsx scripts/benchmark-computer-color.ts",
     "benchmark:computer:receipts": "tsx scripts/benchmark-computer-receipts.ts",
+    "benchmark:models": "tsx scripts/benchmark-model-routing.ts",
     "test:acp": "node scripts/smoke-acp.mjs",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write 'src/**/*.ts'",

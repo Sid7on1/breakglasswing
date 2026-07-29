@@ -62,9 +62,11 @@ private final class PreviewView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer = CALayer()
-        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
+        // Preserve the complete image. The panel itself adopts the source aspect ratio below, so
+        // aspect-fit has neither letterboxing nor cropping.
         displayLayer.videoGravity = .resizeAspect
-        displayLayer.backgroundColor = NSColor.black.cgColor
+        displayLayer.backgroundColor = NSColor.clear.cgColor
         layer?.addSublayer(displayLayer)
         layer?.cornerRadius = 12
         layer?.masksToBounds = true
@@ -335,6 +337,10 @@ private final class PreviewApplication: NSObject, NSApplicationDelegate, NSWindo
             throw PreviewError("preview output was not initialized")
         }
 
+        // SCShareableContent resumes on a cooperative queue. AppKit window mutations must return
+        // to the main actor explicitly or NSWindow's transaction coordinator traps.
+        await MainActor.run { self.fitPanel(to: target.frame.size) }
+
         // PiP is the operator's clean app preview, not the model's desktop safety frame. Keep the
         // exact target window visible even while another application remains frontmost.
         let filter = SCContentFilter(desktopIndependentWindow: target)
@@ -360,6 +366,43 @@ private final class PreviewApplication: NSObject, NSApplicationDelegate, NSWindo
         try await stream.startCapture()
         print("{\"event\":\"stream_started\",\"pid\":\(arguments.pid),\"window_id\":\(arguments.windowID)}")
         fflush(stdout)
+    }
+
+    /**
+     * Match the floating panel to the captured window instead of forcing every source into the
+     * original 3:2 rectangle. This removes side/top letterboxing while keeping `.resizeAspect`, so
+     * the operator sees the complete window and no pixels are cropped. `contentAspectRatio` keeps
+     * the match when the user resizes the PiP manually.
+     *
+     * PiP is presentation-only: ComputerTool coordinates remain bound to its separate exact action
+     * screenshot and FrameRegistry, so changing this panel geometry cannot change click delivery.
+     */
+    @MainActor private func fitPanel(to source: CGSize) {
+        guard let panel, source.width > 0, source.height > 0 else { return }
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let maxSize = CGSize(
+            width: min(480, visible.width * 0.45),
+            height: min(480, visible.height * 0.55)
+        )
+        let scale = min(maxSize.width / source.width, maxSize.height / source.height)
+        let preferred = CGSize(
+            width: max(1, floor(source.width * scale)),
+            height: max(1, floor(source.height * scale))
+        )
+        // Keep the minimum on the same ratio too; an arbitrary 240×160 minimum would reintroduce
+        // bars for a narrow or wide source when the panel is resized down.
+        let minimumScale = min(1, 200 / max(source.width, source.height))
+        panel.contentMinSize = CGSize(
+            width: max(1, floor(source.width * minimumScale)),
+            height: max(1, floor(source.height * minimumScale))
+        )
+        panel.contentAspectRatio = source
+        panel.setContentSize(preferred)
+        panel.setFrameOrigin(NSPoint(
+            x: visible.maxX - panel.frame.width - 18,
+            y: visible.maxY - panel.frame.height - 18
+        ))
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

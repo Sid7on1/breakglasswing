@@ -12,8 +12,18 @@ describe('RecoveryController — bounded, explicit terminal states', () => {
   it('a changed outcome continues and resets transient counters', () => {
     const r = new RecoveryController();
     expect(r.record('failed')).toBe('retry');
+    expect(r.record('no-change')).toBe('recover');
     expect(r.record('changed')).toBe('continue');
-    expect(r.counters.retries).toBe(0);
+    expect(r.counters).toEqual({ retries: 0, recoveries: 0, noProgress: 0 });
+  });
+
+  it('does not accumulate recovery attempts across screens that made real progress', () => {
+    const r = new RecoveryController({ maxRetries: 2, maxRecoveries: 2, maxNoProgress: 4 });
+    for (let phase = 0; phase < 5; phase++) {
+      expect(r.record('no-change')).toBe('recover');
+      expect(r.record('changed')).toBe('continue');
+    }
+    expect(r.done).toBe(false);
   });
 
   it('retries are bounded, then it escalates, then it gives up', () => {

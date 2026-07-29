@@ -35,6 +35,15 @@ describe('continuous native PiP contract', () => {
     expect(swift).toContain('isReadyForMoreMediaData');
   });
 
+  it('removes letterboxing without cropping or changing the action coordinate surface', () => {
+    const swift = fs.readFileSync(path.join(root, 'native', 'BimaxLivePip.swift'), 'utf8');
+    expect(swift).toContain('displayLayer.videoGravity = .resizeAspect');
+    expect(swift).not.toContain('displayLayer.videoGravity = .resizeAspectFill');
+    expect(swift).toContain('panel.contentAspectRatio = source');
+    expect(swift).toContain('await MainActor.run { self.fitPanel(to: target.frame.size) }');
+    expect(swift).toContain('displayLayer.backgroundColor = NSColor.clear.cgColor');
+  });
+
   it('keeps only the newest preview frame and surfaces measured latency', () => {
     // A backlog of obsolete preview frames is strictly worse than dropping them: `main.async` is
     // unbounded, so a busy main thread would push the preview progressively further behind live.

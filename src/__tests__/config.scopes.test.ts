@@ -123,7 +123,7 @@ describe('config scopes — file integrity', () => {
     await fs.writeFile(cfgPath, '{"model": "user/persisted-mo…TRUNCATED');
     const { loadConfig } = freshConfigModule();
     const cfg = await loadConfig();
-    expect(cfg.model).toBe('mistralai/mistral-small-4-119b-2603'); // default — corrupt scope is empty
+    expect(cfg.model).toBe('mistralai/mistral-nemotron'); // default — corrupt scope is empty
     const entries = await fs.readdir(dir);
     expect(entries.some(f => f.startsWith('config.json.corrupt-'))).toBe(true); // evidence kept
   });

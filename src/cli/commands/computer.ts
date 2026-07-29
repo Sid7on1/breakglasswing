@@ -56,9 +56,11 @@ globalCommandRegistry.register({
       return { type: 'none' };
     }
 
-    if (sub === 'visible') {
-      const cfg = await loadConfig();
-      const next = !cfg.computerVisible;
+    if (sub === 'visible' || sub === 'background') {
+      // These are explicit setters, not a toggle. A command named "visible" must never silently
+      // turn the physical cursor back off when it is run twice (or selected from stale UI state).
+      // Keep the alternative mode available under its own equally explicit subcommand.
+      const next = sub === 'visible';
       await saveConfig({ computerVisible: next });
       await globalDesktopRuntime.dispose?.();
       context.addSystemMessage('success', next
@@ -212,7 +214,7 @@ globalCommandRegistry.register({
     });
     options.push({
       label: cfg.computerVisible ? '✓ Input: visible native cursor' : '✓ Input: background-first',
-      value: '/computer visible',
+      value: cfg.computerVisible ? '/computer background' : '/computer visible',
       desc: cfg.computerVisible
         ? 'target comes forward; Enter switches to background semantic delivery'
         : 'AX handles first, target remains behind your work; Enter switches to visible cursor',

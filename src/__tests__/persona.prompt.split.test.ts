@@ -21,13 +21,18 @@ const fakeMemoryTool: BuiltTool = {
   schema: { type: 'object', properties: {} }, isDestructive: false, isConcurrencySafe: true,
   execute: async () => 'ok',
 };
+const fakeComputerTool: BuiltTool = {
+  name: 'ComputerTool', description: 'Observe and operate the desktop.',
+  schema: { type: 'object', properties: {} }, isDestructive: false, isConcurrencySafe: false,
+  execute: async () => 'ok',
+};
 
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
 const llm = {} as unknown as LlmAdapter;
 
 function persona(): BiMaxPersona {
   const r = new ToolRegistry();
-  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor), fakeMemoryTool].forEach(t => r.register(t));
+  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor), fakeMemoryTool, fakeComputerTool].forEach(t => r.register(t));
   return new BiMaxPersona(r, llm);
 }
 
@@ -103,6 +108,20 @@ describe('Persona system prompt — static/session/turn cache split', () => {
     const parts = p.getSystemPromptParts({ memory: 'm' });
     const full = p.getSystemPrompt({ memory: 'm' });
     expect(full).toBe([parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].filter(Boolean).join('\n\n'));
+  });
+
+  it('builds a compact, non-coding prompt for a computer-operation turn', () => {
+    const p = persona();
+    const parts = p.getSystemPromptParts({
+      computerUse: true,
+      toolNames: ['ComputerTool', 'TodoWriteTool', 'OutcomeTool', 'AskUserTool'],
+    });
+    const full = [parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].join('\n');
+    expect(full).toContain('ACTIVE DESKTOP OPERATION');
+    expect(full).toContain('- ComputerTool:');
+    expect(full).not.toContain('PROJECT GUIDE');
+    expect(full).not.toContain('GraphQueryTool SEARCH_NODES');
+    expect(full).not.toContain('LOAD-ON-DEMAND TOOLS');
   });
 });
 

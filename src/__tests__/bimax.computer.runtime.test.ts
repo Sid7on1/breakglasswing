@@ -163,6 +163,84 @@ describe('BimaxComputerRuntime', () => {
     expect((openClient as jest.Mock).mock.calls[0][0].args).not.toContain('--experimental-pip');
   });
 
+  it('makes the window actually captured after an action authoritative for the next input', async () => {
+    const nativeRun = jest.fn(async (cmd: any) => ({
+      ok: true, action: cmd.action, driver: 'native-helper', summary: `${cmd.action} delivered`,
+    }));
+    const runtime = new BimaxComputerRuntime({
+      run: nativeRun,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Calculator',
+    } as any);
+    await runtime.run({ action: 'open', app: 'Calculator', deliveryMode: 'background' });
+
+    // Reproduce the live failure: window discovery/result assembly chooses a newly focused
+    // same-process surface (8), while FrameRegistry proves the returned pixels still belong to the
+    // stable parent (7). Ownership must follow the immutable captured frame, not a provisional id.
+    (runtime as any).refreshTargetWindow = jest.fn(async (target: any) => ({ ...target, windowId: 8 }));
+    (runtime as any).observeTarget = jest.fn(async () => ({
+      ok: true,
+      action: 'observe',
+      driver: 'test',
+      app: 'Calculator',
+      pid: 42,
+      windowId: 8,
+      screenshot: '/tmp/bimax-window.png',
+      frameHash: 'captured-parent',
+      width: 500,
+      height: 700,
+      elements: [],
+      degraded: false,
+      summary: 'result assembled with provisional child id',
+    }));
+
+    const observed = await runtime.run({ action: 'observe', deliveryMode: 'background' });
+    expect(observed.windowId).toBe(7);
+    expect((runtime as any).targets.current()).toEqual(expect.objectContaining({ pid: 42, windowId: 7 }));
+
+    const keyed = await runtime.run({ action: 'key', combo: 'x', deliveryMode: 'background' });
+
+    expect(keyed.ok).toBe(true);
+    expect(keyed.windowId).toBe(7);
+    expect((runtime as any).targets.current()).toEqual(expect.objectContaining({ pid: 42, windowId: 7 }));
+  });
+
+  it('opens an exact discovered window instead of hardcoding or taking the first app window', async () => {
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({
+        name: 'Quasar Workspace', pid: 42,
+        windows: [{ window_id: 7 }, { window_id: 9 }],
+      });
+      if (name === 'list_windows') return result({ windows: [
+        { window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } },
+        { window_id: 9, is_on_screen: true, bounds: { x: 520, y: 0, width: 500, height: 700 } },
+      ] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/quasar-window.png', screenshot_width: 500, screenshot_height: 700,
+        elements: [{ role: 'AXWindow', label: 'Fixture', frame: { x: 520, y: 0, w: 500, h: 700 } }],
+      });
+      if (name === 'bring_to_front') return result({ activated: true, window_id: args?.window_id });
+      return result({ ok: true });
+    });
+    const native: any = {
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Quasar Workspace',
+    };
+    const runtime = new BimaxComputerRuntime(native);
+
+    const opened = await runtime.run({
+      action: 'open', app: 'Quasar Workspace', windowId: 9, deliveryMode: 'background',
+    });
+
+    expect(opened.ok).toBe(true);
+    expect(opened.windowId).toBe(9);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'get_window_state', arguments: expect.objectContaining({ pid: 42, window_id: 9 }),
+    }));
+  });
+
   it('honors background-first config without fronting the app and prefers semantic handles', async () => {
     process.env.BIMAX_COMPUTER_VISIBLE = '0';
     __resetConfigForTests();
@@ -413,6 +491,18 @@ describe('BimaxComputerRuntime', () => {
       captureSafe: true,
       surface: expect.stringMatching(/window 7/i),
     }));
+
+    // The caller can deliberately request the same composited display a human sees. This must not
+    // silently collapse back to the owned window merely because one exists.
+    await runtime.run({ action: 'record_stop' }, { cwd: '/tmp' });
+    const displayToken = runtime.authorizeFullDisplayRecording();
+    const display = await runtime.run({
+      action: 'record_start', captureScope: 'display', fullDisplayToken: displayToken,
+    }, { cwd: '/tmp' });
+    expect(display.recording).toEqual(expect.objectContaining({ scope: 'whole display', captureSafe: false }));
+    const displayStart = callTool.mock.calls.filter(([a]) => a.name === 'start_recording').pop()?.[0];
+    expect(displayStart.arguments).not.toHaveProperty('pid');
+    expect(displayStart.arguments).not.toHaveProperty('window_id');
   });
 
   it('ends the native session at a turn boundary so PiP cannot linger', async () => {
@@ -855,6 +945,26 @@ describe('BimaxComputerRuntime', () => {
     expect(clicked.ok).toBe(true);
     expect(callTool.mock.calls.filter(([a]) => a.name === 'click').pop()?.[0].arguments)
       .toEqual(expect.objectContaining({ pid: 84, window_id: 9 }));
+  });
+
+  it('refuses input when an enabled PiP cannot acquire the exact owned window', async () => {
+    process.env.BIMAX_COMPUTER_PIP = '1';
+    callTool.mockImplementation(alphaBeta());
+    const pip: LivePipPort = {
+      sync: jest.fn(async () => undefined), // broken preview: accepts sync but never owns a target
+      stop: jest.fn(async () => undefined),
+      status: () => ({
+        enabled: true, running: false, continuous: true, captureSafe: false, target: undefined,
+      }),
+    };
+    const runtime = new BimaxComputerRuntime(simulatedNative(), pip);
+    const opened = await runtime.run({ action: 'open', app: 'alpha' }, { cwd: '/tmp' });
+    const clicked = await runtime.run({
+      action: 'click', query: 'Alpha Action', frameId: opened.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(clicked.ok).toBe(false);
+    expect(clicked.error).toMatch(/preview has no target/i);
+    expect(callTool.mock.calls.filter(([a]) => a.name === 'click')).toHaveLength(0);
   });
 
   it('switches back to an already-open app with focus, without re-launching it', async () => {
@@ -1397,7 +1507,53 @@ describe('BimaxComputerRuntime', () => {
     const listed = await runtime.run({ action: 'desktop' }, { cwd: '/tmp' });
     expect(listed.ok).toBe(true);
     expect(listed.icons?.map(i => i.name)).toEqual(['Report.pdf', 'Archive', 'Report Draft.pdf']);
+    expect(listed.actionResult).toEqual(expect.objectContaining({ delivered: false, observed: 'confirmed' }));
     expect(listed.summary).toMatch(/Report\.pdf/);
+  });
+
+  it('treats an unavailable desktop-item surface as a valid empty listing', async () => {
+    const run = jest.fn(async (cmd: any) => ({
+      ok: false,
+      action: cmd.action,
+      driver: 'native-helper',
+      error: 'desktop-icons: error: no desktop icon surface is present on this system',
+      summary: 'desktop icon enumeration unavailable',
+    }));
+    const native = {
+      run,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Alpha',
+    } as any;
+    callTool.mockImplementation(alphaBeta());
+    const runtime = new BimaxComputerRuntime(native);
+
+    const listed = await runtime.run({ action: 'desktop' }, { cwd: '/tmp' });
+
+    expect(listed.ok).toBe(true);
+    expect(listed.icons).toEqual([]);
+    expect(listed.details).toEqual({ desktopSurface: 'unavailable' });
+    expect(listed.actionResult).toEqual(expect.objectContaining({ delivered: false, observed: 'confirmed' }));
+  });
+
+  it('filters unnamed desktop accessibility containers from the item list', async () => {
+    const { native } = desktopNative();
+    native.run.mockImplementationOnce(async (cmd: any) => ({
+      ok: true,
+      action: cmd.action,
+      driver: 'native-helper',
+      icons: [
+        { name: '', frame: { x: 0, y: 0, w: 100, h: 100 } },
+        { name: 'Visible.txt', frame: { x: 100, y: 100, w: 96, h: 96 } },
+      ],
+      summary: 'listed',
+    }));
+    callTool.mockImplementation(alphaBeta());
+    const runtime = new BimaxComputerRuntime(native);
+
+    const listed = await runtime.run({ action: 'desktop' }, { cwd: '/tmp' });
+
+    expect(listed.icons?.map(icon => icon.name)).toEqual(['Visible.txt']);
+    expect(listed.summary).not.toMatch(/2 item/);
   });
 
   it('repositions a desktop item and verifies it by re-reading the desktop', async () => {
@@ -2357,6 +2513,44 @@ describe('BimaxComputerRuntime', () => {
     expect(opened.summary).toContain('WhatsApp');
   });
 
+  it('retries by human app name when the model supplies a stale bundle id', async () => {
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app' && args?.bundle_id === 'com.apple.iChat') {
+        return {
+          isError: true,
+          structuredContent: {},
+          content: [{ type: 'text', text: "No installed macOS app found for bundle_id 'com.apple.iChat'." }],
+        };
+      }
+      if (name === 'launch_app' && args?.name === 'Messages') {
+        return result({ name: 'Messages', pid: 12412, windows: [{ window_id: 1383 }] });
+      }
+      if (name === 'list_windows') return result({ windows: [{
+        window_id: 1383, is_on_screen: true, bounds: { x: 0, y: 0, width: 900, height: 700 },
+      }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/messages.png', screenshot_width: 900, screenshot_height: 700,
+        elements: [],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+
+    const opened = await runtime.run({
+      action: 'open', app: 'Messages', bundleId: 'com.apple.iChat', deliveryMode: 'background',
+    });
+
+    expect(opened).toEqual(expect.objectContaining({ ok: true, app: 'Messages', pid: 12412, windowId: 1383 }));
+    const launches = callTool.mock.calls
+      .map(([call]) => call)
+      .filter((call: any) => call.name === 'launch_app');
+    expect(launches).toEqual([
+      { name: 'launch_app', arguments: { bundle_id: 'com.apple.iChat' } },
+      { name: 'launch_app', arguments: { name: 'Messages' } },
+    ]);
+  });
+
   it('warns instead of claiming success when an opened app never becomes frontmost', async () => {
     callTool.mockImplementation(async ({ name }: any) => {
       if (name === 'start_session') return result({ ok: true });
@@ -3023,6 +3217,44 @@ describe('BimaxComputerRuntime', () => {
     } finally {
       fs.rmSync(windowPng, { force: true });
     }
+  });
+
+  it('retains exact ownership when AX focus geometry matches overlapping same-sized windows', async () => {
+    const owned = { window_id: 7, is_on_screen: true, bounds: { x: 40, y: 40, width: 600, height: 500 } };
+    const overlapping = { window_id: 9, is_on_screen: true, bounds: { ...owned.bounds } };
+    let liveWindows = [owned];
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'bring_to_front' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Quasar Workspace', pid: 42, windows: [owned] });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'Quasar Workspace', active: true }] });
+      if (name === 'list_windows') return result({ windows: liveWindows });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/quasar-overlap.png', screenshot_width: 600, screenshot_height: 500,
+        elements: [{ role: 'AXWindow', label: `Document ${args?.window_id}`, frame: { x: 40, y: 40, w: 600, h: 500 } }],
+      });
+      return result({ ok: true });
+    });
+    const native: any = {
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Quasar Workspace',
+      run: jest.fn(async (cmd: any) => {
+        const base = { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+        if (cmd.action === 'window_frame') return { ...base, windowFrame: { x: 40, y: 40, w: 600, h: 500 } };
+        if (cmd.action === 'window_at') return base;
+        return base;
+      }),
+    };
+    const runtime = new BimaxComputerRuntime(native);
+    await runtime.run({ action: 'open', app: 'Quasar Workspace', deliveryMode: 'background' });
+    // Put the other id first to prove enumeration order cannot take ownership from window 7.
+    liveWindows = [overlapping, owned];
+
+    const observed = await runtime.run({ action: 'observe', includeScreenshot: false });
+
+    expect(observed.ok).toBe(true);
+    expect(observed.windowId).toBe(7);
+    expect((observed.elements as any[])[0]?.label).toBe('Document 7');
+    expect(runtime.activeSurface()).toEqual(expect.objectContaining({ windowId: 7 }));
   });
 
   it('keeps the parent capture pinned when a contained autocomplete child takes AX focus', async () => {

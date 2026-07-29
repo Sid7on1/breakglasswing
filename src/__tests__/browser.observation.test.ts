@@ -7,7 +7,7 @@ import {
 } from '../browser/browser.runtime';
 import {
   screenshotFromToolResult, buildScreenshotObservation, pruneScreenshotObservations,
-  SCREENSHOT_OBSERVATION_MARKER, MAX_SCREENSHOT_BYTES,
+  isScreenshotObservationMessage, SCREENSHOT_OBSERVATION_MARKER, MAX_SCREENSHOT_BYTES,
 } from '../core/multimodal';
 
 // Deterministic fixtures for the observation layer: successor diffs, progressive filters,
@@ -144,5 +144,17 @@ describe('screenshot → next-turn vision observation', () => {
     expect((remaining[1].content[0] as any).text).toContain('shot 3');
     expect(messages.some(m => m.content === 'do the thing')).toBe(true);
     expect(messages.some(m => Array.isArray(m.content) && (m.content[0] as any)?.text === 'a real user image turn')).toBe(true);
+  });
+
+  it('keeps only the newest screenshot observation by default', () => {
+    const obs = (n: number) => ({
+      role: 'user',
+      content: [{ type: 'text', text: `${SCREENSHOT_OBSERVATION_MARKER} shot ${n}` }],
+    });
+    const messages: any[] = [obs(1), { role: 'assistant', content: 'working' }, obs(2)];
+    pruneScreenshotObservations(messages);
+    const remaining = messages.filter(m => isScreenshotObservationMessage(m));
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].content[0].text).toContain('shot 2');
   });
 });

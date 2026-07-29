@@ -7,10 +7,11 @@ import * as path from 'path';
 const testBreakglass = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-computer-tool-test-'));
 process.env.BIMAX_BREAKGLASS_DIR = testBreakglass;
 
-import { appNamesMatch, scaleNormalizedPoint, DesktopRuntimePort, DesktopResult } from '../computer/desktop.runtime';
+import { appNamesMatch, scaleNormalizedPoint, DesktopRuntimePort, DesktopResult, PUBLIC_DESKTOP_ACTIONS } from '../computer/desktop.runtime';
 import { screenshotFromToolResult } from '../core/multimodal';
 import { IGovernor } from '../core/interfaces';
 import { createComputerTool } from '../tools/implementations/computer.tool';
+import { COMPUTER_ACTION_CONTRACTS } from '../computer/action.contract';
 import { __resetConfigForTests } from '../cli/config';
 
 afterAll(() => { try { fs.rmSync(testBreakglass, { recursive: true, force: true }); } catch { /* tmp */ } });
@@ -75,6 +76,68 @@ describe('ComputerTool', () => {
     __resetConfigForTests();
   }
 
+  it('exposes and forwards every public desktop action from the shared action contract', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    expect(tool.schema.properties.action.enum).toEqual([...PUBLIC_DESKTOP_ACTIONS]);
+    expect(new Set(PUBLIC_DESKTOP_ACTIONS).size).toBe(PUBLIC_DESKTOP_ACTIONS.length);
+
+    for (const action of PUBLIC_DESKTOP_ACTIONS) {
+      const command: any = { action, app: 'Fixture App' };
+      if (action === 'click') Object.assign(command, { x: 10, y: 20, frameId: 'frame-fixture' });
+      if (action === 'type') command.text = 'fixture';
+      if (action === 'key') command.combo = 'return';
+      if (action === 'set_value') Object.assign(command, { elementIndex: 1, value: 'fixture' });
+      if (action === 'drag') Object.assign(command, { x: 10, y: 20, toX: 30, toY: 40, frameId: 'frame-fixture' });
+      if (action === 'scroll') command.dy = 50;
+      if (['hover', 'hold', 'mouse_down', 'mouse_up'].includes(action)) {
+        Object.assign(command, { x: 10, y: 20, frameId: 'frame-fixture' });
+      }
+      if (action === 'move') Object.assign(command, { x: 10, y: 20 });
+      if (action === 'arrange') command.layout = 'center';
+      await tool.execute(command, { cwd: process.cwd() });
+    }
+
+    expect((runtime.run as jest.Mock).mock.calls.map(([command]) => command.action))
+      .toEqual([...PUBLIC_DESKTOP_ACTIONS]);
+  });
+
+  it('gives every public action its own complete model-facing contract', () => {
+    expect(Object.keys(COMPUTER_ACTION_CONTRACTS)).toEqual([...PUBLIC_DESKTOP_ACTIONS]);
+    for (const action of PUBLIC_DESKTOP_ACTIONS) {
+      const spec = COMPUTER_ACTION_CONTRACTS[action];
+      expect(spec.purpose).toBeTruthy();
+      expect(spec.input).toBeTruthy();
+      expect(spec.returns).toBeTruthy();
+      expect(createComputerTool(governor, fakeRuntime()).description).toContain(`${action}: ${spec.purpose}`);
+    }
+  });
+
+  it('rejects unframed raw coordinates before approval or runtime delivery', async () => {
+    const runtime = fakeRuntime();
+    const tool = createComputerTool(governor, runtime);
+    const out = JSON.parse(await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() }));
+    expect(out).toEqual(expect.objectContaining({ ok: false, error: expect.stringMatching(/require frameId/) }));
+    expect(runtime.run).not.toHaveBeenCalled();
+    expect((governor.approveTaskExecution as jest.Mock).mock.calls.some(([kind]) => kind === 'COMPUTER_CONTROL')).toBe(false);
+  });
+
+  it('sends compact action evidence to the model, not runtime diagnostics or duplicate guidance', async () => {
+    const runtime = fakeRuntime({
+      screenshot: '/tmp/shot.png', frameId: 'frame-1', pid: 12, windowId: 34,
+      elements: [{ elementIndex: 1, role: 'AXButton', label: 'Continue' }],
+      tree: 'large duplicate accessibility tree',
+      completionGuidance: 'large duplicate generic guidance',
+      details: { transportDump: 'large native response' },
+    });
+    const out = JSON.parse(await createComputerTool(governor, runtime).execute({ action: 'observe' }, { cwd: process.cwd() }));
+    expect(out).toEqual(expect.objectContaining({ screenshot: '/tmp/shot.png', frameId: 'frame-1', pid: 12, windowId: 34 }));
+    expect(out.elements).toHaveLength(1);
+    expect(out).not.toHaveProperty('tree');
+    expect(out).not.toHaveProperty('completionGuidance');
+    expect(out).not.toHaveProperty('details');
+  });
+
   it('maps normalized 0–1000 coordinates to screen points, clamped', () => {
     expect(scaleNormalizedPoint(500, 1470)).toBe(735);
     expect(scaleNormalizedPoint(0, 1470)).toBe(0);
@@ -108,7 +171,7 @@ describe('ComputerTool', () => {
     await tool.execute({ action: 'status' }, { cwd: process.cwd() });
     expect(controlCalls()).toHaveLength(0);
 
-    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    await tool.execute({ action: 'click', x: 10, y: 20, frameId: 'fresh' }, { cwd: process.cwd() });
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       tool: 'ComputerTool', action: 'click', app: 'Notes', isDestructive: false,
     }));
@@ -118,7 +181,7 @@ describe('ComputerTool', () => {
     const runtime = fakeRuntime();
     const tool = createComputerTool(governor, runtime);
     for (const action of ['scroll', 'move', 'hover', 'request_access'] as const) {
-      await tool.execute({ action, x: 10, y: 20, dy: 120 }, { cwd: process.cwd() });
+      await tool.execute({ action, x: 10, y: 20, dy: 120, frameId: 'fresh' }, { cwd: process.cwd() });
     }
     const gated = (governor.approveTaskExecution as jest.Mock).mock.calls
       .filter(([kind]) => kind === 'COMPUTER_CONTROL')
@@ -157,7 +220,7 @@ describe('ComputerTool', () => {
     setApprovals('always');
     const tool = createComputerTool(governor, fakeRuntime());
 
-    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    await tool.execute({ action: 'click', x: 10, y: 20, frameId: 'fresh' }, { cwd: process.cwd() });
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       action: 'click', isDestructive: true,
     }));
@@ -168,7 +231,7 @@ describe('ComputerTool', () => {
     const tool = createComputerTool(governor, fakeRuntime());
 
     // Routine click → still governor-visible (sensitive-target floor runs) but not prompt-worthy.
-    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    await tool.execute({ action: 'click', x: 10, y: 20, frameId: 'fresh' }, { cwd: process.cwd() });
     expect(governor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       action: 'click', isDestructive: false,
     }));
@@ -185,7 +248,7 @@ describe('ComputerTool', () => {
     setApprovals('high-impact-only');
     const planGovernor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined), mode: 'plan' } as unknown as IGovernor;
     const tool = createComputerTool(planGovernor, fakeRuntime());
-    await tool.execute({ action: 'click', x: 10, y: 20 }, { cwd: process.cwd() });
+    await tool.execute({ action: 'click', x: 10, y: 20, frameId: 'fresh' }, { cwd: process.cwd() });
     expect(planGovernor.approveTaskExecution).toHaveBeenCalledWith('COMPUTER_CONTROL', expect.objectContaining({
       action: 'click', isDestructive: true,
     }));
@@ -284,7 +347,7 @@ describe('ComputerTool', () => {
     const veto = { approveTaskExecution: jest.fn().mockRejectedValue(new Error('vetoed')) } as unknown as IGovernor;
     const runtime = fakeRuntime();
     const tool = createComputerTool(veto, runtime);
-    await expect(tool.execute({ action: 'click', x: 1, y: 1 }, { cwd: process.cwd() })).rejects.toThrow('vetoed');
+    await expect(tool.execute({ action: 'click', x: 1, y: 1, frameId: 'fresh' }, { cwd: process.cwd() })).rejects.toThrow('vetoed');
     expect(runtime.run).not.toHaveBeenCalled();
   });
 
@@ -300,7 +363,7 @@ describe('ComputerTool', () => {
     const runtime = fakeRuntime();
     const tool = createComputerTool(governor, runtime);
     await tool.execute({
-      action: 'click', x: 10, y: 20, deliveryMode: 'background', modifier: ['cmd'],
+      action: 'click', x: 10, y: 20, frameId: 'fresh', deliveryMode: 'background', modifier: ['cmd'],
     }, { cwd: process.cwd() });
 
     expect(runtime.run).toHaveBeenCalledWith(expect.objectContaining({
@@ -373,5 +436,24 @@ describe('ComputerTool whole-display recording approval is unforgeable', () => {
     expect(authorize).not.toHaveBeenCalled();
     const sent = (runtime.run as jest.Mock).mock.calls[0][0];
     expect(sent.fullDisplayToken).toBeUndefined();
+  });
+
+  it('treats an explicit display capture as whole-display even while a window is owned', async () => {
+    const authorize = jest.fn().mockReturnValue('display-token');
+    const preview = jest.fn().mockReturnValue({ scope: 'whole display', captureSafe: false });
+    const runtime: DesktopRuntimePort = {
+      run: jest.fn().mockImplementation(async (cmd: any): Promise<DesktopResult> => ({ ok: true, action: cmd.action, driver: 'fake', summary: 'ok' })),
+      quickStatus: jest.fn().mockReturnValue({ driver: 'fake', ready: true, accessibility: null, screenRecording: null }),
+      frontmostApp: jest.fn().mockResolvedValue('Fixture App'),
+      recordingScopePreview: preview,
+      authorizeFullDisplayRecording: authorize,
+    };
+    const tool = createComputerTool(governor, runtime);
+    await tool.execute({ action: 'record_start', captureScope: 'display' }, { cwd: '/tmp' });
+    expect(preview).toHaveBeenCalledWith('display');
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect((runtime.run as jest.Mock).mock.calls[0][0]).toEqual(expect.objectContaining({
+      captureScope: 'display', fullDisplayToken: 'display-token',
+    }));
   });
 });

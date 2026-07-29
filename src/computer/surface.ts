@@ -59,8 +59,8 @@ export interface ExecutionSurface {
  *  - physical-foreground: the Swift helper posts a real global CGEvent — moves the one macOS cursor
  *    and requires the target window to be frontmost first (visible mode).
  *  - sidecar-background:  the native sidecar PID-posts a synthetic event to a specific window — does
- *    NOT move the physical cursor and does NOT need foreground, but SwiftUI / System Settings can
- *    ignore synthetic events (which is exactly why visible/foreground is the default).
+ *    NOT move the physical cursor and does NOT need foreground, but some accessibility frameworks
+ *    can ignore synthetic events (which is exactly why visible/foreground is the default).
  *  - accessibility:       an AX action (set_value / press on an element handle) — no cursor, no
  *    foreground, and reliable for controls the accessibility tree exposes.
  *  - browser-automation:  driven over the browser protocol; the physical cursor is never touched.
@@ -145,7 +145,7 @@ export function chooseMechanism(
       return { mechanism: 'unsupported', requiresForeground: true, reason: 'background input has no specific window to target on the bare desktop; open/select a window first, or use visible mode' };
     }
     if (surface.backgroundCapable) {
-      return { mechanism: 'sidecar-background', requiresForeground: false, reason: 'background delivery via the sidecar synthetic event (cursor untouched) — note SwiftUI / System Settings can ignore synthetic events; visible mode is more reliable for those' };
+      return { mechanism: 'sidecar-background', requiresForeground: false, reason: 'background delivery via the sidecar synthetic event (cursor untouched) — some accessibility frameworks can ignore synthetic events; visible mode is more reliable for those surfaces' };
     }
     return { mechanism: 'unsupported', requiresForeground: true, reason: 'no background mechanism for this surface; use visible mode or target a named accessibility element' };
   }
