@@ -76,10 +76,15 @@ export function CommandPalette({
 
   return (
     <Dialog open={open} onOpenChange={(value) => { if (!value) onClose(); }}>
-      {/* Anchoring belongs to the shell, sizing to the box — see the two-box note in ui/dialog. */}
+      {/*
+        `palette`, not a Tailwind offset. Prompt 2 §43/§45: a command palette is its own destination
+        semantics — it sits high the way Spotlight does, and when it is opened from ⌘K there is no
+        spatial seed to grow from and none may be invented. Naming the kind gets both; the previous
+        `top-[18%]` positioned the box while the flight knew nothing about it.
+      */}
       <DialogContent
         aria-describedby={undefined}
-        positionClassName="top-[18%] -translate-y-0"
+        kind="palette"
         className="max-h-[64vh] w-[min(560px,calc(100vw-min(64px,40vw)))] p-0"
       >
         <DialogTitle className="sr-only">Search and open</DialogTitle>

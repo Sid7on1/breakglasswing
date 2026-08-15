@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { DiffView } from './DiffView';
-import { Dropdown, DropdownItem } from './ui/dropdown';
+import { SeedMenu, SeedMenuItem } from './ui/morph/SeedMenu';
 import type { GitStatusResult, GitCommitEntry } from '../global';
 import type { ReviewSnapshot, ReviewStateName, UiSnapshotCheckpoint } from '../protocol';
 
@@ -220,8 +220,12 @@ export function ReviewPanel({
     <div className="flex h-full flex-col">
       {/* Branch row */}
       <div className="mb-3 flex shrink-0 items-center gap-1.5">
-        <Dropdown
-          direction="down"
+        {/* Placement is derived here, not declared. v1 needed `direction="down"` because it opened
+            from a `transform-origin` corner and had no idea where on screen it was; the v2 surface
+            measures the seed and flips itself, which is the same reason this one is correct when
+            the inspector is dragged short enough that "down" no longer fits. */}
+        <SeedMenu
+          label="Switch branch"
           trigger={() => (
             <span
               className="flex min-w-0 items-center gap-1.5 rounded-md border border-line bg-raise px-2 py-1 text-xs text-ink hover:bg-hover"
@@ -236,7 +240,7 @@ export function ReviewPanel({
           {(close) => (
             <>
               {branches.map((b) => (
-                <DropdownItem
+                <SeedMenuItem
                   key={b}
                   icon={b === status.branch ? <Check size={12} /> : <GitBranch size={12} />}
                   selected={b === status.branch}
@@ -247,14 +251,14 @@ export function ReviewPanel({
                   }}
                 />
               ))}
-              <DropdownItem
+              <SeedMenuItem
                 icon={<Plus size={12} />}
                 label="New branch…"
                 onClick={() => { setNewBranch(''); close(); }}
               />
             </>
           )}
-        </Dropdown>
+        </SeedMenu>
         {(status.ahead > 0 || status.behind > 0) && (
           <span className="flex items-center gap-0.5 text-[10.5px] text-faint tabular-nums">
             {status.ahead > 0 && <><ArrowUp size={10} />{status.ahead}</>}

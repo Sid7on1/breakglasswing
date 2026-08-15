@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { Settings, Sparkles, X } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from '../src/renderer/src/components/ui/dialog';
-import { Dropdown, DropdownItem } from '../src/renderer/src/components/ui/dropdown';
+import { SeedMenu, SeedMenuItem } from '../src/renderer/src/components/ui/morph/SeedMenu';
 import { SPRINGS, springFor } from '../src/renderer/src/components/ui/motion';
-import { panelBox } from '../src/renderer/src/components/ui/seed-expand';
+import { destinationFor } from '../src/renderer/src/components/ui/morph/geometry';
 
 /**
  * The motion harness.
@@ -16,8 +16,8 @@ import { panelBox } from '../src/renderer/src/components/ui/seed-expand';
  * Each frame is a real containing block with its own size, so a panel sized in `vw`/`vh` would NOT
  * respond to it — which is the point. What is being checked here is that the flight starts from the
  * button, that nothing is clipped, and that the material reads as glass over a real backdrop; the
- * viewport-relative clamps are checked by `panelBox` in the test lane, and reported per frame below
- * so the two can be compared side by side.
+ * viewport-relative clamps are checked by `destinationFor` in the test lane, and reported per frame
+ * below so the two can be compared side by side.
  */
 
 /** The window shapes worth looking at. Same list as the test matrix, trimmed to what fits a page. */
@@ -33,7 +33,9 @@ const DESKTOP = 'linear-gradient(135deg, #1f3a5f 0%, #6d597a 34%, #b56576 62%, #
 
 function Seeded({ width, height, label }: { width: number; height: number; label: string }): React.ReactElement {
   const [open, setOpen] = useState(false);
-  const box = panelBox({ width, height });
+  // The same pure placement the flight uses, asked about this frame rather than about the browser
+  // window — so the readout below and the surface above are computed from one function.
+  const box = destinationFor({ kind: 'floatingPanel' }, { width, height }, null);
 
   return (
     <figure style={{ margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -67,29 +69,37 @@ function Seeded({ width, height, label }: { width: number; height: number; label
             </header>
             <div className="space-y-2.5 p-4 text-[12px] leading-relaxed text-dim">
               <p>
-                The panel is laid out at its final geometry, inverted onto the button&apos;s rect, and
-                played to identity on a spring. Closing runs it backwards, so it folds back into the
-                control you pressed.
+                The shell starts at the button&apos;s exact rect and springs its real
+                width, height and corner to this box. Closing retargets the same springs at the
+                button, so it folds back into the control you pressed.
               </p>
               <p className="text-faint">
-                Content counter-scales by the exact reciprocal, which is why this text is never
-                stretched even though the box grows by more than 10× on its short axis.
+                This text is laid out once, at the size you are reading it — the shell grows over it
+                and clips it, so no glyph is ever scaled and the corner is a real radius rather than
+                an ellipse smeared by a transform.
               </p>
-              <Dropdown trigger={() => <span className="glass-pill rounded-lg px-2.5 py-1.5 text-[11px]">A popover, same material</span>} direction="down" ariaLabel="Demo">
+              {/* A morph inside a morph: this menu flies from a control that is itself still
+                  arriving. It is here because that is the one arrangement where a surface can be
+                  given the wrong coordinate space and still look plausible — the menu must land on
+                  the button, not where the button will be. */}
+              <SeedMenu
+                label="Demo"
+                trigger={() => <span className="glass-pill rounded-lg px-2.5 py-1.5 text-[11px]">A popover, same material</span>}
+              >
                 {(close) => (
                   <>
-                    <DropdownItem label="Bouncy" desc="the house spring" onClick={close} />
-                    <DropdownItem label="Glass" desc="panels and sheets" onClick={close} />
+                    <SeedMenuItem label="Bouncy" desc="the house spring" onClick={close} />
+                    <SeedMenuItem label="Glass" desc="panels and sheets" onClick={close} />
                   </>
                 )}
-              </Dropdown>
+              </SeedMenu>
             </div>
           </DialogContent>
         </Dialog>
       </div>
-      {/* What panelBox() computes for this window, so the pure geometry and the render agree. */}
+      {/* What the pure placement computes for this window, so geometry and render can be compared. */}
       <div style={{ font: '10px/1.5 ui-monospace, monospace', color: '#8a8a85' }}>
-        panelBox → {Math.round(box.width)}×{Math.round(box.height)} at ({box.left}, {box.top})
+        destinationFor → {Math.round(box.width)}×{Math.round(box.height)} at ({Math.round(box.x)}, {Math.round(box.y)})
       </div>
     </figure>
   );

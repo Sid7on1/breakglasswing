@@ -3,7 +3,8 @@ import {
   AppWindow, Hand, Play, CircleCheck, CircleX, CircleDashed, Clock3, Eye, ShieldAlert, X,
 } from 'lucide-react';
 import { cn } from '../lib/cn';
-import { SeedPanel, useSeed } from './ui/seed-expand';
+import { SeedPopover } from './ui/morph/MorphSurface';
+import { useSeedRef } from './ui/morph/use-seed';
 import { describeEvidenceAge, type MacSession, type MacTimelineEntry } from '../mac.session.model';
 
 /**
@@ -170,7 +171,10 @@ function outcomeWords(entry: MacTimelineEntry, verified: boolean): string {
 function TimelineRow({ entry }: { entry: MacTimelineEntry }): React.ReactElement {
   const verified = entry.postcondition.startsWith('matched');
   const [open, setOpen] = useState(false);
-  const { seed, seedFrom } = useSeed();
+  // The row itself is the seed, held as a handle rather than a rect captured at the click: the
+  // inspector's width is draggable and its list scrolls, so between opening this panel and closing
+  // it the row has usually moved. A remembered rect would fold the panel back to where the row was.
+  const seed = useSeedRef();
 
   const facts: Array<[string, string]> = [
     ['How', executorWords(entry.executor)],
@@ -183,7 +187,8 @@ function TimelineRow({ entry }: { entry: MacTimelineEntry }): React.ReactElement
     <li className="mb-1.5">
       <button
         type="button"
-        onClick={(event) => { seedFrom(event); setOpen(true); }}
+        ref={seed.ref}
+        onClick={() => setOpen(true)}
         aria-expanded={open}
         aria-haspopup="dialog"
         className={cn(
@@ -201,12 +206,20 @@ function TimelineRow({ entry }: { entry: MacTimelineEntry }): React.ReactElement
         <span className="timeline-row-chevron" aria-hidden>Details</span>
       </button>
 
-      <SeedPanel
+      {/*
+        A popover, not a modal. This is evidence *about* the row underneath it, and trapping focus
+        to read four facts is the behaviour that makes a Mac app feel like a web app (Prompt 2 §42:
+        keep the morph where the spatial relationship is real, keep standard behaviour elsewhere).
+        Escape closes it, a press outside closes it, and focus returns to the row.
+      */}
+      <SeedPopover
         open={open}
         onClose={() => setOpen(false)}
         seed={seed}
-        title={entry.label}
-        description={`Evidence for ${entry.label}`}
+        kind="floatingPanel"
+        width={380}
+        fitHeight
+        label={`Evidence for ${entry.label}`}
       >
         <header className="flex items-start gap-2.5 border-b border-line px-4 py-3.5">
           <span className="mt-0.5 shrink-0">{statusIcon(entry, verified, 15)}</span>
@@ -231,7 +244,7 @@ function TimelineRow({ entry }: { entry: MacTimelineEntry }): React.ReactElement
             </React.Fragment>
           ))}
         </dl>
-      </SeedPanel>
+      </SeedPopover>
     </li>
   );
 }

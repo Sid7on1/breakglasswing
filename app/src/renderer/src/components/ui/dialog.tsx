@@ -1,9 +1,9 @@
 import React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { cn } from '../../lib/cn';
-import { prefersReducedMotion } from './motion';
-import { playSeedFlight, type Seed } from './seed-expand';
-import { clearIntent, recentIntentRect } from './intent';
+import { destinationFor, type DestinationKind, type MorphGeometry } from './morph/geometry';
+import { useMorphDriver } from './morph/use-morph';
+import { useIntentSeed } from './morph/use-seed';
 
 /**
  * shadcn-pattern Dialog on Radix primitives — real focus trap, aria-modal, focus restore.
@@ -13,36 +13,42 @@ import { clearIntent, recentIntentRect } from './intent';
  * ## The seeded flight lives here, not in each dialog
  *
  * Every dialog in the app renders `<Dialog open><DialogContent className=…>`. Putting the container
- * transform in this one component means all of them grow out of the control that opened them and
- * shrink back into it on close, and a dialog added later gets it without opting in — which is the
- * only version of "every component has the same animation" that stays true after this change.
+ * morph in this one component means all of them grow out of the control that opened them and shrink
+ * back into it on close, and a dialog added later gets it without opting in — which is the only
+ * version of "every component has the same animation" that stays true after this change.
  *
- * The origin comes from `./intent`, which watches what the user actually pressed. A dialog that
- * nobody triggered (an engine approval prompt arriving on its own) finds no fresh intent and plainly
- * fades, because flying out of an unrelated button would be a false claim about what caused it.
+ * The origin comes from `./morph/use-seed`, which watches what the user actually pressed. A dialog
+ * nobody triggered (an engine approval prompt arriving on its own) finds no fresh intent and
+ * materialises in place, because flying out of an unrelated button would be a false claim about
+ * what caused it (Prompt 2 §45).
+ *
+ * ## Why Radix still owns the node
+ *
+ * The alternative — rendering the dialog *inside* a `MorphSurface` — would put our portal between
+ * Radix's Content and its Portal, and Radix's focus trap, `aria-modal`, outside-press detection and
+ * focus restore are all things this app relies on and none of them are worth reimplementing for an
+ * animation. So the morph drives the node Radix already made: `useMorphDriver` writes the geometry
+ * onto `Content` and reveals the box inside it. Radix keeps every guarantee; the motion is ours.
  *
  * ## Why there are two boxes
  *
- * The flight scales the surface non-uniformly — a 32px round button is square, a settings window is
- * a wide sheet — so the content must counter-scale by the inverse or every glyph stretches. That
- * needs a second element, and it cannot be inserted *around* the caller's children: dialogs put
- * their layout on `DialogContent` (`flex flex-row` for Settings' nav-plus-page, `flex flex-col` for
- * Models) and address their children directly, so a box between them collapses the layout to a
- * single item.
+ * The shell carries the geometry — position, size, radius, material — and the inner box carries the
+ * caller's layout. They cannot be one element: dialogs put their layout on `DialogContent`
+ * (`flex-row` for Settings' nav-plus-page, `flex-col` for Models) and address their children
+ * directly, so a wrapper *inside* would collapse those layouts to a single item. Keeping the split
+ * this way round means `className`, `style` and the children still land exactly where they used to.
  *
- * So the split runs the other way. The OUTER element is the flight shell — position, material,
- * radius, the animated transform — and it shrink-wraps. The INNER element is the caller's box: it
- * takes `className`, `style` and the children, exactly as `DialogContent` used to, and carries the
- * counter-scale. Callers that need different anchoring pass `positionClassName`, which is the one
- * concern that genuinely belongs to the shell.
+ * The inner box is also what makes the reveal honest: it is laid out once at the destination's size
+ * and then *clipped* by the growing shell (Prompt 1 §13), so no text is ever scaled. v1 had to
+ * counter-scale it by the exact inverse at every instant, which worked and was the fragile way.
  *
  * ## Why this manages its own mounting
  *
  * Radix's `Presence` keeps a closing element mounted by watching for a CSS *animation* to end. The
- * flight is a WAAPI animation over a geometry only known at runtime, which Presence cannot see — so
- * a plain `<DialogContent>` would be torn out of the DOM on the first frame of its own exit. Hence
- * `forceMount` throughout and an explicit `mounted` state here: `open` is the caller's intent, and
- * the gap between `open === false` and `mounted === false` is exactly the collapse.
+ * collapse is a spring over a geometry only known at runtime, which Presence cannot see — so a
+ * plain `<DialogContent>` would be torn out of the DOM on the first frame of its own exit. Hence
+ * `forceMount` throughout: `open` is the caller's intent, and the gap between `open === false` and
+ * the driver going inactive is exactly the collapse.
  */
 
 /** Lets `DialogContent` see the open state that `Dialog` was given, so it can own the exit. */
@@ -66,14 +72,17 @@ export const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
     locked?: boolean;
     /**
-     * Anchoring for the shell, when centred is wrong. The command palette sits high on the screen
-     * the way Spotlight does, so it passes `top-[18%] -translate-y-0`.
+     * What this surface is, semantically (Prompt 2 §43).
+     *
+     * Decides where it lands and how it is dressed. `floatingPanel` is the right default for a
+     * modal sheet; the command palette passes `palette`, which sits high the way every Mac palette
+     * does — placement that used to be a `positionClassName` full of Tailwind offsets that the
+     * flight knew nothing about.
      */
-    positionClassName?: string;
+    kind?: Extract<DestinationKind, 'floatingPanel' | 'palette' | 'workspaceSurface'>;
   }
->(({ className, style, locked, positionClassName, children, ...props }, forwardedRef) => {
+>(({ className, style, locked, kind = 'floatingPanel', children, ...props }, forwardedRef) => {
   const open = React.useContext(OpenContext);
-  const [mounted, setMounted] = React.useState(open);
   /*
     The nodes live in state, not in refs, and that is load-bearing.
 
@@ -89,62 +98,93 @@ export const DialogContent = React.forwardRef<
   */
   const [shell, setShell] = React.useState<HTMLDivElement | null>(null);
   const [box, setBox] = React.useState<HTMLDivElement | null>(null);
-  const seedRef = React.useRef<Seed>(null);
+  const boxNode = React.useRef<HTMLDivElement | null>(null);
+  const setBoxNode = React.useCallback((node: HTMLDivElement | null) => {
+    boxNode.current = node;
+    setBox(node);
+  }, []);
 
-  React.useLayoutEffect(() => {
-    if (!open) return;
-    setMounted(true);
-    // Claimed here, on the commit where the caller opened us — the freshest possible moment, and
-    // before the portal costs us a frame. Cleared so a second surface opening from the same press
-    // cannot also claim it.
-    seedRef.current = recentIntentRect();
-    clearIntent();
-  }, [open]);
+  const seed = useIntentSeed();
+  /**
+   * The width the caller's box wants, measured once from its own CSS.
+   *
+   * Every dialog states its size in classes — `w-[min(760px,calc(100vw-40px))]` — and the morph
+   * needs that as a number, because a spring cannot animate toward `min()`. Measuring beats
+   * duplicating it as a prop: a second declaration is a second thing to keep in agreement, and when
+   * they disagree the surface flies smoothly to the wrong size, which reads as deliberate.
+   *
+   * Taken on the opening commit, while the box is still laid out by its own class — after that the
+   * width is pinned, and re-reading would only measure the pin.
+   */
+  const naturalWidth = React.useRef<number | null>(null);
+  const [width, setWidth] = React.useState<number | null>(null);
 
-  // Grow, once the portal has actually produced a node.
-  React.useLayoutEffect(() => {
-    if (!open || !mounted) return;
-    const origin = seedRef.current;
-    if (!shell || !origin || prefersReducedMotion()) return;
-    const flown = playSeedFlight(shell, box, origin, 'grow', 'glass');
-    // `fill: both` would pin the shell at its INVERTED first frame if the renderer stops painting —
-    // a sliver at 40% opacity, indefinitely. A wall clock releases it to the plain visible state.
-    const settle = window.setTimeout(() => flown.cancel(), flown.duration + 200);
-    return () => {
-      window.clearTimeout(settle);
-      flown.cancel();
+  const resolve = React.useCallback(() => {
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const origin = seed.measure();
+    const node = boxNode.current;
+    if (node && naturalWidth.current === null) {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 1) naturalWidth.current = rect.width;
+    }
+    // Height is measured *live*, every time. The command palette is the reason: its list shrinks as
+    // the query filters, and a sheet pinned to the height it opened at would leave a growing block
+    // of empty glass under the results. Because this is a spring and not a timeline, a new height
+    // is simply a new target — the surface resizes as you type instead of at the end of it.
+    const height = node?.getBoundingClientRect().height;
+    // `destinationFor` re-clamps against the *current* window every time it is asked, so a window
+    // dragged smaller mid-flight shrinks the target rather than leaving the sheet hanging off the
+    // edge — the natural size is a preference, not a promise.
+    return {
+      seed: origin,
+      destination: destinationFor(
+        { kind, width: naturalWidth.current ?? 560, height: height && height > 1 ? height : undefined },
+        viewport,
+        origin,
+      ),
     };
-  }, [open, mounted, shell, box]);
+  }, [kind, seed]);
 
-  // Collapse, then unmount.
+  const elements = React.useMemo(() => (shell ? { surface: shell, content: box } : null), [shell, box]);
+
+  const { active, controller } = useMorphDriver({
+    open,
+    kind: () => kind,
+    resolve,
+    // The box's own height is the target, so a change in it has to reach the spring. Nothing else
+    // reports it: filtering a list fires no resize event and moves no window.
+    observe: box,
+    elements,
+  });
+
+  // The box's width as a layout value, set at the edges of a flight rather than per frame — it is
+  // laid out once and then merely clipped by the shell growing over it (Prompt 1 §13).
   React.useLayoutEffect(() => {
-    if (open || !mounted) return;
-    const origin = seedRef.current;
-    if (!shell || !origin || prefersReducedMotion()) { setMounted(false); return; }
-    let done = false;
-    const finish = (): void => { if (!done) { done = true; setMounted(false); } };
-    const flown = playSeedFlight(shell, box, origin, 'shrink', 'glass');
-    flown.finished.then(finish).catch(() => { /* re-opened mid-flight; the guard still releases it */ });
-    // The unmount is NOT the animation's to grant. A window that stops painting never resolves
-    // `finished`, and with the overlay still mounted the user is left under an opaque scrim with no
-    // way back. The wall clock is the authority; the promise is only the fast path.
-    const guard = window.setTimeout(finish, flown.duration + 200);
-    return () => {
-      done = true;
-      window.clearTimeout(guard);
-      flown.cancel();
-    };
-  }, [open, mounted, shell, box]);
+    if (!active) {
+      naturalWidth.current = null;
+      setWidth(null);
+      return;
+    }
+    // Nothing to measure yet — the portal above renders null on its first commit. Pinning a
+    // fallback width here would be worse than doing nothing: the box would arrive already wearing
+    // it, and the "natural" width measured a moment later would be the pin reading itself back.
+    if (!box) return;
+    setWidth(resolve().destination.width);
+  }, [active, box, resolve]);
 
-  if (!mounted) return null;
+  React.useEffect(() => {
+    if (!active) return;
+    const onResize = (): void => {
+      setWidth(resolve().destination.width);
+      controller()?.remeasure();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [active, resolve, controller]);
+
+  if (!active) return null;
 
   const block = locked ? (event: { preventDefault: () => void }) => event.preventDefault() : undefined;
-  // Peeked, not read back from the ref. The ref is filled by the layout effect below, which runs
-  // AFTER this render — so reading it here reported "no seed" on the opening frame and shipped the
-  // fallback CSS animation alongside the flight that was about to start, putting two animations on
-  // one `transform`. `recentIntentRect()` is a pure read of an already-captured rect, so asking it
-  // the same question a moment earlier gives the same answer.
-  const seeded = !prefersReducedMotion() && (open ? recentIntentRect() !== null : seedRef.current !== null);
 
   return (
     <DialogPrimitive.Portal forceMount>
@@ -162,30 +202,24 @@ export const DialogContent = React.forwardRef<
         onPointerDownOutside={block}
         onInteractOutside={block}
         className={cn(
-          'fixed top-1/2 left-1/2 z-50',
-          // Tailwind v4 writes these to the native `translate` property, which composes with
-          // `transform` rather than overwriting it — so the centring and the flight coexist, and a
-          // caller can still cancel one axis (`-translate-y-0`) without touching the other.
-          '-translate-x-1/2 -translate-y-1/2',
-          // Only when there is no flight to own the transform. Two animations on one property is a
-          // race decided by declaration order, and the loser is invisible.
-          !seeded && (open ? 'anim-dialog-in' : 'anim-dialog-out'),
-          'liquid-glass liquid-glass-panel overflow-hidden rounded-[22px]',
-          'focus:outline-none',
-          positionClassName,
+          // No positioning classes: `armSurface` pins this to `fixed; left: 0; top: 0` and the
+          // driver writes the real geometry. A `-translate-x-1/2` here would be a second writer of
+          // the same property, and whoever writes last silently wins.
+          'morph-surface z-50 overflow-hidden',
+          'liquid-glass liquid-glass-panel focus:outline-none',
         )}
-        style={{ transformOrigin: 'center center', willChange: 'transform, opacity' }}
         {...props}
       >
         {/*
           The caller's box, unchanged from what `DialogContent` used to be: its className, its style,
-          its children as direct descendants. It additionally carries the counter-scale, which is why
-          it must be a real element and not `display: contents`.
+          its children as direct descendants. Pinned to the destination's size so the layout inside
+          settles once, on the first frame, and the shell grows over a surface that is already final
+          — which is why nothing here is ever scaled or re-flowed mid-flight.
         */}
         <div
-          ref={setBox}
-          className={cn('max-h-[80vh] w-[min(680px,calc(100vw-min(64px,40vw)))] overflow-y-auto p-5', className)}
-          style={{ transformOrigin: 'center center', ...style }}
+          ref={setBoxNode}
+          className={cn('absolute top-0 left-0 max-h-[80vh] w-[min(680px,calc(100vw-min(64px,40vw)))] overflow-y-auto p-5', className)}
+          style={width !== null ? { width: `${Math.round(width)}px`, ...style } : style}
         >
           {children}
         </div>

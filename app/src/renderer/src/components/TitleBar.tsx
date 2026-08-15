@@ -5,7 +5,8 @@ import {
 import { cn } from '../lib/cn';
 import type { GitStatusResult } from '../global';
 import { BrandMark } from './BrandMark';
-import { Dropdown, DropdownItem } from './ui/dropdown';
+import { SeedMenu, SeedMenuItem, SeedMenuLabel } from './ui/morph/SeedMenu';
+import { Toolbar } from './ui/toolbar';
 import { APPEARANCES, Appearance } from '../appearance';
 
 /**
@@ -57,9 +58,24 @@ export function TitleBar({
         </IconBtn>
       )}
       <BrandMark className="mr-1 text-[12px]" />
+      {/*
+        Identity yields before the controls do.
+
+        Both compete for the same row, and flexbox would otherwise shrink them in proportion to
+        their size — so a long project path would squeeze the toolbar into its overflow menu while
+        the path itself stayed almost intact. The shrink factors say which of them is *supposed* to
+        give: a truncated project name is still an answer to "where am I?" (Prompt 2 §19), whereas a
+        control pushed into a menu costs a click every time it is used.
+
+        The floors are the last thing to give and they are deliberately low: below them the toolbar
+        starts clipping its own overflow button, and a control sliced in half is worse than a
+        project name shown as three letters and an ellipsis — the name has a tooltip, the sliced
+        button has nothing.
+      */}
       <button
         title={project || 'Open a project'}
         onClick={() => void window.bimax.pickFolder()}
+        style={{ flexShrink: 6, minWidth: '3.25rem' }}
         className="no-drag flex max-w-[320px] cursor-pointer items-center gap-1.5 truncate rounded-lg px-2 py-1 text-dim hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-ember"
       >
         <FolderOpen size={13} />
@@ -71,6 +87,7 @@ export function TitleBar({
             ? `${gitStatus.files.length} changed file${gitStatus.files.length === 1 ? '' : 's'} — open Changes`
             : `On ${gitStatus.branch} — nothing changed`}
           onClick={onOpenChanges}
+          style={{ flexShrink: 8, minWidth: '2.5rem' }}
           className="no-drag flex max-w-[220px] cursor-pointer items-center gap-1.5 truncate rounded-lg px-2 py-1 text-xs text-dim hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-ember"
         >
           <GitBranch size={12} className="shrink-0 text-ember/80" />
@@ -83,53 +100,78 @@ export function TitleBar({
         </button>
       )}
       <span className="flex-1" />
-      {protocolMismatch !== null && (
-        <span className="rounded-lg border border-rust/25 bg-rust/8 px-2 py-1 text-xs text-rust">
-          Bimax needs an update
-        </span>
-      )}
-      {project && (
-        <IconBtn title="Trust Center (⌘⇧T)" onClick={onOpenTrust}>
-          <ShieldCheck size={15} />
-        </IconBtn>
-      )}
-      <Dropdown
-        direction="down"
-        align="right"
-        ariaLabel="Change appearance"
-        trigger={(open) => (
-          <span
-            title="Change appearance"
-            className={cn(
-              'no-drag flex size-7 items-center justify-center rounded-lg transition-colors',
-              open ? 'bg-hover text-ember' : 'text-faint hover:bg-hover hover:text-ink',
-            )}
-          >
-            <Palette size={15} />
+      {/*
+        The trailing cluster, tiered rather than crammed (Prompt 2 §22).
+
+        Which of these survives a narrow window is a statement about what the app is for. The
+        evidence toggle is how you see what the agent just did, and it never overflows. The Trust
+        Center answers a question you ask once a session — why can it not drive my Mac? — so it is
+        the one that moves into a menu, and it keeps its keyboard shortcut when it does.
+
+        Appearance is pinned here rather than tiered only because it is a menu, and a menu inside an
+        overflow menu is a submenu; that is a worse answer than one more icon (§39).
+      */}
+      <Toolbar
+        actions={project ? [
+          {
+            id: 'inspector',
+            label: 'Show or hide evidence (⌘J)',
+            icon: <PanelRight size={16} />,
+            priority: 'always',
+            active: inspectorOpen,
+            onSelect: onToggleInspector,
+          },
+          {
+            id: 'trust',
+            label: 'Trust Center (⌘⇧T)',
+            icon: <ShieldCheck size={15} />,
+            priority: 'low',
+            onSelect: onOpenTrust,
+          },
+        ] : []}
+      >
+        {protocolMismatch !== null && (
+          <span className="shrink-0 rounded-lg border border-rust/25 bg-rust/8 px-2 py-1 text-xs text-rust">
+            Bimax needs an update
           </span>
         )}
-      >
-        {(close) => (
-          <>
-            <div className="px-2.5 pt-1.5 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">Appearance</div>
-            {APPEARANCES.map((item) => (
-              <DropdownItem
-                key={item.id}
-                selected={appearance === item.id}
-                icon={item.id === 'starlight' ? <Sun size={13} /> : item.id === 'moonlight' ? <Moon size={13} /> : <Monitor size={13} />}
-                label={item.label}
-                desc={item.description}
-                onClick={() => { onAppearance(item.id); close(); }}
-              />
-            ))}
-          </>
-        )}
-      </Dropdown>
-      {project && (
-        <IconBtn title="Show or hide evidence (⌘J)" active={inspectorOpen} onClick={onToggleInspector}>
-          <PanelRight size={16} />
-        </IconBtn>
-      )}
+        {/* The one morph in the title bar. Its seed is a 28px square rather than a pill, which is
+            the case that shows whether the corner really interpolates: it starts at 8px, not
+            round. Pinned rather than tiered — see `Toolbar`'s note on menus in overflow menus. */}
+        <SeedMenu
+          label="Change appearance"
+          // `shrink-0` for the same reason the toolbar buttons have it: an item that squashes
+          // reports that it fits at any width, which makes the overflow measurement a lie.
+          triggerClassName="no-drag shrink-0"
+          trigger={(open) => (
+            <span
+              title="Change appearance"
+              className={cn(
+                'flex size-7 items-center justify-center rounded-lg transition-colors',
+                open ? 'bg-hover text-ember' : 'text-faint hover:bg-hover hover:text-ink',
+              )}
+            >
+              <Palette size={15} />
+            </span>
+          )}
+        >
+          {(close) => (
+            <>
+              <SeedMenuLabel>Appearance</SeedMenuLabel>
+              {APPEARANCES.map((item) => (
+                <SeedMenuItem
+                  key={item.id}
+                  selected={appearance === item.id}
+                  icon={item.id === 'starlight' ? <Sun size={13} /> : item.id === 'moonlight' ? <Moon size={13} /> : <Monitor size={13} />}
+                  label={item.label}
+                  desc={item.description}
+                  onClick={() => { onAppearance(item.id); close(); }}
+                />
+              ))}
+            </>
+          )}
+        </SeedMenu>
+      </Toolbar>
     </header>
   );
 }

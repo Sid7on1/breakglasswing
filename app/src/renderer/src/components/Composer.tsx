@@ -6,7 +6,7 @@ import {
 import { CompletionItem, ControlsMsg, UiSnapshot } from '../protocol';
 import { cn } from '../lib/cn';
 import { Button } from './ui/button';
-import { Dropdown, DropdownItem } from './ui/dropdown';
+import { SeedMenu, SeedMenuItem, SeedMenuLabel, SeedMenuNote, SeedMenuReadout, SeedMenuSeparator } from './ui/morph/SeedMenu';
 import type { SupervisorStatus } from '../global';
 import { inferLane, LANE_LABEL, type LaneInference, type TaskLane } from '../lane.inference';
 
@@ -277,7 +277,8 @@ export function Composer({
           </button>
 
           {/* The lane chip: what Bimax thinks this request is, and one click to correct it. */}
-          <Dropdown
+          <SeedMenu
+            label="Task type"
             trigger={(open) => (
               <ComposerPill
                 open={open}
@@ -291,18 +292,16 @@ export function Composer({
           >
             {(close) => (
               <>
-                <div className="px-2.5 pt-1.5 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">
-                  What is this task?
-                </div>
-                <div className="px-2.5 pb-1.5 text-[10.5px] leading-relaxed text-faint">{laneWhy}</div>
-                <DropdownItem
+                <SeedMenuLabel>What is this task?</SeedMenuLabel>
+                <SeedMenuNote>{laneWhy}</SeedMenuNote>
+                <SeedMenuItem
                   icon={<Code2 size={13} />}
                   selected={lane === 'code'}
                   label={LANE_LABEL.code}
                   desc="Work on this project’s files, tests and commands"
                   onClick={() => { setLaneOverride('code'); close(); }}
                 />
-                <DropdownItem
+                <SeedMenuItem
                   icon={<AppWindow size={13} />}
                   selected={lane === 'mac'}
                   label={LANE_LABEL.mac}
@@ -311,13 +310,20 @@ export function Composer({
                 />
               </>
             )}
-          </Dropdown>
+          </SeedMenu>
 
-          <Dropdown trigger={(open) => <ComposerPill open={open} icon={<Shield size={13} />} label={activeLevel.short} title={activeLevel.label} />}>
+          {/* Widest of the strip's menus: in `custom` it grows three sections deep, and `fitHeight`
+              means the surface is exactly as tall as whichever shape it is in rather than sized for
+              its largest one. */}
+          <SeedMenu
+            label="Permission level"
+            width={300}
+            trigger={(open) => <ComposerPill open={open} icon={<Shield size={13} />} label={activeLevel.short} title={activeLevel.label} />}
+          >
             {(close) => (
               <>
                 {CONTROL_LEVELS.map((level) => (
-                  <DropdownItem
+                  <SeedMenuItem
                     key={level.id}
                     selected={level.id === activeLevel.id}
                     label={level.label}
@@ -331,12 +337,10 @@ export function Composer({
                 ))}
                 {permission === 'custom' && (
                   <>
-                    <div className="my-1 border-t border-line" />
-                    <div className="px-2.5 pt-1 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">
-                      How Bimax works
-                    </div>
+                    <SeedMenuSeparator />
+                    <SeedMenuLabel>How Bimax works</SeedMenuLabel>
                     {ADVANCED_MODES.map((m) => (
-                      <DropdownItem
+                      <SeedMenuItem
                         key={m.id}
                         icon={m.icon}
                         selected={m.id === activeMode.id}
@@ -345,12 +349,10 @@ export function Composer({
                         onClick={() => { onControls({ mode: m.id as ControlsMsg['mode'] }); close(); }}
                       />
                     ))}
-                    <div className="my-1 border-t border-line" />
-                    <div className="px-2.5 pt-1 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">
-                      Approvals
-                    </div>
+                    <SeedMenuSeparator />
+                    <SeedMenuLabel>Approvals</SeedMenuLabel>
                     {ADVANCED_AUTONOMY.map((option) => (
-                      <DropdownItem
+                      <SeedMenuItem
                         key={option.id}
                         selected={readOnlyMode && option.id === 'plan'}
                         label={option.label}
@@ -362,7 +364,7 @@ export function Composer({
                 )}
               </>
             )}
-          </Dropdown>
+          </SeedMenu>
 
           <span className="flex-1" />
 
@@ -377,28 +379,52 @@ export function Composer({
             </span>
           )}
 
-          <Dropdown
-            align="right"
+          {/*
+            The first surface on Seed Morph v2 (docs/motion/SEED_MORPH_BRIEF.md, Prompt 2 §72): the
+            pill physically becomes the menu and folds back into it.
+
+            It also stopped being a one-item menu. "Change model…" alone made the pill a button
+            wearing a chevron: the label already showed the work model, so the only thing the menu
+            could tell you was that a window existed. Naming both loaded slots means the common
+            question — *what is actually running right now?* — is answered by the control that
+            claims to show it, and the window is one row further on for the case that needs it.
+          */}
+          <SeedMenu
+            label="Model"
+            width={280}
             trigger={(open) => <ComposerPill open={open} icon={<Cpu size={13} />} label={shortModel(snapshot?.models.coding)} mono />}
           >
             {(close) => (
-              <DropdownItem label="Change model…" desc="Slots, reasoning effort and what the engine actually kept" onClick={() => { onOpenModels(); close(); }} />
+              <>
+                <SeedMenuLabel>Loaded</SeedMenuLabel>
+                {/* Readouts, not disabled controls: the engine picks between these per turn, so
+                    there is nothing to choose — but "which model is actually loaded" is the whole
+                    reason to open this menu, and a disabled style would draw the answer faintest. */}
+                <SeedMenuReadout label="Work" value={snapshot?.models.coding ?? 'not reported'} />
+                <SeedMenuReadout label="Quick" value={snapshot?.models.lite ?? 'not reported'} />
+                <SeedMenuSeparator />
+                <SeedMenuItem
+                  label="Change model…"
+                  desc="Slots, reasoning effort and what the engine actually kept"
+                  onClick={() => { onOpenModels(); close(); }}
+                />
+              </>
             )}
-          </Dropdown>
+          </SeedMenu>
 
-          <Dropdown
-            align="right"
+          <SeedMenu
+            label="Model quality"
             trigger={(open) => <ComposerPill open={open} label={activeTier.short} title={activeTier.desc} />}
           >
             {(close) => (
               <>
-                <div className="px-2.5 pt-1.5 pb-1 text-[9.5px] font-semibold tracking-[0.1em] text-faint uppercase">Model quality</div>
+                <SeedMenuLabel>Model quality</SeedMenuLabel>
                 {TIERS.map((t) => (
-                  <DropdownItem key={t.id} selected={(tier || 'auto') === t.id} label={t.label} desc={t.desc} onClick={() => { onControls({ tier: t.id as ControlsMsg['tier'] }); close(); }} />
+                  <SeedMenuItem key={t.id} selected={(tier || 'auto') === t.id} label={t.label} desc={t.desc} onClick={() => { onControls({ tier: t.id as ControlsMsg['tier'] }); close(); }} />
                 ))}
               </>
             )}
-          </Dropdown>
+          </SeedMenu>
           {queued && (
             <span className="hidden items-center gap-1.5 text-[10px] text-dim sm:flex">
               <span className="signal-beacon size-1.5 rounded-full bg-amber" /> Starting your task…
@@ -421,7 +447,15 @@ export function Composer({
   );
 }
 
-function ComposerPill({
+/**
+ * The composer strip's control shape — and, since the model menu became a Seed Morph, the shape a
+ * surface has to grow out of.
+ *
+ * Exported so the Motion Lab can seed a real morph from the real control rather than from a copy of
+ * its classes: the seed's corner radius and box are measured off this element, so a harness that
+ * reproduced the markup would be verifying its own reproduction.
+ */
+export function ComposerPill({
   open, icon, label, mono = false, tone = 'default', title, testId,
 }: {
   open: boolean;
