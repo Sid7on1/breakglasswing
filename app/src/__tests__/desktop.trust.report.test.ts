@@ -23,6 +23,22 @@ import type { ComponentName, Resolution } from '../main/runtime.paths';
 
 const repo = path.resolve(__dirname, '..', '..', '..');
 const read = (relative: string): string => fs.readFileSync(path.join(repo, relative), 'utf8');
+const stripComments = (code: string): string =>
+  code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+/**
+ * Slice one top-level function out of a source file: from its signature to the closing brace in
+ * column 0. Nested braces are all indented, so this needs no parser — and every caller asserts
+ * something positive about the slice, so a bad cut fails loudly instead of silently emptying the
+ * scope and letting the bans below pass over nothing.
+ */
+const topLevelFunction = (source: string, signature: string): string => {
+  const from = source.indexOf(signature);
+  if (from < 0) throw new Error(`no such function: ${signature}`);
+  const to = source.indexOf('\n}\n', from);
+  if (to < 0) throw new Error(`unterminated function: ${signature}`);
+  return source.slice(from, to + 2);
+};
 
 const PACKAGED_BUILD: BuildFacts = {
   packaged: true,
@@ -236,8 +252,7 @@ describe('the declared macOS floor is one number everywhere', () => {
 
 describe('reporting is read-only and cannot prompt', () => {
   test('the trust module performs no probing of its own', () => {
-    const code = read('app/src/main/trust.ts')
-      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    const code = stripComments(read('app/src/main/trust.ts'));
     expect(code).not.toMatch(/from\s+'electron'/);
     // Match process-launching identifiers, not harmless words such as `executableSha256`.
     expect(code).not.toMatch(/\b(?:spawn|exec|child_process)\b/);
@@ -245,14 +260,31 @@ describe('reporting is read-only and cannot prompt', () => {
     expect(code).not.toMatch(/process\.(versions|platform|env)/);
   });
 
-  test('the main process uses only the non-prompting permission APIs', () => {
+  test('the trust report is built only from the non-prompting permission APIs', () => {
     const main = read('app/src/main/index.ts');
-    // Query-only forms. The prompting variants are askForMediaAccess and
-    // isTrustedAccessibilityClient(true).
-    expect(main).toContain('isTrustedAccessibilityClient(false)');
-    expect(main).toContain("getMediaAccessStatus('screen')");
-    expect(main).not.toContain('askForMediaAccess');
-    expect(main).not.toContain('isTrustedAccessibilityClient(true)');
+    // Scoped to the reporting path, NOT to index.ts as a whole. The main process does own one
+    // legitimate prompting call — `permissions:request-microphone`, which Apple requires the
+    // responsible app to issue itself — and a file-wide ban made that path and this invariant
+    // mutually exclusive. What must never prompt is *reporting*: opening the Trust Center cannot
+    // be the thing that raises a macOS dialog.
+    const builder = stripComments(topLevelFunction(main, 'async function currentTrustReport()'));
+    // Self-checking scope: these are the report's only two permission probes, so if the slice ever
+    // stops covering the real builder these fail rather than the bans passing over a stale cut.
+    expect(builder).toContain('isTrustedAccessibilityClient(false)');
+    expect(builder).toContain("getMediaAccessStatus('screen')");
+    // …and the channel must still reach that builder, so the scope cannot drift off the live path.
+    expect(main).toMatch(/'trust:report'[^;]*currentTrustReport\(\)/);
+
+    // The builder plus every module it draws report facts from. Only engine.ts can even reach
+    // Electron; the rest are pure, and the ban keeps it that way.
+    const reportingPath = [
+      builder,
+      ...['trust', 'engine', 'manual-alpha.trust', 'release.integrity']
+        .map((m) => stripComments(read(`app/src/main/${m}.ts`))),
+    ].join('\n');
+    // The prompting variants of the two APIs above.
+    expect(reportingPath).not.toContain('askForMediaAccess');
+    expect(reportingPath).not.toContain('isTrustedAccessibilityClient(true)');
   });
 
   test('the channel is registered through the guarded helper like every other', () => {
