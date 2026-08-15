@@ -5,50 +5,21 @@
 //        node app/scripts/screenshot-ui.mjs --quick → welcome + home only
 import puppeteer from 'puppeteer';
 import path from 'node:path';
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const repoDir = path.resolve(appDir, '..');
 const outDir = path.join(appDir, 'release');
 mkdirSync(outDir, { recursive: true });
 
-/**
- * The website is a third product, and it publishes these shots.
- *
- * They used to reach site/public/media by hand, and by 2026-08-15 they had silently drifted: the
- * site was serving a `ui-home.png` and `ui-transcript.png` whose bytes no longer matched anything
- * the app could produce. Nobody would notice, because a stale screenshot of your own UI still
- * looks like your UI — just an older one.
- *
- * A manual copy between two products is a drift generator. Publishing is therefore part of the
- * same run that captures, and the list below is exactly what site/src/lib/content.tsx and
- * site/src/App.tsx reference. Set BIMAX_SKIP_SITE_PUBLISH=1 to capture without publishing.
- */
-const SITE_PUBLISHED = ['ui-home', 'ui-transcript', 'ui-gallery', 'ui-review', 'ui-diff', 'ui-terminal'];
-const siteMediaDir = path.join(repoDir, 'site', 'public', 'media');
-
-function publishToSite() {
-  if (process.env.BIMAX_SKIP_SITE_PUBLISH === '1') return;
-  if (!existsSync(siteMediaDir)) {
-    console.warn(`site media dir absent, skipping publish: ${siteMediaDir}`);
-    return;
-  }
-  const published = [];
-  for (const name of SITE_PUBLISHED) {
-    const from = path.join(outDir, `${name}.png`);
-    // A missing shot means the capture above changed; say so rather than leaving the old one in
-    // place, which is the exact failure this function exists to prevent.
-    if (!existsSync(from)) {
-      console.warn(`NOT published (never captured): ${name}.png — site keeps its previous copy`);
-      continue;
-    }
-    copyFileSync(from, path.join(siteMediaDir, `${name}.png`));
-    published.push(name);
-  }
-  console.log(`published to site/public/media: ${published.join(', ')}`);
-}
+// This script writes to the desktop app's own output directory and nowhere else.
+//
+// The website publishes some of these same shots, but it is a separate product and keeps its own
+// copies under site/public/media, which it updates on its own schedule. An earlier version of this
+// script pushed into that directory directly — which made a website concern a step of the app
+// build, so `npm run build` for the app could not succeed without the site checked out. The two
+// builds are independent; if the site's copies go stale, that is the site's build to fix.
 
 const root = path.join(appDir, 'out/renderer');
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -564,4 +535,3 @@ await page.screenshot({ path: path.join(outDir, 'ui-modal.png') });
 await browser.close();
 server.close();
 console.log('screenshots:', ['ui-welcome', 'ui-home', 'ui-gallery', 'ui-transcript', 'ui-agents', 'ui-agents-launch', 'ui-map', 'ui-health', 'ui-mind', 'ui-review', 'ui-diff', 'ui-files', 'ui-editor', 'ui-terminal', 'ui-settings', 'ui-palette', 'ui-modal'].map((n) => `release/${n}.png`).join(', '));
-publishToSite();

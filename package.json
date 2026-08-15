@@ -13,6 +13,7 @@
     "start": "node bin/bimax.js",
     "dev": "tsx src/index.ts",
     "build": "tsc && chmod +x bin/bimax.js",
+    "build:engine": "bun build src/index.ts --compile --format=cjs --outfile .engine-local/bimax-engine && rm -f .*.bun-build",
     "postinstall": "node -e \"try{require('fs').existsSync(require('path').join(process.cwd(),'.breakglass','config.json'))||require('./scripts/postinstall')()}catch(e){}\"",
     "test": "jest --coverage",
     "test:ci": "jest --coverage=false",
