@@ -1,4 +1,4 @@
-import { inspectActionReceipt } from '../../app/src/renderer/src/receipt.inspector';
+import { inspectActionReceipt } from '../renderer/src/receipt.inspector';
 
 describe('typed action receipt inspector', () => {
   test('renders the native service receipt without inferring focus or evidence', () => {

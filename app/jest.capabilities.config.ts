@@ -12,6 +12,12 @@ const config: Config = {
     // need a DOM stay in the design-preview harness; this root is for the parts a layout engine
     // cannot make more true.
     '<rootDir>/src/renderer/src/components/ui',
+    // Desktop integration tests that used to live in the CLI's suite (src/__tests__) and reach
+    // across into this app via `../../app/src/...`. They never imported anything from the CLI, so
+    // they were purely misfiled — and their presence meant `npm test` at the repo root silently
+    // required the desktop app's source to be checked out. They are this product's tests; they run
+    // with this product's runner.
+    '<rootDir>/src/__tests__',
   ],
   testMatch: ['**/__tests__/**/*.test.ts'],
   transform: {

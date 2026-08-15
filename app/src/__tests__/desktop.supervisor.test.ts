@@ -7,16 +7,16 @@
 import {
   EngineSupervisor, EngineHandle, SpawnCallbacks, SupervisorDeps, SupervisorTimeouts,
   parseRecoveryAction, isSafeToReplay, EXPECTED_PROTOCOL,
-} from '../../app/src/main/supervisor/supervisor';
-import { transition, bootProgress, isStartupPhase } from '../../app/src/main/supervisor/machine';
+} from '../main/supervisor/supervisor';
+import { transition, bootProgress, isStartupPhase } from '../main/supervisor/machine';
 import {
   classifyExit, decideRestart, consecutiveCrashes, shedProfile, DEFAULT_POLICY, PolicyConfig,
-} from '../../app/src/main/supervisor/policy';
-import { planCapabilities, profileForMemory, minProfile } from '../../app/src/main/supervisor/resources';
+} from '../main/supervisor/policy';
+import { planCapabilities, profileForMemory, minProfile } from '../main/supervisor/resources';
 import {
   CrashJournal, redactSecrets, appendRecord, parseJournal, serializeJournal, MAX_RECORDS, MAX_LOG_TAIL_CHARS,
-} from '../../app/src/main/supervisor/journal';
-import { CrashRecord, SupervisorStatus } from '../../app/src/main/supervisor/types';
+} from '../main/supervisor/journal';
+import { CrashRecord, SupervisorStatus } from '../main/supervisor/types';
 
 // ---------------------------------------------------------------------------------------------
 // Harness: fake clock/timers/spawn — every test drives time explicitly.

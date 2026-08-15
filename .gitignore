@@ -3,6 +3,9 @@
 coverage/
 dist/
 .breakglass/
+# The engine that app/scripts/build-local-mac.sh compiles from src/ for a local desktop build.
+# A build artifact of the CLI, consumed by the app — never a source of truth, never committed.
+.engine-local/
 src/**/evolve_staging_*
 *.backup_*
 # Covers node_modules, the node_modules.nosync real dir, AND iCloud conflict-copies like

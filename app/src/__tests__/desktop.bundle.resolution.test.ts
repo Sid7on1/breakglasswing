@@ -18,9 +18,9 @@ import {
   resolveEngineCommand, resolveNativeComponent, buildEngineChildEnv, describeRefusal,
   packagedEnginePath, PackagedRuntimeError, OVERRIDE_ENV, NATIVE_COMPONENT_ENV,
   EngineArtifactError, stagedEnginePath, type RuntimeLayout,
-} from '../../app/src/main/runtime.paths';
-import { EngineSupervisor } from '../../app/src/main/supervisor/supervisor';
-import { CrashJournal } from '../../app/src/main/supervisor/journal';
+} from '../main/runtime.paths';
+import { EngineSupervisor } from '../main/supervisor/supervisor';
+import { CrashJournal } from '../main/supervisor/journal';
 
 const APP = '/Applications/Bimax.app';
 const RESOURCES = `${APP}/Contents/Resources`;
@@ -355,7 +355,7 @@ describe('a broken packaged app fails visibly rather than crashing the shell', (
 describe('this slice changed no Computer Use behaviour', () => {
   test('the resolver decides locations only — it never launches or routes anything', () => {
     const source = require('node:fs').readFileSync(
-      path.join(__dirname, '..', '..', 'app', 'src', 'main', 'runtime.paths.ts'), 'utf8',
+      path.join(__dirname, '..', 'main', 'runtime.paths.ts'), 'utf8',
     );
     const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     expect(code).not.toMatch(/spawn|exec|child_process|XPCConnection|AXIsProcessTrusted/i);

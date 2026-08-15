@@ -24,11 +24,11 @@ import {
   asBoundedInt, asBoundedString, asFileContent, asPtyInput,
   asGitPathspec, asSupervisorAction, isProtocolFrame, resolveWithinRoot,
   SUPERVISOR_ACTIONS,
-} from '../../app/src/main/security';
-import { listDir, readFilePreview, writeFileContent } from '../../app/src/main/files';
-import { gitDiff } from '../../app/src/main/git';
+} from '../main/security';
+import { listDir, readFilePreview, writeFileContent } from '../main/files';
+import { gitDiff } from '../main/git';
 
-const repo = path.resolve(__dirname, '..', '..');
+const repo = path.resolve(__dirname, '..', '..', '..');
 const read = (relative: string): string => fs.readFileSync(path.join(repo, relative), 'utf8');
 
 // Electron's own support policy is "the latest three stable majors". 33 was already out of support

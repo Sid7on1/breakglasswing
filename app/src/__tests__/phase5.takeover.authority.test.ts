@@ -13,14 +13,14 @@
  */
 import {
   UserTakeoverAuthority, parseTakeoverRequest, startUserTakeoverBroker,
-} from '../../app/src/main/takeover';
+} from '../main/takeover';
 import {
   refreshTakeoverAuthority, readTakeoverConfig,
   TAKEOVER_ENDPOINT_ENV, TAKEOVER_TOKEN_ENV, TAKEOVER_REQUIRED_ENV,
-} from '../../app/src/capabilities/mac/takeover.authority';
-import { buildTrustReport } from '../../app/src/main/trust';
-import { NativeInputInterlock } from '../../app/src/capabilities/mac/native.input.interlock';
-import { buildEngineChildEnv } from '../../app/src/main/runtime.paths';
+} from '../capabilities/mac/takeover.authority';
+import { buildTrustReport } from '../main/trust';
+import { NativeInputInterlock } from '../capabilities/mac/native.input.interlock';
+import { buildEngineChildEnv } from '../main/runtime.paths';
 
 describe('takeover authority (Electron main)', () => {
   test('starts running and records who paused, when, and why', () => {

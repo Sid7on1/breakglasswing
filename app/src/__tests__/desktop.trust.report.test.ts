@@ -18,10 +18,10 @@ import yaml from 'js-yaml';
 import {
   buildTrustReport, toComponentReport, toDisposition, MINIMUM_MACOS,
   type BuildFacts, type PermissionReadings, type TrustReport,
-} from '../../app/src/main/trust';
-import type { ComponentName, Resolution } from '../../app/src/main/runtime.paths';
+} from '../main/trust';
+import type { ComponentName, Resolution } from '../main/runtime.paths';
 
-const repo = path.resolve(__dirname, '..', '..');
+const repo = path.resolve(__dirname, '..', '..', '..');
 const read = (relative: string): string => fs.readFileSync(path.join(repo, relative), 'utf8');
 
 const PACKAGED_BUILD: BuildFacts = {

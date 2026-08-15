@@ -10,22 +10,22 @@
  * They live in the Terminal suite alongside `trust.center.model.test.ts` and
  * `receipt.inspector.test.ts`, which is where the existing Desktop pure-logic tests already run.
  */
-import { deriveTaskState } from '../../app/src/renderer/src/task.state';
+import { deriveTaskState } from '../renderer/src/task.state';
 import {
   deriveMacSession, describeEvidenceAge, describeMacAction, isMacToolCall, EVIDENCE_MAX_AGE_MS,
   type MacToolCall,
-} from '../../app/src/renderer/src/mac.session.model';
-import { DEFAULT_FRAME_MAX_AGE_MS } from '../../app/src/capabilities/mac/frame';
-import { inspectorTabs, resolveActiveTab } from '../../app/src/renderer/src/inspector.model';
-import { buildFinalReceipt } from '../../app/src/renderer/src/final.receipt.model';
-import { deriveBrowserSession } from '../../app/src/renderer/src/browser.session.model';
+} from '../renderer/src/mac.session.model';
+import { DEFAULT_FRAME_MAX_AGE_MS } from '../capabilities/mac/frame';
+import { inspectorTabs, resolveActiveTab } from '../renderer/src/inspector.model';
+import { buildFinalReceipt } from '../renderer/src/final.receipt.model';
+import { deriveBrowserSession } from '../renderer/src/browser.session.model';
 import {
   normalizeUiSnapshot, normalizeReviewSnapshot, normalizeSubAgents, normalizeTodos,
-} from '../../app/src/renderer/src/protocol.normalize';
-import type { ReviewSnapshot } from '../../app/src/renderer/src/protocol';
-import { MAC_PROVIDER_SERVER_NAME, macToolIdentity } from '../../app/src/shared/mac.provider';
-import { buildEngineChildEnv } from '../../app/src/main/runtime.paths';
-import { inferLane, needsTrustCenterBeforeRun } from '../../app/src/renderer/src/lane.inference';
+} from '../renderer/src/protocol.normalize';
+import type { ReviewSnapshot } from '../renderer/src/protocol';
+import { MAC_PROVIDER_SERVER_NAME, macToolIdentity } from '../shared/mac.provider';
+import { buildEngineChildEnv } from '../main/runtime.paths';
+import { inferLane, needsTrustCenterBeforeRun } from '../renderer/src/lane.inference';
 
 const NOW = 1_800_000_000_000;
 

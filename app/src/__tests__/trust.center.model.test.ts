@@ -1,5 +1,5 @@
-import type { TrustReport } from '../../app/src/renderer/src/global';
-import { summarizeTrustReport } from '../../app/src/renderer/src/trust.center.model';
+import type { TrustReport } from '../renderer/src/global';
+import { summarizeTrustReport } from '../renderer/src/trust.center.model';
 
 const report = (overrides: Partial<TrustReport> = {}): TrustReport => {
   const signature = {

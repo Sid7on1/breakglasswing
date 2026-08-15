@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { supportsProtocolMajor } from '../../app/src/shared/protocol.compat.gen';
+import { supportsProtocolMajor } from '../shared/protocol.compat.gen';
 
-const repo = path.resolve(__dirname, '..', '..');
+const repo = path.resolve(__dirname, '..', '..', '..');
 const read = (file: string) => fs.readFileSync(path.join(repo, file), 'utf8');
 
 describe('Phase 3 versioned client protocol', () => {
