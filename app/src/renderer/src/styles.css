@@ -458,6 +458,41 @@
     inset 0 0 20px var(--glass-inner-glow);
 }
 
+/* The morphing surface — glass whose material changes across the flight.
+
+   Prompt 1 §11: a morph that resizes a box with fixed glass is the tell that it *is* a resized box.
+   The material of a small, thick, strongly-curved control genuinely does not look like the material
+   of a large flat sheet, and holding it constant is what makes an expansion read as a zoom of a
+   picture rather than as a thing changing shape.
+
+   Two dials, both written from JS each frame (see morph/paint.ts):
+
+     --morph-elevation  0 = flush with the surface behind it, 1 = floating over the workspace.
+                        A control lifts off the toolbar as it becomes a panel; a sidebar never does,
+                        because a shadow along a window edge reads as a second window.
+     --morph-sheen      how concentrated the specular highlight is. Strong and tight on a pill,
+                        broad and faint across a sheet.
+
+   The third dial is `--glass-thickness`, which is not redeclared here: it is the lens band's width
+   and the existing material already reads it, so the morph drives the same knob the static classes
+   use rather than a parallel one.
+
+   `color-mix(… calc(var() * 100%), transparent)` scales an already-translucent colour's alpha,
+   which is the only way to make a box-shadow's strength a variable — box-shadow takes no opacity of
+   its own, and animating a wrapper's `opacity` instead would fade the surface's contents with it. */
+.morph-surface {
+  --morph-elevation: 1;
+  --morph-sheen: 0.6;
+  box-shadow:
+    /* Contact. Present at any elevation: even a flush surface has an edge. */
+    0 1px 2px rgb(0 0 0 / 0.10),
+    0 10px 26px -8px color-mix(in srgb, rgb(0 0 0 / 0.30) calc(var(--morph-elevation) * 100%), transparent),
+    0 34px 70px -22px color-mix(in srgb, rgb(0 0 0 / 0.40) calc(var(--morph-elevation) * 100%), transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--glass-sheen) calc(var(--morph-sheen) * 100%), transparent),
+    inset 0 -1px 0 var(--glass-edge),
+    inset 0 0 34px var(--glass-inner-glow);
+}
+
 /* Expanded: the window owns the screen, so there is no desktop behind it to refract. Every layer
    that was pretending to be a lens stops pretending, rather than filtering an opaque app surface
    into a slightly-wrong grey. */
@@ -997,4 +1032,99 @@
     transition-duration: 60ms !important;
   }
   .pressable::after { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+   Platform state: the window, and the user's accessibility settings.
+
+   Prompt 2 §15, §28–§31. Three of these four are read straight from the platform through CSS media
+   queries rather than plumbed over IPC, and that is deliberate: Chromium already resolves
+   `prefers-reduced-transparency` and `prefers-contrast` from the real macOS settings, live, with no
+   round trip and nothing to keep in sync. The fourth — key-window state — has no CSS in Chromium
+   (`:window-inactive` is WebKit's), so it arrives as `data-window-active` from the main process.
+   ══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* Not the key window (§15).
+
+   Everything here is a *decoration*, and that is the whole rule: labels, values, code, diffs and
+   terminal output are untouched, because the most common reason a Mac window is not key is that
+   someone is reading it while working in another one. What eases off is the app asserting itself —
+   selection intensity, the glass's own liveliness, the accent on things that are merely current.
+
+   Transitioned, not switched: Cmd-Tabbing back to a window that snaps its contrast is a flinch. */
+:root[data-window-active='false'] .liquid-glass {
+  --glass-sheen: color-mix(in srgb, var(--glass-edge) 60%, transparent);
+  --glass-inner-glow: transparent;
+  --glass-lens-brightness: 1;
+}
+
+:root[data-window-active='false'] .selection-strong,
+:root[data-window-active='false'] [data-selected='true'] {
+  opacity: 0.82;
+}
+
+:root[data-window-active='false'] .signal-beacon {
+  /* A pulsing indicator in a background window is movement in the corner of the eye for a state
+     nobody is watching. The dot stays — the state is still true — it just stops asking. */
+  animation: none;
+  opacity: 0.7;
+}
+
+.liquid-glass,
+.selection-strong,
+[data-selected='true'] {
+  transition: opacity var(--dur-snappy) var(--ease-snappy);
+}
+
+/* Reduce Transparency (§30).
+
+   Fall back to a stronger material *while preserving hierarchy* — the failure this guards against
+   is not "less pretty", it is a panel whose text no longer separates from what is behind it. So the
+   veils go opaque and the lens is switched off entirely; the edges and the elevation stay, because
+   they are what still says "this is a surface above that one" once the translucency is gone. */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-veil: var(--glass-solid);
+    --app-veil: var(--color-bg);
+    --glass-lens-brightness: 1;
+    --glass-inner-glow: transparent;
+  }
+  .liquid-glass::before,
+  .liquid-glass::after {
+    /* The lens bands sample a backdrop that is no longer visible through anything. Removing them
+       also removes two `backdrop-filter` passes per surface, which is the one place where the
+       accessible path is also the fast one. */
+    display: none;
+  }
+  .liquid-glass {
+    background: var(--glass-veil);
+    backdrop-filter: none;
+  }
+}
+
+/* Increase Contrast (§31).
+
+   The specific failure named in the brief is hard-coded hairline borders vanishing, so the borders
+   are what get fixed — at the token, so every surface that draws one is covered including the ones
+   written after this block. Text gets the same treatment: `--color-dim` and `--color-faint` are
+   the two that exist to be quiet, and quiet is exactly what this setting is asking us to stop. */
+@media (prefers-contrast: more) {
+  :root {
+    --color-line: color-mix(in srgb, var(--color-ink) 42%, var(--color-bg));
+    --color-dim: color-mix(in srgb, var(--color-ink) 88%, var(--color-bg));
+    --color-faint: color-mix(in srgb, var(--color-ink) 70%, var(--color-bg));
+    --glass-edge: color-mix(in srgb, var(--color-ink) 34%, transparent);
+    --glass-edge-strong: color-mix(in srgb, var(--color-ink) 52%, transparent);
+  }
+  /* Focus must be unmistakable, not harmonious (§34 gives way to §31 here). */
+  :focus-visible {
+    outline-width: 3px;
+    outline-offset: 2px;
+  }
+  /* A selected row identified only by a 15% tint is identified by nothing at this setting. */
+  [data-selected='true'],
+  .bg-ember\/15 {
+    outline: 1.5px solid var(--color-ember);
+    outline-offset: -1.5px;
+  }
 }

@@ -31,7 +31,25 @@ export const INTENT_FRESHNESS_MS = 1200;
 /** The things a seed can come from. Anything else is a click on scenery. */
 const ACTIVATABLE = 'button, a[href], summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [data-seed]';
 
-interface Intent { rect: DOMRect; at: number }
+interface Intent {
+  /**
+   * The control itself, weakly.
+   *
+   * A rect is where the button *was*; between opening a surface and closing it the window may have
+   * been resized, the sidebar dragged wider, the toolbar reflowed into its overflow menu — so a
+   * surface that folds back into a remembered rectangle flies, very smoothly, to a place its button
+   * is no longer at (Prompt 1 §22, Prompt 2 §25). Keeping the element means the seed can be
+   * re-measured at the moment it is needed instead.
+   *
+   * Weak because this is module-level state that outlives the press: a strong reference would pin a
+   * detached DOM subtree — the whole dialog that has just unmounted, in the common case — until the
+   * user happens to click something else.
+   */
+  element: WeakRef<HTMLElement>;
+  /** The rect as it was at the press. The fallback for a control that has since gone away. */
+  rect: DOMRect;
+  at: number;
+}
 
 let last: Intent | null = null;
 
@@ -65,7 +83,7 @@ function record(event: Event): void {
   // A control with no box (display:none, or detached between the press and this handler) would
   // seed a zero-size flight from the top-left corner of the screen. No rect is better than that.
   if (!rect.width && !rect.height) return;
-  last = { rect, at: Date.now() };
+  last = { element: new WeakRef(element), rect, at: Date.now() };
 }
 
 function recordKey(event: KeyboardEvent): void {
@@ -81,8 +99,22 @@ function recordKey(event: KeyboardEvent): void {
  * Returns null rather than a stale rect — callers treat null as "no seed, fade instead".
  */
 export function recentIntentRect(window = INTENT_FRESHNESS_MS): DOMRect | null {
-  if (!last) return null;
-  return isFresh(last.at, Date.now(), window) ? last.rect : null;
+  return recentIntent(window)?.rect ?? null;
+}
+
+/**
+ * The last activated control itself, plus when it was pressed — for callers that will need to
+ * measure it again later.
+ *
+ * `at` is part of the result rather than hidden inside the freshness test because a seed handle has
+ * two different questions to answer with it. *Opening* asks "is this press recent enough to explain
+ * a surface appearing?", which is what the window is for. *Closing* asks "which control did this
+ * surface come from?", where recency is irrelevant and the honest answer is the one that was
+ * latched at open — so the caller compares timestamps rather than re-testing freshness.
+ */
+export function recentIntent(window = INTENT_FRESHNESS_MS): { element: HTMLElement | null; rect: DOMRect; at: number } | null {
+  if (!last || !isFresh(last.at, Date.now(), window)) return null;
+  return { element: last.element.deref() ?? null, rect: last.rect, at: last.at };
 }
 
 /** Drop the recorded intent. Used after a surface consumes it, so a second one cannot reuse it. */
