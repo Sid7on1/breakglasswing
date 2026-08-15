@@ -8,6 +8,9 @@ import {
 } from './policy';
 import { degradedCapabilities, minProfile, planCapabilities } from './resources';
 import { CrashJournal } from './journal';
+import {
+  CLIENT_MAX_COMPATIBLE_MAJOR, CLIENT_MIN_COMPATIBLE_MAJOR, supportsProtocolMajor,
+} from '../../shared/protocol.compat.gen';
 
 /**
  * EngineSupervisor — the authoritative engine lifecycle for the desktop app. Starts, monitors,
@@ -26,7 +29,7 @@ import { CrashJournal } from './journal';
  * so the whole lifecycle runs deterministically under test.
  */
 
-export const EXPECTED_PROTOCOL = 3;
+export const EXPECTED_PROTOCOL = CLIENT_MAX_COMPATIBLE_MAJOR;
 
 // ---------------------------------------------------------------------------------------------
 // Injected dependencies
@@ -140,6 +143,7 @@ export class EngineSupervisor {
   private childGen = 0;
   private spawnedAt = 0;
   private childProtocol: number | null = null;
+  private childIdentity: { version: string; buildCommit: string; features: string[] } | null = null;
   private intentionalStop = false;
   private watchdogVerdict: 'startup_timeout' | 'unresponsive' | 'protocol_failure' | null = null;
   private malformedLines = 0;
@@ -358,6 +362,7 @@ export class EngineSupervisor {
     this.heartbeatSeen = false;
     this.heartbeat = null;
     this.childProtocol = null;
+    this.childIdentity = null;
     this.malformedLines = 0;
     this.plan = planCapabilities(this.deps.memory(), this.deps.env, this.profileFloor);
     this.enter('spawning', 'launch');
@@ -384,7 +389,28 @@ export class EngineSupervisor {
     if (gen !== this.childGen) return; // stale child — its output must not touch current state
     const t = String(msg.t ?? '');
 
-    if (t === 'boot') {
+    if (t === 'hello') {
+      const major = Number(msg.protocolMajor);
+      const engineMin = Number(msg.minCompatibleMajor);
+      const engineMax = Number(msg.maxCompatibleMajor);
+      const overlaps = Number.isInteger(engineMin) && Number.isInteger(engineMax)
+        && Math.max(engineMin, CLIENT_MIN_COMPATIBLE_MAJOR) <= Math.min(engineMax, CLIENT_MAX_COMPATIBLE_MAJOR)
+        && supportsProtocolMajor(major);
+      if (!overlaps) {
+        this.childProtocol = Number.isFinite(major) ? major : null;
+        this.watchdogVerdict = 'protocol_failure';
+        this.deps.onNotice('error', `Engine protocol ${String(msg.protocolVersion ?? major)} is incompatible with Desktop ${CLIENT_MIN_COMPATIBLE_MAJOR}–${CLIENT_MAX_COMPATIBLE_MAJOR}.`);
+        this.killCurrentChild();
+        return;
+      }
+      const identity = msg.engine as Record<string, unknown> | undefined;
+      this.childProtocol = major;
+      this.childIdentity = {
+        version: String(identity?.version ?? 'unknown'),
+        buildCommit: String(identity?.buildCommit ?? 'unknown'),
+        features: Array.isArray(msg.features) ? msg.features.map(String) : [],
+      };
+    } else if (t === 'boot') {
       const phase = String(msg.phase ?? '') as EnginePhase;
       const res = transition(this.phase, phase);
       // Illegal here means out-of-order/backwards (dup line, phase we already passed) — keep going.
@@ -402,7 +428,14 @@ export class EngineSupervisor {
       this.heartbeatSeen = true;
       this.emitStatus();
     } else if (t === 'ready') {
-      this.childProtocol = Number(msg.protocol) || null;
+      const legacyMajor = Number(msg.protocol) || null;
+      if (this.childProtocol === null) this.childProtocol = legacyMajor;
+      if (legacyMajor !== null && !supportsProtocolMajor(legacyMajor)) {
+        this.watchdogVerdict = 'protocol_failure';
+        this.deps.onNotice('error', `Engine protocol v${legacyMajor} is incompatible with Desktop ${CLIENT_MIN_COMPATIBLE_MAJOR}–${CLIENT_MAX_COMPATIBLE_MAJOR}.`);
+        this.killCurrentChild();
+        return;
+      }
       const degraded = degradedCapabilities(this.plan).length > 0;
       const res = transition(this.phase, degraded ? 'degraded' : 'ready');
       if (res.ok) this.enter(res.phase, degraded ? 'capabilities_shed' : 'ready');
@@ -617,8 +650,8 @@ export class EngineSupervisor {
 
   private maybeSendPendingResume(): void {
     if (!this.pendingResume) return;
-    if (this.childProtocol !== null && this.childProtocol !== EXPECTED_PROTOCOL) {
-      this.deps.onNotice('warn', `Engine protocol v${this.childProtocol} ≠ app protocol v${EXPECTED_PROTOCOL} — skipped automatic session resume.`);
+    if (this.childProtocol !== null && this.childProtocol < 3) {
+      this.deps.onNotice('warn', `Engine protocol v${this.childProtocol} predates typed resume — skipped automatic session resume.`);
       this.pendingResume = null;
       return;
     }

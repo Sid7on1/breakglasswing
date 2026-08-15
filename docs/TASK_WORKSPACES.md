@@ -26,16 +26,12 @@ never as navigation:
 - **Outcome contract** — the ◆ strip: phase, passed/required criteria, active/
   waiting/blocked task counts, elapsed time for engine-owned long tasks.
 - **Task list** — the pinned todo panel above the prompt.
-- **Browser session** — the ◍ footer chip (host only), fed by the engine's
-  `ui_snapshot.computer` posture; warn-tinted when tainted web content has
-  entered the conversation. Details live in `/computer`. A live automated
-  browser is never invisible.
 - **Mind/goals/workspace chips** — compact state, expandable via `Ctrl+X`,
   `/self`, `/workspace`.
 
 State names are explicit where they exist today: sub-agents run → done/failed
-with phase; outcomes run → verified/blocked/failed; browser actions return
-running/reset/failed-with-reason summaries.
+with phase; outcomes run → verified/blocked/failed; coding and research tool
+calls return running/done/failed summaries.
 
 ## Why this fits BiMax
 
@@ -51,5 +47,4 @@ running/reset/failed-with-reason summaries.
 - Promoting a long-running *shell* process to its own live panel (today long
   shell output streams inline; acceptable, not ideal).
 - A keyboard task switcher across panels beyond `Ctrl+A`/`Ctrl+X`.
-- Browser panel with last-action/loop-state detail (the chip shows presence;
-  the failure-loop nudge lives in tool results).
+- Richer BrowserTool task state beyond its current transcript results.

@@ -313,16 +313,27 @@ export class ContextManager {
       if (m.role !== 'tool' || i >= clearBefore) return m;
       if (typeof m.content === 'string' && m.content.startsWith('[tool result cleared')) return m; // already stubbed
       cleared++;
-      // Code is never silently altered: an OLD code result is replaced whole with a LOSSLESS,
-      // RESOLVABLE reference — the file path when the read header carries one — so the model can
-      // restore the exact content by re-reading instead of trusting a truncated ghost.
+      // Code is never silently TRUNCATED: an old code result is evicted WHOLE and replaced with a
+      // resolvable reference — the file path when the read header carries one — so the model re-reads
+      // real content instead of reasoning over a half-cut ghost.
+      //
+      // It is deliberately NOT called lossless, and the stub must not promise verbatim restoration.
+      // A re-read returns the file as it is NOW, and the agent edits files: read foo.ts → evict →
+      // edit foo.ts → "re-read to restore it verbatim" would handed back different bytes while the
+      // model believed it had recovered the original. Resolvable is the honest claim; identical is
+      // not one we can make.
+      //
+      // Content-addressing (hash at eviction, verify at re-read) is what would earn the stronger
+      // word, and it is not done here on purpose: this function cannot see the re-read, which
+      // happens later inside the file tool, so a digest recorded here would be an unverified number
+      // nothing ever checks. Do the plumbing or keep the claim narrow — do not just add the hash.
       if (typeof m.content === 'string' && looksLikeCode(m.content)) {
         const file = m.content.match(/^FILE\s+(.+?):/m)?.[1];
         return {
           ...m,
           content: file
-            ? `[tool result cleared to save context — code from ${file}; re-read that file to restore it verbatim]`
-            : '[tool result cleared to save context — code output; re-run the tool to restore it verbatim]',
+            ? `[tool result cleared to save context — code from ${file}; re-read it for the current contents, which may have changed since]`
+            : '[tool result cleared to save context — code output; re-run the tool for a current result, which may differ from the cleared one]',
         };
       }
       return { ...m, content: '[tool result cleared to save context]' };

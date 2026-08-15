@@ -92,10 +92,10 @@ describe('normalized coordinate mapping (0–1000 VLM space)', () => {
 });
 
 describe('screenshot → next-turn vision observation', () => {
-  it('extracts the screenshot path only from a successful BrowserTool result', () => {
+  it('extracts a screenshot path from any successful structured provider result', () => {
     const ok = JSON.stringify({ ok: true, action: 'screenshot', screenshot: '/tmp/shot.png' });
     expect(screenshotFromToolResult('BrowserTool', ok)).toBe('/tmp/shot.png');
-    expect(screenshotFromToolResult('BashTool', ok)).toBeNull();
+    expect(screenshotFromToolResult('HostVisionTool', ok)).toBe('/tmp/shot.png');
     expect(screenshotFromToolResult('BrowserTool', JSON.stringify({ ok: false, screenshot: '/tmp/shot.png' }))).toBeNull();
     expect(screenshotFromToolResult('BrowserTool', 'not json')).toBeNull();
     expect(screenshotFromToolResult('BrowserTool', JSON.stringify({ ok: true, action: 'assert' }))).toBeNull();

@@ -13,7 +13,7 @@ The machine you run it on needs no Node, no Bun, no `node_modules`.
 
 ## Install
 
-macOS (arm64/x64) or Linux (x64/arm64):
+macOS (Apple Silicon or Intel):
 
 ```sh
 curl -fsSL https://bimax-liard.vercel.app/install | bash

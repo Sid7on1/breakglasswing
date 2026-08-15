@@ -306,7 +306,6 @@ type model struct {
 	fMcp       int            // connected (non-disabled) MCP server count
 	fMind      MindStrip      // mind layer: weak spots / drive deviations / compiled habits
 	fWorkspace WorkspaceStrip // multi-repo workspace: repo count/names for the status chip
-	fComputer  *ComputerStrip // computer-use posture: live browser page / desktop driver / taint
 	fOutcome   *OutcomeStrip  // active engine-owned outcome contract; nil for chat/simple questions
 
 	// statusExpiry: when non-zero, the footer status reverts to "Ready" once this time passes. Used
@@ -316,7 +315,7 @@ type model struct {
 
 func initialModel(e *Engine) model {
 	ta := textarea.New()
-	ta.Placeholder = "Ask BiMax…"
+	ta.Placeholder = "Ask BiMAX…"
 	ta.Prompt = "❯ "
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
@@ -642,7 +641,7 @@ func (m *model) handleEngine(o Outbound) {
 		m.reqIsMulti = o.IsMulti
 		m.reqSelected = make(map[int]bool)
 		// The turn-complete bell (events.go) never fires mid-turn: a multi-step gated task (e.g.
-		// ComputerTool's open→observe→type→observe→key→close) needs several APPROVALS deep into one
+		// a long external workflow) needs several APPROVALS deep into one
 		// long-running turn, each arriving after minutes of model reasoning between steps. Without
 		// an audible cue here, only the FIRST approval — the one that lands while the user is still
 		// watching right after they submit — ever gets noticed; later ones sit silently,
@@ -659,7 +658,6 @@ func (m *model) handleEngine(o Outbound) {
 			m.comps = o.Items
 			m.compIdx = 0
 			m.compOpen = len(o.Items) > 0
-			m.relayout()
 		}
 
 	case "event":
@@ -667,9 +665,10 @@ func (m *model) handleEngine(o Outbound) {
 	}
 }
 
-// append commits a transcript line: QUEUED for the terminal's native scrollback (flushed via
-// tea.Println by the Update wrapper) and also kept in a bounded in-memory slice for Ctrl+F search.
-// We never re-render committed lines — the terminal owns the visible transcript + its native scrollbar.
+// append commits a transcript line into the bounded in-memory slice that IS the transcript: under
+// the alternate screen (see main.go) the model owns it, every frame re-derives the visible window
+// from it, and the terminal has no scrollback of its own while the program runs — which is why
+// scrolling is ours to implement and why the whole transcript is printed once after exit.
 const (
 	transcriptCap  = 2000
 	transcriptKeep = 1500
@@ -689,12 +688,6 @@ func (m *model) append(line string) {
 		m.lines = append(m.lines[:0:0], m.lines[drop:]...) // keep the tail in a fresh backing array
 	}
 }
-
-// relayout / refresh are no-ops — the transcript is state (m.lines) and every frame re-derives the
-// visible window from it, so there is no separate viewport buffer to rebuild. Kept so the many
-// existing m.relayout()/m.refresh() call sites don't need touching.
-func (m *model) relayout() {}
-func (m *model) refresh()  {}
 
 // chromeLines is the live region below the committed transcript: the pending (un-flushed) tool run +
 // any in-flight running tool calls, then the ambient chrome (search/log panel, menu/completion

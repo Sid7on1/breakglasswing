@@ -5,7 +5,7 @@ baked in. The target machine needs **no Node, no Bun, no node_modules**.
 
 ## One-click install
 
-On any macOS (arm64/x64) or Linux (x64/arm64) machine:
+On macOS (Apple Silicon or Intel):
 
 ```sh
 curl -fsSL https://bimax-liard.vercel.app/install | bash
@@ -36,24 +36,26 @@ curl -fsSL https://bimax-liard.vercel.app/install | bash -s -- --uninstall
 On a build machine with bun ≥ 1.1 and go ≥ 1.26:
 
 ```sh
-BIMAX_VERSION=1.2.0 ./release.sh          # darwin-arm64 darwin-x64 linux-x64 linux-arm64
-./release.sh linux-x64                    # single target
+BIMAX_VERSION=1.2.0 ./release.sh          # darwin-arm64 + darwin-x64
+./release.sh darwin-arm64                 # single target
 ```
 
 Each target compiles the engine with `bun build --compile --target=bun-<os>-<arch>`
 (CJS format — ESM mangles the web-tree-sitter glue), embeds it in a cross-compiled Go
-binary (`-tags embedengine`), and produces `build/bimax-<os>-<arch>.tar.gz` plus
-`build/SHA256SUMS`. Publish all five files to the public
+binary (`-tags embedengine`), and produces `build/bimax-darwin-<arch>.tar.gz` plus
+`build/SHA256SUMS`. Publish both archives, the checksum manifest, and its signature when present to the public
 [`Sid7on1/bimax-releases`](https://github.com/Sid7on1/bimax-releases) release; the website
 installer pulls from its `releases/latest/download/` endpoint while this source repository
 remains private.
 
 ### Apple signing and notarization
 
-Tagged releases are built and archived by `.github/workflows/release.yml`, then promoted to the
-public binary repository with `scripts/publish-public-release.sh`. The macOS binaries
-are signed with hardened runtime and a secure timestamp, submitted to Apple's notary service, and
-then repackaged before `SHA256SUMS` is generated.
+Tagged releases can be built by `.github/workflows/release.yml` and promoted with
+`scripts/publish-public-release.sh`. The credential-gated path is designed to sign with hardened
+runtime and a timestamp and submit to Apple's notary service before regenerating `SHA256SUMS`.
+Do not describe an artifact as signed or notarized merely because this workflow exists: those facts
+require the actual Developer ID, notary, stapler and clean-Mac checks. The current Desktop channel
+is the unsigned/unnotarized manual alpha documented in `SECURITY_INSTALL.md`.
 
 The repository must define these GitHub Actions secrets:
 

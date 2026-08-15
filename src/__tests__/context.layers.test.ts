@@ -108,6 +108,34 @@ describe('ContextManager — layered passes (smart vs full)', () => {
     );
   });
 
+  it('the code eviction stub is resolvable but never promises verbatim restoration', async () => {
+    // The stub is read by the MODEL, so an overclaim here is a correctness trap rather than a
+    // wording nit: the agent edits files, so read foo.ts → evict → edit foo.ts → "re-read to
+    // restore it verbatim" hands back different bytes while the model believes it recovered the
+    // original. Only content-addressing could earn the stronger claim (see microCompact).
+    // Driven through reactiveDrain, which runs micro-compact directly: going via checkAndCompact
+    // would also fire snip/summarize at the pressure needed to trigger eviction, and those drop
+    // messages, so the assertion would be reading whatever survived rather than the stubs.
+    const cm = new ContextManager(noopLlm);
+    const code = 'FILE src/auth.ts:\nexport function login() { return 1; }';
+    const messages: Message[] = [
+      { role: 'user', content: 'go' },
+      ...Array.from({ length: 10 }).flatMap((_, i) => toolExchange(`c${i}`, `${code} // ${i}`)),
+    ];
+    const { messages: out, changed } = cm.reactiveDrain(messages);
+    expect(changed).toBe(true);
+    const cleared = out.filter(m => m.role === 'tool').slice(0, 4).map(m => String(m.content));
+
+    for (const stub of cleared) {
+      // Resolvable: it still names the exact file, so the model re-reads real content instead of
+      // reasoning over a truncated ghost.
+      expect(stub).toContain('src/auth.ts');
+      // ...and honest about what a re-read returns.
+      expect(stub).toMatch(/current contents, which may have changed/i);
+      expect(stub).not.toMatch(/verbatim|lossless|identical/i);
+    }
+  });
+
   it('micro-compact does NOT run at low pressure — old tool results stay intact', async () => {
     // Plenty of old tool results, but a huge window: destroying context the model may still
     // need (and churning history bytes → provider cache) buys nothing at 1% usage.

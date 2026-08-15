@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-11T13-27-33-782Z",
+  "started_at": "2026-08-11T13:27:33.786Z",
+  "ended_at": "2026-08-11T13:27:37.234Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J4",
+      "name": "Diagnose Mac permissions while coding stays usable",
+      "outcome": "fail",
+      "checks": [
+        {
+          "name": "journey completed",
+          "pass": false,
+          "observed": "Error: no clickable element matching \"Open & drag…\"\n    at clickByText (file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/harness.mjs:314:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async Object.j4 [as run] (file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/journeys.mjs:170:3)\n    at async main (file:///Users/vishsiddharth/Desktop/Bim"
+        }
+      ],
+      "pageErrors": [
+        "console: JSHandle@error (http://127.0.0.1:51996/assets/index-CnuCXM-B.js)",
+        "console: [renderer] unrecoverable render error JSHandle@error \n    at App (http://127.0.0.1:51996/assets/index-CnuCXM-B.js:77137:7)\n    at ErrorBoundary (http://127.0.0.1:51996/assets/index-CnuCXM-B.js:77550:1) (http://127.0.0.1:51996/assets/index-CnuCXM-B.js)"
+      ],
+      "accessibilityFindings": [],
+      "error": "Error: no clickable element matching \"Open & drag…\"\n    at clickByText (file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/harness.mjs:314:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at async Object.j4 [as run] (file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/journeys.mjs:170:3)\n    at async main (file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/journeys.mjs:691:17)\n    at async file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/journeys.mjs:808:1"
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 0,
+    "failed": 1
+  }
+}

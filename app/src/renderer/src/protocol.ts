@@ -10,12 +10,27 @@ export * from './protocol.gen';
 
 // --- Renderer-only payload shapes ------------------------------------------------------------
 
+import type { CatalogModelEntry, ProviderEntry } from './protocol.gen';
+
+/**
+ * A `catalogResult` with the wire envelope (`t`, `id`) stripped — what the model window actually
+ * consumes. `error` is not a failure to swallow: it means the provider's live model list could not
+ * be read, so `served` is unknown rather than false, and the UI must say "unverified" instead of
+ * hiding models it merely failed to confirm.
+ */
+export interface EngineCatalog {
+  providers: ProviderEntry[];
+  models: CatalogModelEntry[];
+  error?: string;
+}
+
 /** The engine settings the wire exposes (allowlist lives in headless.entry.ts). */
 export interface EngineConfig {
   model?: string;
   liteModel?: string;
   fallbackModel?: string;
   subagentModel?: string;
+  visionModel?: string;
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -204,16 +219,10 @@ export interface UiSnapshot {
     mcp: number;
     graphReady: boolean;
   };
-  /** v3 additive: computer-use posture (browser/desktop/vision/grants/taint), all live values. */
-  computer?: UiSnapshotComputer;
 }
 
-/** Mirrors src/protocol/ui.snapshot.ts UiSnapshotComputer. */
-export interface UiSnapshotComputer {
-  browserUrl: string | null;
-  desktop: 'connected' | 'configured' | 'not-installed';
-  desktopTools: number;
-  vision: boolean;
-  grants: string[];
-  tainted: boolean;
-}
+// Phase 4 moved every Computer Use owner out of the engine, so `ui_snapshot` no longer carries a
+// `computer` block and `UiSnapshotComputer` was removed with its last consumer (the old Dock's
+// posture card). Mac state now reaches the renderer as the Desktop provider's own typed tool
+// receipts — see `mac.session.model.ts`. Re-adding a posture field here would recreate the
+// engine-owned CU vocabulary the two-product boundary removed.

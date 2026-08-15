@@ -399,33 +399,17 @@ func TestWorkspaceChipInFooter(t *testing.T) {
 	}
 }
 
-// A live automated browser page shows as a host-only chip in the footer (◍), fed by the engine's
-// ui_snapshot computer posture — a running browser session must never be invisible.
-func TestBrowserSessionChipInFooter(t *testing.T) {
+// Terminal intentionally ignores additive Desktop-only posture. This fixture proves an older or
+// mismatched engine cannot bring a removed legacy footer back through protocol JSON.
+func TestDesktopComputerPostureIsIgnored(t *testing.T) {
 	m, _ := newTestModel()
 	m.width, m.height = 100, 40
-
-	// No computer posture (older engine) or no live page: no chip.
-	if strings.Contains(stripANSI(m.footerLine()), "◍") {
-		t.Fatalf("browser chip must be hidden with no live session: %q", stripANSI(m.footerLine()))
-	}
-	m.handleEngine(ev("ui_snapshot", map[string]any{
-		"computer": map[string]any{"browserUrl": "", "desktop": "connected", "tainted": false},
-	}))
-	if strings.Contains(stripANSI(m.footerLine()), "◍") {
-		t.Fatalf("browser chip must be hidden when browserUrl is empty: %q", stripANSI(m.footerLine()))
-	}
-
-	// Live page → host-only chip.
 	m.handleEngine(ev("ui_snapshot", map[string]any{
 		"computer": map[string]any{"browserUrl": "https://app.example.com/checkout?step=2", "desktop": "connected", "tainted": true},
 	}))
 	foot := stripANSI(m.footerLine())
-	if !strings.Contains(foot, "◍ app.example.com") {
-		t.Fatalf("expected host-only browser chip, got: %q", foot)
-	}
-	if strings.Contains(foot, "checkout") {
-		t.Fatalf("chip must not leak the URL path: %q", foot)
+	if strings.Contains(foot, "app.example.com") || strings.Contains(foot, "◍") {
+		t.Fatalf("Desktop-only posture leaked into Terminal footer: %q", foot)
 	}
 }
 
@@ -971,9 +955,10 @@ func TestMouseWheelScrollsTranscriptViewport(t *testing.T) {
 	}
 }
 
-// The live region (View) must never exceed the terminal height, or the inline renderer pushes its top
-// into scrollback every frame (the "footer multiplies itself" bug). Committed lines go to scrollback,
-// so even a huge transcript leaves the live region bounded.
+// The frame (View) must never exceed the terminal height. Under the alternate screen there is no
+// scrollback to absorb an overlong frame — the terminal simply scrolls, and the top of the frame is
+// gone. The transcript window is therefore clamped to whatever the chrome leaves free, so even a
+// huge transcript renders in exactly m.height rows.
 func TestLiveRegionFitsHeight(t *testing.T) {
 	m, _ := newTestModel()
 	m.width, m.height = 80, 24
@@ -987,17 +972,15 @@ func TestLiveRegionFitsHeight(t *testing.T) {
 	}
 }
 
-// No View line may reach the LAST column. A line == width trips the terminal's auto-wrap (cursor
-// slides to the next row) and a line > width wraps — either desyncs Bubble Tea's inline clear and the
-// live region stacks/multiplies every update. The invariant is therefore width ≤ m.width-1 for every
-// line. Exercised with a long stream AND the full footer/meter/map chrome present.
-// No live-region line may reach the LAST column. A line == width trips the terminal's auto-wrap (cursor
-// slides to the next row) and a line > width wraps — either desyncs Bubble Tea's inline clear and the
-// live region stacks/multiplies (or leaves a mirror box) every update. Invariant: width ≤ m.width-1.
+// No View line may reach the LAST column. A line == width trips the terminal's auto-wrap (the cursor
+// slides to the next row) and a line > width wraps outright — either way one logical line occupies
+// two rows, the frame silently exceeds its height budget, and the top scrolls away. The invariant is
+// therefore width ≤ m.width-1 for every line, exercised with a long stream AND the full
+// footer/meter/map chrome present.
 func TestViewLinesStayInsideLastColumn(t *testing.T) {
 	// Exercise the FULL live region — pinned map, pinned todo, busy indicator, input box, footer — at
 	// several widths (incl. the exact zoom widths from the bug report). EVERY line must be ≤ width-1,
-	// or a full-width line wraps and the whole region multiplies on the next tea.Println / zoom.
+	// or a full-width line wraps and costs the frame a row it did not budget for.
 	for _, w := range []int{40, 80, 100, 120, 158} {
 		m, _ := newTestModel()
 		m.width, m.height = w, 30
@@ -1034,7 +1017,7 @@ func TestFooterRendersBelowInput(t *testing.T) {
 	m.handleEngine(ev("model_tier", map[string]any{"tier": "lite"}))
 	v := stripANSI(m.View())
 	foot := strings.Index(v, "▸ default")
-	input := strings.Index(v, "Ask BiMax")
+	input := strings.Index(v, "Ask BiMAX")
 	if foot < 0 || input < 0 {
 		t.Fatalf("view missing footer (%d) or input (%d):\n%s", foot, input, v)
 	}
@@ -1543,7 +1526,7 @@ func TestVersionStringProvenance(t *testing.T) {
 }
 
 func TestBundledThirdPartyNotice(t *testing.T) {
-	for _, want := range []string{"Bimax Computer Use", "MIT License", "Copyright (c) 2025 Cua AI, Inc."} {
+	for _, want := range []string{"Bimax Terminal third-party notices", "no native host capability payloads", "THIRD_PARTY_NOTICES.md"} {
 		if !strings.Contains(thirdPartyNotices, want) {
 			t.Errorf("third-party notices missing %q", want)
 		}

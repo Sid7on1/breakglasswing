@@ -1,5 +1,10 @@
 node_modules/
 out/
+out-focus/
 release/
 engine/
+native-service/
+native/**/.build/
+.bimax/
+*.bun-build
 *.log

@@ -11,29 +11,29 @@ import '@xterm/xterm/css/xterm.css';
  * One session per project; switching projects kills and respawns the shell in the new cwd.
  */
 
-// Graphite & Phosphor ANSI map — warm, muted, never neon (TUI parity).
+// Moonlight ANSI map — black, white and stepped silver, never neon (TUI parity).
 const THEME = {
-  background: '#12100e',
-  foreground: '#e8e2da',
-  cursor: '#d77757',
-  cursorAccent: '#12100e',
-  selectionBackground: 'rgba(215, 119, 87, 0.30)',
-  black: '#2e2925',
-  red: '#c25b4e',
-  green: '#9cb380',
-  yellow: '#d9a05b',
-  blue: '#7f9db3',
-  magenta: '#b58d9e',
-  cyan: '#86a69c',
-  white: '#e8e2da',
-  brightBlack: '#6b6259',
-  brightRed: '#d47768',
-  brightGreen: '#b0c496',
-  brightYellow: '#e6b578',
-  brightBlue: '#98b3c7',
-  brightMagenta: '#c7a3b3',
-  brightCyan: '#9fbcb1',
-  brightWhite: '#f2ede6',
+  background: '#0d0d0d',
+  foreground: '#eeeeec',
+  cursor: '#ffffff',
+  cursorAccent: '#0d0d0d',
+  selectionBackground: 'rgba(255, 255, 255, 0.22)',
+  black: '#242424',
+  red: '#c8c8c5',
+  green: '#d6d6d2',
+  yellow: '#b9b9b5',
+  blue: '#bfc0c3',
+  magenta: '#c9c6cc',
+  cyan: '#c5cccb',
+  white: '#eeeeec',
+  brightBlack: '#777773',
+  brightRed: '#dededb',
+  brightGreen: '#e7e7e4',
+  brightYellow: '#d2d2ce',
+  brightBlue: '#d5d6d8',
+  brightMagenta: '#dedbe0',
+  brightCyan: '#d9dfde',
+  brightWhite: '#ffffff',
 };
 
 interface Session {

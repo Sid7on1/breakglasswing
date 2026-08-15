@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
+const require = createRequire(import.meta.url);
+const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+
+const appRoot = path.resolve(import.meta.dirname, '..');
+const binary = path.resolve(process.argv[2] || path.join(appRoot, 'native-service/bimax-mac-capability'));
+const sampleFile = path.join(appRoot, 'benchmarks/computer-use/contracts/mac-provider-tools.sample.json');
+const expected = JSON.parse(readFileSync(sampleFile, 'utf8'));
+const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
+const client = new Client({ name: 'bimax-phase4-gate', version: '1.0.0' }, { capabilities: {} });
+const transport = new StdioClientTransport({
+  command: binary,
+  args: [],
+  env: {
+    PATH: process.env.PATH || '/usr/bin:/bin',
+    HOME: process.env.HOME || '',
+    TMPDIR: process.env.TMPDIR || '/tmp',
+    BIMAX_CWD: appRoot,
+    BIMAX_HOST_ARCH: architecture,
+    BIMAX_MAC_PROVIDER_AUTHORITY: 'electron-main',
+    BIMAX_MAC_CONSENT_CHANNEL: 'engine-governor',
+    BIMAX_MAC_PROVIDER_DISABLE_NATIVE: '1',
+  },
+  stderr: 'pipe',
+});
+
+try {
+  await client.connect(transport);
+  const listed = await client.listTools();
+  const tools = (listed.tools || []).map((tool) => ({
+    name: tool.name,
+    required: [...(tool.inputSchema?.required || [])].sort(),
+    additionalProperties: tool.inputSchema?.additionalProperties,
+    actionEnum: [...(tool.inputSchema?.properties?.action?.enum || [])],
+  })).sort((a, b) => a.name.localeCompare(b.name));
+  if (JSON.stringify(tools) !== JSON.stringify(expected.tools)) {
+    throw new Error(`provider schema drifted from ${sampleFile}\nexpected=${JSON.stringify(expected.tools)}\nactual=${JSON.stringify(tools)}`);
+  }
+  const status = await client.callTool({ name: 'mac_control', arguments: { action: 'status' } });
+  if (!status.structuredContent || typeof status.structuredContent !== 'object') {
+    throw new Error('mac_control status did not preserve structuredContent');
+  }
+  process.stdout.write(`${JSON.stringify({
+    ok: true,
+    transport: 'stdio',
+    architecture,
+    tools: tools.map(tool => tool.name),
+    structuredStatus: true,
+  }, null, 2)}\n`);
+} finally {
+  await client.close().catch(() => undefined);
+}

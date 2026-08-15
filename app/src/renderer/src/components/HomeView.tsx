@@ -51,14 +51,14 @@ export function HomeView({
       <div className="mx-auto flex min-h-full w-full max-w-[820px] flex-col justify-center px-7 py-12">
         <section className="anim-fade-up">
           <div className="mb-6 flex items-center gap-3">
-            <BrandMark className="size-10" />
+            <BrandMark className="text-[13px]" />
             <div>
               <div className="text-[11px] font-medium tracking-[0.08em] text-faint uppercase">{projectName(project)}</div>
               <h1 className="font-display mt-0.5 text-[34px] font-semibold tracking-[-0.04em] text-ink">What do you want to make?</h1>
             </div>
           </div>
           <p className="max-w-[560px] text-[14px] leading-relaxed text-dim">
-            Describe an outcome. Bimax can explore the code, make changes, run checks, and show you exactly what changed.
+            Describe an outcome. BiMAX can explore the code, make changes, run checks, and show you exactly what changed.
           </p>
 
           <div className="mt-7 grid gap-2.5 md:grid-cols-3">

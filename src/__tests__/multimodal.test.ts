@@ -144,9 +144,9 @@ describe('contentToText', () => {
 
 describe('pruneStaleToolObservations', () => {
   const bigObserve = (n: number) =>
-    JSON.stringify({ ok: true, action: 'observe', driver: 'bimax-computer-use 0.8.3', screenshot: `/tmp/${n}.png`, tree: 'x'.repeat(3000), n });
+    JSON.stringify({ ok: true, action: 'observe', driver: 'host-provider', screenshot: `/tmp/${n}.png`, tree: 'x'.repeat(3000), n });
   const bigAction = (n: number) =>
-    JSON.stringify({ ok: true, action: 'click', driver: 'bimax-computer-use 0.8.3', screenshot: `/tmp/${n}.png`, elements: ['x'.repeat(3000)], n });
+    JSON.stringify({ ok: true, action: 'click', driver: 'host-provider', screenshot: `/tmp/${n}.png`, elements: ['x'.repeat(3000)], n });
 
   it('stubs old explicit and post-action screen results, keeping the newest N', () => {
     const messages: Array<{ role: string; tool_call_id?: string; content: string }> = [
@@ -196,7 +196,7 @@ describe('appendScreenshotObservation', () => {
 
   it('completes a strict tool exchange with assistant before the screenshot user turn', () => {
     const messages: any[] = [
-      { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'ComputerTool', arguments: '{}' } }] },
+      { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'HostVisionTool', arguments: '{}' } }] },
       { role: 'tool', tool_call_id: 'c1', content: '{"ok":true}' },
     ];
     appendScreenshotObservation(messages, observation);
@@ -217,12 +217,12 @@ describe('buildScreenshotObservation completion contract', () => {
     fs.writeFileSync(screenshot, Buffer.from([1, 2, 3, 4]));
     try {
       const observation = buildScreenshotObservation(screenshot, {
-        source: 'ComputerTool', action: 'click', width: 900, height: 700,
+        source: 'HostVisionTool', action: 'click', width: 900, height: 700,
         frameId: 'frame-current', app: 'Fixture App', pid: 42, windowId: 7,
       });
       const instruction = observation?.content[0];
       expect(instruction?.type).toBe('text');
-      expect((instruction as any)?.text).toContain('[ScreenObservation] source=ComputerTool action=click size=900x700');
+      expect((instruction as any)?.text).toContain('[ScreenObservation] source=HostVisionTool action=click size=900x700');
       expect((instruction as any)?.text).toContain('frameId=frame-current');
       expect((instruction as any)?.text).toContain('"windowId":7');
       expect((instruction as any)?.text).toMatch(/exactly one next UI action/);
@@ -240,14 +240,14 @@ describe('buildScreenshotObservation completion contract', () => {
     fs.writeFileSync(display, Buffer.from([5, 6, 7, 8]));
     try {
       const observation = buildScreenshotObservation(target, {
-        source: 'ComputerTool', action: 'observe', width: 500, height: 700,
+        source: 'HostVisionTool', action: 'observe', width: 500, height: 700,
         displayScreenshot: display, displayWidth: 1440, displayHeight: 900,
       });
       expect(observation?.content.filter(part => part.type === 'image_url')).toHaveLength(2);
       const labels = observation?.content.filter(part => part.type === 'text').map(part => (part as any).text).join('\n');
       expect(labels).toMatch(/Image 1 is the TARGET ACTION FRAME/);
-      expect(labels).toMatch(/Image 2 is DISPLAY CONTEXT ONLY/);
-      expect(labels).toMatch(/Never use Image 2 pixels/);
+      expect(labels).toMatch(/Image 2 is WIDER CONTEXT ONLY/);
+      expect(labels).toMatch(/Never use Image 2 coordinates/);
     } finally {
       fs.unlinkSync(target);
       fs.unlinkSync(display);

@@ -68,21 +68,21 @@ export function ProjectWelcome(): React.ReactElement {
 
       <div className="relative mx-auto flex w-full max-w-[900px] flex-col px-8 pt-[10vh] pb-10">
         <div className="anim-fade-up flex items-center gap-3">
-          <BrandMark className="size-10" />
-          <span className="text-xs font-medium tracking-[0.12em] text-faint uppercase">Welcome to Bimax</span>
+          <BrandMark className="text-[13px]" />
+          <span className="text-xs font-medium tracking-[0.12em] text-faint uppercase">Welcome to BiMAX</span>
         </div>
         <h1 className="anim-fade-up font-display mt-4 max-w-[650px] text-[40px] leading-[1.06] font-semibold tracking-[-0.04em] text-ink" style={{ animationDelay: '50ms' }}>
           Where are we working?
         </h1>
         <p className="anim-fade-up mt-4 max-w-[620px] text-[14px] leading-relaxed text-dim" style={{ animationDelay: '90ms' }}>
-          Open a project and Bimax will understand its code, remember your tasks, and keep every change inside that folder.
+          Open a project and BiMAX will understand its code, remember your tasks, and keep every change inside that folder.
         </p>
 
         <div className="anim-fade-up mt-8 flex flex-wrap gap-2.5" style={{ animationDelay: '130ms' }}>
           <button
             onClick={() => void chooseFolder()}
             disabled={opening !== null}
-            className="flex cursor-pointer items-center gap-2 rounded-xl bg-ember px-4 py-2.5 text-[13px] font-semibold text-white shadow-[0_10px_28px_rgba(90,46,29,0.22)] transition hover:-translate-y-0.5 hover:bg-ember-bright disabled:cursor-wait disabled:opacity-60"
+            className="flex cursor-pointer items-center gap-2 rounded-xl bg-ember px-4 py-2.5 text-[13px] font-semibold text-bg shadow-[0_10px_28px_rgba(0,0,0,0.16)] transition hover:-translate-y-0.5 hover:bg-ember-bright disabled:cursor-wait disabled:opacity-60"
           >
             <FolderOpen size={16} />
             {opening === 'picker' ? 'Opening…' : 'Open project'}

@@ -108,6 +108,7 @@ jobs:
         run: |
           cd build
           shasum -a 256 -c SHA256SUMS
+          shasum -a 256 -c ENGINE_SHA256SUMS
           tar -xOzf bimax-darwin-arm64.tar.gz bimax-darwin-arm64 > /dev/null
           tar -xOzf bimax-darwin-x64.tar.gz bimax-darwin-x64 > /dev/null
 
@@ -136,7 +137,11 @@ jobs:
           path: |
             build/bimax-darwin-arm64.tar.gz
             build/bimax-darwin-x64.tar.gz
-            build/bimax-linux-x64.tar.gz
-            build/bimax-linux-arm64.tar.gz
+            build/bimax-engine-darwin-arm64
+            build/bimax-engine-darwin-x64
+            build/bimax-engine-manifest.json
+            build/ENGINE_SHA256SUMS
+            build/bimax-client-protocol-v*.tar.gz
+            build/protocol/bimax-client-protocol-v*/**
             build/SHA256SUMS
             build/release-notes.md

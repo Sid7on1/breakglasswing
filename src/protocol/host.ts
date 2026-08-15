@@ -1,7 +1,9 @@
 import { EventEmitter } from 'events';
 import {
-  Outbound, Inbound, ReplyMsg, MenuSelectMsg, CompletionItem,
-  FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, INPUT_PROMPT_EVENT, PROTOCOL_VERSION, sanitizeArgs,
+  Outbound, Inbound, ReplyMsg, MenuSelectMsg, CompletionItem, CatalogResultMsg,
+  FORWARDED_EVENTS, PROMPT_EVENT, DIFF_PROMPT_EVENT, INPUT_PROMPT_EVENT,
+  PROTOCOL_FEATURES, PROTOCOL_MAX_COMPATIBLE_MAJOR, PROTOCOL_MIN_COMPATIBLE_MAJOR,
+  PROTOCOL_SEMVER, PROTOCOL_VERSION, sanitizeArgs,
 } from './protocol';
 import { markReady, loadPersistedTimelines } from '../telemetry/perf';
 
@@ -18,6 +20,13 @@ export interface HostHandlers {
   onConfigGet?: () => Record<string, any>;
   /** Settings page write — merge the allowlisted patch, return the post-write subset (v3). */
   onConfigSet?: (patch: Record<string, any>) => Record<string, any> | Promise<Record<string, any>>;
+  /** Provider + model catalogue read (v3 additive) — answered with a `catalogResult`. */
+  onCatalogGet?: (refresh: boolean) => Promise<Omit<CatalogResultMsg, 't' | 'id'>>;
+  /**
+   * Switch the active provider, optionally saving a key for it first (v3 additive). The key is
+   * write-only: it is handed straight to the engine's secrets path and is never echoed back.
+   */
+  onProviderSet?: (input: { name: string; baseURL?: string; apiKey?: string }) => Promise<Omit<CatalogResultMsg, 't' | 'id'>>;
   /** Typed session resume (recovery flows) — restore the saved thread with this id. */
   onResume?: (id: string) => void;
   /** Atomically apply mode/tier/autonomy controls; the session serializes the underlying actions. */
@@ -116,6 +125,18 @@ export class ProtocolHost {
 
     markReady(); // engine wired + handshake sent — the cold-start clock stops here (/perf)
     loadPersistedTimelines(); // seed /perf so it can explain prior turns after a restart/crash
+    this.write({
+      t: 'hello',
+      engine: {
+        version: process.env.BIMAX_ENGINE_VERSION?.trim() || 'dev',
+        buildCommit: process.env.BIMAX_ENGINE_COMMIT?.trim() || 'unknown',
+      },
+      protocolVersion: PROTOCOL_SEMVER,
+      protocolMajor: PROTOCOL_VERSION,
+      minCompatibleMajor: PROTOCOL_MIN_COMPATIBLE_MAJOR,
+      maxCompatibleMajor: PROTOCOL_MAX_COMPATIBLE_MAJOR,
+      features: [...PROTOCOL_FEATURES],
+    });
     this.write({ t: 'ready', protocol: PROTOCOL_VERSION });
   }
 
@@ -178,7 +199,50 @@ export class ProtocolHost {
           .catch(() => this.write({ t: 'configResult', id, config: {} }));
         return;
       }
+      case 'catalogGet': {
+        const { id } = msg;
+        this.answerCatalog(id, this.handlers.onCatalogGet?.(msg.refresh === true));
+        return;
+      }
+      case 'providerSet': {
+        const { id } = msg;
+        // Validate before the key ever reaches a handler: a provider name is a short slug, and a
+        // base URL must be an http(s) origin. An unvalidated baseURL is a credential-exfiltration
+        // primitive — it is where the API key gets sent on the very next request.
+        const name = String(msg.name ?? '').trim();
+        if (!/^[\w.-]{1,64}$/.test(name)) {
+          this.answerCatalog(id, Promise.reject(new Error('Invalid provider name.')));
+          return;
+        }
+        const baseURL = String(msg.baseURL ?? '').trim();
+        if (baseURL && !/^https?:\/\/[^\s]+$/i.test(baseURL)) {
+          this.answerCatalog(id, Promise.reject(new Error('A provider endpoint must be an http(s) URL.')));
+          return;
+        }
+        this.answerCatalog(id, this.handlers.onProviderSet?.({
+          name,
+          ...(baseURL ? { baseURL } : {}),
+          ...(typeof msg.apiKey === 'string' && msg.apiKey ? { apiKey: msg.apiKey } : {}),
+        }));
+        return;
+      }
     }
+  }
+
+  /**
+   * Answer a catalogue request, correlated by `id`.
+   *
+   * A front-end blocks its picker on this reply, so every path must produce exactly one message:
+   * an unhandled message kind or a rejected fetch answers with an empty catalogue carrying the
+   * reason, never with silence.
+   */
+  private answerCatalog(id: number, work?: Promise<Omit<CatalogResultMsg, 't' | 'id'>>): void {
+    Promise.resolve(work ?? { providers: [], models: [], error: 'This engine does not provide a catalogue.' })
+      .then(result => this.write({ t: 'catalogResult', id, ...result }))
+      .catch((e: any) => this.write({
+        t: 'catalogResult', id, providers: [], models: [],
+        error: String(e?.message || e || 'The catalogue could not be read.'),
+      }));
   }
 
   /** Number of approval requests still awaiting an answer (for diagnostics / tests). */

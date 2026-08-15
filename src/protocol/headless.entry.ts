@@ -3,7 +3,13 @@ import { goalEvents } from '../memory/goal.manager';
 import { buildPersonas } from '../cli/personas/factory';
 import { HeadlessSession } from './headless.session';
 import { startStdioHost } from './stdio.host';
-import { startUiSnapshot, setTokensBaseline, setUiSnapshotGovernor } from './ui.snapshot';
+import { createConfigWire } from './config.wire';
+import { buildCatalog, type CatalogDeps } from './catalog.wire';
+import { getProviders, getProvider, getCurrentProvider, setProvider } from '../cli/provider';
+import { saveApiKeyToEnv } from '../cli/env.loader';
+import { MODEL_CATALOG } from '../cli/models';
+import { capabilitiesFor } from '../core/capabilities';
+import { startUiSnapshot, setTokensBaseline } from './ui.snapshot';
 import { completeInput } from './completions';
 import { isCodebase, summarizeGraph } from '../graph/graph.summary';
 import { getConfig, saveConfig } from '../cli/config';
@@ -232,25 +238,30 @@ export async function startHeadless(container: any, config: any): Promise<void> 
 
   // Settings surface (protocol v3): the allowlisted, JSON-safe subset of CliConfig a graphical
   // front-end may read and write directly — the silent path behind settings pages, replacing
-  // transcript menus. Sensitive/engine-internal keys (API keys, workspaceRoot,
-  // dangerouslySkipPermissions, onboarding flags) stay OFF the wire on purpose.
-  const CONFIG_WIRE_KEYS = [
-    'model', 'liteModel', 'visionModel', 'fallbackModel', 'subagentModel',
-    'temperature', 'topP', 'maxTokens', 'timeout',
-    'reasoningEffort', 'contextMode', 'contextWindowTokens', 'parallelToolCalls',
-    'maxToolIterations', 'maxSubAgents',
-    'autoResumeAgents',
-    'notificationBell', 'verbose', 'reducedMotion', 'theme',
-    'autoIndex', 'gitAutoCommit', 'autoVerify', 'sandboxBash',
-    'autoResumeAgents', 'autoContinueOutcome',
-    'selfCritic', 'adversarialVerify', 'diffApproval', 'blastGate',
-    'showMapPanel', 'showTokenMeter',
-  ] as const;
-  const configSubset = (): Record<string, any> => {
-    const c = getConfig() as any;
-    const out: Record<string, any> = {};
-    for (const k of CONFIG_WIRE_KEYS) if (c[k] !== undefined) out[k] = c[k];
-    return out;
+  // transcript menus. The allowlist, the persistence and the live-adapter application all live in
+  // protocol/config.wire.ts so the seam is testable without booting a container; see that file for
+  // why a read-back of the config FILE is not proof that anything took effect.
+  const configWire = createConfigWire({
+    getConfig: () => getConfig() as any,
+    saveConfig: (updates) => saveConfig(updates as any),
+    llmAdapter,
+    onChanged: () => cliEvents.emit('config_changed'), // re-snapshot + notify every front-end
+  });
+  const configSubset = (): Record<string, any> => configWire.read();
+
+  // The provider + model catalogue behind the desktop's model picker. `listServed` is the live
+  // `/models` call, so the picker offers ids the provider genuinely accepts instead of a hand-typed
+  // list that drifts — and `capabilities` lets the UI grey out a knob a model does not have rather
+  // than sending a parameter the backend will reject the whole request over.
+  const catalogDeps: CatalogDeps = {
+    getProviders: () => getProviders(),
+    activeProvider: () => getCurrentProvider(),
+    catalog: () => MODEL_CATALOG.map(m => ({
+      label: m.label, value: m.value, desc: m.desc, tier: m.tier, avoidAutoSelect: m.avoidAutoSelect,
+    })),
+    listServed: (refresh) => llmAdapter.listProviderModels(refresh),
+    capabilities: (provider, id) => capabilitiesFor(provider, id) as any,
+    readEnv: (name) => process.env[name],
   };
 
   const dispose = startStdioHost({
@@ -282,14 +293,36 @@ export async function startHeadless(container: any, config: any): Promise<void> 
       if (tier) await session.dispatch(`/tier ${tier}`);
     },
     onConfigGet: configSubset,
-    onConfigSet: async (patch) => {
-      const safe: Record<string, any> = {};
-      for (const k of CONFIG_WIRE_KEYS) if (patch[k] !== undefined) safe[k] = patch[k];
-      if (Object.keys(safe).length > 0) {
-        await saveConfig(safe as any);
-        cliEvents.emit('config_changed'); // re-snapshot + notify every attached front-end
+    onConfigSet: (patch) => configWire.write(patch),
+    onCatalogGet: async (refresh) => {
+      const { t, id, ...rest } = await buildCatalog(catalogDeps, 0, refresh);
+      return rest;
+    },
+    onProviderSet: async ({ name, baseURL, apiKey }) => {
+      const provider = getProvider(name);
+      if (!provider) return { providers: [], models: [], error: `Unknown provider "${name}".` };
+
+      // Save the key BEFORE switching, so the catalogue fetch that answers this request is made
+      // with the credential the user just supplied — that round-trip is how they find out whether
+      // the key works, and asking them to press refresh afterwards to discover a typo is a worse
+      // answer than simply using it. saveApiKeyToEnv writes owner-only, refuses to follow a
+      // symlink, and updates process.env so the running key pool picks it up without a restart.
+      if (apiKey) {
+        try { saveApiKeyToEnv(provider.apiKeyEnv, apiKey); }
+        catch (e: any) {
+          return { providers: [], models: [], error: `Could not save the key: ${String(e?.message || e)}` };
+        }
       }
-      return configSubset();
+
+      setProvider(name);
+      // Persist, so the choice survives a restart — the whole point of the `provider` config key.
+      // Without this the switch lives in a module variable and every relaunch silently reverts.
+      await saveConfig({ provider: name, ...(baseURL ? { providerBaseURL: baseURL } : {}) } as any);
+      // A new provider means a new key pool, a new endpoint and a different served-model list; the
+      // session cache belongs to the old one, so force a refresh rather than answering from it.
+      const { t, id, ...rest } = await buildCatalog(catalogDeps, 0, true);
+      cliEvents.emit('config_changed');
+      return rest;
     },
   });
 
@@ -339,7 +372,6 @@ export async function startHeadless(container: any, config: any): Promise<void> 
   goalEvents.on('goals_changed', onGoals);
 
   // Push footer + map-panel + token-meter state the Go front-end can't read from engine singletons.
-  setUiSnapshotGovernor(governor);
   startUiSnapshot(graphStore, toolRegistry);
 
   // Launch-grade first run: an empty key pool opens the real provider picker automatically. The

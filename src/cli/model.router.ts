@@ -55,10 +55,10 @@ const CHATTY = /^(hi|hey+|hello|yo|sup|howdy|thanks|thank you|thx|ty|ok|okay|k|c
 // (a fenced block, a stack trace). These route straight to HEAVY with no further analysis.
 const HEAVY_VERB = /\b(implement|refactor|debug|rewrite|redesign|optimi[sz]e|migrate|integrate|diagnose|troubleshoot|build (?:a|the|out|me)\b|write (?:a|the|some|me)? ?(?:code|tests?|script|function|class|module|component)\b|fix (?:the|this|that|a|my)? ?(?:bug|tests?|error|crash|issue|build|types?)\b|add (?:a|the)? ?(?:support|tests?|feature|endpoint|command|flag)\b|create (?:a|the)? ?(?:file|class|function|module|component|script|tests?)\b)/i;
 const CODE_CONTEXT = /```|\bTraceback \(most recent call last\)|\n\s+at [\w$.<[\]]+ \([^)]*:\d+:\d+\)/;
-// Driving the computer is real work: a browser/desktop operation loop (observe → act → verify)
+// Browser operation loops (observe → act → verify) need the capable work model;
 // on the quick model flails — observed live: it denied having the tools, then described tool JSON
 // instead of looking. These verbs route straight to HEAVY, same as unmistakable coding work.
-const OPERATE_CONTEXT = /\b(screenshot|computer ?tool|browser ?tool|click (?:on|the|at)\b|scroll (?:the|down|up|to)\b|open (?:the )?(?:app|application)\b|type into\b|drive (?:the )?(?:browser|desktop|computer)\b|computer use|my (?:desktop|screen)\b|on (?:the )?screen\b)/i;
+const BROWSER_OPERATION_CONTEXT = /\b(screenshot|browser ?tool|click (?:on|the|at)\b|scroll (?:the|down|up|to)\b|type into\b|drive (?:the )?browser\b)/i;
 
 /**
  * Local, LLM-free pre-filter. Returns a definite tier for obvious cases, or null to mean
@@ -70,8 +70,8 @@ export function heuristicTier(prompt: string): Tier | null {
   // Short greetings / acknowledgements / filler → lite, no model call.
   if (p.length <= 40 && CHATTY.test(p)) return 'lite';
   // Unmistakable coding work → heavy, no model call. Long prompts with code fences or stack
-  // traces are equally unambiguous — and so is driving the browser/desktop.
-  if (HEAVY_VERB.test(p) || CODE_CONTEXT.test(p) || OPERATE_CONTEXT.test(p)) return 'heavy';
+  // traces are equally unambiguous — and so is driving the browser.
+  if (HEAVY_VERB.test(p) || CODE_CONTEXT.test(p) || BROWSER_OPERATION_CONTEXT.test(p)) return 'heavy';
   if (p.length > 600) return 'heavy'; // a request this detailed is never small talk
   return null;
 }

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": 7,
+  "date": "2026-08-09",
+  "channel": "manual-alpha-local-candidate",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "appVersion": "1.1.0",
+  "artifact": {
+    "dmg": "app/release/Bimax-1.1.0-arm64.dmg",
+    "dmgSha256": "22f139dd6745499e28677a1f22d9a80f230a0a4c591e39b740422c47aa02bb21",
+    "appTreeSha256": "729a1ad4262a05a4237ebd0a0bb35df8b67e04c702ba5c29eb979ccd9f90633e",
+    "appInventoryEntries": 294,
+    "signature": "ad-hoc/linker-signed",
+    "notarization": "not-established",
+    "developerIdIdentityCount": 0
+  },
+  "verification": {
+    "typecheck": "pass",
+    "productionBuild": "pass",
+    "phase7UnitTests": { "suites": 1, "tests": 3, "status": "pass" },
+    "completeDesktopMacRegression": { "suites": 55, "tests": 606, "status": "pass" },
+    "manualAlphaMutationRollback": "pass",
+    "packagedOwnershipGate": "pass-arm64",
+    "manualManifestVerification": "pass",
+    "desktopNpmAudit": { "total": 0, "high": 0, "critical": 0 },
+    "dmgMutationRejected": true,
+    "appTreeMutationRejected": true,
+    "activationFailureRestoredPreviousApp": true
+  },
+  "blockers": [
+    "configured public v1.1.0 engine manifest URL returned HTTP 404",
+    "no valid Developer ID Application identity",
+    "no notary credentials",
+    "no quarantined clean-Mac Gatekeeper/TCC/update run",
+    "x64 Desktop candidate not rebuilt in Phase 7",
+    "signed update feed and stable rollback are not implemented"
+  ],
+  "claimBoundary": "Locally Measured manual-alpha arm64 candidate only; not public, stable, notarized, clean-Mac-qualified, or a Win."
+}

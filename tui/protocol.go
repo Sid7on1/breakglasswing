@@ -18,20 +18,26 @@ const supportedProtocol = 3
 // Outbound — engine → TUI. One struct covers all three message kinds (event/request/ready);
 // only the relevant fields are populated per `t`.
 type Outbound struct {
-	T        string            `json:"t"`
-	Name     string            `json:"name,omitempty"`     // event name
-	Args     []json.RawMessage `json:"args,omitempty"`     // event payload (shape depends on Name)
-	ID       int               `json:"id,omitempty"`       // request id
-	Kind     string            `json:"kind,omitempty"`     // request kind ("prompt")
-	Question string            `json:"question,omitempty"` // request prompt
-	Options  []string          `json:"options,omitempty"`  // request choices
-	IsAsk    bool              `json:"isAsk,omitempty"`
-	IsMulti  bool              `json:"isMulti,omitempty"`
-	Masked   bool              `json:"masked,omitempty"`   // kind:"input" — the answer is a secret; render as bullets
-	Protocol int               `json:"protocol,omitempty"` // ready handshake
-	Items    []CompletionItem  `json:"items,omitempty"`    // queryResult
-	Body     string            `json:"body,omitempty"`     // request kind:"diff" — the diff text
-	Config   json.RawMessage   `json:"config,omitempty"`   // configResult (v3) — allowlisted settings subset
+	T                  string            `json:"t"`
+	Name               string            `json:"name,omitempty"`     // event name
+	Args               []json.RawMessage `json:"args,omitempty"`     // event payload (shape depends on Name)
+	ID                 int               `json:"id,omitempty"`       // request id
+	Kind               string            `json:"kind,omitempty"`     // request kind ("prompt")
+	Question           string            `json:"question,omitempty"` // request prompt
+	Options            []string          `json:"options,omitempty"`  // request choices
+	IsAsk              bool              `json:"isAsk,omitempty"`
+	IsMulti            bool              `json:"isMulti,omitempty"`
+	Masked             bool              `json:"masked,omitempty"`             // kind:"input" — the answer is a secret; render as bullets
+	Protocol           int               `json:"protocol,omitempty"`           // ready handshake
+	Engine             *EngineIdentity   `json:"engine,omitempty"`             // hello: engine release identity
+	ProtocolVersion    string            `json:"protocolVersion,omitempty"`    // hello: semantic wire release
+	ProtocolMajor      int               `json:"protocolMajor,omitempty"`      // hello: wire major
+	MinCompatibleMajor int               `json:"minCompatibleMajor,omitempty"` // hello: oldest compatible client major
+	MaxCompatibleMajor int               `json:"maxCompatibleMajor,omitempty"` // hello: newest compatible client major
+	Features           []string          `json:"features,omitempty"`           // hello: negotiated feature vocabulary
+	Items              []CompletionItem  `json:"items,omitempty"`              // queryResult
+	Body               string            `json:"body,omitempty"`               // request kind:"diff" — the diff text
+	Config             json.RawMessage   `json:"config,omitempty"`             // configResult (v3) — allowlisted settings subset
 
 	// boot + health (v3 additive) — startup phases and the engine's liveness heartbeat. Emitted for
 	// supervising front-ends (the desktop app); this TUI decodes them for contract coverage and may
@@ -44,6 +50,11 @@ type Outbound struct {
 	HeapMb           int    `json:"heapMb,omitempty"`           // health
 	EventLoopDelayMs int    `json:"eventLoopDelayMs,omitempty"` // health: p99 since last beat
 	ActiveTurn       bool   `json:"activeTurn,omitempty"`       // health: a user turn is executing
+}
+
+type EngineIdentity struct {
+	Version     string `json:"version"`
+	BuildCommit string `json:"buildCommit"`
 }
 
 // CompletionItem mirrors src/protocol/protocol.ts — one autocomplete candidate.
@@ -128,9 +139,6 @@ type UiSnapshot struct {
 	CompressionSaved int `json:"compressionSaved"`
 	// Multi-repo workspace working set (count <= 1 = single-repo session; chip hidden).
 	Workspace WorkspaceStrip `json:"workspace"`
-	// Computer-use posture (v3 additive): live browser session + desktop driver + taint state.
-	// nil on older engines — every consumer must nil-check.
-	Computer *ComputerStrip `json:"computer"`
 	// Task workspaces (v3 additive): live + recent background tasks (shell, browser, builds) for
 	// the pinned task panel. nil/empty on older engines and when nothing is running.
 	Tasks []TaskStrip `json:"tasks"`
@@ -185,7 +193,7 @@ type ToolsStrip struct {
 // does) — the panel offers exactly these actions and nothing more.
 type TaskStrip struct {
 	ID        string  `json:"id"`
-	Kind      string  `json:"kind"`  // shell | browser | subagent | build | test | generic
+	Kind      string  `json:"kind"` // shell | browser | subagent | build | test | generic
 	Title     string  `json:"title"`
 	State     string  `json:"state"` // the 16-state machine in execution.ledger.ts
 	ElapsedMs int64   `json:"elapsedMs"`
@@ -196,18 +204,6 @@ type TaskStrip struct {
 	CanPause  bool    `json:"canPause"`
 	CanResume bool    `json:"canResume"`
 	CanCancel bool    `json:"canCancel"`
-}
-
-// ComputerStrip mirrors UiSnapshotComputer (src/protocol/ui.snapshot.ts): the live automated
-// page (empty when no browser session is open), desktop driver posture, and whether untrusted
-// web content has entered the conversation window.
-type ComputerStrip struct {
-	BrowserURL   string   `json:"browserUrl"`
-	Desktop      string   `json:"desktop"` // "connected" | "configured" | "not-installed"
-	DesktopTools int      `json:"desktopTools"`
-	Vision       bool     `json:"vision"`
-	Grants       []string `json:"grants"`
-	Tainted      bool     `json:"tainted"`
 }
 
 // OutcomeStrip — the compact engine-owned completion snapshot sent by outcome_update. It is a

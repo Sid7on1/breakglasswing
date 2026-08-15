@@ -1,9 +1,13 @@
-# Bimax desktop packaging — DMG for macOS, NSIS installer for Windows.
+# Bimax for Mac packaging — DMG for macOS only.
 # The headless engine (bun --compile, standalone — no Node on the host) is bundled as an
 # extraResource; scripts/prepare-engine.sh must have compiled it for the TARGET platform/arch
 # before electron-builder runs (the dist:* npm scripts sequence this).
 appId: ai.bimax.app
 productName: Bimax
+# Runs after the app is packed and BEFORE it is signed. Clears the extended attributes an
+# iCloud-synced working copy stamps onto every file, which `codesign` rejects outright as
+# "resource fork, Finder information, or similar detritus". See scripts/after-pack.cjs.
+afterPack: scripts/after-pack.cjs
 directories:
   output: release
   buildResources: buildResources
@@ -18,7 +22,7 @@ files:
 asarUnpack:
   - node_modules/@lydell/**
 
-# engine/ holds exactly one binary: bimax-engine (or bimax-engine.exe), compiled for the
+# engine/ holds exactly one binary: bimax-engine, compiled for the
 # same platform+arch this build targets.
 extraResources:
   - from: engine
@@ -28,37 +32,46 @@ asar: true
 
 mac:
   category: public.app-category.developer-tools
+  extendInfo:
+    NSMicrophoneUsageDescription: Bimax uses the microphone only when you explicitly start voice input.
   target:
     - dmg
   darkModeSupport: true
+  # Bimax for Mac's support floor. This is a product decision, not an Electron requirement —
+  # Electron 43 itself still runs on older macOS. macOS 13 is chosen because the native XPC service
+  # installs NSXPCConnection code-signing requirements (evaluated against the immutable audit token)
+  # from macOS 13, so below the floor the CU service would fall back to the weaker PID-based check;
+  # and because Electron 44 raises its own floor to macOS 13, so this avoids moving the boundary
+  # again during the next runtime upgrade. It writes LSMinimumSystemVersion into Info.plist, so the
+  # OS refuses to launch the app below the floor rather than failing later in the native path.
+  minimumSystemVersion: "13.0"
   # Release signing (see docs/SECURITY_INSTALL.md). Hardened runtime + entitlements are always
   # declared so that WHEN a Developer ID cert is present (CSC_LINK/CSC_KEY_PASSWORD, or one in the
   # keychain with CSC_IDENTITY_AUTO_DISCOVERY=true) electron-builder produces a correctly hardened,
-  # signable app. With NO cert available, `identity: null` keeps local/dev builds unsigned instead of
-  # failing. For a PUBLIC release, remove `identity: null` (or set MACOS via CSC_*) and set
-  # `notarize` below, then verify on a clean Mac per the doc — do NOT claim notarization from a local
-  # `codesign` pass alone.
-  identity: null
+  # signed app and nested XPC service. Keyless local builds remain unsigned; release CI must set
+  # CSC_LINK/CSC_KEY_PASSWORD (or expose the Developer ID identity in the keychain) and verify the
+  # nested service. Notarization below remains credential-gated and must never be inferred from a
+  # local `codesign` pass alone.
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: buildResources/entitlements.mac.plist
   entitlementsInherit: buildResources/entitlements.mac.plist
+  # A real nested XPC bundle, signed with the containing app. Runtime activation remains subject to
+  # the live structural/signing gate and rollout circuit; packaging alone never enables delivery.
+  extraFiles:
+    - from: native-service/BimaxCuService.xpc
+      to: XPCServices/BimaxCuService.xpc
+    # Signed bridge: validates a live ai.bimax.app ancestor before using the Data-only XPC client.
+    - from: native-service/bimax-cu-bridge
+      to: MacOS/bimax-cu-bridge
+    # The compatibility/product helper is compiled at build time; user machines never invoke swiftc.
+    - from: native-service/bimax-desktop-helper
+      to: MacOS/bimax-desktop-helper
+    - from: native-service/bimax-mac-capability
+      to: MacOS/bimax-mac-capability
   # notarize: { teamId: "YOUR_TEAM_ID" }   # uncomment for release; needs APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD
 
 dmg:
   # DMG signing follows the app identity. Left off for unsigned dev builds; a signed release signs the
   # app inside the DMG (what Gatekeeper checks) via the mac.identity above.
   sign: false
-
-win:
-  target:
-    - nsis
-
-nsis:
-  oneClick: false
-  allowToChangeInstallationDirectory: true
-
-linux:
-  target:
-    - AppImage
-  category: Development

@@ -162,8 +162,39 @@ export interface ConnectedMcp {
   spec: McpServerSpec;
 }
 
+/** List every page and return a stable order, as required by the MCP tools contract. */
+export async function listAllMcpTools(client: any, maxPages = 32, maxTools = 2048): Promise<any[]> {
+  const tools: any[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const listed = await client.listTools(cursor ? { cursor } : undefined);
+    if (Array.isArray(listed?.tools)) tools.push(...listed.tools);
+    if (tools.length > maxTools) throw new Error(`MCP tool catalog exceeds ${maxTools} entries`);
+    const next = typeof listed?.nextCursor === 'string' && listed.nextCursor ? listed.nextCursor : undefined;
+    if (!next) break;
+    cursor = next;
+    if (page === maxPages - 1) throw new Error(`MCP tool catalog exceeds ${maxPages} pages`);
+  }
+  return tools.sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || '')));
+}
+
+/**
+ * Is this text block just a re-serialization of the same structured payload?
+ *
+ * Key order is not normalized: a server emits both fields from one object, so they agree on order,
+ * and canonicalizing would make two genuinely different payloads look identical. Only formatting is
+ * neutralized, which is the difference this is meant to see through.
+ */
+function sameJsonPayload(text: string, structured: unknown): boolean {
+  try {
+    return JSON.stringify(JSON.parse(text)) === JSON.stringify(structured);
+  } catch {
+    return false; // not JSON at all — a real summary, keep it
+  }
+}
+
 /** Flatten an MCP tool result's content array into a plain string for the agent. */
-function contentToString(result: any): string {
+export function contentToString(result: any): string {
   if (!result) return '';
   const content = result.content;
   if (Array.isArray(content)) {
@@ -178,7 +209,19 @@ function contentToString(result: any): string {
       .join('\n');
     if (result.structuredContent !== undefined) {
       const structured = JSON.stringify(result.structuredContent, null, 2);
-      return rendered ? `${rendered}\n${structured}` : structured;
+      if (!rendered) return structured;
+      // MCP lets a server answer in both fields, and the spec ENCOURAGES mirroring the structured
+      // payload into a text block for clients that cannot read `structuredContent`. Our own
+      // `mac_control` does exactly that, so every computer-use result was being handed to the model
+      // twice — an observe carrying 40+ elements paid for its whole element list, its guidance
+      // prose and its screenshot metadata a second time, in the same turn that a small model has to
+      // plan the next action from. Emit one copy when they are the same payload.
+      //
+      // Compared parsed, not textually: the two differ in whitespace by construction (the text
+      // block is the server's own formatting, this one is 2-space). A server that puts a genuine
+      // human summary in text and data in structured is NOT the same payload and keeps both.
+      if (sameJsonPayload(rendered, result.structuredContent)) return structured;
+      return `${rendered}\n${structured}`;
     }
     return rendered;
   }
@@ -199,6 +242,19 @@ export function isDeadConnectionError(e: any): boolean {
 export type McpHealer = (serverName: string) => Promise<any | null>;
 
 /**
+ * Bimax for Mac owns approval for its single native Computer Use entrypoint.
+ *
+ * A Control Mac instruction is explicitly selected in the desktop composer, then the provider
+ * applies its resolved-target policy, sensitive-surface blocks and takeover gate to every action.
+ * Sending that same entrypoint through the terminal engine's generic external-tool governor made
+ * one task ask "Run mac_control?" before every observation and click. That was duplicate consent,
+ * not an additional safety boundary. Keep every other MCP tool fail-closed.
+ */
+export function approvalHandledByAppOwnedProvider(serverName: string, toolName: string): boolean {
+  return serverName === 'bimax-mac' && toolName === 'mac_control';
+}
+
+/**
  * Connect to one MCP server (stdio) and register each of its tools into the registry as a
  * native-looking `mcp__<server>__<tool>` tool, governed like any other. Returns the
  * connection (for later close), or null if the server failed to start — never throws, so a
@@ -216,9 +272,9 @@ export async function connectAndRegister(
   try {
     client = await openClient(spec);
 
-    const listed = await client.listTools();
+    const listed = await listAllMcpTools(client);
     const toolNames: string[] = [];
-    for (const t of listed?.tools || []) {
+    for (const t of listed) {
       const toolName = `mcp__${spec.name}__${t.name}`;
       registered.set(toolName, registry.getTool(toolName));
       registry.register(buildTool({
@@ -226,6 +282,7 @@ export async function connectAndRegister(
         description: `[MCP:${spec.name}] ${t.description || t.name}`,
         schema: t.inputSchema || { type: 'object', properties: {} },
         isDestructive: true, // external tools are fail-closed under the Governor
+        approvalHandledInternally: approvalHandledByAppOwnedProvider(spec.name, String(t.name || '')),
         execute: async (args: any) => {
           // Weak models routinely emit numbers/booleans as strings ("1", "true"). MCP servers
           // validate strictly (zod) and reject those, so coerce each arg to its declared schema

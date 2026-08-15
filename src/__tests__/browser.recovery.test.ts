@@ -1,11 +1,40 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   BrowserRuntime, BrowserCommand, BrowserCommandResult,
-  isBrowserCrashError, browserActionKey,
+  isBrowserCrashError, browserActionKey, findBrowserExecutable,
 } from '../browser/browser.runtime';
 
 // Long-run hardening contracts, no browser launched: crash classification (what resets the
 // runtime vs what is just a failed page action), action identity for the consecutive-failure
 // memory, and the failure-loop nudge itself via a stubbed dispatch.
+
+describe('managed browser selection', () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    process.env = { ...original };
+  });
+
+  it('does not silently launch the user\'s installed Chrome', () => {
+    delete process.env.BIMAX_BROWSER_EXECUTABLE;
+    delete process.env.PUPPETEER_EXECUTABLE_PATH;
+    process.env.CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    expect(findBrowserExecutable()).toBeUndefined();
+  });
+
+  it('honors an explicit existing automation executable', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-browser-path-'));
+    const executable = path.join(dir, 'chromium');
+    try {
+      fs.writeFileSync(executable, '#!/bin/sh');
+      process.env.BIMAX_BROWSER_EXECUTABLE = executable;
+      expect(findBrowserExecutable()).toBe(executable);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('isBrowserCrashError', () => {
   it.each([
@@ -43,8 +72,113 @@ describe('browserActionKey', () => {
       .not.toBe(browserActionKey({ action: 'click', selector: '#cancel' }));
     expect(browserActionKey({ action: 'click', elementIndex: 3 }))
       .not.toBe(browserActionKey({ action: 'hover', elementIndex: 3 }));
+    expect(browserActionKey({ action: 'click', elementRef: 'observation-a' }))
+      .not.toBe(browserActionKey({ action: 'click', elementRef: 'observation-b' }));
+    expect(browserActionKey({ action: 'status', tabRef: 'tab', documentRef: 'document-a' }))
+      .not.toBe(browserActionKey({ action: 'status', tabRef: 'tab', documentRef: 'document-b' }));
     expect(browserActionKey({ action: 'navigate', url: 'https://a.test' }))
       .not.toBe(browserActionKey({ action: 'navigate', url: 'https://b.test' }));
+  });
+});
+
+describe('typed browser target preflight', () => {
+  it('binds ordinary work to the active tab and exact current document', () => {
+    const runtime = new BrowserRuntime() as any;
+    const active = { isClosed: () => false };
+    const other = { isClosed: () => false };
+    runtime.page = active;
+    runtime.pagesByTabRef.set('active-tab', active);
+    runtime.pagesByTabRef.set('other-tab', other);
+    runtime.documentRefs.set(active, 'active-document');
+    runtime.documentRefs.set(other, 'other-document');
+
+    expect(runtime.preflightTarget({
+      action: 'status', tabRef: 'active-tab', documentRef: 'active-document',
+    })).toEqual({ ok: true });
+    expect(runtime.preflightTarget({
+      action: 'status', tabRef: 'active-tab', documentRef: 'stale-document',
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/stale/) });
+    expect(runtime.preflightTarget({ action: 'status', tabRef: 'other-tab' }))
+      .toMatchObject({ ok: false, error: expect.stringMatching(/not active/) });
+    expect(runtime.preflightTarget({ action: 'switch_tab', tabRef: 'other-tab', documentRef: 'other-document' }))
+      .toEqual({ ok: true });
+  });
+
+  it('blocks page work while an unhandled dialog is pending but permits typed inspection', () => {
+    const runtime = new BrowserRuntime() as any;
+    const active = { isClosed: () => false };
+    runtime.page = active;
+    runtime.pendingDialogs.set(active, {
+      dialog: {},
+      info: {
+        tabRef: 'tab', documentRef: 'document', dialogRef: 'dialog', type: 'confirm',
+        message: 'Approve?', openedAt: 1,
+      },
+    });
+    expect(runtime.preflightTarget({ action: 'click', selector: '#behind' }))
+      .toMatchObject({ ok: false, error: expect.stringMatching(/dialog is blocking/) });
+    expect(runtime.preflightTarget({ action: 'dialogs' })).toEqual({ ok: true });
+  });
+});
+
+describe('bounded browser downloads', () => {
+  it('finalizes a GUID-named Chromium transfer with a collision-safe path and digest', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-download-unit-'));
+    try {
+      fs.writeFileSync(path.join(root, 'report.txt'), 'existing');
+      fs.writeFileSync(path.join(root, 'guid-one'), 'fixture bytes');
+      const runtime = new BrowserRuntime() as any;
+      runtime.projectRoot = root;
+      runtime.downloadSession = { send: jest.fn(async () => {}) };
+      const record = {
+        guid: 'guid-one', root, internalPath: path.join(root, 'guid-one'),
+        info: {
+          tabRef: 'tab', documentRef: 'document', downloadRef: 'download',
+          url: 'https://example.test/report', suggestedFilename: 'report.txt',
+          state: 'in_progress', receivedBytes: 0, maxBytes: 1000, startedAt: 1,
+        },
+      };
+      runtime.downloadRecords.set('download', record);
+      runtime.downloadRefsByGuid.set('guid-one', 'download');
+      await runtime.updateDownloadProgress({
+        guid: 'guid-one', totalBytes: 13, receivedBytes: 13, state: 'completed',
+      });
+      expect(record.info).toMatchObject({
+        state: 'completed', path: 'report-2.txt', receivedBytes: 13,
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/), completedAt: expect.any(Number),
+      });
+      expect(fs.readFileSync(path.join(root, 'report-2.txt'), 'utf8')).toBe('fixture bytes');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('cancels a transfer as soon as its declared or received bytes exceed the permit', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-download-limit-'));
+    try {
+      fs.writeFileSync(path.join(root, 'guid-two'), 'too large');
+      const send = jest.fn(async () => {});
+      const runtime = new BrowserRuntime() as any;
+      runtime.downloadSession = { send };
+      const record = {
+        guid: 'guid-two', root, internalPath: path.join(root, 'guid-two'),
+        info: {
+          tabRef: 'tab', documentRef: 'document', downloadRef: 'download',
+          url: 'https://example.test/large', suggestedFilename: 'large.bin',
+          state: 'in_progress', receivedBytes: 0, maxBytes: 4, startedAt: 1,
+        },
+      };
+      runtime.downloadRecords.set('download', record);
+      runtime.downloadRefsByGuid.set('guid-two', 'download');
+      await runtime.updateDownloadProgress({
+        guid: 'guid-two', totalBytes: 9, receivedBytes: 0, state: 'inProgress',
+      });
+      expect(record.info).toMatchObject({ state: 'canceled', error: expect.stringMatching(/exceeded/) });
+      expect(send).toHaveBeenCalledWith('Browser.cancelDownload', { guid: 'guid-two' });
+      expect(fs.existsSync(path.join(root, 'guid-two'))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

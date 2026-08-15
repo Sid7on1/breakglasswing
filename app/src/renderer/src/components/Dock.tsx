@@ -107,7 +107,8 @@ export function Dock({
           {tab === 'agents' && <AgentsPanel subagents={subagents} todos={todos} goalCount={snapshot?.goalCount ?? 0} onCommand={onCommand} />}
           {tab === 'map' && <MapPanel snapshot={snapshot} onCommand={onCommand} />}
           {tab === 'mind' && <MindPanel snapshot={snapshot} onCommand={onCommand} />}
-          {tab === 'health' && <HealthPanel diagnostics={diagnostics} runtime={runtime} computer={snapshot?.computer} onCommand={onCommand} />}
+          {tab === 'health' && <HealthPanel diagnostics={diagnostics} runtime={runtime} /* the wire has no computer field at this protocol version — the card owns the empty state */
+            computer={undefined} onCommand={onCommand} />}
       </div>
     </div>
   );
@@ -116,7 +117,7 @@ export function Dock({
 function HealthPanel({ diagnostics, runtime, computer, onCommand }: {
   diagnostics: DiagnosticEntry[];
   runtime: SupervisorStatus | null;
-  computer?: UiSnapshot['computer'];
+  computer?: DockComputerSummary;
   onCommand: (cmd: string) => void;
 }): React.ReactElement {
   const problems = diagnostics.filter((d) => d.level !== 'info');
@@ -173,8 +174,25 @@ function HealthPanel({ diagnostics, runtime, computer, onCommand }: {
  * companion, model vision, session grants, context taint. Every value comes from the engine's
  * ui_snapshot — the card renders an honest empty state when the engine hasn't reported one.
  */
+/**
+ * The computer-use summary this panel renders.
+ *
+ * It used to be typed as `UiSnapshot['computer']`, but the engine's current ui_snapshot does not
+ * carry that field — this component predates the protocol it is reading. Declaring the shape here
+ * keeps the panel honest: it renders its empty state until something genuinely supplies one, rather
+ * than reaching for a field the wire never sends.
+ */
+export interface DockComputerSummary {
+  browserUrl?: string;
+  desktop?: 'connected' | 'configured' | 'unavailable' | string;
+  desktopTools?: number;
+  grants?: string[];
+  tainted?: boolean;
+  vision?: string;
+}
+
 function ComputerUseCard({ computer, onCommand }: {
-  computer?: UiSnapshot['computer'];
+  computer?: DockComputerSummary;
   onCommand: (cmd: string) => void;
 }): React.ReactElement {
   if (!computer) {
@@ -229,12 +247,17 @@ function ComputerUseCard({ computer, onCommand }: {
             : 'active model is text-only — screenshots stay on disk',
           computer.vision ? undefined : { label: 'Pick model', cmd: '/model one' },
         )}
-        {row(
-          computer.grants.length ? 'bg-amber' : 'bg-moss',
-          `Session grants${computer.grants.length ? ` · ${computer.grants.length}` : ''}`,
-          computer.grants.length ? computer.grants.join(' · ') : 'none — every domain/app asks first',
-          computer.grants.length ? { label: 'Revoke', cmd: '/computer revoke-grants' } : undefined,
-        )}
+        {/*
+          No grants reported and an empty grants list are the same thing to a reader — "nothing is
+          standing granted" — so both take the reassuring branch. Treating absent as unknown would
+          make the row hedge about a state it can describe exactly.
+        */}
+        {((grants) => row(
+          grants.length ? 'bg-amber' : 'bg-moss',
+          `Session grants${grants.length ? ` · ${grants.length}` : ''}`,
+          grants.length ? grants.join(' · ') : 'none — every domain/app asks first',
+          grants.length ? { label: 'Revoke', cmd: '/computer revoke-grants' } : undefined,
+        ))(computer.grants ?? [])}
         {row(
           computer.tainted ? 'bg-amber' : 'bg-moss',
           computer.tainted ? 'Context taint active' : 'Context clean',

@@ -28,7 +28,6 @@ func (m *model) requestCompletions() tea.Cmd {
 	if v == "" {
 		if m.compOpen {
 			m.compOpen = false
-			m.relayout()
 		}
 		return nil
 	}
@@ -51,7 +50,6 @@ func (m *model) acceptCompletion() bool {
 	item := m.comps[m.compIdx]
 	if item.Disabled {
 		m.status = item.DisabledReason
-		m.relayout()
 		return false
 	}
 	isCmd := item.Kind == "command"
@@ -66,6 +64,5 @@ func (m *model) acceptCompletion() bool {
 	}
 	m.input.CursorEnd()
 	m.compOpen = false
-	m.relayout()
 	return isCmd
 }

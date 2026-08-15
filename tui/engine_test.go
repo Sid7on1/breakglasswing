@@ -20,64 +20,18 @@ func TestEmbeddedEngineFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	fallback := filepath.Join(root, "fallback")
-	got, err := extractEmbeddedEngineFromRoots([]string{blocked, fallback}, "test")
+	got, fresh, err := extractEmbeddedEngineFromRoots([]string{blocked, fallback}, "test")
 	if err != nil {
 		t.Fatalf("fallback extraction failed: %v", err)
+	}
+	if !fresh {
+		t.Fatal("first extraction was not reported as fresh")
 	}
 	if want := filepath.Join(fallback, "bimax", "bimax-engine-test"); got != want {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
 	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded engine" {
 		t.Fatalf("extracted engine = %q, err=%v", data, err)
-	}
-}
-
-func TestEmbeddedComputerUseFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
-	original := embeddedComputerUse
-	embeddedComputerUse = []byte("test embedded computer use")
-	t.Cleanup(func() { embeddedComputerUse = original })
-
-	root := t.TempDir()
-	blocked := filepath.Join(root, "blocked")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fallback := filepath.Join(root, "fallback")
-	got, err := extractEmbeddedComputerUseFromRoots([]string{blocked, fallback}, "test")
-	if err != nil {
-		t.Fatalf("fallback extraction failed: %v", err)
-	}
-	if want := filepath.Join(fallback, "bimax", "bimax-computer-use-test"); got != want {
-		t.Fatalf("path = %q, want %q", got, want)
-	}
-	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded computer use" {
-		t.Fatalf("extracted computer use = %q, err=%v", data, err)
-	}
-}
-
-func TestEmbeddedLivePipFallsBackWhenUserCacheIsUnwritable(t *testing.T) {
-	original := embeddedLivePip
-	embeddedLivePip = []byte("test embedded live pip")
-	t.Cleanup(func() { embeddedLivePip = original })
-
-	root := t.TempDir()
-	blocked := filepath.Join(root, "blocked")
-	if err := os.WriteFile(blocked, []byte("not a directory"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fallback := filepath.Join(root, "fallback")
-	got, err := extractEmbeddedLivePipFromRoots([]string{blocked, fallback}, "test")
-	if err != nil {
-		t.Fatalf("fallback extraction failed: %v", err)
-	}
-	if want := filepath.Join(fallback, "bimax", "bimax-live-pip-test"); got != want {
-		t.Fatalf("path = %q, want %q", got, want)
-	}
-	if data, err := os.ReadFile(got); err != nil || string(data) != "test embedded live pip" {
-		t.Fatalf("extracted live pip = %q, err=%v", data, err)
-	}
-	if info, err := os.Stat(got); err != nil || info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("extracted live pip is not executable: info=%v err=%v", info, err)
 	}
 }
 
@@ -91,6 +45,44 @@ func TestPackagedEngineDisablesBlockingCodeMemoryByDefault(t *testing.T) {
 	overridden := appendEnvDefault([]string{"BIMAX_DISABLE_CODEMEM=0"}, "BIMAX_DISABLE_CODEMEM", "1")
 	if len(overridden) != 1 || overridden[0] != "BIMAX_DISABLE_CODEMEM=0" {
 		t.Fatalf("explicit opt-in was overwritten: %v", overridden)
+	}
+}
+
+func TestTerminalEngineEnvironmentStripsDesktopCapabilities(t *testing.T) {
+	base := []string{
+		"PATH=/usr/bin",
+		`BIMAX_HOST_CAPABILITIES_JSON={"servers":[{"name":"host","command":"/tmp/provider"}]}`,
+	}
+	env := terminalEngineEnv(base)
+
+	for _, forbidden := range []string{
+		`BIMAX_HOST_CAPABILITIES_JSON={"servers":[{"name":"host","command":"/tmp/provider"}]}`,
+	} {
+		if containsEnv(env, forbidden) {
+			t.Fatalf("Terminal child inherited Desktop capability: %s", forbidden)
+		}
+	}
+	if !containsEnv(env, "BIMAX_HEADLESS=1") {
+		t.Fatalf("Terminal child environment = %v", env)
+	}
+}
+
+func TestStaleBuildUsesOfflineSocketFreeSourceLoader(t *testing.T) {
+	t.Setenv("BIMAX_ENGINE_CMD", "")
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "index.ts"), []byte("export {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := engineCommand(root)
+	if err != nil {
+		t.Fatalf("engineCommand: %v", err)
+	}
+	if got, want := strings.Join(cmd.Args, " "), "node --import tsx src/index.ts"; got != want {
+		t.Fatalf("source command = %q, want %q", got, want)
 	}
 }
 

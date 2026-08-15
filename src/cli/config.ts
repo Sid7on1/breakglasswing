@@ -38,10 +38,8 @@ const ENV_OVERRIDES: Partial<Record<keyof CliConfig, string>> = {
   visionModel: 'BGW_VISION_MODEL',
   reasoningEffort: 'BGW_REASONING_EFFORT',
   computerPip: 'BIMAX_COMPUTER_PIP',
-  computerRecord: 'BIMAX_COMPUTER_RECORD',
   computerVisible: 'BIMAX_COMPUTER_VISIBLE',
-  // Lets tests/CI pin the approval cadence deterministically (the PTY approval scenarios depend
-  // on 'always'), and lets cautious users force per-action prompts without editing config files.
+  computerRecord: 'BIMAX_COMPUTER_RECORD',
   computerApprovals: 'BIMAX_COMPUTER_APPROVALS',
 };
 
@@ -89,6 +87,22 @@ export interface CliConfig {
   adversarialVerify: boolean; // Phase 4: full-model red-team pass after self-critic (off by default)
   allowSelfEvolution: boolean;
   reasoningEffort?: string; // off by default; 'low'|'medium'|'high' to speed up thinking models
+  /**
+   * Upper bound on tokens a thinking model may spend reasoning before it must answer. 0 = leave it
+   * to the provider's default. Only sent to models whose capability row advertises the knob —
+   * backends that don't understand it reject the whole request, so this is gated exactly like
+   * `reasoningEffort` is.
+   */
+  maxThinkingTokens: number;
+  /**
+   * The active LLM provider (see cli/provider.ts). Persisted so a choice made in the UI survives a
+   * restart: this used to be a module-level variable set only by the /provider command, so every
+   * launch silently reverted to BGW_PROVIDER or 'nvidia' regardless of what the user had picked.
+   * Precedence is unchanged — a runtime /provider override still wins, then this, then the env var.
+   */
+  provider: string;
+  /** OpenAI-compatible endpoint override for the active provider ('' = the provider's own URL). */
+  providerBaseURL: string;
   onboardingComplete: boolean; // per-project: has the map-graph/AI-graph onboarding flow run once?
   showMapPanel: boolean; // pinned codebase-map overview panel above the input
   showTokenMeter: boolean; // live "tokens that will be sent" estimate near the input
@@ -110,35 +124,50 @@ export interface CliConfig {
   keybindings?: Record<string, string>;
   // Accessibility: calm static UI — disables spinner/shimmer animation (also set via BGW_REDUCED_MOTION env).
   reducedMotion?: boolean;
-  // Computer-use approval cadence: 'always' prompts for every acting verb (click/type/open/…);
-  // 'high-impact-only' auto-approves routine interaction and prompts ONLY for high-impact actions
-  // (delete/send/purchase/submit/permissions — see action.impact.ts). The sensitive-target hard
-  // floor (password managers, security settings, wallets) applies in BOTH modes and cannot be waived.
-  computerApprovals: 'always' | 'high-impact-only';
-  // true: visible physical mouse/keyboard with the target raised. false: background-first semantic
-  // Accessibility delivery, with PID-scoped sidecar fallback for controls lacking AX handles.
-  computerVisible: boolean;
-  // Native always-on-top ScreenCaptureKit stream of the active target window. It is presentation
-  // only: model perception still uses the original per-action PNG and exact coordinate metadata.
+
+  // ── Computer use ────────────────────────────────────────────────────────────────────────────
+  // Defaults mirror the capability provider's own config (see the Desktop `capabilities/mac`
+  // tree), so the same run behaves identically whether it is driven from the CLI or the app.
+  /** Picture-in-picture view of what computer use is doing. Off by default: it is a second capture
+   *  surface, and one that can occlude the very window being driven. */
   computerPip: boolean;
-  // Opt-in: allow computer-use screen recording. Recording NEVER starts implicitly — only an
-  // explicit record_start action (which itself requires approval, and separate explicit approval
-  // for whole-display capture) can begin one, and only when this is true.
+  /** Show the driven app while acting, rather than operating a hidden surface. */
+  computerVisible: boolean;
+  /** Record a video of computer-use runs. Off by default — recordings are large and sensitive. */
   computerRecord: boolean;
+  /** When the user is asked to approve an action: every action, or only high-impact ones. */
+  computerApprovals: 'always' | 'high-impact-only';
 }
 
-const DEFAULTS: CliConfig = {
+export const DEFAULTS: CliConfig = {
   defaultAgent: 'bimax',
-  // Work: fastest prompt-faithful text controller in the grounded 2026-07-29 rerun (exact reply
-  // 0.36s, correct ComputerTool open 0.57s). Screenshot turns route to the explicit Vision slot.
-  model: 'mistralai/mistral-nemotron',
+  // Work: tool-call fidelity is selected before raw latency, because a model that cannot call tools
+  // cannot drive the loop at all (mistralai/mistral-nemotron declares Reasoning only — no Function
+  // Calling — and prints bare tool JSON as prose; it is flagged avoidAutoSelect in cli/models.ts).
+  //
+  // The previous pick here was stepfun-ai/step-3.7-flash, chosen from its capability card. Three
+  // independent LIVE probes contradict that card — cli/models.ts records "timed out (180s, no
+  // response headers)" for both its Work and Vision rows, and core/agent.loop.ts records the same
+  // model sending no headers for 180s as a configured fallback. A measurement outranks a card, and
+  // shipping a default the catalog itself bars from automatic selection is what turned a bad model
+  // choice into a silent hang: the spinner runs and no reply ever arrives.
+  //
+  // These MUST equal the DEFAULT_* constants in cli/models.ts (enforced by models.test.ts).
+  // Re-measure with `npm run benchmark:models` — that script, not this comment, is the authority.
+  model: 'nvidia/nemotron-3-nano-30b-a3b',
   // Quick slot: plain model, never a reasoner. Live exact reply 0.61s; valid tool call 0.56s.
   liteModel: 'meta/llama-3.1-8b-instruct',
-  // Vision: the only served candidate that both typed the exact message for a proven contact and
-  // refused to act blindly when the selected phone-number conversation was not the recipient.
+  // Vision: the only VLM in the catalog that both grounded a real composer action AND refused the
+  // unproven-recipient safety trap. The previous default (nemotron-3-nano-omni) is faster on paper
+  // but chose a WRONG click on both grounded frames, which is why the catalog flags it
+  // avoidAutoSelect — a vision slot that clicks confidently in the wrong place is worse than a slow
+  // one.
   visionModel: 'nvidia/nemotron-nano-12b-v2-vl',
   fallbackModel: '', // off by default — set to a second NIM id to survive mid-run model outages
   subagentModel: '', // '' = sub-agents use the main model
+  provider: '',          // '' = follow BGW_PROVIDER, else 'nvidia' (see cli/provider.ts)
+  providerBaseURL: '',   // '' = the provider's own endpoint
+  maxThinkingTokens: 0,  // 0 = the provider's default reasoning budget
 
   timeout: 120000,
   temperature: 0.7,
@@ -172,14 +201,10 @@ const DEFAULTS: CliConfig = {
   contextMode: 'smart',
   contextWindowTokens: 0,
   parallelToolCalls: true,
-  computerApprovals: 'high-impact-only',
-  // Reliability default: visible physical input. Users can choose background-first coexistence;
-  // action receipts and fresh target-window screenshots still verify every delivered step.
+  computerPip: false,
   computerVisible: true,
-  computerPip: true,
-  // Privacy default: recording is OFF. Screen recording captures everything visible — it must be
-  // an explicit, approved user decision (record_start), never an ambient side effect of acting.
   computerRecord: false,
+  computerApprovals: 'always',
 };
 
 let cached: CliConfig | null = null;
@@ -238,6 +263,10 @@ async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
 }
 
 function parseEnvValue(key: keyof CliConfig, raw: string): unknown {
+  // Union-typed keys cannot take an arbitrary string: the declared type would be a lie, and an
+  // unrecognized approval mode must fail SAFE (ask about everything) rather than silently widening
+  // what runs unattended. Matches the capability provider's own config.
+  if (key === 'computerApprovals') return raw === 'high-impact-only' ? 'high-impact-only' : 'always';
   const kind = typeof (DEFAULTS as any)[key];
   if (kind === 'number') { const n = Number(raw); return Number.isFinite(n) ? n : undefined; }
   if (kind === 'boolean') return raw !== 'false' && raw !== '0';

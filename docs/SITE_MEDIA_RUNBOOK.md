@@ -44,7 +44,7 @@ The repo already has a screenshot script for the desktop app:
 
 ```sh
 cd app
-node scripts/screenshot-ui.mjs      # writes ui-*.png into app/release/
+node scripts/ui/journeys.mjs        # writes app/benchmarks/ui/screenshots/*.png
 ```
 
 Then re-run the downscale step (§2). Keep the same filenames so nothing in the site needs editing.

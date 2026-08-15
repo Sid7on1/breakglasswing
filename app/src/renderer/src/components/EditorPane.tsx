@@ -25,45 +25,45 @@ import { insertIntoComposer } from './FilesPanel';
  * the engine's tools and Edit Shield.
  */
 
-// --- Graphite & Phosphor CodeMirror theme ------------------------------------------------------
+// --- Moonlight CodeMirror theme ---------------------------------------------------------------
 
-const graphiteTheme = EditorView.theme({
-  '&': { backgroundColor: '#12100e', color: '#e8e2da', fontSize: '12.5px', height: '100%' },
-  '.cm-content': { fontFamily: "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace", caretColor: '#d77757', padding: '8px 0' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#d77757' },
+const moonlightTheme = EditorView.theme({
+  '&': { backgroundColor: '#0d0d0d', color: '#eeeeec', fontSize: '12.5px', height: '100%' },
+  '.cm-content': { fontFamily: "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace", caretColor: '#ffffff', padding: '8px 0' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#ffffff' },
   '&.cm-focused': { outline: 'none' },
-  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, ::selection': { backgroundColor: 'rgba(215,119,87,0.25)' },
-  '.cm-selectionBackground': { backgroundColor: 'rgba(215,119,87,0.18)' },
-  '.cm-activeLine': { backgroundColor: 'rgba(232,226,218,0.035)' },
-  '.cm-gutters': { backgroundColor: '#12100e', color: '#6b6259', border: 'none', borderRight: '1px solid #2e2925' },
-  '.cm-activeLineGutter': { backgroundColor: 'rgba(232,226,218,0.05)', color: '#948a7e' },
-  '.cm-foldGutter .cm-gutterElement': { color: '#6b6259' },
-  '.cm-matchingBracket': { backgroundColor: 'rgba(215,119,87,0.22)', outline: 'none' },
-  '.cm-searchMatch': { backgroundColor: 'rgba(217,160,91,0.25)' },
-  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'rgba(215,119,87,0.4)' },
-  '.cm-selectionMatch': { backgroundColor: 'rgba(156,179,128,0.15)' },
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, ::selection': { backgroundColor: 'rgba(255,255,255,0.22)' },
+  '.cm-selectionBackground': { backgroundColor: 'rgba(255,255,255,0.15)' },
+  '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.035)' },
+  '.cm-gutters': { backgroundColor: '#0d0d0d', color: '#747470', border: 'none', borderRight: '1px solid #292929' },
+  '.cm-activeLineGutter': { backgroundColor: 'rgba(255,255,255,0.05)', color: '#a0a09b' },
+  '.cm-foldGutter .cm-gutterElement': { color: '#747470' },
+  '.cm-matchingBracket': { backgroundColor: 'rgba(255,255,255,0.18)', outline: 'none' },
+  '.cm-searchMatch': { backgroundColor: 'rgba(255,255,255,0.16)' },
+  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'rgba(255,255,255,0.28)' },
+  '.cm-selectionMatch': { backgroundColor: 'rgba(255,255,255,0.10)' },
   '.cm-scroller': { overflow: 'auto' },
-  '.cm-panels': { backgroundColor: '#1e1b18', color: '#e8e2da', border: 'none' },
-  '.cm-panels input': { backgroundColor: '#12100e', color: '#e8e2da', border: '1px solid #2e2925' },
+  '.cm-panels': { backgroundColor: '#171717', color: '#eeeeec', border: 'none' },
+  '.cm-panels input': { backgroundColor: '#0d0d0d', color: '#eeeeec', border: '1px solid #303030' },
 }, { dark: true });
 
-const graphiteHighlight = HighlightStyle.define([
-  { tag: [t.comment, t.blockComment, t.lineComment], color: '#6b6259', fontStyle: 'italic' },
-  { tag: [t.keyword, t.operatorKeyword, t.modifier, t.controlKeyword, t.moduleKeyword], color: '#d77757' },
-  { tag: [t.string, t.special(t.string), t.regexp], color: '#9cb380' },
-  { tag: [t.number, t.bool, t.null, t.atom], color: '#d9a05b' },
-  { tag: [t.function(t.variableName), t.function(t.propertyName), t.labelName], color: '#e89b7c' },
-  { tag: [t.typeName, t.className, t.namespace], color: '#c9a06a' },
-  { tag: [t.propertyName, t.attributeName], color: '#b8a890' },
-  { tag: [t.variableName, t.definition(t.variableName)], color: '#e8e2da' },
-  { tag: [t.punctuation, t.bracket, t.separator], color: '#948a7e' },
-  { tag: [t.meta, t.processingInstruction, t.annotation], color: '#948a7e' },
-  { tag: t.heading, color: '#e89b7c', fontWeight: '600' },
-  { tag: t.link, color: '#d77757', textDecoration: 'underline' },
+const moonlightHighlight = HighlightStyle.define([
+  { tag: [t.comment, t.blockComment, t.lineComment], color: '#747470', fontStyle: 'italic' },
+  { tag: [t.keyword, t.operatorKeyword, t.modifier, t.controlKeyword, t.moduleKeyword], color: '#ffffff', fontWeight: '600' },
+  { tag: [t.string, t.special(t.string), t.regexp], color: '#d1d1ce' },
+  { tag: [t.number, t.bool, t.null, t.atom], color: '#b9b9b5' },
+  { tag: [t.function(t.variableName), t.function(t.propertyName), t.labelName], color: '#eeeeec' },
+  { tag: [t.typeName, t.className, t.namespace], color: '#c8c8c4' },
+  { tag: [t.propertyName, t.attributeName], color: '#ababA7' },
+  { tag: [t.variableName, t.definition(t.variableName)], color: '#e5e5e2' },
+  { tag: [t.punctuation, t.bracket, t.separator], color: '#999995' },
+  { tag: [t.meta, t.processingInstruction, t.annotation], color: '#999995' },
+  { tag: t.heading, color: '#ffffff', fontWeight: '600' },
+  { tag: t.link, color: '#e2e2df', textDecoration: 'underline' },
   { tag: t.emphasis, fontStyle: 'italic' },
   { tag: t.strong, fontWeight: '600' },
-  { tag: [t.inserted], color: '#9cb380' },
-  { tag: [t.deleted], color: '#c25b4e' },
+  { tag: [t.inserted], color: '#d6d6d2' },
+  { tag: [t.deleted], color: '#b1b1ad' },
 ]);
 
 function langFor(path: string) {
@@ -157,8 +157,8 @@ export function EditorPane({
         highlightActiveLine(),
         highlightActiveLineGutter(),
         highlightSelectionMatches(),
-        syntaxHighlighting(graphiteHighlight),
-        graphiteTheme,
+        syntaxHighlighting(moonlightHighlight),
+        moonlightTheme,
         langFor(path),
         EditorView.lineWrapping,
         keymap.of([

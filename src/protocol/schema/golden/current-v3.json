@@ -1,0 +1,25 @@
+{
+  "protocolVersion": "3.1.0",
+  "clientRange": { "minMajor": 2, "maxMajor": 3 },
+  "journeys": {
+    "transcript": [
+      { "direction": "out", "message": { "t": "hello", "engine": { "version": "1.1.0", "buildCommit": "01234567" }, "protocolVersion": "3.1.0", "protocolMajor": 3, "minCompatibleMajor": 2, "maxCompatibleMajor": 3, "features": ["approvals", "interrupt", "resume"] } },
+      { "direction": "out", "message": { "t": "ready", "protocol": 3 } },
+      { "direction": "in", "message": { "t": "input", "text": "inspect the failing test" } },
+      { "direction": "out", "message": { "t": "event", "name": "stream_token", "args": ["Found it."] } }
+    ],
+    "approval_interrupt_resume": [
+      { "direction": "out", "message": { "t": "request", "id": 7, "kind": "diff", "question": "Apply this edit?", "options": ["Approve", "Reject"], "body": "--- a/x\n+++ b/x" } },
+      { "direction": "in", "message": { "t": "reply", "id": 7, "value": "Approve" } },
+      { "direction": "in", "message": { "t": "interrupt" } },
+      { "direction": "in", "message": { "t": "resume", "id": "session-7" } }
+    ],
+    "crash_recovery": [
+      { "direction": "out", "message": { "t": "ready", "protocol": 3 } },
+      { "process": "exit", "code": 1 },
+      { "direction": "out", "message": { "t": "ready", "protocol": 3 } },
+      { "direction": "in", "message": { "t": "resume", "id": "session-7" } }
+    ],
+    "malformed_frames": ["not-json", "[]", "{\"t\":"]
+  }
+}

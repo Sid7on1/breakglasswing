@@ -5,6 +5,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Keep the gate hermetic on managed builders where the user-level Go cache is intentionally
+# read-only. Honor an explicit caller cache, otherwise use the same disposable cache for both the
+# TUI tests and the embedded release build.
+export GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/bimax-release-go-cache}"
+# A nested sandbox can prevent the autonomy fixture from starting its own OS sandbox. Keep any
+# explicit test-harness bypass scoped to stage 9; the product tests below must always exercise the
+# normal fail-closed default.
+release_autonomy_soft_floor="${BIMAX_RELEASE_AUTONOMY_SOFT_FLOOR:-0}"
+unset BIMAX_SANDBOX_FLOOR_SOFT
+
 echo "[1/10] TypeScript build"
 npm run build
 
@@ -15,15 +25,10 @@ echo "[3/10] Engine tests + real browser smoke"
 BIMAX_BROWSER_E2E=1 npm run test:ci -- --runInBand --testTimeout=30000
 
 echo "[4/10] Go TUI tests"
-( cd tui && GOCACHE="${TMPDIR:-/tmp}/bimax-release-go-cache" go test ./... )
+( cd tui && go test ./... )
 
 echo "[5/10] Self-contained host binary"
 ./build-release.sh
-# The build compiles and embeds native/BimaxLivePip.swift. A real-window frame-delivery smoke needs
-# an interactive macOS login session + Screen Recording permission, so keep it opt-in for headless CI.
-if [ "${BIMAX_NATIVE_PIP_SMOKE:-0}" = "1" ]; then
-  npm run test:computer:pip
-fi
 
 echo "[6/10] Artifact identity"
 version="$(node -p "require('./package.json').version")"
@@ -34,6 +39,12 @@ source_actual="$(node dist/index.js --version)"
 [ "$source_actual" = "$version" ] || { echo "source CLI version mismatch: expected '$version', got '$source_actual'" >&2; exit 1; }
 ./build/bimax --help >/dev/null
 
+# Structural Terminal boundary: only the coding engine may be embedded by the Go release source.
+if grep -En 'go:embed embed/(bimax-computer-use|bimax-live-pip|bimax-desktop-helper|bimax-cu-service)' tui/embed_prod.go; then
+  echo "Terminal release source still embeds a Computer Use payload" >&2
+  exit 1
+fi
+
 echo "[7/10] Clean local install"
 install_root="$(mktemp -d)"
 trap 'rm -rf "$install_root"' EXIT
@@ -42,10 +53,14 @@ HOME="$install_root/home" BIMAX_INSTALL_DIR="$install_root/bin" BIMAX_LOCAL_ARTI
 "$install_root/bin/bimax" --version >/dev/null
 
 echo "[8/10] First-user dogfood"
-npx tsx scripts/dogfood-release.ts
+node --import tsx scripts/dogfood-release.ts
 
 echo "[9/10] Offline autonomy pipeline suite"
-npx tsx benchmarks/autonomy/run.ts --suite
+if [ "$release_autonomy_soft_floor" = "1" ]; then
+  BIMAX_SANDBOX_FLOOR_SOFT=1 node --import tsx benchmarks/autonomy/run.ts --suite
+else
+  node --import tsx benchmarks/autonomy/run.ts --suite
+fi
 
 echo "[10/10] Release checksum"
 ( cd build && shasum -a 256 bimax > bimax.sha256 )

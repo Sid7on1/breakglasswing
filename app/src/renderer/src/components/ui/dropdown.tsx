@@ -36,16 +36,34 @@ export function Dropdown({
 
   return (
     <div ref={rootRef} className="relative">
-      <button type="button" aria-label={ariaLabel} onClick={() => setOpen((v) => !v)} className="cursor-pointer">
+      {/* Without an explicit ring the trigger falls back to the UA's own accent outline, which is
+          the one focus indicator in the app that ignores the theme. */}
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="cursor-pointer rounded-lg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ember"
+      >
         {trigger(open)}
       </button>
       {open && (
         <div
           className={cn(
-            'absolute z-30 min-w-56 rounded-[10px] border border-line bg-raise p-1.5 shadow-[0_12px_32px_rgba(0,0,0,0.45)]',
+            'anim-pop-in absolute z-30 min-w-56 rounded-[12px] p-1.5',
+            'liquid-glass liquid-glass-pop',
             direction === 'up' ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
             align === 'left' ? 'left-0' : 'right-0',
           )}
+          /*
+            A popover is adjacent to its trigger, so it does not need a measured flight: growing
+            from the anchored corner already reads as "this came out of that button", and it costs
+            a transform-origin instead of a rect. The corner is the one nearest the trigger, which
+            is the opposite of wherever the popover is placed relative to it.
+          */
+          style={{
+            transformOrigin: `${align === 'left' ? 'left' : 'right'} ${direction === 'up' ? 'bottom' : 'top'}`,
+          }}
         >
           {children(() => setOpen(false))}
         </div>

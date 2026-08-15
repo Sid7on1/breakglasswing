@@ -1,16 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Settings2, Cpu, Bot, Shield, Activity, Search, X, ChevronDown,
+  Activity, Bot, BrainCircuit, ChevronDown, Cpu, ExternalLink, FlaskConical, Globe2,
+  KeyRound, Search, Settings2, Shield, TerminalSquare, X,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 import { cn } from '../lib/cn';
 import type { EngineConfig } from '../protocol';
-
-/**
- * Settings v2 — a real settings surface (Claude-desktop style): left nav + search, pages of
- * live controls that read/write the engine config over the silent protocol-v3 round-trip
- * (configGet/configSet). Nothing in this surface prints into the transcript.
- */
+import type { InspectorTabId } from '../inspector.model';
+import type { Phase9View } from '../usePhase9';
 
 type Control =
   | { kind: 'toggle' }
@@ -18,82 +15,69 @@ type Control =
   | { kind: 'number'; min?: number; max?: number; step?: number; placeholder?: string }
   | { kind: 'text'; placeholder?: string };
 
-interface Item {
-  key: keyof EngineConfig;
-  label: string;
-  desc: string;
-  control: Control;
-}
+interface Item { key: keyof EngineConfig; label: string; desc: string; control: Control }
+type PageId = 'general' | 'providers' | 'browser' | 'environment' | 'alchemist' | 'autonomy' | 'safety';
+interface Page { id: PageId; label: string; icon: React.ReactNode; subtitle: string; items: Item[] }
 
-type PageId = 'general' | 'models' | 'autonomy' | 'safety';
-
-const PAGES: { id: PageId; label: string; icon: React.ReactNode; items: Item[] }[] = [
+const PAGES: Page[] = [
   {
-    id: 'general',
-    label: 'General',
-    icon: <Settings2 size={15} />,
+    id: 'general', label: 'General', icon: <Settings2 size={15} />, subtitle: 'Interface, notifications and project behavior',
     items: [
-      { key: 'notificationBell', label: 'Notification bell', desc: 'Play a sound when a turn finishes while the window is in the background.', control: { kind: 'toggle' } },
+      { key: 'notificationBell', label: 'Notification bell', desc: 'Play a sound when a turn finishes while Bimax is in the background.', control: { kind: 'toggle' } },
       { key: 'autoIndex', label: 'Build code maps automatically', desc: 'Prepare the visual code map when a project opens.', control: { kind: 'toggle' } },
-      { key: 'verbose', label: 'Verbose logging', desc: 'Include extra diagnostic detail for troubleshooting.', control: { kind: 'toggle' } },
-      { key: 'reducedMotion', label: 'Reduce motion', desc: 'Use a calmer interface with fewer animations.', control: { kind: 'toggle' } },
+      { key: 'verbose', label: 'Diagnostic detail', desc: 'Include additional local troubleshooting detail in engine logs.', control: { kind: 'toggle' } },
+      { key: 'reducedMotion', label: 'Reduce motion', desc: 'Prefer quiet fades and short state transitions throughout Bimax.', control: { kind: 'toggle' } },
     ],
   },
   {
-    id: 'models',
-    label: 'Models',
-    icon: <Cpu size={15} />,
+    id: 'providers', label: 'Providers & models', icon: <Cpu size={15} />, subtitle: 'Credentials, routing and model roles',
     items: [
       { key: 'model', label: 'Main model', desc: 'The model Bimax uses for building and reasoning.', control: { kind: 'text', placeholder: 'provider/model-id' } },
       { key: 'liteModel', label: 'Fast model', desc: 'A quicker model for summaries and small supporting tasks.', control: { kind: 'text', placeholder: 'provider/model-id' } },
-      { key: 'subagentModel', label: 'Specialist model', desc: 'The model used by the agent team. Leave empty to use the main model.', control: { kind: 'text', placeholder: 'use main model' } },
-      { key: 'fallbackModel', label: 'Backup model', desc: 'Used when the main model is temporarily unavailable.', control: { kind: 'text', placeholder: 'off' } },
-      {
-        key: 'reasoningEffort', label: 'Reasoning effort', desc: 'Thinking budget for reasoning-capable models. Off sends no effort hint.',
-        control: { kind: 'select', options: [{ value: '', label: 'Off' }, { value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
-      },
-      {
-        key: 'contextMode', label: 'Tool context', desc: 'Smart sends only the working set of tool schemas (rare tools load on demand). Full sends everything, every turn.',
-        control: { kind: 'select', options: [{ value: 'smart', label: 'Smart (deferred)' }, { value: 'full', label: 'Full (all tools)' }] },
-      },
-      { key: 'contextWindowTokens', label: 'Context window', desc: "Your model's real window in tokens; drives proactive compaction. 0 = safe default (128k).", control: { kind: 'number', min: 0, step: 1000, placeholder: '0 (auto)' } },
+      { key: 'subagentModel', label: 'Specialist model', desc: 'Used by agent-team specialists. Empty inherits the main model.', control: { kind: 'text', placeholder: 'use main model' } },
+      { key: 'fallbackModel', label: 'Backup model', desc: 'Used only when the main model is temporarily unavailable.', control: { kind: 'text', placeholder: 'off' } },
+      { key: 'reasoningEffort', label: 'Reasoning effort', desc: 'Thinking budget for compatible models.', control: { kind: 'select', options: [{ value: '', label: 'Off' }, { value: 'low', label: 'Low' }, { value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] } },
+      { key: 'contextMode', label: 'Tool context', desc: 'Smart loads tools on demand; Full sends the complete tool set.', control: { kind: 'select', options: [{ value: 'smart', label: 'Smart · deferred' }, { value: 'full', label: 'Full · all tools' }] } },
+      { key: 'contextWindowTokens', label: 'Context window', desc: 'Actual model context in tokens. Zero uses the conservative default.', control: { kind: 'number', min: 0, step: 1000, placeholder: '0 · auto' } },
       { key: 'temperature', label: 'Temperature', desc: 'Sampling temperature for the main loop.', control: { kind: 'number', min: 0, max: 2, step: 0.1 } },
-      { key: 'topP', label: 'Top-p', desc: 'Nucleus sampling cap — clips the low-probability tail behind dropped tool args.', control: { kind: 'number', min: 0, max: 1, step: 0.05 } },
+      { key: 'topP', label: 'Top-p', desc: 'Nucleus sampling cap.', control: { kind: 'number', min: 0, max: 1, step: 0.05 } },
       { key: 'maxTokens', label: 'Max output tokens', desc: 'Per-response output budget.', control: { kind: 'number', min: 256, step: 256 } },
-      { key: 'parallelToolCalls', label: 'Parallel tool calls', desc: 'Let the model batch multiple tool calls per turn. Disable for backends that reject multi-tool turns.', control: { kind: 'toggle' } },
+      { key: 'parallelToolCalls', label: 'Parallel tool calls', desc: 'Allow compatible models to batch independent tool calls.', control: { kind: 'toggle' } },
     ],
   },
+  { id: 'browser', label: 'Browser & research', icon: <Globe2 size={15} />, subtitle: 'Structured browsing, artifacts and page health', items: [] },
+  { id: 'environment', label: 'Environment', icon: <TerminalSquare size={15} />, subtitle: 'Runtimes, SDKs and local developer services', items: [] },
+  { id: 'alchemist', label: 'ML Alchemist', icon: <FlaskConical size={15} />, subtitle: 'Measured local-model experiments and compression', items: [] },
   {
-    id: 'autonomy',
-    label: 'Agent behavior',
-    icon: <Bot size={15} />,
+    id: 'autonomy', label: 'Agent behavior', icon: <Bot size={15} />, subtitle: 'Depth, parallel work and verification',
     items: [
-      { key: 'maxToolIterations', label: 'Max tool iterations', desc: 'Per-turn budget for autonomous tool loops. Higher = deeper multi-file work without babysitting.', control: { kind: 'number', min: 1, max: 500, step: 5 } },
+      { key: 'maxToolIterations', label: 'Max tool iterations', desc: 'Per-turn budget for autonomous tool loops.', control: { kind: 'number', min: 1, max: 500, step: 5 } },
       { key: 'maxSubAgents', label: 'Parallel specialists', desc: 'Maximum number of specialists Bimax may coordinate at once.', control: { kind: 'number', min: 1, max: 20, step: 1 } },
-      { key: 'selfCritic', label: 'Self-critic pass', desc: 'A lite-model review of each result before it reaches you.', control: { kind: 'toggle' } },
-      { key: 'adversarialVerify', label: 'Adversarial verify', desc: 'Full-model red-team pass after self-critic. Slower, catches sneaky mistakes.', control: { kind: 'toggle' } },
-      { key: 'autoVerify', label: 'Auto-verify edits', desc: 'Typecheck after each edit and feed errors straight back into the loop.', control: { kind: 'toggle' } },
-      { key: 'gitAutoCommit', label: 'Git auto-commit', desc: 'Commit after every successful agent edit (Aider-style). The ledger records each one.', control: { kind: 'toggle' } },
+      { key: 'selfCritic', label: 'Self-critic pass', desc: 'Review each result before it reaches you.', control: { kind: 'toggle' } },
+      { key: 'adversarialVerify', label: 'Adversarial verify', desc: 'Run an additional full-model challenge pass.', control: { kind: 'toggle' } },
+      { key: 'autoVerify', label: 'Auto-verify edits', desc: 'Feed typecheck failures back into the active loop.', control: { kind: 'toggle' } },
+      { key: 'gitAutoCommit', label: 'Git auto-commit', desc: 'Commit after successful agent edits and record the result.', control: { kind: 'toggle' } },
     ],
   },
   {
-    id: 'safety',
-    label: 'Permissions',
-    icon: <Shield size={15} />,
+    id: 'safety', label: 'Permissions & safety', icon: <Shield size={15} />, subtitle: 'Approval gates and Mac trust',
     items: [
-      { key: 'diffApproval', label: 'Diff approval', desc: 'Every mutating edit surfaces its diff and waits for your approval.', control: { kind: 'toggle' } },
-      { key: 'blastGate', label: 'Blast-radius gate', desc: 'Confirm edits touching HIGH/CRITICAL symbols in the codebase graph.', control: { kind: 'toggle' } },
-      { key: 'sandboxBash', label: 'Sandboxed bash', desc: 'Run shell commands under macOS sandbox-exec.', control: { kind: 'toggle' } },
+      { key: 'diffApproval', label: 'Diff approval', desc: 'Surface every mutating edit and wait for approval.', control: { kind: 'toggle' } },
+      { key: 'blastGate', label: 'Blast-radius gate', desc: 'Confirm edits touching high-impact code symbols.', control: { kind: 'toggle' } },
+      { key: 'sandboxBash', label: 'Sandboxed shell', desc: 'Run compatible shell commands through the macOS sandbox.', control: { kind: 'toggle' } },
     ],
   },
 ];
 
 export function SettingsDialog({
-  open, onClose, onOpenHealth, configGet, configSet,
+  open, onClose, onOpenHealth, onOpenModels, onOpenInspector, phase9, configGet, configSet,
 }: {
   open: boolean;
   onClose: () => void;
   onOpenHealth: () => void;
+  onOpenModels: () => void;
+  onOpenInspector: (tab: InspectorTabId) => void;
+  phase9: Phase9View;
   configGet: () => Promise<EngineConfig>;
   configSet: (patch: EngineConfig) => Promise<EngineConfig>;
 }): React.ReactElement {
@@ -101,121 +85,89 @@ export function SettingsDialog({
   const [search, setSearch] = useState('');
   const [cfg, setCfg] = useState<EngineConfig | null>(null);
   const [unsupported, setUnsupported] = useState(false);
-  const debounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const debounceRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
     if (!open) return;
-    setCfg(null);
-    setUnsupported(false);
-    void configGet().then((c) => {
-      if (Object.keys(c).length === 0) setUnsupported(true);
-      setCfg(c);
-    });
+    setCfg(null); setUnsupported(false);
+    void configGet().then((value) => { setUnsupported(Object.keys(value).length === 0); setCfg(value); });
   }, [open, configGet]);
 
+  useEffect(() => () => {
+    debounceRef.current.forEach((timer) => clearTimeout(timer));
+    debounceRef.current.clear();
+  }, []);
+
   const apply = (key: keyof EngineConfig, value: unknown, debounceMs = 0): void => {
-    setCfg((c) => ({ ...(c ?? {}), [key]: value }) as EngineConfig);
+    setCfg((current) => ({ ...(current ?? {}), [key]: value }) as EngineConfig);
     const timers = debounceRef.current;
-    const prev = timers.get(key as string);
-    if (prev) clearTimeout(prev);
-    const fire = (): void => {
+    const previous = timers.get(key as string);
+    if (previous) clearTimeout(previous);
+    const save = (): void => {
       timers.delete(key as string);
       void configSet({ [key]: value } as EngineConfig).then((canonical) => {
-        // Adopt the engine's canonical view unless another edit is mid-debounce.
         if (timers.size === 0 && Object.keys(canonical).length > 0) setCfg(canonical);
       });
     };
-    if (debounceMs > 0) timers.set(key as string, setTimeout(fire, debounceMs));
-    else fire();
+    if (debounceMs > 0) timers.set(key as string, setTimeout(save, debounceMs)); else save();
   };
 
   const q = search.trim().toLowerCase();
+  const currentPage = PAGES.find((entry) => entry.id === page) ?? PAGES[0];
   const visible = useMemo(() => {
-    if (!q) return PAGES.find((p) => p.id === page)?.items ?? [];
-    return PAGES.flatMap((p) => p.items).filter(
-      (i) => i.label.toLowerCase().includes(q) || i.desc.toLowerCase().includes(q),
-    );
-  }, [q, page]);
-  const heading = q ? `Search — ${visible.length} match${visible.length === 1 ? '' : 'es'}` : PAGES.find((p) => p.id === page)?.label;
+    if (!q) return currentPage.items;
+    return PAGES.flatMap((entry) => entry.items).filter((item) => `${item.label} ${item.desc}`.toLowerCase().includes(q));
+  }, [currentPage.items, q]);
+  const customPage = !q && currentPage.items.length === 0;
 
   return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="flex h-[min(680px,85vh)] w-[min(960px,calc(100vw-64px))] max-w-none flex-row gap-0 overflow-hidden p-0">
-        {/* Left nav */}
-        <div className="flex w-[220px] shrink-0 flex-col border-r border-line bg-bg/60 p-3">
-          <div className="mb-3 flex items-center gap-2 rounded-lg border border-line bg-well px-2.5 py-1.5">
-            <Search size={13} className="shrink-0 text-faint" />
-            <input
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search settings"
-              className="min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-faint"
-            />
-            {search && (
-              <button onClick={() => setSearch('')} className="cursor-pointer text-faint hover:text-ink"><X size={12} /></button>
-            )}
+    <Dialog open={open} onOpenChange={(value) => { if (!value) onClose(); }}>
+      <DialogContent className="settings-shell flex h-[min(720px,88vh)] w-[min(1020px,calc(100vw-min(48px,40vw)))] max-w-none flex-row gap-0 overflow-hidden p-0">
+        <nav className="settings-nav" aria-label="Settings sections">
+          <div className="settings-search">
+            <Search size={13} />
+            <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search settings" aria-label="Search settings" />
+            {search ? <button onClick={() => setSearch('')} aria-label="Clear search"><X size={12} /></button> : null}
           </div>
-          <div className="mb-1 px-2 text-[10px] font-medium tracking-[0.08em] text-faint uppercase">Settings</div>
-          {PAGES.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => { setPage(p.id); setSearch(''); }}
-              className={cn(
-                'flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors',
-                !q && page === p.id ? 'bg-hover text-ink' : 'text-dim hover:bg-hover/60 hover:text-ink',
-              )}
-            >
-              <span className={cn('shrink-0', !q && page === p.id ? 'text-ember' : 'text-faint')}>{p.icon}</span>
-              {p.label}
+          <div className="settings-nav-label">Bimax</div>
+          {PAGES.map((entry) => (
+            <button key={entry.id} onClick={() => { setPage(entry.id); setSearch(''); }} className={cn('settings-nav-item pressable', !q && page === entry.id && 'settings-nav-item--active')}>
+              <span>{entry.icon}</span><span className="min-w-0 flex-1 truncate">{entry.label}</span>
+              {(entry.id === 'environment' || entry.id === 'alchemist') ? <span className="size-1.5 rounded-full bg-moss" /> : null}
             </button>
           ))}
-          <div className="mt-4 mb-1 px-2 text-[10px] font-medium tracking-[0.08em] text-faint uppercase">System</div>
-          <button
-            onClick={() => { onClose(); onOpenHealth(); }}
-            className="flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2 text-left text-[12.5px] text-dim transition-colors hover:bg-hover/60 hover:text-ink"
-          >
-            <Activity size={14} className="mt-0.5 shrink-0 text-faint" />
-            <span>
-              <span className="block">Support</span>
-              <span className="mt-0.5 block text-[10.5px] leading-snug text-faint">App status and troubleshooting</span>
-            </span>
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center justify-between px-6 pt-5 pb-1">
-            <DialogTitle className="text-[15px] font-semibold text-ink">{heading}</DialogTitle>
-            <button
-              onClick={onClose}
-              title="Close"
-              className="flex size-7 cursor-pointer items-center justify-center rounded-md text-faint hover:bg-hover hover:text-ink"
-            >
-              <X size={15} />
+          <div className="mt-auto pt-4">
+            <button onClick={() => { onClose(); onOpenHealth(); }} className="settings-support pressable">
+              <Activity size={14} /><span><strong>Support & Trust</strong><small>Permissions, app health and diagnostics</small></span>
             </button>
           </div>
+        </nav>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
-            {unsupported && (
-              <div className="anim-fade-up mt-3 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-amber">
-                These settings are unavailable in this build. Update Bimax and try again.
-              </div>
-            )}
-            {!cfg && !unsupported ? (
-              <div className="mt-6 space-y-4">
-                {[0, 1, 2, 3].map((i) => (
-                  <div key={i} className="h-14 animate-pulse rounded-lg bg-raise" style={{ animationDelay: `${i * 120}ms` }} />
-                ))}
-              </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="settings-heading">
+            <div className="min-w-0">
+              <DialogTitle className="text-[16px] font-semibold text-ink">{q ? `Search · ${visible.length}` : currentPage.label}</DialogTitle>
+              <p className="mt-0.5 text-[11px] text-faint">{q ? 'Matching controls across Bimax' : currentPage.subtitle}</p>
+            </div>
+            <button onClick={onClose} title="Close" aria-label="Close settings" className="evidence-close pressable"><X size={15} /></button>
+          </header>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-7 pb-7">
+            {unsupported ? <div className="mt-3 rounded-xl border border-amber/30 bg-amber/8 px-3 py-2 text-xs text-amber">Engine controls are unavailable in this build. Capability pages remain read-only.</div> : null}
+            {customPage ? (
+              <CapabilitySettings page={page} phase9={phase9} onOpenModels={onOpenModels} onOpenInspector={onOpenInspector} onOpenHealth={onOpenHealth} onClose={onClose} />
+            ) : !cfg && !unsupported ? (
+              <div className="mt-6 space-y-3">{[0, 1, 2, 3].map((index) => <div key={index} className="h-16 animate-pulse rounded-xl bg-raise" />)}</div>
             ) : (
               <div className="mt-2">
-                {visible.map((item, i) => (
-                  <SettingRow key={item.key} item={item} cfg={cfg ?? {}} onApply={apply} index={i} disabled={unsupported} />
-                ))}
-                {q && visible.length === 0 && (
-                  <div className="mt-8 text-center text-xs text-faint">No settings match “{search}”.</div>
-                )}
+                {page === 'providers' && !q ? (
+                  <ActionCard icon={<KeyRound size={16} />} title="Provider catalogue & credentials" description="Connect API providers, store keys in the macOS Keychain and choose a compatible model for each role." action="Manage providers" onClick={onOpenModels} />
+                ) : null}
+                {page === 'safety' && !q ? (
+                  <ActionCard icon={<Shield size={16} />} title="Trust Center" description="Live macOS permission state, Computer Use service provenance and the draggable app bundle." action="Open Trust Center" onClick={() => { onClose(); onOpenHealth(); }} />
+                ) : null}
+                {visible.map((item, index) => <SettingRow key={item.key} item={item} cfg={cfg ?? {}} onApply={apply} index={index} disabled={unsupported} />)}
+                {q && visible.length === 0 ? <div className="mt-10 text-center text-xs text-faint">No settings match “{search}”.</div> : null}
               </div>
             )}
           </div>
@@ -225,91 +177,46 @@ export function SettingsDialog({
   );
 }
 
-function SettingRow({
-  item, cfg, onApply, index, disabled,
-}: {
-  item: Item;
-  cfg: EngineConfig;
-  onApply: (key: keyof EngineConfig, value: unknown, debounceMs?: number) => void;
-  index: number;
-  disabled: boolean;
+function CapabilitySettings({ page, phase9, onOpenModels, onOpenInspector, onOpenHealth, onClose }: {
+  page: PageId; phase9: Phase9View; onOpenModels: () => void; onOpenInspector: (tab: InspectorTabId) => void; onOpenHealth: () => void; onClose: () => void;
 }): React.ReactElement {
-  const value = cfg[item.key];
-  return (
-    <div
-      className="anim-fade-up flex items-start justify-between gap-6 border-b border-line/60 py-4 last:border-b-0"
-      style={{ animationDelay: `${Math.min(index, 10) * 30}ms` }}
-    >
-      <div className="min-w-0">
-        <div className="text-[13.5px] text-ink">{item.label}</div>
-        <div className="mt-0.5 text-xs leading-relaxed text-dim">{item.desc}</div>
-      </div>
-      <div className={cn('shrink-0 pt-0.5', disabled && 'pointer-events-none opacity-40')}>
-        {item.control.kind === 'toggle' && (
-          <Toggle checked={!!value} onChange={(v) => onApply(item.key, v)} label={item.label} />
-        )}
-        {item.control.kind === 'select' && (
-          <div className="relative">
-            <select
-              value={String(value ?? item.control.options[0].value)}
-              onChange={(e) => onApply(item.key, e.target.value)}
-              aria-label={item.label}
-              className="w-44 cursor-pointer appearance-none rounded-lg border border-line bg-well py-1.5 pr-8 pl-3 text-xs text-ink outline-none transition-colors hover:bg-hover focus:border-ember/55"
-            >
-              {item.control.options.map((o) => (
-                <option key={o.value} value={o.value} className="bg-raise">{o.label}</option>
-              ))}
-            </select>
-            <ChevronDown size={12} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-faint" />
-          </div>
-        )}
-        {item.control.kind === 'number' && (
-          <input
-            type="number"
-            value={value === undefined ? '' : Number(value)}
-            min={item.control.min}
-            max={item.control.max}
-            step={item.control.step}
-            placeholder={item.control.placeholder}
-            aria-label={item.label}
-            onChange={(e) => onApply(item.key, e.target.value === '' ? 0 : Number(e.target.value), 600)}
-            className="w-32 rounded-lg border border-line bg-well px-3 py-1.5 text-right font-mono text-xs text-ink outline-none transition-colors focus:border-ember/55 tabular-nums"
-          />
-        )}
-        {item.control.kind === 'text' && (
-          <input
-            type="text"
-            value={String(value ?? '')}
-            placeholder={item.control.placeholder}
-            aria-label={item.label}
-            onChange={(e) => onApply(item.key, e.target.value, 700)}
-            className="w-64 rounded-lg border border-line bg-well px-3 py-1.5 font-mono text-xs text-ink outline-none transition-colors focus:border-ember/55 placeholder:text-faint"
-          />
-        )}
-      </div>
+  if (page === 'browser') return (
+    <div className="settings-capability-grid">
+      <ActionCard icon={<Globe2 size={16} />} title="Structured research browser" description="BrowserTool uses stable indexed targets, screenshots, downloads, assertions and page-health evidence before generic Mac clicks." action="Open Browser lane" onClick={() => onOpenInspector('browser')} />
+      <CapabilityNote icon={<Shield size={15} />} title="Isolated automation profile" description="Bimax uses its managed Puppeteer browser by default. Your personal Chrome profile, history and extensions are not attached." />
+      <CapabilityNote icon={<BrainCircuit size={15} />} title="Research receipts" description="URLs, page titles, failed requests and console errors stay attached to the task as reviewable evidence." />
     </div>
   );
+  if (page === 'environment') {
+    const ready = phase9.environment?.tools.filter((tool) => tool.state === 'ready').length ?? 0;
+    return <div className="settings-capability-grid"><CapabilityHero icon={<TerminalSquare size={18} />} title={`${ready} developer tools resolved`} description="A bounded, read-only inventory of runtimes, package managers, SDKs and local services. No profile sourcing or project scripts." status={phase9.environment ? 'Live' : 'Loading'} /><ActionCard icon={<ExternalLink size={15} />} title="Environment map" description="Inspect exact tool paths, versions and project declarations in Evidence Studio." action="Open Environment" onClick={() => onOpenInspector('environment')} /></div>;
+  }
+  const ready = phase9.alchemist?.backends.filter((backend) => backend.state === 'ready').length ?? 0;
+  return <div className="settings-capability-grid"><CapabilityHero icon={<FlaskConical size={18} />} title={`${ready} local model backends ready`} description="MLX, Core ML Tools, llama.cpp and Ollama are detected without installing or running a model." status={phase9.alchemist?.state ?? 'Loading'} /><ActionCard icon={<BrainCircuit size={15} />} title="Measured experiment pipeline" description="Inspect → quantize or fine-tune → compare quality, memory and latency → verify → export. Unavailable steps remain disabled." action="Open Alchemist" onClick={() => onOpenInspector('alchemist')} /><ActionCard icon={<Cpu size={15} />} title="Model roles" description="Select provider models for coding and Computer Use before running an agent." action="Manage models" onClick={onOpenModels} /><ActionCard icon={<Shield size={15} />} title="Isolation boundary" description="Model transforms require isolated workers and immutable artifact handles; unsafe pickle input is refused." action="Open support" onClick={() => { onClose(); onOpenHealth(); }} /></div>;
 }
 
-/** Ember switch — the app's version of the Claude toggle: track fades, knob slides 16px. */
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }): React.ReactElement {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={cn(
-        'relative h-6 w-10.5 cursor-pointer rounded-full transition-colors duration-200',
-        checked ? 'bg-ember' : 'bg-line hover:bg-hover',
-      )}
-    >
-      <span
-        className={cn(
-          'absolute top-0.5 left-0.5 size-5 rounded-full bg-ink shadow-[0_1px_3px_rgba(0,0,0,0.4)] transition-transform duration-200 ease-out',
-          checked && 'translate-x-[18px]',
-        )}
-      />
-    </button>
-  );
+function CapabilityHero({ icon, title, description, status }: { icon: React.ReactNode; title: string; description: string; status: string }): React.ReactElement {
+  return <section className="settings-capability-hero"><span className="settings-capability-icon">{icon}</span><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h3>{title}</h3><span className="status-chip status-chip--ok">{status}</span></div><p>{description}</p></div></section>;
+}
+
+function CapabilityNote({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }): React.ReactElement {
+  return <section className="settings-note"><span>{icon}</span><div><h3>{title}</h3><p>{description}</p></div></section>;
+}
+
+function ActionCard({ icon, title, description, action, onClick }: { icon: React.ReactNode; title: string; description: string; action: string; onClick: () => void }): React.ReactElement {
+  return <button onClick={onClick} className="settings-action-card pressable"><span className="settings-capability-icon">{icon}</span><span className="min-w-0 flex-1 text-left"><strong>{title}</strong><small>{description}</small></span><span className="settings-action-label">{action}<ExternalLink size={11} /></span></button>;
+}
+
+function SettingRow({ item, cfg, onApply, index, disabled }: { item: Item; cfg: EngineConfig; onApply: (key: keyof EngineConfig, value: unknown, debounceMs?: number) => void; index: number; disabled: boolean }): React.ReactElement {
+  const value = cfg[item.key];
+  return <div className="anim-fade-up flex items-start justify-between gap-6 border-b border-line/60 py-4 last:border-b-0" style={{ animationDelay: `${Math.min(index, 10) * 24}ms` }}><div className="min-w-0"><div className="text-[13px] text-ink">{item.label}</div><div className="mt-0.5 text-[11.5px] leading-relaxed text-dim">{item.desc}</div></div><div className={cn('shrink-0 pt-0.5', disabled && 'pointer-events-none opacity-40')}>
+    {item.control.kind === 'toggle' ? <Toggle checked={Boolean(value)} onChange={(next) => onApply(item.key, next)} label={item.label} /> : null}
+    {item.control.kind === 'select' ? <div className="relative"><select value={String(value ?? item.control.options[0].value)} onChange={(event) => onApply(item.key, event.target.value)} aria-label={item.label} className="settings-select">{item.control.options.map((option) => <option key={option.value} value={option.value} className="bg-raise">{option.label}</option>)}</select><ChevronDown size={12} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-faint" /></div> : null}
+    {item.control.kind === 'number' ? <input type="number" value={value === undefined ? '' : Number(value)} min={item.control.min} max={item.control.max} step={item.control.step} placeholder={item.control.placeholder} aria-label={item.label} onChange={(event) => onApply(item.key, event.target.value === '' ? 0 : Number(event.target.value), 600)} className="settings-input w-32 text-right" /> : null}
+    {item.control.kind === 'text' ? <input type="text" value={String(value ?? '')} placeholder={item.control.placeholder} aria-label={item.label} onChange={(event) => onApply(item.key, event.target.value, 700)} className="settings-input w-64" /> : null}
+  </div></div>;
+}
+
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (value: boolean) => void; label: string }): React.ReactElement {
+  return <button role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} className={cn('relative h-6 w-10.5 cursor-pointer rounded-full transition-colors duration-200', checked ? 'bg-ember' : 'bg-line hover:bg-hover')}><span className={cn('absolute top-0.5 left-0.5 size-5 rounded-full bg-ink shadow-[0_1px_3px_rgba(0,0,0,0.35)] transition-transform duration-200 ease-out', checked && 'translate-x-[18px]')} /></button>;
 }

@@ -14,7 +14,7 @@ import (
 //      syntax theme is the one documented exception).
 //   2. Contract — every token styles.go defines must carry exactly the hex the design-language
 //      doc publishes for it. Editing one without the other fails CI.
-//   3. Parity — the shared Graphite&Ember tokens must match the Electron app's styles.css, so
+//   3. Parity — the shared Moonlight tokens must match the Electron app's styles.css, so
 //      the two frontends can't quietly diverge.
 // Plus semantic-binding checks: the ok/err/warn styles must be bound to the token their name
 // says (the stall-tint bug of 9eefbda5 — a style mirroring the WRONG token — stays fixed).
@@ -88,14 +88,14 @@ func TestTokenParityWithElectronApp(t *testing.T) {
 	}
 	varRE := regexp.MustCompile(`--color-([\w-]+):\s*(#[0-9A-Fa-f]{6})`)
 	appTokens := map[string]string{}
-	// First match wins: the leading @theme block is the DEFAULT Graphite palette the contract
-	// covers; later .theme-linen/.theme-ink blocks are alternate user themes with their own hexes.
+	// First match wins: the leading @theme block is the default Moonlight palette the contract
+	// covers; later Starlight/Moonlight blocks are explicit user themes with their own hexes.
 	for _, m := range varRE.FindAllStringSubmatch(string(css), -1) {
 		if _, seen := appTokens[m[1]]; !seen {
 			appTokens[m[1]] = strings.ToUpper(m[2])
 		}
 	}
-	// The shared Graphite & Ember vocabulary — TUI token ↔ app custom property.
+	// The shared Moonlight vocabulary — TUI token ↔ app custom property.
 	shared := map[string]string{
 		"ember": string(colAccent), "ember-bright": string(colShimmer),
 		"ink": string(colText), "dim": string(colInactive), "faint": string(colSubtle),

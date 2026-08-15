@@ -135,7 +135,7 @@ export class DogfoodEngine {
     try { return JSON.parse(fs.readFileSync(path.join(this.projectRoot, 'package.json'), 'utf-8')); } catch { return null; }
   }
 
-  /** Site probe: load the built site in headless system Chrome, collect console errors. */
+  /** Site probe: load the built site in Puppeteer's managed browser, collect console errors. */
   private async probeSite(): Promise<ProbeResult | null> {
     const persona = 'visitor loading the landing page';
     const distIndex = ['site/dist/index.html', 'dist/index.html', 'build/index.html']
@@ -145,8 +145,6 @@ export class DogfoodEngine {
     let browser: Awaited<ReturnType<(typeof import('puppeteer'))['launch']>> | null = null;
     try {
       const puppeteer = await import('puppeteer');
-      const chrome = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome']
-        .find(p => { try { return fs.existsSync(p); } catch { return false; } });
       const siteRoot = path.dirname(path.join(this.projectRoot, distIndex));
       server = http.createServer((req, res) => {
         try {
@@ -179,7 +177,6 @@ export class DogfoodEngine {
 
       browser = await puppeteer.launch({
         headless: 'new',
-        ...(chrome ? { executablePath: chrome } : {}),
         args: ['--no-sandbox', '--disable-gpu'],
       });
       {

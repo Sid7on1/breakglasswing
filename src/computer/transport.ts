@@ -62,6 +62,14 @@ function mcpStructured(result: any): any {
 const COLD_START_TIMEOUT_MS = 45_000;
 const RPC_TIMEOUT_MS = 30_000;
 
+/** The sidecar retires a session on its own (idle reap, daemon restart) and then rejects every
+ * session-scoped tool call. The connection stays healthy, so this is NOT a dead-transport error —
+ * it is repaired by re-issuing start_session for the same id, which is exactly what the driver's
+ * own message asks for. Matched on the driver's wording, deliberately loose about the id. */
+function isRetiredSessionError(message: string): boolean {
+  return /session\b.*\bhas ended|call\s+start_session/i.test(String(message || ''));
+}
+
 /** The packaged TUI extracts a >40MB content-addressed binary; anything smaller is a stub/corrupt. */
 const MIN_DRIVER_BYTES = 1 << 20;
 
@@ -246,7 +254,7 @@ export class SidecarTransport implements SidecarTransportPort {
     return this.clientPromise;
   }
 
-  public async call(name: string, args: Record<string, unknown> = {}): Promise<any> {
+  public async call(name: string, args: Record<string, unknown> = {}, revived = false): Promise<any> {
     const promise = this.client();
     const client = await promise;
     this.lastActivityAt = Date.now(); // heartbeat
@@ -272,6 +280,33 @@ export class SidecarTransport implements SidecarTransportPort {
     const data = bimaxBrand(mcpStructured(result));
     if (result?.isError) {
       const detail = bimaxBrand(mcpText(result)).trim();
+      // A retired session arrives as an app-level isError RESULT, not a rejected promise, so it
+      // never reaches the condemnation branch above — and the transport is genuinely healthy, so
+      // condemning it would buy a cold start we do not need. The driver states the repair itself
+      // ("call start_session with this id to revive it"); nothing was doing it, so the runtime kept
+      // reusing a client whose session the daemon had already retired and EVERY stateful call
+      // failed for the life of the process. Revive in place and retry exactly once.
+      if (!revived && isRetiredSessionError(detail)) {
+        try {
+          await client.callTool({ name: 'start_session', arguments: { session: this.session } });
+          // The revived session starts with driver defaults; re-assert that there is exactly one
+          // cursor, the real OS one, as the original handshake does.
+          try {
+            await client.callTool({
+              name: 'set_agent_cursor_enabled',
+              arguments: { enabled: false, cursor_id: this.session },
+            });
+          } catch { /* pinned driver supports this; older local overrides remain usable */ }
+        } catch {
+          // The sidecar will not revive this session — now the connection IS condemned, so the
+          // next call cold-starts a fresh one rather than looping on a corpse.
+          if (this.clientPromise === promise) this.clientPromise = null;
+          try { Promise.resolve(client.close?.()).catch(() => { /* best-effort teardown */ }); }
+          catch { /* best-effort teardown */ }
+          throw new Error(detail || `${name} failed`);
+        }
+        return this.call(name, args, true);
+      }
       throw new Error(detail || `${name} failed`);
     }
     return data;

@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 
 // ─── Generalized failure memory ─────────────────────────────────────────────────────────────────
 // Provider- and tool-independent detection of repeated ineffective actions, across every tool the
-// agent can call (shell, files, network, MCP, computer use, builds, installs…). Replaces nothing:
+// agent can call (shell, files, network, MCP providers, builds, installs…). Replaces nothing:
 // the browser runtime keeps its specialized page-state-aware loop detector (it can see URL and
 // element indexes this layer can't); this covers the rest of the toolbox at the agent-loop choke
 // point. Research-informed (docs/RESEARCH_LEDGER.md):

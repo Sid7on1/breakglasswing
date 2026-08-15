@@ -24,6 +24,21 @@ describe('computerToolResults', () => {
     // Fail-open on a wiped transcript: an absent history must never strand a completed task.
     expect(computerToolResults(undefined)).toEqual([]);
   });
+
+  it('recognizes a compatibility-provider result by its paired ComputerTool call', () => {
+    const messages: Message[] = [
+      { role: 'assistant', tool_calls: [{
+        id: 'compat-1', type: 'function',
+        function: { name: 'ComputerTool', arguments: '{"action":"observe"}' },
+      }, {
+        id: 'other-1', type: 'function',
+        function: { name: 'OtherTool', arguments: '{}' },
+      }] },
+      { role: 'tool', tool_call_id: 'compat-1', content: JSON.stringify({ driver: 'compatibility', action: 'observe' }) },
+      { role: 'tool', tool_call_id: 'other-1', content: JSON.stringify({ driver: 'compatibility', action: 'read' }) },
+    ];
+    expect(computerToolResults(messages).map(item => item.action)).toEqual(['observe']);
+  });
 });
 
 describe('computerToolSteps', () => {
@@ -38,6 +53,21 @@ describe('computerToolSteps', () => {
     expect(computerToolSteps(messages)).toEqual([expect.objectContaining({
       args: expect.objectContaining({ action: 'type', text: 'Mom' }),
       result: expect.objectContaining({ action: 'type', app: 'Messages' }),
+    })]);
+  });
+
+  it('does not require a provider-specific driver label after a verified pairing', () => {
+    const messages: Message[] = [
+      { role: 'assistant', tool_calls: [{
+        id: 'observe-compat', type: 'function',
+        function: { name: 'ComputerTool', arguments: '{"action":"observe"}' },
+      }] },
+      { role: 'tool', tool_call_id: 'observe-compat', content: JSON.stringify({
+        ok: true, driver: 'compatibility', action: 'observe', elements: [],
+      }) },
+    ];
+    expect(computerToolSteps(messages)).toEqual([expect.objectContaining({
+      args: { action: 'observe' }, result: expect.objectContaining({ action: 'observe' }),
     })]);
   });
 });

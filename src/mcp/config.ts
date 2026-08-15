@@ -18,12 +18,51 @@ export interface McpServerSpec {
   env?: Record<string, string>;
   /** Internal trusted runtimes can forbid the legacy full-parent-env escape hatch. */
   forceScrubEnv?: boolean;
+  /** Host-owned capability schemas that must be available without model-side discovery. */
+  eager?: boolean;
   // Remote transport:
   url?: string;
   type?: 'http' | 'sse' | 'stdio';
   headers?: Record<string, string>;
   // When true, the server is kept in config but NOT started at boot until re-enabled.
   disabled?: boolean;
+}
+
+export const HOST_CAPABILITIES_ENV = 'BIMAX_HOST_CAPABILITIES_JSON';
+
+/**
+ * Parse the narrow, process-local capability contract supplied by an embedding host.
+ *
+ * This deliberately accepts only absolute stdio commands, string arguments and string-valued
+ * environment entries. It cannot add a remote endpoint or opt into parent-environment inheritance.
+ * The embedding application owns the process and lifecycle; the engine only consumes MCP schemas
+ * and results through the same generic connector used for every other provider.
+ */
+export function loadHostCapabilityServers(raw = process.env[HOST_CAPABILITIES_ENV]): McpServerSpec[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const candidates = Array.isArray(parsed) ? parsed : parsed?.servers;
+    if (!Array.isArray(candidates)) return [];
+    const seen = new Set<string>();
+    const out: McpServerSpec[] = [];
+    for (const value of candidates.slice(0, 8)) {
+      const name = typeof value?.name === 'string' ? value.name.trim() : '';
+      const command = typeof value?.command === 'string' ? value.command.trim() : '';
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name) || seen.has(name) || !path.isAbsolute(command)) continue;
+      const args = Array.isArray(value.args) && value.args.every((arg: unknown) => typeof arg === 'string')
+        ? value.args.slice(0, 32) : [];
+      const envEntries = value.env && typeof value.env === 'object' && !Array.isArray(value.env)
+        ? Object.entries(value.env).filter((entry): entry is [string, string] =>
+          /^[A-Z][A-Z0-9_]{0,127}$/.test(entry[0]) && typeof entry[1] === 'string')
+        : [];
+      seen.add(name);
+      out.push({ name, command, args, env: Object.fromEntries(envEntries), type: 'stdio', forceScrubEnv: true, eager: true });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /**

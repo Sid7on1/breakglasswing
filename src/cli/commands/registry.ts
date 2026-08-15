@@ -30,6 +30,12 @@ export interface CommandContext {
   restoreMessages?: (messages: any[]) => boolean | void;
   /** Return the current live conversation messages (for branching). */
   getMessages?: () => any[];
+  /**
+   * The active session/task id, when this run has one (see headless.session.ts, which supplies it
+   * from the session recorder). Commands that drive the desktop use it to route to that task's own
+   * computer session instead of a single shared one — see `isSessionRoutableDesktopRuntime`.
+   */
+  sessionId?: string;
 }
 
 export interface Command {

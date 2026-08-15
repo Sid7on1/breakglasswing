@@ -61,16 +61,15 @@ func TestOutboundFixturesStrictDecode(t *testing.T) {
 		}
 		seen[o.T] = true
 	}
-	for _, kind := range []string{"event", "request", "ready", "queryResult", "pong"} {
+	for _, kind := range []string{"event", "request", "ready", "hello", "queryResult", "pong"} {
 		if !seen[kind] {
 			t.Errorf("no fixture for outbound %q — the contract under-covers the wire", kind)
 		}
 	}
 }
 
-// Semantic parity for the ui_snapshot payload: the engine's fixture (typed Required<UiSnapshot>,
-// every optional populated) must strict-decode into this TUI's UiSnapshot struct. A field the
-// engine produces that this struct doesn't model fails here — it cannot be silently ignored.
+// Semantic parity for the Terminal ui_snapshot payload: strict-decode every reviewed field so any
+// wire drift fails loudly.
 func TestUiSnapshotFixtureStrictDecode(t *testing.T) {
 	f := loadFixtures(t)
 	if len(f.UiSnapshot) == 0 {
@@ -80,7 +79,7 @@ func TestUiSnapshotFixtureStrictDecode(t *testing.T) {
 	dec.DisallowUnknownFields()
 	var snap UiSnapshot
 	if err := dec.Decode(&snap); err != nil {
-		t.Fatalf("engine produces a ui_snapshot field this TUI doesn't model (silent drift): %v", err)
+		t.Fatalf("engine produces an unreviewed Terminal ui_snapshot field: %v", err)
 	}
 	if snap.ContextWindow == 0 || snap.Models.Coding == "" {
 		t.Fatalf("ui_snapshot fixture decoded but core fields are empty: %+v", snap)

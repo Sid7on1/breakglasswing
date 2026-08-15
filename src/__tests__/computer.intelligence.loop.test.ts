@@ -73,6 +73,62 @@ describe('confidence-aware computer-use loop', () => {
     return runtime;
   }
 
+  /**
+   * A frame that merely aged out is refreshable. Refusing a coordinate-free action against it
+   * deadlocked a live messaging run: the phase gate declared `key combo="return"` the only legal
+   * action while this check refused that same Return as expired and demanded an observation. Raw
+   * pixels still refuse — they mean nothing against a different picture.
+   */
+  describe('an aged planning frame refreshes instead of failing', () => {
+    // FrameRegistry captures its clock as a default parameter at construction, so the spy has to be
+    // installed BEFORE the runtime is built or the registry keeps the real Date.now.
+    async function agedRuntime() {
+      let clock = Date.now();
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      const runtime = await openedRuntime();
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      clock += 120_000; // well past DEFAULT_FRAME_MAX_AGE_MS
+      return {
+        runtime,
+        frameId: observed.frameId,
+        restore: () => (Date.now as unknown as jest.Mock).mockRestore(),
+      };
+    }
+
+    it('delivers a keystroke after silently re-capturing the window', async () => {
+      const { runtime, frameId, restore } = await agedRuntime();
+      const pressed = await runtime.run({
+        action: 'key', combo: 'return', frameId, deliveryMode: 'background',
+      }, { cwd: '/tmp' });
+      restore();
+      expect(pressed.ok).toBe(true);
+      expect((pressed.details as any)?.semanticRegrounding?.notification).toMatch(/expired/);
+      await runtime.dispose();
+    });
+
+    it('delivers a named click after re-resolving it', async () => {
+      const { runtime, frameId, restore } = await agedRuntime();
+      const clicked = await runtime.run({
+        action: 'click', query: 'Continue', frameId, deliveryMode: 'background',
+      }, { cwd: '/tmp' });
+      restore();
+      expect(clicked.ok).toBe(true);
+      expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
+      await runtime.dispose();
+    });
+
+    it('still refuses raw coordinates, which cannot survive a new picture', async () => {
+      const { runtime, frameId, restore } = await agedRuntime();
+      const refused = await runtime.run({
+        action: 'click', x: 50, y: 50, frameId, deliveryMode: 'background',
+      }, { cwd: '/tmp' });
+      restore();
+      expect(refused.ok).toBe(false);
+      expect(refused.summary).toMatch(/expired/);
+      await runtime.dispose();
+    });
+  });
+
   it('acts and proves a semantic postcondition in the same call', async () => {
     const runtime = await openedRuntime();
     const result = await runtime.run({
@@ -169,7 +225,7 @@ describe('confidence-aware computer-use loop', () => {
     expect((observed.details as any).perception.scanCaps).toEqual([180, 600]);
   });
 
-  it('invalidates a planned action when an AX event arrives after observation', async () => {
+  it('re-observes and re-grounds a semantic action when ordinary AX state changes', async () => {
     let notify: ((event: any) => void) | undefined;
     const stop = jest.fn();
     const fallback = {
@@ -185,14 +241,163 @@ describe('confidence-aware computer-use loop', () => {
     expect(observed.ok).toBe(true);
     notify?.({ pid: 42, notification: 'AXValueChanged', timestampMs: Date.now() });
 
-    const refused = await runtime.run({
+    callTool.mockClear();
+    const clicked = await runtime.run({
       action: 'click', query: 'Continue', frameId: observed.frameId, deliveryMode: 'background',
     }, { cwd: '/tmp' });
+    expect(clicked.ok).toBe(true);
+    expect(callTool.mock.calls.filter(([arg]) => arg.name === 'get_window_state').length).toBeGreaterThanOrEqual(2);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
+    await runtime.dispose();
+    expect(stop).toHaveBeenCalled();
+  });
+
+  it('re-grounds a named message composer instead of looping on AXValueChanged', async () => {
+    let notify: ((event: any) => void) | undefined;
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return ok({ ok: true });
+      if (name === 'launch_app') return ok({ name: 'Demo', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return ok({ windows: [
+        { window_id: 7, is_on_screen: true, bounds: { x: 10, y: 20, width: 700, height: 500 } },
+      ] });
+      if (name === 'get_window_state') return ok({
+        screenshot_file_path: BEFORE, screenshot_width: 700, screenshot_height: 500,
+        elements: [{
+          element_index: 2, element_token: 'composer-current', role: 'AXTextArea',
+          label: 'Text Message • SMS', editable: true, frame: { x: 300, y: 440, w: 300, h: 30 },
+        }],
+      });
+      if (name === 'type_text') return ok({ effect: 'delivered' });
+      return ok({ ok: true });
+    });
+    const fallback = {
+      ...native(),
+      watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+        notify = onEvent;
+        return jest.fn();
+      }),
+    } as any;
+    const runtime = new BimaxComputerRuntime(fallback);
+    await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    notify?.({ pid: 42, notification: 'AXValueChanged', timestampMs: Date.now() });
+    callTool.mockClear();
+
+    const typed = await runtime.run({
+      action: 'type', query: 'Text Message • SMS', text: 'hi',
+      frameId: observed.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+
+    expect(typed.ok).toBe(true);
+    expect(callTool.mock.calls.filter(([arg]) => arg.name === 'get_window_state').length).toBeGreaterThanOrEqual(2);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'type_text', arguments: expect.objectContaining({ element_token: 'composer-current', text: 'hi' }),
+    }));
+    await runtime.dispose();
+  });
+
+  it('still refuses raw coordinates when an AX event invalidates their picture', async () => {
+    let notify: ((event: any) => void) | undefined;
+    const fallback = {
+      ...native(),
+      watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+        notify = onEvent;
+        return jest.fn();
+      }),
+    } as any;
+    const runtime = new BimaxComputerRuntime(fallback);
+    await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    notify?.({ pid: 42, notification: 'AXValueChanged', timestampMs: Date.now() });
+
+    const refused = await runtime.run({
+      action: 'click', x: 50, y: 50, frameId: observed.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+
     expect(refused.ok).toBe(false);
     expect(refused.error).toMatch(/accessibility state changed.*AXValueChanged/i);
     expect(callTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
     await runtime.dispose();
-    expect(stop).toHaveBeenCalled();
+  });
+
+  it('delivers a combo-only key after an AX event instead of refusing it', async () => {
+    // A keystroke carries no coordinate and no element handle — it goes to whatever holds focus, and
+    // the `key` path never reads the element map at all. The stale-frame guard exists because "the
+    // visible element map may no longer own those coordinates"; with no coordinates that premise is
+    // simply absent, so refusing here is self-inflicted.
+    //
+    // Measured live on WhatsApp 2026-08-05: opening the app raised its own "New chat" popover, the
+    // runtime's guidance said to press escape to dismiss it, and escape was then refused for
+    // AXFocusedUIElementChanged — the app's own opening event. The advice and the guard disagreed,
+    // and escape is precisely how a caller answers a surface that just appeared.
+    let notify: ((event: any) => void) | undefined;
+    const fallback = {
+      ...native(),
+      watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+        notify = onEvent;
+        return jest.fn();
+      }),
+    } as any;
+    const runtime = new BimaxComputerRuntime(fallback);
+    await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+    notify?.({ pid: 42, notification: 'AXFocusedUIElementChanged', timestampMs: Date.now() });
+
+    const pressed = await runtime.run({
+      action: 'key', combo: 'escape', frameId: observed.frameId,
+    }, { cwd: '/tmp' });
+
+    expect(pressed.ok).toBe(true);
+    expect(pressed.error).toBeUndefined();
+    await runtime.dispose();
+  });
+
+  describe('an unnamed type survives events that cannot have moved focus', () => {
+    // Measured live in Finder on 2026-08-06: `key cmd+shift+g` opened Go to Folder, its completion
+    // list posted AXSelectedChildrenChanged, and the `type` that was the whole reason for opening the
+    // sheet was refused — told that "the visible element map may no longer own those coordinates"
+    // for an action carrying no coordinates. Intermittent, because it races the app's autocompletion.
+    //
+    // The watcher registers AXValueChanged/AXSelectedChildrenChanged/AXSelectedTextChanged on the
+    // CURRENTLY FOCUSED element, so those are emitted by the very field the text is going into.
+    const runWithEvent = async (notification: string, extra: Record<string, unknown> = {}) => {
+      let notify: ((event: any) => void) | undefined;
+      const fallback = {
+        ...native(),
+        watchAccessibility: jest.fn((_pid: number, onEvent: (event: any) => void) => {
+          notify = onEvent;
+          return jest.fn();
+        }),
+      } as any;
+      const runtime = new BimaxComputerRuntime(fallback);
+      await runtime.run({ action: 'open', app: 'Demo', deliveryMode: 'background' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      notify?.({ pid: 42, notification, timestampMs: Date.now(), ...extra });
+      const typed = await runtime.run({
+        action: 'type', text: 'hi', frameId: observed.frameId, deliveryMode: 'background',
+      }, { cwd: '/tmp' });
+      await runtime.dispose();
+      return typed;
+    };
+
+    it.each(['AXValueChanged', 'AXSelectedChildrenChanged', 'AXSelectedTextChanged'])(
+      'delivers after %s, which the focused field itself emits', async notification => {
+        const typed = await runWithEvent(notification);
+        expect(typed.ok).toBe(true);
+        expect(typed.error).toBeUndefined();
+      });
+
+    it.each(['AXFocusedUIElementChanged', 'AXFocusedWindowChanged'])(
+      'still refuses after %s, which can put the text in another field', async notification => {
+        const typed = await runWithEvent(notification);
+        expect(typed.ok).toBe(false);
+        expect(typed.error).toMatch(/accessibility state changed/i);
+      });
+
+    it('refuses when the event has no name, because that is not evidence focus held', async () => {
+      const typed = await runWithEvent('');
+      expect(typed.ok).toBe(false);
+    });
   });
 
   it('ignores frame-less app-level AXWindowCreated noise after observation', async () => {
@@ -220,7 +425,13 @@ describe('confidence-aware computer-use loop', () => {
     await runtime.dispose();
   });
 
-  it('still invalidates when AXWindowCreated identifies a concrete new window', async () => {
+  /** A concrete new window really did change the surface. The property that must hold is that no
+   * action is delivered against the caller's superseded picture — NOT that every action is refused.
+   * Raw coordinates have nothing to re-resolve, so they are refused; a named target is re-grounded
+   * from a replacement observation and the result says so. Refusing the semantic case too was
+   * measured as fatal: an app that creates its own window on open (Messages) or on search then
+   * refuses the very operation that produced the event, and the task never reaches send. */
+  async function runtimeWithNewWindowEvent() {
     let notify: ((event: any) => void) | undefined;
     const fallback = {
       ...native(),
@@ -236,12 +447,30 @@ describe('confidence-aware computer-use loop', () => {
       pid: 42, notification: 'AXWindowCreated', timestampMs: Date.now(),
       element: { pid: 42, role: 'AXWindow', frame: { x: 30, y: 40, w: 300, h: 200 } },
     });
+    return { runtime, observed };
+  }
 
+  it('refuses raw coordinates when AXWindowCreated identifies a concrete new window', async () => {
+    const { runtime, observed } = await runtimeWithNewWindowEvent();
     const refused = await runtime.run({
-      action: 'click', query: 'Continue', frameId: observed.frameId, deliveryMode: 'background',
+      action: 'click', x: 50, y: 50, frameId: observed.frameId, deliveryMode: 'background',
     }, { cwd: '/tmp' });
     expect(refused.ok).toBe(false);
     expect(refused.error).toMatch(/AXWindowCreated/);
+    expect(callTool).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
+    await runtime.dispose();
+  });
+
+  it('re-grounds a named target through a concrete new window and discloses it', async () => {
+    const { runtime, observed } = await runtimeWithNewWindowEvent();
+    const clicked = await runtime.run({
+      action: 'click', query: 'Continue', frameId: observed.frameId, deliveryMode: 'background',
+    }, { cwd: '/tmp' });
+    expect(clicked.ok).toBe(true);
+    expect(callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'click' }));
+    // The model must never read this as a click on the picture it planned from.
+    expect(clicked.summary).toMatch(/re-resolved from a fresh observation/i);
+    expect((clicked.details as any)?.semanticRegrounding?.notification).toBe('AXWindowCreated');
     await runtime.dispose();
   });
 

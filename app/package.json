@@ -1,7 +1,7 @@
 {
   "name": "bimax-app",
   "productName": "Bimax",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bimax — the two-minded coding agent, as a desktop app",
   "main": "out/main/index.js",
   "private": true,
@@ -9,13 +9,26 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "build:focus-harness": "electron-vite build --config electron.vite.focus.config.ts",
     "typecheck": "tsc --noEmit",
     "prepare:engine": "bash scripts/prepare-engine.sh",
-    "dist:mac": "electron-vite build && bash scripts/prepare-engine.sh darwin-arm64 && electron-builder --mac --arm64",
-    "dist:mac:x64": "electron-vite build && bash scripts/prepare-engine.sh darwin-x64 && electron-builder --mac --x64",
-    "dist:win": "electron-vite build && bash scripts/prepare-engine.sh windows-x64 && electron-builder --win --x64"
+    "prepare:native": "bash scripts/prepare-native.sh",
+    "test:mac:smoke": "bun scripts/computer-use/smoke-computer-use.ts",
+    "test:mac:all": "bun scripts/computer-use/smoke-computer-all.ts",
+    "test:mac:soak": "bun scripts/computer-use/soak-computer-use.ts",
+    "test:mac:range": "bun scripts/computer-use/smoke-computer-range.ts",
+    "test:mac:unit": "jest --config jest.capabilities.config.ts --coverage=false",
+    "benchmark:mac": "bun scripts/computer-use/benchmark-computer-targeting.ts",
+    "benchmark:mac:models": "bun scripts/computer-use/benchmark-model-routing.ts",
+    "test:phase7": "jest --config jest.capabilities.config.ts --runInBand phase7.release.test.ts",
+    "test:phase7:manual-alpha": "node scripts/test-manual-alpha-release.mjs",
+    "release:manual-alpha:verify": "node scripts/verify-manual-alpha-release.mjs",
+    "release:stable:mac": "bash scripts/release-stable-macos.sh",
+    "dist:mac": "electron-vite build && BIMAX_RELEASE_BUILD=1 bash scripts/prepare-engine.sh darwin-arm64 && bash scripts/prepare-native.sh darwin-arm64 && electron-builder --mac --arm64",
+    "dist:mac:x64": "electron-vite build && BIMAX_RELEASE_BUILD=1 bash scripts/prepare-engine.sh darwin-x64 && bash scripts/prepare-native.sh darwin-x64 && electron-builder --mac --x64"
   },
   "dependencies": {
+    "@ai-sdk/react": "^4.0.61",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-css": "^6.3.1",
@@ -33,9 +46,12 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@lezer/highlight": "^1.2.3",
     "@lydell/node-pty": "^1.2.0-beta.12",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@radix-ui/react-dialog": "^1.1.4",
+    "@shadcn/helpers": "^0.1.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "ai": "^7.0.58",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.2",
@@ -50,15 +66,22 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
-    "@types/node": "^20.19.42",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8",
-    "electron-vite": "^2.3.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jest": "^30.4.2",
     "tailwindcss": "^4.0.0",
+    "ts-jest": "^29.4.11",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^6.4.3"
+  },
+  "overrides": {
+    "nanoid": "^3.3.18",
+    "postcss": "^8.5.26"
   }
 }

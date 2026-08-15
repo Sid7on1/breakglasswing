@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "2.0.0",
+  "compatibility": "supported-readonly-degradation",
+  "features": ["approvals", "interrupt"],
+  "journey": [
+    { "direction": "out", "message": { "t": "ready", "protocol": 2 } },
+    { "direction": "in", "message": { "t": "input", "text": "continue" } },
+    { "direction": "out", "message": { "t": "event", "name": "message", "args": [{ "role": "assistant", "content": "Continuing." }] } },
+    { "direction": "out", "message": { "t": "request", "id": 2, "kind": "prompt", "question": "Run tests?", "options": ["Yes", "No"] } },
+    { "direction": "in", "message": { "t": "reply", "id": 2, "value": "Yes" } }
+  ],
+  "unsupported": ["typed resume", "controls", "hello feature negotiation"]
+}

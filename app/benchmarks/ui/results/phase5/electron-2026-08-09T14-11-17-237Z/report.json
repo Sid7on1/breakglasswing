@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "product": "bimax-desktop-electron-boundary",
+  "run_id": "2026-08-09T14-11-17-237Z",
+  "architecture": "arm64",
+  "provider": "/tmp/bimax-mac-capability-phase5",
+  "checks": [
+    {
+      "name": "production-qualified provider result creates the Mac lane",
+      "pass": true,
+      "observed": "target visible"
+    },
+    {
+      "name": "the exact safe fixture window is visible",
+      "pass": true,
+      "observed": "Window 5150 · process 73581"
+    },
+    {
+      "name": "the actual provider refused while main owned the pause",
+      "pass": true,
+      "observed": "{\"sequence\":2,\"server\":\"bimax-mac\",\"qualifiedTool\":\"mcp__bimax-mac__mac_control\",\"action\":\"wait\",\"isError\":true,\"code\":\"computer_use_paused\",\"ok\":false}"
+    },
+    {
+      "name": "only a freshly issued post-resume action succeeded",
+      "pass": true,
+      "observed": "[{\"sequence\":1,\"server\":\"bimax-mac\",\"qualifiedTool\":\"mcp__bimax-mac__mac_control\",\"action\":\"status\",\"isError\":false,\"code\":null,\"ok\":true},{\"sequence\":2,\"server\":\"bimax-mac\",\"qualifiedTool\":\"mcp__bimax-mac__mac_control\",\"action\":\"wait\",\"isError\":true,\"code\":\"computer_use_paused\",\"ok\":false},{\"sequence\":3,\"server\":\"bimax-mac\",\"qualifiedTool\":\"mcp__bimax-mac__mac_control\",\"action\":\"wait\",\"isError\":false,\"code\":null,\"ok\":true}]"
+    },
+    {
+      "name": "the provider name is the production MCP identity",
+      "pass": true,
+      "observed": "[\"mcp__bimax-mac__mac_control\",\"mcp__bimax-mac__mac_control\",\"mcp__bimax-mac__mac_control\"]"
+    }
+  ],
+  "providerRecords": [
+    {
+      "sequence": 1,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "status",
+      "isError": false,
+      "code": null,
+      "ok": true
+    },
+    {
+      "sequence": 2,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "wait",
+      "isError": true,
+      "code": "computer_use_paused",
+      "ok": false
+    },
+    {
+      "sequence": 3,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "wait",
+      "isError": false,
+      "code": null,
+      "ok": true
+    }
+  ],
+  "outcome": "pass"
+}

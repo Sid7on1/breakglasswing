@@ -96,24 +96,6 @@ export interface UiSnapshotGit {
   behind: number;
 }
 
-/** Computer-use posture: what BiMax can observe/act on right now, truthfully. All values are read
- * from live engine state (browser runtime, MCP manager, model capabilities, governor, taint). */
-export interface UiSnapshotComputer {
-  /** URL of the live automated page, or null when no browser session is open. */
-  browserUrl: string | null;
-  /** Desktop control posture. 'connected' = Bimax Computer Use (ComputerTool) is
-   * ready on this platform (or the legacy open-computer-use MCP companion is connected). */
-  desktop: 'connected' | 'configured' | 'not-installed';
-  /** Desktop tool count: 1 for the native ComputerTool, plus any legacy MCP companion tools. */
-  desktopTools: number;
-  /** Whether the ACTIVE model advertises vision (screenshots become model-visible observations). */
-  vision: boolean;
-  /** Standing session-scoped computer-control grants (domain:… / app:…). */
-  grants: string[];
-  /** Untrusted web/MCP/page content has entered the conversation window. */
-  tainted: boolean;
-}
-
 /** Live tool fabric: what the model can call now vs what remains load-on-demand. */
 export interface UiSnapshotTools {
   registered: number;
@@ -169,8 +151,6 @@ export interface UiSnapshot {
   git?: UiSnapshotGit;
   // v3 additive: live registry posture for desktop/tooling surfaces.
   tools?: UiSnapshotTools;
-  // v3 additive: computer-use capability/safety posture for the desktop app's Runtime lane.
-  computer?: UiSnapshotComputer;
   // v3 additive: task workspaces (live + recent terminal tasks awaiting close) for the task panel.
   tasks?: UiSnapshotTask[];
   // NOTE: the Grok-port power/update footer chips were removed — no front-end ever consumed them
@@ -182,7 +162,7 @@ export interface UiSnapshot {
 let baselineFn: (() => number) | undefined;
 export function setTokensBaseline(fn: () => number): void { baselineFn = fn; }
 
-function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnapshot {
+export function buildUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnapshot {
   let models: { coding: string; lite: string; vision?: string } = { coding: '', lite: '' };
   let goalCount = 0;
   let contextWindow = 0;
@@ -317,34 +297,6 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* git best-effort */ }
 
-  let computer: UiSnapshotComputer | undefined;
-  try {
-    const { globalBrowserRuntime } = require('../browser/browser.runtime');
-    const { globalMcpManager } = require('../mcp/manager');
-    const { getTaintTracker } = require('../mind/taint');
-    const { globalDesktopRuntime } = require('../computer/desktop.runtime');
-    const nativeReady = (() => { try { return !!globalDesktopRuntime.quickStatus().ready; } catch { return false; } })();
-    const legacyConnected = !!globalMcpManager.get('open-computer-use');
-    const desktopConnected = nativeReady || legacyConnected;
-    const desktopConfigured = desktopConnected || globalMcpManager.configuredNames().includes('open-computer-use');
-    let vision = false;
-    try {
-      const { capabilitiesFor } = require('../core/capabilities');
-      // True when screenshots can be SEEN by some configured model: a vision-capable coding model
-      // OR the dedicated vision slot (image turns reroute there automatically).
-      vision = !!capabilitiesFor(undefined, models.coding || models.lite).visionInput
-        || !!(models.vision && capabilitiesFor(undefined, models.vision).visionInput);
-    } catch { /* capabilities optional */ }
-    computer = {
-      browserUrl: (() => { try { return globalBrowserRuntime.currentUrl?.() ?? null; } catch { return null; } })(),
-      desktop: desktopConnected ? 'connected' : desktopConfigured ? 'configured' : 'not-installed',
-      desktopTools: (nativeReady ? 1 : 0) + (legacyConnected ? (globalMcpManager.get('open-computer-use')?.toolNames.length ?? 0) : 0),
-      vision,
-      grants: (governorRef as any)?.computerGrants?.() ?? [],
-      tainted: (() => { try { return getTaintTracker().isTainted(); } catch { return false; } })(),
-    };
-  } catch { /* computer posture best-effort */ }
-
   let tools: UiSnapshotTools | undefined;
   try {
     if (toolRegistry) {
@@ -375,26 +327,21 @@ function snapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): UiSnap
     }
   } catch { /* task registry best-effort */ }
 
-  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, computer, tasks };
+  return { models, goalCount, mind, graph, contextWindow, tokensBaseline, compressionSaved, workspace, sessions, checkpoints, git, tools, tasks };
 }
-
-// The governor is per-container (no engine singleton), so the host hands it in at startup for the
-// computer-use grants readout. Absent → grants render empty, everything else still populates.
-let governorRef: unknown;
-export function setUiSnapshotGovernor(governor: unknown): void { governorRef = governor; }
 
 /** Begin emitting `ui_snapshot` (immediately + on config/goal/graph changes). Call after the host attaches. */
 export function startUiSnapshot(graphStore?: IGraphStore, toolRegistry?: ToolRegistry): void {
   // First snapshot is synchronous (the front-end needs footer state with the `ready` handshake);
   // afterwards a trailing 80ms debounce coalesces change bursts — a /beast step can fire
   // config+goals+graph+mind together, and each snapshot walks the whole graph summary.
-  cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
+  cliEvents.emit('ui_snapshot', buildUiSnapshot(graphStore, toolRegistry));
   let timer: ReturnType<typeof setTimeout> | null = null;
   const emit = () => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = null;
-      cliEvents.emit('ui_snapshot', snapshot(graphStore, toolRegistry));
+      cliEvents.emit('ui_snapshot', buildUiSnapshot(graphStore, toolRegistry));
     }, 80);
     timer.unref?.();
   };

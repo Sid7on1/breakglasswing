@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-11T13-33-37-977Z",
+  "started_at": "2026-08-11T13:33:37.982Z",
+  "ended_at": "2026-08-11T13:33:42.896Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J10",
+      "name": "Approve an exact unsigned local Computer Use build",
+      "outcome": "pass",
+      "checks": [
+        {
+          "name": "the exact code hash is shown before approval",
+          "pass": true,
+          "observed": "full Code Directory hash"
+        },
+        {
+          "name": "the UI says local approval is not builder identity",
+          "pass": true,
+          "observed": "provenance boundary"
+        },
+        {
+          "name": "the UI says local approval cannot bypass macOS",
+          "pass": true,
+          "observed": "TCC boundary"
+        },
+        {
+          "name": "the renderer submits the exact displayed hash",
+          "pass": true,
+          "observed": "[{\"name\":\"manualAlpha.approve\",\"payload\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"at\":1786455222122}]"
+        },
+        {
+          "name": "the approved end state is explicit",
+          "pass": true,
+          "observed": "approved exact build"
+        }
+      ],
+      "pageErrors": [],
+      "accessibilityFindings": [],
+      "error": null
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 1,
+    "failed": 0
+  }
+}

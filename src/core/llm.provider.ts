@@ -19,6 +19,9 @@ export interface ChatOptions {
   reasoningEffort?: string; // 'low' | 'medium' | 'high' — when set, sent as reasoning_effort
   signal?: AbortSignal;
   lite?: boolean; // route this call to the configured LITE model (cheap aux work), if one is set
+  /** Require one specific native function call for this round. Used only while an operation is
+   * still unresolved; final answer rounds return to automatic tool selection. */
+  toolChoice?: { type: 'function'; function: { name: string } };
 }
 
 export type ChatEvent =

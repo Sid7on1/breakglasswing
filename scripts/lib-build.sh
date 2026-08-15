@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# lib-build.sh — the shared build steps for the single self-contained BiMax binary: the bun-compiled
-# Node engine baked into the Go / Bubble Tea TUI via go:embed, so the result ships as ONE file (no
-# Node, no Bun, no node_modules on the host). Sourced by build-release.sh (quick host dev build →
-# build/bimax) and release.sh (cross-platform release matrix). Not meant to be run on its own.
+# lib-build.sh — shared build steps for the self-contained Bimax Terminal binary: the bun-compiled
+# coding engine baked into the Go / Bubble Tea TUI via go:embed. Computer Use services and helpers
+# are Desktop-owned and must never be staged or embedded here.
 
 # Release version string: env override → package.json → 0.0.0.
 bimax_version() { echo "${BIMAX_VERSION:-$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)}"; }
@@ -11,8 +10,7 @@ bimax_version() { echo "${BIMAX_VERSION:-$(node -p "require('./package.json').ve
 # interrupted; run before and after a build so they never pile up in the repo root (gitignored too).
 bimax_sweep_bunbuild() { rm -f .*.bun-build 2>/dev/null || true; }
 
-# Build one target: stage the native action driver and continuous PiP helper, compile the engine,
-# then embed all three in the Go binary. The release remains one self-contained executable.
+# Build one target: compile the coding engine, then embed only that engine in the Go Terminal.
 #   build_bimax <goos> <goarch> <outfile> <mode:dev|release> [bun-target]
 # Empty goos/goarch → host-native build (no cross-compile env). Empty bun-target → host engine
 # compile (no --target). release mode adds -s -w -trimpath; dev keeps symbols for local debugging.
@@ -32,13 +30,7 @@ build_bimax() {
   if [ -n "$goos" ]; then env_prefix=(env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch"); fi
   mkdir -p build tui/embed
 
-  echo "[0/4] native Bimax Computer Use sidecar (pinned + checksum verified) …"
-  scripts/stage-computer-use-driver.sh "$goos" "${goarch/amd64/x64}"
-
-  echo "[1/4] native continuous ScreenCaptureKit PiP …"
-  scripts/stage-live-pip.sh "$goos" "$goarch"
-
-  echo "[2/4] engine → standalone binary (bun --compile, CJS${bun_target:+, ${bun_target}}) …"
+  echo "[1/2] coding engine → standalone binary (bun --compile, CJS${bun_target:+, ${bun_target}}) …"
   # --format=cjs is required: the engine is CommonJS, and Bun's default ESM bundling mangles the
   # web-tree-sitter Emscripten glue (surfaces as 'ReferenceError: _a is not defined' at boot).
   if [ -n "$bun_target" ]; then
@@ -47,7 +39,7 @@ build_bimax() {
     bun build src/index.ts --compile --format=cjs --outfile tui/embed/bimax-engine
   fi
 
-  echo "[3/4] Go binary with engine + Bimax Computer Use + live PiP embedded → ${outfile} …"
+  echo "[2/2] Go Terminal binary with coding engine only → ${outfile} …"
   # Guard empty-array expansion: macOS's bash 3.2 treats "${arr[@]}" as unbound under `set -u`.
   ( cd tui && ${env_prefix[@]+"${env_prefix[@]}"} go build -tags embedengine ${goflags[@]+"${goflags[@]}"} -ldflags "$ldflags" -o "../$outfile" . )
 }

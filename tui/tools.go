@@ -3,9 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"image"
-	_ "image/png"
-	"os"
 	"strings"
 	"time"
 
@@ -70,14 +67,6 @@ func summarizeToolOutput(tc ToolCall) string {
 		}
 		return ""
 	}
-	if tc.ToolName == "ComputerTool" {
-		var result struct {
-			Summary string `json:"summary"`
-		}
-		if json.Unmarshal([]byte(tc.Output), &result) == nil && result.Summary != "" {
-			return clip(result.Summary, 100)
-		}
-	}
 	lines := strings.Split(out, "\n")
 	preview := clip(lines[0], 80)
 	// Edit cards render their actual diff directly below this summary. Reporting the number of
@@ -91,128 +80,6 @@ func summarizeToolOutput(tc ToolCall) string {
 		return fmt.Sprintf("%s (+%d lines)", preview, len(lines)-1)
 	}
 	return preview
-}
-
-func computerScreenshotPath(tc ToolCall) string {
-	if tc.ToolName != "ComputerTool" || tc.Status == "running" || tc.Output == "" {
-		return ""
-	}
-	var result struct {
-		Screenshot string `json:"screenshot"`
-	}
-	if json.Unmarshal([]byte(tc.Output), &result) != nil {
-		return ""
-	}
-	return result.Screenshot
-}
-
-// screenshotThumbsEnabled reports whether the user opted into inline pixel thumbnails. Default OFF:
-// a see→act loop captures a screen on EVERY action, so rendering each one as blocky half-block
-// pixels turned the transcript into unreadable image spam. The compact card names the exact file so
-// it stays inspectable; BIMAX_COMPUTER_THUMBS=1 brings the inline pixel preview back for debugging.
-func screenshotThumbsEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("BIMAX_COMPUTER_THUMBS"))) {
-	case "1", "true", "on", "yes":
-		return true
-	}
-	return false
-}
-
-// renderScreenshotCard returns a compact one-line reference to a captured screenshot — an icon, its
-// pixel dimensions (read from the PNG header without decoding the pixels), and the file's base name
-// — instead of dumping the image into scrollback. Returns "" when the summary already names the file
-// (screenshot/observe summaries do), so the card only appears where it adds information (clicks,
-// typing, drags — actions whose summary would otherwise not mention that a screen was captured).
-func renderScreenshotCard(path, summary string) string {
-	if path == "" {
-		return ""
-	}
-	name := path
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		name = path[i+1:]
-	}
-	if name != "" && strings.Contains(summary, name) {
-		return ""
-	}
-	dims := ""
-	if f, err := os.Open(path); err == nil {
-		if cfg, _, derr := image.DecodeConfig(f); derr == nil {
-			dims = fmt.Sprintf("%d×%d ", cfg.Width, cfg.Height)
-		}
-		_ = f.Close()
-	}
-	return subtleStyle.Render("▣ " + captureScope(name) + " " + dims + "· " + name)
-}
-
-// captureScope names what a capture actually covers, read from the file the engine wrote: a
-// window-scoped PNG is `window-<ts>.png`, a whole-display one is `shot-<ts>.png`.
-//
-// This card used to say "screen" for every capture. A window capture of TextEdit was therefore
-// presented as `▣ screen 1568×1538`, which reads as a full-screen grab — and in a real session the
-// model went on to describe that file to the user as "a full-display screenshot showing both
-// Calculator and TextEdit windows". It showed one window. The label should not be the part of the
-// transcript that makes a false claim easy to believe.
-func captureScope(name string) string {
-	switch {
-	case strings.HasPrefix(name, "window-"):
-		return "window"
-	case strings.HasPrefix(name, "shot-"):
-		return "display"
-	default:
-		return "capture"
-	}
-}
-
-// renderScreenshotThumbnail turns a native PNG into a compact true-colour terminal image. Each
-// `▀` carries one source sample in its foreground and one in its background, so it works in an
-// ordinary terminal without Kitty/iTerm-specific image protocols. Debug-only (see
-// screenshotThumbsEnabled); the normal transcript uses renderScreenshotCard.
-func renderScreenshotThumbnail(path string, maxCols int) string {
-	if path == "" || maxCols < 8 {
-		return ""
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return ""
-	}
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
-	if w < 1 || h < 1 {
-		return ""
-	}
-	cols := maxCols
-	if cols > 44 {
-		cols = 44
-	}
-	rows := (h*cols + 2*w - 1) / (2 * w)
-	if rows > 18 {
-		rows = 18
-		cols = (2*w*rows + h - 1) / h
-	}
-	if cols < 1 {
-		cols = 1
-	}
-	var out strings.Builder
-	for row := 0; row < rows; row++ {
-		if row > 0 {
-			out.WriteByte('\n')
-		}
-		for col := 0; col < cols; col++ {
-			x := b.Min.X + min(w-1, col*w/cols)
-			yTop := b.Min.Y + min(h-1, (2*row)*h/(2*rows))
-			yBottom := b.Min.Y + min(h-1, (2*row+1)*h/(2*rows))
-			r1, g1, b1, _ := img.At(x, yTop).RGBA()
-			r2, g2, b2, _ := img.At(x, yBottom).RGBA()
-			fmt.Fprintf(&out, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀", r1>>8, g1>>8, b1>>8, r2>>8, g2>>8, b2>>8)
-		}
-		out.WriteString("\x1b[0m")
-	}
-	return out.String()
 }
 
 // toolDuration returns a "0.1s" timing badge from the ISO start/end timestamps, or "" if absent.
@@ -322,7 +189,6 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 	// For edit/write tools, show the actual colorized diff (green adds, red deletes) like Claude
 	// Code — the engine returns a unified diff (@@ hunks) in the output. Shown below the summary.
 	var diffBlock string
-	var screenshotBlock string
 	if tc.Status != "error" {
 		switch tc.ToolName {
 		case "EditFileTool", "MultiEditTool", "WriteFileTool":
@@ -332,18 +198,8 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 				diffBlock = "\n" + indentLines(renderDiff(d, 20, diffW, diffPath(tc.Input)), indent+"    ")
 			}
 		}
-		if shot := computerScreenshotPath(tc); shot != "" {
-			if screenshotThumbsEnabled() {
-				thumbW := termWidth - len(indent) - 6
-				if thumb := renderScreenshotThumbnail(shot, thumbW); thumb != "" {
-					screenshotBlock = "\n" + indentLines(thumb, indent+"    ")
-				}
-			} else if card := renderScreenshotCard(shot, summary); card != "" {
-				screenshotBlock = "\n" + indent + "    " + card
-			}
-		}
 	}
-	if summary == "" && diffBlock == "" && screenshotBlock == "" {
+	if summary == "" && diffBlock == "" {
 		return indent + header
 	}
 	sumStyle := lipgloss.Style(dimStyle)
@@ -354,7 +210,7 @@ func renderToolCall(tc ToolCall, termWidth int) string {
 	if summary != "" {
 		out += "\n" + indent + "  " + toolGut.Render("└ ") + sumStyle.Render(summary)
 	}
-	return out + diffBlock + screenshotBlock
+	return out + diffBlock
 }
 
 // extractDiff returns the unified-diff portion of a tool's output (from the first @@ hunk), or "" if
@@ -405,7 +261,7 @@ func formatRun(run []ToolCall, width int, collapse bool) []string {
 	}
 
 	for _, tc := range run {
-		if isMutatingTool(tc.ToolName) || tc.ToolName == "ComputerTool" {
+		if isMutatingTool(tc.ToolName) {
 			flushBoring()
 			out = append(out, renderToolCall(tc, width))
 		} else {

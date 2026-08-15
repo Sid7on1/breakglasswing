@@ -117,3 +117,63 @@ export function computerUsePlaybookFor(prompt: string): string {
   const text = String(prompt || '');
   return render(SECTIONS.filter(s => !s.when || s.when.test(text)));
 }
+
+/**
+ * Small GUI models lose the task inside the full operating manual. This deliberately compact
+ * variant follows the same pattern as MacOS-Use's flash prompt: a short observe → one action →
+ * verify loop, with only the high-value action choices spelled out. It does not weaken evidence or
+ * safety rules; it removes background material that is useful to large planners but distracting to
+ * a 11–14B controller.
+ */
+export const COMPUTER_USE_FLASH_PLAYBOOK = `[Compact desktop playbook]
+
+- Use ComputerTool. Never replace the requested action with manual instructions.
+- Open the app with the exact app name the user gave. Do not invent a bundleId. The open result is already a fresh observation.
+- Act only on controls present in the newest result. Use exactly one selector: elementToken, query, or elementIndex. Never guess coordinates when a semantic selector exists.
+- Make one ComputerTool call per step, then read its returned state before deciding the next step.
+- Text field replacement: use set_value with the exact text and one fresh field selector. Use type only when appending is intended.
+- Checkbox or radio: if its fresh value is already 1/true, stop. Otherwise click it exactly once. Never click a selected toggle again.
+- Pop-up/select: use set_value with the exact requested choice and one fresh selector. The runtime completes any required native menu gesture without another model round.
+- Finish only when the newest tool result shows every requested value. Driver delivery or your own claim is not proof.
+- If an action fails, change strategy from the new state. Do not repeat an identical failed call.`;
+
+/** Models measured to benefit from the compact controller prompt. Explicit env choice wins. */
+export function shouldUseFlashComputerPlaybook(model: string): boolean {
+  const override = String(process.env.BIMAX_COMPUTER_PROMPT || '').trim().toLowerCase();
+  if (override === 'flash') return true;
+  if (override === 'full') return false;
+  const id = String(model || '').toLowerCase();
+  // Live Desktop probe (2026-08-13): this 30B NIM controller opened Calculator correctly, then
+  // lost the task inside the full operating manual and narrated prospective mac_control JSON for
+  // more than a minute instead of issuing the next call. It is fast and tool-capable, so keep it
+  // available, but give it the compact one-action/fresh-frame contract used by smaller GUI
+  // controllers. This is model-specific rather than a blanket 30B cutoff: larger measured
+  // planners still benefit from the full scenario guidance.
+  if (id === 'nvidia/nemotron-3-nano-30b-a3b') return true;
+  const size = id.match(/(?:^|[-_/])(\d+(?:\.\d+)?)b(?:[-_/]|$)/)?.[1];
+  return size !== undefined && Number(size) <= 14;
+}
+
+/**
+ * Single owner for the model-facing desktop task text. Production and the live benchmark both use
+ * this helper so the benchmark cannot silently drift back to a stripped-down prompt route.
+ */
+export function buildComputerUseModelPrompt(
+  prompt: string,
+  options: { native?: boolean; model?: string; toolName?: string } = {},
+): string {
+  const rawPlaybook = shouldUseFlashComputerPlaybook(options.model || '')
+    ? COMPUTER_USE_FLASH_PLAYBOOK
+    : computerUsePlaybookFor(prompt);
+  // Name the tool the model ACTUALLY has. The playbook is written against the generic
+  // "ComputerTool", but Desktop exposes the app-owned tool as `mac_control` (or its MCP-qualified
+  // name). Instructing a model to use a tool that is not in its tool list is what produced narrated
+  // tool JSON instead of a real call, so substitute the resolved name when the caller supplies one.
+  const playbook = options.toolName
+    ? rawPlaybook.replace(/ComputerTool/g, options.toolName)
+    : rawPlaybook;
+  const evidence = options.native
+    ? '[Fresh computer-use constraint: Complete this turn only from native snapshots, receipts, and captures produced after this request. Prior shell, browser, assistant, memory, and tool values are not evidence. Re-observe after mutation; otherwise report that verification failed.]'
+    : `[Fresh computer-use constraint: Complete this turn only from ${options.toolName || 'ComputerTool'} results produced after this request. Prior shell, browser, assistant, memory, and tool values are not evidence. Continue until the newest result proves every requested value; otherwise report the concrete runtime blocker.]`;
+  return `${prompt}\n\n${playbook}\n\n${evidence}`;
+}

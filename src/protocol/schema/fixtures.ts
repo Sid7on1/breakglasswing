@@ -1,4 +1,7 @@
-import { Outbound, Inbound, PROTOCOL_VERSION } from '../protocol';
+import {
+  Outbound, Inbound, PROTOCOL_FEATURES, PROTOCOL_MAX_COMPATIBLE_MAJOR,
+  PROTOCOL_MIN_COMPATIBLE_MAJOR, PROTOCOL_SEMVER, PROTOCOL_VERSION,
+} from '../protocol';
 import type { UiSnapshot } from '../ui.snapshot';
 
 /**
@@ -22,6 +25,15 @@ export const OUTBOUND_FIXTURES: Outbound[] = [
   { t: 'request', id: 9, kind: 'input', question: 'Branch name:', options: [], isAsk: true, isMulti: false },
   { t: 'ready', protocol: PROTOCOL_VERSION },
   {
+    t: 'hello',
+    engine: { version: '1.1.0', buildCommit: '01234567' },
+    protocolVersion: PROTOCOL_SEMVER,
+    protocolMajor: PROTOCOL_VERSION,
+    minCompatibleMajor: PROTOCOL_MIN_COMPATIBLE_MAJOR,
+    maxCompatibleMajor: PROTOCOL_MAX_COMPATIBLE_MAJOR,
+    features: [...PROTOCOL_FEATURES],
+  },
+  {
     t: 'queryResult', id: 3, items: [
       { value: '/git', label: '/git', desc: 'Git helpers', kind: 'command', disabled: true, disabledReason: 'repo not initialized' },
       { value: '@handlePayment', label: 'handlePayment', desc: 'src/pay.ts', kind: 'symbol' },
@@ -32,6 +44,32 @@ export const OUTBOUND_FIXTURES: Outbound[] = [
   { t: 'configResult', id: 5, config: { model: 'stepfun-ai/step-3.7-flash', notificationBell: false, temperature: 0.7, contextMode: 'smart' } },
   { t: 'boot', phase: 'loading_graph', detail: 'sqlite graph store', pid: 4242 },
   { t: 'health', uptimeMs: 61234, rssMb: 312, heapMb: 148, eventLoopDelayMs: 4, activeTurn: true, phase: 'ready' },
+  // v3 additive (2026-08-10). `served: false` on a curated entry is the "unverified" case the
+  // front-end must not render as "unavailable", so the fixture carries one of each.
+  {
+    t: 'catalogResult',
+    id: 8,
+    providers: [
+      {
+        name: 'openai-compatible', label: 'OpenAI-compatible', baseURL: 'https://api.example.invalid/v1',
+        apiKeyEnv: 'BGW_API_KEY', hasKey: true, keyHint: '…4242', keyCount: 2, active: true,
+      },
+    ],
+    models: [
+      {
+        id: 'stepfun-ai/step-3.7-flash', label: 'Step 3.7 Flash', desc: 'fast coding model',
+        tier: 'coding', served: true, curated: true,
+        capabilities: {
+          visionInput: false, reasoningEffortKnob: true, thinking: false,
+          structuredOutputs: true, parallelToolCalls: true, contextWindow: 131072,
+        },
+      },
+      {
+        id: 'curated/unverified-vision', label: 'Unverified Vision', desc: 'curated but not served by this endpoint',
+        tier: 'vision', served: false, curated: true, avoidAutoSelect: true,
+      },
+    ],
+  },
 ];
 
 export const INBOUND_FIXTURES: Inbound[] = [
@@ -45,12 +83,16 @@ export const INBOUND_FIXTURES: Inbound[] = [
   { t: 'configSet', id: 6, patch: { notificationBell: true, reasoningEffort: 'high' } },
   { t: 'resume', id: 'sess-20260712-abc123' },
   { t: 'controls', mode: 'code', tier: 'heavy', autonomy: 'ask' },
+  // v3 additive (2026-08-10). `apiKey` is write-only and never echoed back; the value here is an
+  // obvious placeholder so this committed fixture can never be mistaken for a real credential.
+  { t: 'catalogGet', id: 8, refresh: true },
+  { t: 'providerSet', id: 9, name: 'openai-compatible', baseURL: 'https://api.example.invalid/v1', apiKey: 'fixture-not-a-real-key' },
 ];
 
 // Compile-time exhaustiveness: adding a new message variant without a fixture makes
 // these records fail to type-check — the contract cannot silently under-cover.
-export const OUTBOUND_KINDS: Record<Outbound['t'], true> = { event: true, request: true, ready: true, queryResult: true, pong: true, configResult: true, boot: true, health: true };
-export const INBOUND_KINDS: Record<Inbound['t'], true> = { reply: true, input: true, interrupt: true, query: true, menuSelect: true, ping: true, configGet: true, configSet: true, resume: true, controls: true };
+export const OUTBOUND_KINDS: Record<Outbound['t'], true> = { event: true, request: true, ready: true, hello: true, queryResult: true, pong: true, configResult: true, catalogResult: true, boot: true, health: true };
+export const INBOUND_KINDS: Record<Inbound['t'], true> = { reply: true, input: true, interrupt: true, query: true, menuSelect: true, ping: true, configGet: true, configSet: true, catalogGet: true, providerSet: true, resume: true, controls: true };
 
 /**
  * Semantic parity fixture for the ui_snapshot payload (which rides event args and therefore
@@ -77,7 +119,6 @@ export const UI_SNAPSHOT_FIXTURE: Required<UiSnapshot> = {
   checkpoints: [{ id: 'c1', label: 'before refactor', ts: 1753142400000, auto: false }],
   git: { branch: 'main', dirty: 2, ahead: 1, behind: 0 },
   tools: { registered: 40, ready: 25, deferred: 12, discovered: 3, mcp: 5, graphReady: true },
-  computer: { browserUrl: 'https://example.com', desktop: 'connected', desktopTools: 1, vision: true, grants: ['app:Notes'], tainted: false },
   tasks: [{
     id: 't1', kind: 'shell', title: 'npm test', state: 'running', elapsedMs: 4200,
     attention: false, pinned: true, lastEvent: 'output', progress: 0.5,

@@ -1,6 +1,13 @@
 import { createComputerTool } from '../tools/implementations/computer.tool';
-import { COMPUTER_USE_PLAYBOOK, computerUsePlaybookFor, SCENARIO_SECTION_TITLES } from '../cli/personas/computer.playbook';
-import { explicitlyRequiresComputerUse } from '../cli/personas/base.persona';
+import {
+  buildComputerUseModelPrompt,
+  COMPUTER_USE_FLASH_PLAYBOOK,
+  COMPUTER_USE_PLAYBOOK,
+  computerUsePlaybookFor,
+  SCENARIO_SECTION_TITLES,
+  shouldUseFlashComputerPlaybook,
+} from '../cli/personas/computer.playbook';
+import { appOwnedComputerUseToolName, explicitlyRequiresComputerUse } from '../cli/personas/base.persona';
 import { IGovernor } from '../core/interfaces';
 
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
@@ -100,5 +107,47 @@ describe('ComputerTool schema carries selection, the playbook carries operation'
     expect(explicitlyRequiresComputerUse('open System Settings and check my battery health')).toBe(true);
     expect(explicitlyRequiresComputerUse('say ok')).toBe(false);
     expect(explicitlyRequiresComputerUse('refactor the classifier and run the tests')).toBe(false);
+    expect(appOwnedComputerUseToolName(['BashTool', 'mcp__bimax-mac__mac_control']))
+      .toBe('mcp__bimax-mac__mac_control');
+    expect(appOwnedComputerUseToolName(['BashTool', 'mcp__third-party__computer']))
+      .toBeUndefined();
+  });
+
+  describe('compact controller prompt', () => {
+    const oldOverride = process.env.BIMAX_COMPUTER_PROMPT;
+
+    afterEach(() => {
+      if (oldOverride === undefined) delete process.env.BIMAX_COMPUTER_PROMPT;
+      else process.env.BIMAX_COMPUTER_PROMPT = oldOverride;
+    });
+
+    it('selects flash guidance for measured 11–14B models, not larger models', () => {
+      delete process.env.BIMAX_COMPUTER_PROMPT;
+      expect(shouldUseFlashComputerPlaybook('nvidia/nemotron-nano-12b-v2-vl')).toBe(true);
+      expect(shouldUseFlashComputerPlaybook('meta/llama-3.2-11b-vision-instruct')).toBe(true);
+      expect(shouldUseFlashComputerPlaybook('nvidia/nemotron-3-nano-30b-a3b')).toBe(true);
+      expect(shouldUseFlashComputerPlaybook('mistralai/mistral-small-4-119b-2603')).toBe(false);
+    });
+
+    it('keeps the strict evidence loop while removing the full manual', () => {
+      const built = buildComputerUseModelPrompt('Open Notes and tick the checkbox', {
+        model: 'nvidia/nemotron-nano-12b-v2-vl',
+      });
+      expect(built).toContain(COMPUTER_USE_FLASH_PLAYBOOK);
+      expect(built).toMatch(/click it exactly once/i);
+      expect(built).toMatch(/use set_value with the exact text/i);
+      expect(built).toMatch(/runtime completes any required native menu gesture/i);
+      expect(built).toMatch(/newest result proves every requested value/i);
+      expect(built).not.toContain('ARRANGING WINDOWS');
+    });
+
+    it('supports an explicit full-prompt override for debugging and comparison', () => {
+      process.env.BIMAX_COMPUTER_PROMPT = 'full';
+      const built = buildComputerUseModelPrompt('Open Notes', {
+        model: 'nvidia/nemotron-nano-12b-v2-vl',
+      });
+      expect(built).toContain('TARGET LOCK');
+      expect(built).not.toContain(COMPUTER_USE_FLASH_PLAYBOOK);
+    });
   });
 });

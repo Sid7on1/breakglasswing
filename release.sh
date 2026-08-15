@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# release.sh — build the full BiMax release matrix: ONE self-contained binary per platform
+# release.sh — build the Mac-only Bimax Terminal release matrix: one self-contained binary per arch
 # (Go TUI with the bun-compiled Node engine baked in via go:embed — no Node, no Bun, no
 # node_modules on the host), tarballed with SHA256SUMS, ready to attach to a GitHub release.
 # Shared build steps live in scripts/lib-build.sh; the quick host build is build-release.sh.
 #
-#   ./release.sh                 # all targets
+#   ./release.sh                 # macOS arm64 + x64
 #   ./release.sh darwin-arm64    # one target
 #   BIMAX_VERSION=1.2.0 ./release.sh
 #
@@ -17,7 +17,7 @@ command -v bun >/dev/null || { echo "error: bun is required (https://bun.sh)"; e
 command -v go  >/dev/null || { echo "error: go is required (https://go.dev)"; exit 1; }
 
 VERSION="$(bimax_version)"
-[ $# -eq 0 ] && set -- darwin-arm64 darwin-x64 linux-x64 linux-arm64
+[ $# -eq 0 ] && set -- darwin-arm64 darwin-x64
 
 bimax_sweep_bunbuild
 trap bimax_sweep_bunbuild EXIT
@@ -27,30 +27,40 @@ rm -f build/SHA256SUMS
 for target in "$@"; do
   os="${target%%-*}"
   arch="${target##*-}"
+  [ "$os" = "darwin" ] || { echo "error: Bimax Terminal release is Mac-only (got $target)" >&2; exit 1; }
   goarch="$arch"; [ "$arch" = "x64" ] && goarch=amd64
   out="build/bimax-${os}-${arch}"
 
   echo "── ${target} ──────────────────────────────────────"
   build_bimax "$os" "$goarch" "$out" release "bun-${os}-${arch}"
+  # Publish the same standalone engine that was embedded into Terminal. Desktop consumes this
+  # verified release artifact; it never recompiles ../src during its own build.
+  cp tui/embed/bimax-engine "build/bimax-engine-${os}-${arch}"
+  chmod +x "build/bimax-engine-${os}-${arch}"
 
-  # macOS code signing + hardened runtime for the CLI binary. Requires a Developer ID Application
+  # Code signing + hardened runtime for the CLI binary. Requires a Developer ID Application
   # cert in the keychain and MACOS_SIGN_IDENTITY set (e.g. "Developer ID Application: Name (TEAMID)").
   # Skipped with a clear warning when unset, so a keyless CI build still produces (unsigned) artifacts.
-  if [ "$os" = "darwin" ]; then
-    if [ -n "${MACOS_SIGN_IDENTITY:-}" ] && command -v codesign >/dev/null; then
-      echo "   signing ${out} (Developer ID + hardened runtime)…"
-      codesign --force --options runtime --timestamp \
-        --sign "$MACOS_SIGN_IDENTITY" "$out"
-      codesign --verify --strict --verbose=2 "$out" || { echo "error: codesign verification failed"; exit 1; }
-    else
-      echo "   ⚠ MACOS_SIGN_IDENTITY unset — shipping UNSIGNED darwin binary (see docs/SECURITY_INSTALL.md)."
-    fi
+  if [ -n "${MACOS_SIGN_IDENTITY:-}" ] && command -v codesign >/dev/null; then
+    echo "   signing ${out} (Developer ID + hardened runtime)…"
+    codesign --force --options runtime --timestamp \
+      --sign "$MACOS_SIGN_IDENTITY" "$out"
+    codesign --verify --strict --verbose=2 "$out" || { echo "error: codesign verification failed"; exit 1; }
+  else
+    echo "   ⚠ MACOS_SIGN_IDENTITY unset — shipping UNSIGNED darwin binary (see docs/SECURITY_INSTALL.md)."
   fi
 
   tar -C build -czf "${out}.tar.gz" "$(basename "$out")"
   ( cd build && shasum -a 256 "$(basename "$out").tar.gz" >> SHA256SUMS )
   echo "   → ${out}.tar.gz ($(du -h "${out}.tar.gz" | cut -f1))"
 done
+
+# Generated client contract + per-chip engine manifest are first-class release assets.
+node scripts/generate-protocol-package.mjs
+node scripts/generate-engine-manifest.mjs build
+protocol_version="$(node -p "require('fs').readFileSync('src/protocol/protocol.ts','utf8').match(/PROTOCOL_SEMVER\\s*=\\s*'([^']+)'/)[1]")"
+tar -C build/protocol -czf "build/bimax-client-protocol-v${protocol_version}.tar.gz" "bimax-client-protocol-v${protocol_version}"
+( cd build && shasum -a 256 "bimax-client-protocol-v${protocol_version}.tar.gz" >> ENGINE_SHA256SUMS )
 
 # Independent signature over the checksum manifest. The installer pins the PUBLIC key (see
 # install.sh#MINISIGN_PUBKEY), so this signature — not the manifest's mere co-location with the

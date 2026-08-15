@@ -1,11 +1,20 @@
 import { cliEvents } from '../../cli/events';
 import { loadConfig } from '../../cli/config';
-import { globalDesktopRuntime, DesktopRuntimePort, DesktopCommand, normalizeDesktopAction, PUBLIC_DESKTOP_ACTIONS } from '../../computer/desktop.runtime';
+import { DesktopRuntimePort, DesktopCommand, normalizeDesktopAction, PUBLIC_DESKTOP_ACTIONS } from '../../computer/desktop.runtime';
+import { globalComputerSessionManager, isSessionRoutableDesktopRuntime } from '../../computer/session.manager';
 import { classifyDesktopActionImpact } from '../../browser/action.impact';
 import { IGovernor } from '../../core/interfaces';
 import { getTaintTracker } from '../../mind/taint';
 import { buildTool, BuiltTool } from '../tool.factory';
-import { computerResultForModel, renderComputerActionReference, validateModelComputerCommand } from '../../computer/action.contract';
+import { computerResultForModel, renderComputerActionReference, unwrapActionEnvelope, validateModelComputerCommand } from '../../computer/action.contract';
+import {
+  resolveConvergedComputerRoute, validateConvergedHandoff,
+  type ConvergedComputerTargetRef,
+} from '../../computer/browser.convergence.route';
+import {
+  globalNativeComputerShadowObserver,
+  type NativeShadowObserverPort,
+} from '../../computer/native.shadow.comparison';
 
 /** Acting verbs face the governor; observation (screenshot/cursor/status/…) is approval-free. */
 // 'clipboard' is gated alongside the acting verbs even though a bare read changes nothing: the
@@ -17,14 +26,33 @@ const GATED_ACTIONS = new Set([
   'arrange', 'desktop', 'close', 'quit_app', 'record_start',
 ]);
 
+type ConvergedDesktopCommand = DesktopCommand & {
+  surface?: 'browser_page' | 'browser_chrome' | 'system_ui';
+  handoffRef?: string;
+  pageUrl?: string;
+  browserTabRef?: string;
+  browserDocumentRef?: string;
+  windowGeneration?: number;
+};
+
 export function createComputerTool(
   governor: IGovernor,
-  runtime: DesktopRuntimePort = globalDesktopRuntime,
+  runtime: DesktopRuntimePort = globalComputerSessionManager,
+  shadowObserver: NativeShadowObserverPort = globalNativeComputerShadowObserver,
 ): BuiltTool {
   // Keyboard approval is shown in the terminal, so the approval UI itself can steal focus from
   // the app the model just opened. Remember that intended app and pass it all the way to the
   // runtime; the runtime re-activates and verifies it immediately before each keyboard action.
-  let targetApp = '';
+  const targetAppBySession = new Map<string, string>();
+  const rememberTargetApp = (sessionId: string, app: string): void => {
+    targetAppBySession.delete(sessionId);
+    if (app) targetAppBySession.set(sessionId, app);
+    while (targetAppBySession.size > 32) {
+      const oldest = targetAppBySession.keys().next().value as string | undefined;
+      if (!oldest) break;
+      targetAppBySession.delete(oldest);
+    }
+  };
   return buildTool({
     name: 'ComputerTool',
     description: `Operate the user's real desktop through native screenshots, accessibility targets, and the physical mouse/keyboard. A request to inspect or operate the user's own computer, app, or screen authorizes the routine interaction it asks for — use this tool rather than claiming you have no access, and never improvise desktop control through shell commands.
@@ -63,6 +91,7 @@ ${renderComputerActionReference()}`,
         modifier: { type: 'array', items: { type: 'string', enum: ['cmd', 'shift', 'alt', 'ctrl', 'fn'] }, description: 'click: optional held modifier keys, e.g. ["cmd"] for multi-selection.' },
         count: { type: 'number', description: 'click: 1 (default), 2 = double, 3 = triple.' },
         text: { type: 'string', description: 'type: literal text, full unicode. Pair with query/elementToken when a visible editable field should be focused atomically before typing.' },
+        replaceExisting: { type: 'boolean', description: 'type: select the targeted editable field contents before entering text. Use when the requested value must replace a search query, draft, or existing field exactly.' },
         combo: { type: 'string', description: 'key/press: e.g. "cmd+shift+t", "return", "escape", "ctrl+c".' },
         key: { type: 'string', description: 'Compatibility alias for combo when action is key/press. Prefer combo.' },
         app: { type: 'string', description: 'Exact application name, preferably as returned by apps/open. Actions default to the most recently opened app.' },
@@ -89,10 +118,65 @@ ${renderComputerActionReference()}`,
         recordVideo: { type: 'boolean', description: 'record_start: include an MP4 screen recording (default true).' },
         captureScope: { type: 'string', enum: ['window', 'display'], description: 'record_start: window (default) captures only the owned app window; display captures the whole human-visible display, including overlapping windows, and requires explicit approval.' },
         outputDir: { type: 'string', description: 'record_start: optional output directory; defaults under .bimax/computer/recordings.' },
+        surface: { type: 'string', enum: ['browser_page', 'browser_chrome', 'system_ui'], description: 'Exact BrowserTool handoff surface. browser_page is read-only AX scrape fallback.' },
+        handoffRef: { type: 'string', minLength: 1, maxLength: 128, description: 'Short-lived authority returned by BrowserTool handoff.' },
+        pageUrl: { type: 'string', description: 'BrowserTool handoff page URL; checked against handoffRef.' },
+        browserTabRef: { type: 'string', description: 'BrowserTool handoff tab ref; checked against handoffRef.' },
+        browserDocumentRef: { type: 'string', description: 'BrowserTool handoff document ref; checked against handoffRef.' },
+        windowGeneration: { type: 'integer', minimum: 0, description: 'BrowserTool handoff exact native window generation.' },
       },
       required: ['action'],
     },
-    execute: async (args: DesktopCommand & { key?: string }, context?: any) => {
+    execute: async (rawArgs: ConvergedDesktopCommand & { key?: string }, context?: any) => {
+      // Some models wrap the arguments in the action name — {"click":{...}} — instead of naming it
+      // in `action`. Left alone that reads as action=undefined, and the refusal then names the
+      // symptom rather than the mistake, which a model cannot act on: the Phase 10 baseline caught
+      // one repeating the identical malformed call six times before giving up. Unwrapped here,
+      // before anything reads args, so the branches below and the governor all see one shape.
+      let args = unwrapActionEnvelope(rawArgs as unknown as Record<string, unknown>) as unknown as typeof rawArgs;
+      // The Bimax task owns the computer session. A model-supplied `session` must never select or
+      // observe another task's handles, target, history or recording state.
+      const taskSessionId = typeof context?.sessionId === 'string' && context.sessionId.trim()
+        ? context.sessionId.trim()
+        : '';
+      const taskSessionKey = taskSessionId || 'default';
+      let convergedTarget: ConvergedComputerTargetRef | undefined;
+      if (args.surface || args.handoffRef) {
+        if (!args.surface || !args.handoffRef) {
+          return JSON.stringify({
+            ok: false, action: args.action,
+            summary: 'Browser convergence handoff requires both surface and handoffRef.',
+          });
+        }
+        const authority = validateConvergedHandoff(args.handoffRef, taskSessionKey);
+        if (!authority.ok) {
+          return JSON.stringify({ ok: false, action: args.action, summary: authority.error });
+        }
+        convergedTarget = authority.target;
+        if (convergedTarget.surface !== args.surface) {
+          return JSON.stringify({ ok: false, action: args.action, summary: 'surface does not match handoffRef authority.' });
+        }
+        if (convergedTarget.surface === 'browser_page' && args.action !== 'observe') {
+          return JSON.stringify({
+            ok: false, action: args.action,
+            summary: 'browser_page AX fallback is read-only; page mutations must return to BrowserTool CDP.',
+          });
+        }
+        const mismatch = (provided: unknown, retained: unknown): boolean => provided !== undefined && provided !== retained;
+        if (mismatch(args.pid, convergedTarget.pid)
+            || mismatch(args.windowId, convergedTarget.windowId)
+            || mismatch(args.windowGeneration, convergedTarget.windowGeneration)
+            || (convergedTarget.surface === 'browser_page' && (
+              mismatch(args.pageUrl, convergedTarget.url)
+              || mismatch(args.browserTabRef, convergedTarget.tabRef)
+              || mismatch(args.browserDocumentRef, convergedTarget.documentRef)))) {
+          return JSON.stringify({ ok: false, action: args.action, summary: 'handoff target fields do not match handoffRef authority.' });
+        }
+      }
+      const targetApp = targetAppBySession.get(taskSessionKey) || '';
+      const activeRuntime = taskSessionId && isSessionRoutableDesktopRuntime(runtime)
+        ? runtime.forSession(taskSessionId)
+        : runtime;
       // Fold verb synonyms onto real actions FIRST — before the gating decision below — so an
       // aliased high-impact verb (press→key, launch→open) still faces the governor. Doing this any
       // later would turn the alias into an approval bypass.
@@ -125,13 +209,30 @@ ${renderComputerActionReference()}`,
       //     switch to the sidecar's synthetic overlay path);
       //   - fullDisplayToken / approveFullDisplay(legacy): whole-display recording approval is a
       //     governor decision — a model-supplied token or boolean can never authorize it.
-      const { deliveryMode: _ignoredDelivery, fullDisplayToken: _ignoredToken, ...modelArgs } = args as DesktopCommand & { approveFullDisplay?: unknown };
-      delete (modelArgs as { approveFullDisplay?: unknown }).approveFullDisplay;
-      const effectiveArgs: DesktopCommand = intendedApp ? { ...modelArgs, app: intendedApp } : modelArgs;
+      const modelArgs = { ...args } as DesktopCommand & { approveFullDisplay?: unknown };
+      delete modelArgs.deliveryMode;
+      delete modelArgs.fullDisplayToken;
+      delete modelArgs.session;
+      delete modelArgs.approveFullDisplay;
+      const modelRecord = modelArgs as unknown as Record<string, unknown>;
+      delete modelRecord.surface;
+      delete modelRecord.handoffRef;
+      delete modelRecord.pageUrl;
+      delete modelRecord.browserTabRef;
+      delete modelRecord.browserDocumentRef;
+      delete modelRecord.windowGeneration;
+      const effectiveArgs: DesktopCommand = {
+        ...modelArgs,
+        ...(convergedTarget && 'pid' in convergedTarget ? { pid: convergedTarget.pid } : {}),
+        ...(convergedTarget && 'windowId' in convergedTarget && convergedTarget.windowId !== undefined
+          ? { windowId: convergedTarget.windowId } : {}),
+        ...(intendedApp ? { app: intendedApp } : {}),
+        ...(taskSessionId ? { session: taskSessionId } : {}),
+      };
       // Whole-display recording detection BEFORE the approval prompt, so the user approves the
       // TRUE scope. Only a governor-approved prompt mints the single-use runtime token below.
       const wantsVideo = effectiveArgs.action === 'record_start' && effectiveArgs.recordVideo !== false;
-      const scopePreview = wantsVideo ? runtime.recordingScopePreview?.(effectiveArgs.captureScope) : undefined;
+      const scopePreview = wantsVideo ? activeRuntime.recordingScopePreview?.(effectiveArgs.captureScope) : undefined;
       const wholeDisplay = effectiveArgs.captureScope === 'display'
         || (!!scopePreview && !scopePreview.captureSafe);
       if (GATED_ACTIONS.has(effectiveArgs.action)) {
@@ -147,8 +248,8 @@ ${renderComputerActionReference()}`,
         // instead of what is being switched to.
         const app = effectiveArgs.action === 'open' || effectiveArgs.action === 'focus'
           ? (effectiveArgs.app?.trim() || effectiveArgs.bundleId?.trim() || 'application')
-          : intendedApp || await runtime.frontmostApp();
-        const semanticTarget = runtime.describeTarget?.(effectiveArgs) || undefined;
+          : intendedApp || await activeRuntime.frontmostApp();
+        const semanticTarget = activeRuntime.describeTarget?.(effectiveArgs) || undefined;
         const impact = effectiveArgs.action === 'record_start'
           ? {
             high: true,
@@ -165,7 +266,7 @@ ${renderComputerActionReference()}`,
         // The sidecar's first-use spawn/handshake can take real wall-clock time; kick it off now
         // so it overlaps with the human reading/deciding on the approval prompt instead of starting
         // only after Enter, where it would otherwise sit behind an undifferentiated spinner.
-        runtime.warm?.();
+        activeRuntime.warm?.();
         // 'high-impact-only' approvals: routine interaction (click/type/press/open) flows without a
         // prompt so long runs aren't interrupted every step; high-impact actions (delete/send/
         // purchase/submit/permissions) still face the human each time, and the governor's
@@ -190,18 +291,20 @@ ${renderComputerActionReference()}`,
         // The governor prompt above resolved (or threw on deny). Only NOW — with the user having
         // approved the explicitly-stated whole-display scope — mint the runtime's single-use token.
         if (wholeDisplay) {
-          const token = runtime.authorizeFullDisplayRecording?.();
+          const token = activeRuntime.authorizeFullDisplayRecording?.();
           if (token) effectiveArgs.fullDisplayToken = token;
         }
       }
-      const result = await runtime.run(effectiveArgs, { cwd: context?.cwd || process.cwd(), signal: context?.signal });
+      const result = await activeRuntime.run(effectiveArgs, { cwd: context?.cwd || process.cwd(), signal: context?.signal });
       // Both verbs establish which app subsequent input belongs to, so both must update the
       // remembered target — otherwise a focus switch would leave later acting verbs defaulting to
       // the app the session opened BEFORE the switch.
       if (result.ok && (effectiveArgs.action === 'open' || effectiveArgs.action === 'focus')) {
-        targetApp = result.app || effectiveArgs.app?.trim() || '';
+        rememberTargetApp(taskSessionKey, result.app || effectiveArgs.app?.trim() || '');
       }
-      if (result.ok && effectiveArgs.action === 'quit_app' && (!intendedApp || intendedApp === targetApp)) targetApp = '';
+      if (result.ok && effectiveArgs.action === 'quit_app' && (!intendedApp || intendedApp === targetApp)) {
+        rememberTargetApp(taskSessionKey, '');
+      }
       // Whatever is on screen is untrusted input (prompt injection): a screenshot pulls it into
       // the conversation, exactly like a WebFetch of an arbitrary page. Clipboard content is the
       // same kind of import — text of unknown origin crossing into the transcript — so the verbs
@@ -213,7 +316,7 @@ ${renderComputerActionReference()}`,
       // only on the verbs that already return a picture.
       if (result.ok && ['observe', 'screenshot', 'status'].includes(effectiveArgs.action)) {
         try {
-          const pip = await runtime.pipStatus?.();
+          const pip = await activeRuntime.pipStatus?.();
           if (pip) {
             result.preview = pip.running
               ? `live preview is showing ${pip.surface || 'the active window'}`
@@ -233,7 +336,26 @@ ${renderComputerActionReference()}`,
           source: result.screenshot || 'ComputerTool', summary: result.summary,
         });
       }
-      return JSON.stringify(computerResultForModel(result));
+      // Phase 9 shadowing is observation-only and strictly fail-open. It starts after the
+      // compatibility result exists, is not awaited, and receives no action authority. Its
+      // count/digest receipt never enters the model-visible result.
+      if (result.ok && effectiveArgs.action === 'observe' && result.pid) {
+        void shadowObserver.compare(taskSessionKey, result, {
+          query: effectiveArgs.query,
+          maxElements: effectiveArgs.maxElements,
+        }).catch(() => {});
+      }
+      const compact = computerResultForModel(result);
+      if (convergedTarget) {
+        const receipt = resolveConvergedComputerRoute(convergedTarget, {
+          browserCdp: false, nativeAX: false, nativeCapture: false, compatibilityAX: true,
+        }).receipt!;
+        return JSON.stringify({
+          ...compact,
+          route: { ...receipt, target: convergedTarget, handoffRef: args.handoffRef },
+        });
+      }
+      return JSON.stringify(compact);
     },
   }, governor);
 }

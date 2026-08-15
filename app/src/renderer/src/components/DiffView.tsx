@@ -88,9 +88,19 @@ export function DiffView({ diff }: { diff: string }): React.ReactElement {
   if (rows.length === 0) {
     return <div className="p-4 text-xs text-faint">No changes.</div>;
   }
+  const additions = rows.filter((row) => row.kind === 'add').length;
+  const deletions = rows.filter((row) => row.kind === 'del').length;
+  const hunks = rows.filter((row) => row.kind === 'hunk').length;
   return (
-    <div className="overflow-x-auto rounded-lg border border-line bg-well font-mono text-[11.5px] leading-[1.7]">
-      <table className="w-full border-collapse">
+    <div className="overflow-hidden rounded-[12px] border border-line bg-well">
+      <div className="flex items-center gap-3 border-b border-line bg-raise/70 px-3 py-2 text-[10.5px]">
+        <span className="font-medium text-dim">{hunks} hunk{hunks === 1 ? '' : 's'}</span>
+        <span className="font-mono text-moss">+{additions}</span>
+        <span className="font-mono text-rust">−{deletions}</span>
+        <span className="ml-auto text-faint">Word-level changes highlighted</span>
+      </div>
+      <div className="overflow-x-auto font-mono text-[11.5px] leading-[1.7]">
+      <table className="w-max min-w-full border-collapse">
         <tbody>
           {rows.map((r, i) =>
             r.kind === 'hunk' ? (
@@ -114,7 +124,7 @@ export function DiffView({ diff }: { diff: string }): React.ReactElement {
                   {r.newNo ?? ''}
                 </td>
                 <td className={cn(
-                  'py-0 pr-3 pl-2 break-all whitespace-pre-wrap',
+                  'py-0 pr-3 pl-2 whitespace-pre',
                   r.kind === 'add' && 'text-moss',
                   r.kind === 'del' && 'text-rust',
                   r.kind === 'ctx' && 'text-dim',
@@ -131,6 +141,7 @@ export function DiffView({ diff }: { diff: string }): React.ReactElement {
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

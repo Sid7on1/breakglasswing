@@ -3,6 +3,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 export const MAX_CONCURRENT_SUBAGENTS = 4;
+
+/**
+ * Desktop Phase 9 may canary a lower background-concurrency ceiling. The immutable hard cap stays
+ * four; an untrusted, malformed, or higher value can never widen it. Terminal behavior is
+ * unchanged when the embedding host supplies no policy value.
+ */
+export function runtimeConcurrentSubagentLimit(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.BIMAX_MAX_CONCURRENT_SUBAGENTS);
+  return Number.isInteger(raw) ? Math.max(1, Math.min(MAX_CONCURRENT_SUBAGENTS, raw)) : MAX_CONCURRENT_SUBAGENTS;
+}
 export const CAPACITY_PATH_ENV = 'BIMAX_AGENT_CAPACITY_PATH';
 export const CAPACITY_RUN_ENV = 'BIMAX_AGENT_RUN_ID';
 export const CAPACITY_LEASE_ENV = 'BIMAX_AGENT_LEASE_ID';
@@ -52,7 +62,7 @@ export function resolveCapacityContext(cwd: string, capacityPath?: string, runId
 export class SubAgentCapacityCoordinator {
   constructor(
     readonly filePath: string,
-    readonly max = MAX_CONCURRENT_SUBAGENTS,
+    readonly max = runtimeConcurrentSubagentLimit(),
     readonly ttlMs = DEFAULT_TTL_MS,
   ) {}
 

@@ -2,8 +2,20 @@ import type { Inbound, Outbound } from './protocol';
 // Type-only import (erased at build time): the supervisor's wire shapes come straight from the
 // main process source, so renderer and main can never drift.
 import type { SupervisorStatus, CrashRecord } from '../../main/supervisor/types';
+import type { TakeoverState } from '../../main/takeover';
+import type { AdaptiveDecision, RenderingDecision, RuntimeSignals } from '../../phase9/adaptive.policy';
+import type { ProcessProvenanceRecord } from '../../phase9/process.provenance';
+import type {
+  AlchemistCapabilitySnapshot, EnvironmentCapabilitySnapshot,
+} from '../../phase9/workspace.capabilities';
 
-export type { SupervisorStatus, CrashRecord };
+export type { SupervisorStatus, CrashRecord, TakeoverState };
+
+export interface AdaptiveRuntimeSnapshot {
+  signals: RuntimeSignals;
+  decision: AdaptiveDecision;
+  rendering: RenderingDecision;
+}
 
 export type RecoveryActionName = 'retry' | 'restartSafe' | 'resume' | 'startMinimal' | 'stop';
 
@@ -38,6 +50,71 @@ export interface SessionMetaRecord {
   tokenEstimate: number;
 }
 
+/** Whether the window owns the whole screen — see `windowChrome()` in `main/index.ts`. */
+export interface WindowChromeState { fullScreen: boolean; maximized: boolean }
+
+export type PermissionDisposition = 'granted' | 'denied' | 'not-determined' | 'unavailable';
+
+export interface CodeSignatureReport {
+  kind: 'developer-id' | 'apple-development' | 'ad-hoc' | 'unsigned' | 'unknown';
+  identifier?: string;
+  teamIdentifier?: string;
+  authority?: string;
+  hardenedRuntime: boolean | null;
+  gatekeeper: 'accepted' | 'rejected' | 'unknown';
+  notarization: 'accepted' | 'rejected' | 'unknown';
+}
+
+export interface TrustReport {
+  generatedAt: string;
+  build: {
+    packaged: boolean;
+    appVersion: string;
+    electron: string;
+    chrome: string;
+    node: string;
+    platform: string;
+    osRelease: string;
+    minimumMacOS: string;
+  };
+  permissions: { accessibility: PermissionDisposition; screenRecording: PermissionDisposition };
+  components: Array<{
+    name: 'engine' | 'macCapability' | 'cuService' | 'cuBridge' | 'desktopHelper';
+    label: string;
+    present: boolean;
+    path?: string;
+    source: string;
+    computerUseOnly: boolean;
+    refusedOverride?: { variable: string; value: string };
+    sha256?: string;
+    signature?: CodeSignatureReport;
+  }>;
+  appIntegrity: { executableSha256?: string; signature: CodeSignatureReport };
+  release: {
+    qualification: 'development' | 'manual-alpha' | 'stable';
+    warning: string | null;
+    updatePermissionWarning: string;
+  };
+  coding: { available: boolean; requiresPermissions: string[] };
+  computerUse: { available: boolean; blockers: string[] };
+  unknowns: string[];
+}
+
+export interface ManualAlphaServiceStatus {
+  state: 'developer-id' | 'approved-ad-hoc' | 'approval-required' | 'invalid' | 'unavailable';
+  ready: boolean;
+  canApprove: boolean;
+  serviceVersion?: string;
+  binary?: string;
+  codeDirectoryHash?: string;
+  approvedHash?: string;
+  approvedAt?: string;
+  permissions?: { accessibility: string; screenRecording: string };
+  detail: string;
+}
+
+import type { EvidenceTimeline, RetentionControl } from '../../shared/evidence.timeline';
+
 declare global {
   interface Window {
     bimax: {
@@ -52,13 +129,39 @@ declare global {
         crashHistory: () => Promise<CrashRecord[]>;
         diagnostics: () => Promise<string>;
       };
+      setAppearance: (appearance: 'auto' | 'moonlight' | 'starlight') => void;
+      windowChrome: {
+        get: () => Promise<WindowChromeState>;
+        onState: (cb: (state: WindowChromeState) => void) => () => void;
+      };
       pickFolder: () => Promise<string | null>;
       pickFiles: () => Promise<string[]>;
       restartEngine: () => Promise<string>;
+      providers: {
+        credentialStatus: () => Promise<Array<{
+          name: string;
+          hasKey: boolean;
+          keyHint?: string;
+          storage: 'keychain' | 'none';
+          active: boolean;
+        }>>;
+        configure: (input: { name: string; apiKey?: string; baseURL?: string }) => Promise<{
+          ok: boolean;
+          error?: string;
+        }>;
+      };
       getProject: () => Promise<string>;
       recentProjects: () => Promise<string[]>;
       openProject: (dir: string) => Promise<string | null>;
       rendererReady: () => void;
+      phase9: {
+        adaptiveState: () => Promise<AdaptiveRuntimeSnapshot | null>;
+        processProvenance: () => Promise<ProcessProvenanceRecord[]>;
+        environment: () => Promise<EnvironmentCapabilitySnapshot | null>;
+        alchemistStatus: () => Promise<AlchemistCapabilitySnapshot | null>;
+        reportInteraction: (active: boolean, reduceMotion: boolean) => void;
+        onAdaptiveChanged: (cb: (snapshot: AdaptiveRuntimeSnapshot) => void) => () => void;
+      };
       git: {
         status: () => Promise<GitStatusResult | null>;
         diff: (file: string, untracked: boolean) => Promise<string>;
@@ -73,6 +176,45 @@ declare global {
         onChanged: (cb: () => void) => () => void;
       };
       sessionsMeta: () => Promise<SessionMetaRecord[]>;
+      trustReport: () => Promise<TrustReport | null>;
+      manualAlpha: {
+        status: () => Promise<ManualAlphaServiceStatus | null>;
+        approve: (codeDirectoryHash: string) => Promise<ManualAlphaServiceStatus | null>;
+        revoke: () => Promise<ManualAlphaServiceStatus | null>;
+      };
+      /** Contextual evidence — a derived timeline and the retention controls (Phase 8, section 28). */
+      evidence: {
+        timeline: (taskIntentId?: string) => Promise<EvidenceTimeline | null>;
+        retentionControls: (taskIntentId?: string) => Promise<RetentionControl[]>;
+        remove: (scope: 'task' | 'observations' | 'all', taskIntentId?: string) => Promise<number>;
+      };
+      exportDiagnostics: () => Promise<'saved' | 'cancelled' | 'failed'>;
+      openPermissionSettings: (which: 'accessibility' | 'screenRecording') => Promise<boolean>;
+      /**
+       * The drag coach. Add-by-drag panes receive a compact native drag tile; `setInteractive` is
+       * retained only for compatibility with older main-process bundles.
+       */
+      permissionCoach: {
+        start: (which: 'accessibility' | 'screenRecording' | 'fullDisk' | 'microphone') => Promise<boolean>;
+        startService: (which: 'accessibility' | 'screenRecording') => Promise<boolean>;
+        stop: () => Promise<boolean>;
+        setInteractive: (interactive: boolean) => void;
+        dragBundle: () => void;
+        bundlePath: () => Promise<string>;
+        probe: () => Promise<{
+          readings: Record<string, 'granted' | 'denied' | 'not-determined' | 'unavailable'>;
+          responsibleBundle: string;
+          responsibleName: string;
+          isDevHost: boolean;
+        } | null>;
+        relaunch: () => Promise<boolean>;
+        requestMicrophone: () => Promise<boolean>;
+      };
+      takeover: {
+        get: () => Promise<TakeoverState>;
+        set: (request: { paused: boolean; reason?: string }) => Promise<TakeoverState>;
+        onState: (cb: (state: TakeoverState) => void) => () => void;
+      };
       pty: {
         create: (cols: number, rows: number) => Promise<number>;
         input: (id: number, data: string) => void;

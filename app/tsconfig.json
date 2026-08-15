@@ -3,7 +3,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
@@ -11,7 +15,18 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src", "electron.vite.config.ts"]
+  "include": [
+    "src",
+    "electron.vite.config.ts",
+    "electron.vite.focus.config.ts"
+  ],
+  "exclude": [
+    "src/capabilities/mac/__tests__",
+    "src/shared/__tests__",
+    "src/phase9/__tests__"
+  ]
 }

@@ -1,7 +1,7 @@
 import type { SnapshotElementInfo } from './browser.runtime';
 
 /**
- * Semantic high-impact classification for computer-use actions.
+ * Semantic high-impact classification for browser actions.
  *
  * "High-impact" = the action plausibly commits an outward-facing or hard-to-reverse effect:
  * submitting/sending content, purchases/payments, deletions, approvals, permission or security
@@ -55,19 +55,22 @@ export function classifyBrowserActionImpact(
 }
 
 /**
- * Classify one native desktop action (mcp__open-computer-use__* tool) from its tool name and
- * value-safe string arguments. Keys that look credential-shaped are never inspected.
+ * Classify one DESKTOP (computer-use) action.
+ *
+ * PROVENANCE: restored from the Desktop capability tree's `classifyMacActionImpact`, which is the
+ * surviving copy of this function; the engine's consumers import it under this name.
+ *
+ * Unlike the browser classifier there is no element snapshot to lean on, so the judgement is made
+ * on the action verb plus whatever string arguments came with it. Argument keys that look like
+ * secrets are excluded from the scanned text — an approval label must never quote a credential.
  */
 export function classifyDesktopActionImpact(
   action: string,
   args?: Record<string, unknown>,
 ): ImpactVerdict {
-  const parts: string[] = [action.replace(/_/g, ' ')];
-  for (const [key, value] of Object.entries(args || {})) {
-    if (/password|secret|token|credential|key$/i.test(key)) continue;
-    if (typeof value === 'string') parts.push(value);
-  }
-  const match = parts.join(' ').match(HIGH_IMPACT_INTENT);
-  if (match) return { high: true, reason: `matches "${match[0].trim()}"` };
-  return { high: false };
+  const text = [action, ...Object.entries(args || {})
+    .filter(([key, value]) => typeof value === 'string' && !/password|secret|token|credential|key$/i.test(key))
+    .map(([, value]) => String(value))].join(' ');
+  const match = text.match(HIGH_IMPACT_INTENT);
+  return match ? { high: true, reason: `matches "${match[0].trim()}"` } : { high: false };
 }

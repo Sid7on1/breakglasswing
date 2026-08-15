@@ -16,6 +16,6 @@
   "exclude": [
     "node_modules",
     "dist",
-    "src/__tests__/desktop.supervisor.test.ts"
+    "src/__tests__"
   ]
 }

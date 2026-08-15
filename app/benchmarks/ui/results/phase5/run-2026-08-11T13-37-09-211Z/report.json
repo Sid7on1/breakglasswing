@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-11T13-37-09-211Z",
+  "started_at": "2026-08-11T13:37:09.216Z",
+  "ended_at": "2026-08-11T13:37:12.346Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J11",
+      "name": "Inspect the loaded model slots and provider catalogue",
+      "outcome": "pass",
+      "checks": [
+        {
+          "name": "the model catalogue is a dedicated window",
+          "pass": true,
+          "observed": "catalogue title"
+        },
+        {
+          "name": "each job has a plain-language slot",
+          "pass": true,
+          "observed": "slot names"
+        },
+        {
+          "name": "the active model has a human label and exact id",
+          "pass": true,
+          "observed": "label + id"
+        },
+        {
+          "name": "the active provider and served count are visible",
+          "pass": true,
+          "observed": "provider status"
+        },
+        {
+          "name": "the picker separates recommendations from provider truth",
+          "pass": true,
+          "observed": "served distinction"
+        },
+        {
+          "name": "model capabilities are readable before selection",
+          "pass": true,
+          "observed": "capability summary"
+        }
+      ],
+      "pageErrors": [],
+      "accessibilityFindings": [],
+      "error": null
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 1,
+    "failed": 0
+  }
+}

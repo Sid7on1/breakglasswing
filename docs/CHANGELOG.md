@@ -2,6 +2,22 @@
 
 All notable changes to BiMax. Dates are ISO 8601.
 
+## [1.1.0] — 2026-08-02 Bimax-Cu Phase 9 release candidate
+
+- Completed the macOS native semantic cutover implementation with deterministic staged cohorts,
+  persisted safety metrics, automatic rollback, and one-command backend selection.
+- Kept `ComputerTool` as the no-replay compatibility surface while removing CUA from default macOS
+  artifacts; non-macOS compatibility and an explicit emergency CUA build remain available.
+- Replaced first-use Swift compilation with build-time first-party helper packaging for the CLI and
+  Electron app.
+- Added signed read-only shadow comparisons, content-free receipts, operation-specific native tools,
+  UI/CLI rollout status, and the Phase 9 cutover runbook.
+- Fixed Electron signing being permanently disabled, synchronized the native service bundle version
+  with its 0.7.0 runtime, and closed the native transaction canonicalizer lint failure.
+
+External qualification still requires Developer-ID/notarized artifacts, the signed real-app shadow
+matrix, the 8-hour soak, and the elapsed two-release stability window documented in the runbook.
+
 ## [Unreleased] — 2026-07-22 stabilization: computer-use safety, deterministic context, Grok-port quarantine
 
 Restores trustworthy computer use, deterministic context management, and honest protocol
@@ -59,8 +75,9 @@ deleted. **Privacy default: nothing records, fetches, or provisions without an e
 - **Code survives every context path verbatim.** The per-result size cap no longer elides
   code: a >16k source-file read passes through the cap, proactive compaction, and reactive
   compaction untouched (log dumps are still capped). Old code results are never silently
-  truncated — micro-compact evicts them WHOLE with a lossless, resolvable reference naming
-  the exact file to re-read.
+  truncated — micro-compact evicts them WHOLE with a resolvable reference naming the exact
+  file to re-read. Resolvable, not lossless: a re-read returns the file's current contents,
+  which may have changed since eviction.
 - **`FreeContextTool` is truthful.** `"tool_results"` now actually clears eligible
   historical tool-result bodies from the LIVE session context (newest 6 kept, atomic
   assistant-call/tool-result pairing preserved) and reports measured before/after token

@@ -1,5 +1,6 @@
 import { promises as fs, watch, FSWatcher } from 'node:fs';
 import path from 'node:path';
+import { resolveWithinRoot } from './security';
 
 /**
  * Electron-native file tree for the Files panel: lazy per-directory listing, capped read-only
@@ -15,14 +16,16 @@ export interface FileEntry {
   dir: boolean;
 }
 
-/** Resolve a project-relative path, refusing anything that escapes the root. */
-function safeJoin(root: string, rel: string): string {
-  const abs = path.resolve(root, rel || '.');
-  if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error(`path escapes project: ${rel}`);
-  return abs;
+/**
+ * Resolve a project-relative path, refusing anything that escapes the root — including the
+ * no-project-open case, where an empty root used to make every absolute path look contained.
+ * The containment rule itself lives in security.ts so the IPC layer and this module cannot drift.
+ */
+function safeJoin(root: string, rel: unknown): string {
+  return resolveWithinRoot(root, rel, 'path');
 }
 
-export async function listDir(root: string, rel: string): Promise<FileEntry[]> {
+export async function listDir(root: string, rel: unknown): Promise<FileEntry[]> {
   const abs = safeJoin(root, rel);
   const entries = await fs.readdir(abs, { withFileTypes: true });
   return entries
@@ -32,7 +35,7 @@ export async function listDir(root: string, rel: string): Promise<FileEntry[]> {
 }
 
 export async function readFilePreview(
-  root: string, rel: string,
+  root: string, rel: unknown,
 ): Promise<{ content: string; truncated: boolean; size: number; binary: boolean }> {
   const abs = safeJoin(root, rel);
   const stat = await fs.stat(abs);
@@ -54,7 +57,7 @@ export async function readFilePreview(
 }
 
 /** Editor-pane save (⌘S). Same path guard as reads; refuses only what read refused. */
-export async function writeFileContent(root: string, rel: string, content: string): Promise<void> {
+export async function writeFileContent(root: string, rel: unknown, content: string): Promise<void> {
   const abs = safeJoin(root, rel);
   await fs.writeFile(abs, content, 'utf8');
 }

@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "product": "bimax-desktop-electron-boundary",
+  "run_id": "2026-08-09T14-24-20-947Z",
+  "architecture": "arm64",
+  "provider": "/tmp/bimax-mac-capability-phase5",
+  "checks": [
+    {
+      "name": "production-qualified provider result creates the Mac lane",
+      "pass": true,
+      "observed": "target visible"
+    },
+    {
+      "name": "the exact safe fixture window is visible",
+      "pass": true,
+      "observed": "Window 5150 · process 95157"
+    }
+  ],
+  "providerRecords": [
+    {
+      "sequence": 1,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "status",
+      "isError": false,
+      "code": null,
+      "ok": true
+    },
+    {
+      "sequence": 2,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "wait",
+      "isError": true,
+      "code": "computer_use_paused",
+      "ok": false
+    },
+    {
+      "sequence": 3,
+      "server": "bimax-mac",
+      "qualifiedTool": "mcp__bimax-mac__mac_control",
+      "action": "wait",
+      "isError": false,
+      "code": null,
+      "ok": true
+    }
+  ],
+  "outcome": "fail",
+  "error": "TimeoutError: Waiting failed: 60000ms exceeded\n    at new WaitTask (file:///Users/vishsiddharth/Desktop/Bimax/node_modules/puppeteer-core/lib/esm/puppeteer/common/WaitTask.js:47:34)\n    at IsolatedWorld.waitForFunction (file:///Users/vishsiddharth/Desktop/Bimax/node_modules/puppeteer-core/lib/esm/puppeteer/api/Realm.js:22:26)\n    at CdpFrame.waitForFunction (file:///Users/vishsiddharth/Desktop/Bimax/node_modules/puppeteer-core/lib/esm/puppeteer/api/Frame.js:555:43)\n    at CdpFrame.<anonymous> (file:///Users/vishsiddharth/Desktop/Bimax/node_modules/puppeteer-core/lib/esm/puppeteer/util/decorators.js:94:27)\n    at CdpPage.waitForFunction (file:///Users/vishsiddharth/Desktop/Bimax/node_modules/puppeteer-core/lib/esm/puppeteer/api/Page.js:1439:37)\n    at file:///Users/vishsiddharth/Desktop/Bimax/app/scripts/ui/electron-journey.mjs:101:14"
+}

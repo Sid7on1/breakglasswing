@@ -10,6 +10,7 @@ import { getActiveTodos, todosTouchedThisTurn } from '../tools/implementations/t
 import { LoopDetector, LoopSignal } from './loop-detector';
 import { getGlobalPatternStore } from '../genome/pattern.store';
 import { globalTelemetry } from '../telemetry/telemetry';
+import { taskMetrics } from '../telemetry/task.metrics';
 import { getSelfModel, domainOf, pathOf, classifyOutcome, currentModelKey } from '../mind/self.model';
 import { TypedOutcome, typedFromError } from '../tools/outcome';
 import { getEventLedger } from '../mind/event.ledger';
@@ -20,8 +21,8 @@ import { startEpisodeRecording, isReplayActive } from '../mind/episode.recorder'
 import { getTracer } from '../telemetry/trace';
 import { requiresBuildVerification } from '../review/verification.scope';
 import { applyImplicitWriteConstraints } from '../tools/write.constraints';
-import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, pruneStaleToolObservations, contentToText, isScreenshotObservationMessage } from './multimodal';
-import { commitProvenAfter, computerToolResults, computerToolSteps, lastContentEntryIndex } from '../computer/action.evidence';
+import { screenshotFromToolResult, buildScreenshotObservation, appendScreenshotObservation, pruneScreenshotObservations, contentToText, isScreenshotObservationMessage } from './multimodal';
+import { canonicalToolArgs } from './tool.args';
 
 /** Mutating tools whose success is an implicit "this change is correct" claim. */
 export const CLAIMING_TOOLS = new Set(['EditFileTool', 'WriteFileTool', 'MultiEditTool', 'SymbolEditTool']);
@@ -31,12 +32,20 @@ export interface AgentLoopOptions {
   contextMode?: 'smart' | 'full';
   useLite?: boolean;
   signal?: AbortSignal;
-  /** Restrict the schemas exposed for a specialized turn (for example, desktop operation). */
+  /** Stable Bimax task/thread id used to isolate stateful tools. */
+  sessionId?: string;
+  /** Restrict the schemas exposed for a specialized provider turn. */
   toolNames?: readonly string[];
   /** Do not inject code-navigation context into a turn that is not working on code. */
   skipRepoMap?: boolean;
   /** The turn may not terminate before this tool has actually been attempted. */
   requireTool?: string;
+  /**
+   * Benchmark-fixture label ("form", "menu", "navigation") recorded on this task's metrics. Set
+   * only by a harness that knows what it is exercising — never inferred from the prompt, because
+   * a guessed class would put fake precision under the turn-count criterion it feeds.
+   */
+  metricsLabel?: string;
 }
 
 /**
@@ -47,125 +56,9 @@ export interface AgentLoopOptions {
  * Valid args are re-stringified canonically; anything unparseable becomes `{}`.
  */
 export function sanitizeToolArgs(raw: any): string {
-  if (raw == null) return '{}';
-  if (typeof raw === 'object') {
-    try { return JSON.stringify(raw); } catch { return '{}'; }
-  }
-  const s = String(raw).trim();
-  if (s === '') return '{}';
-  try { return JSON.stringify(JSON.parse(s)); } catch { return '{}'; }
+  return canonicalToolArgs(raw)?.json || '{}';
 }
 
-/** Prevent a weak model from ending a computer-use turn one disclosure too early. This is narrowly
- * evidence-driven: it only fires for a numeric request (including battery health, whose native
- * detail sheet defines Maximum Capacity), only when the proposed answer contains no numeric
- * percentage, and only when the newest Bimax observation supplies a visible
- * Details/info control. The model still chooses and executes the action; the loop merely refuses
- * to mislabel a category such as "Normal" as completion. */
-export function computerPercentageCompletionNudge(messages: Message[], proposedAnswer: string): string {
-  const request = [...messages].reverse().find(message => message.role === 'user'
-    && !isScreenshotObservationMessage(message)
-    && !contentToText(message.content as any).includes('[COMPUTER COMPLETION GATE]'));
-  const requestText = request ? contentToText(request.content as any) : '';
-  const asksForPercentage = /(?:\bpercent(?:age)?\b|%)/i.test(requestText);
-  const asksForBatteryHealth = /\bbattery\s+health\b/i.test(requestText);
-  if (!asksForPercentage && !asksForBatteryHealth) return '';
-  if (/\b\d+(?:\.\d+)?(?:\s*%|\s+percent\b)/i.test(proposedAnswer)) return '';
-
-  let observation: any = null;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== 'tool' || typeof message.content !== 'string') continue;
-    try {
-      const parsed = JSON.parse(message.content);
-      if (String(parsed?.driver || '').startsWith('bimax-computer-use')
-        && Array.isArray(parsed?.elements)) {
-        observation = parsed;
-        break;
-      }
-    } catch { /* compacted/non-JSON tool result */ }
-  }
-  if (!observation) return '';
-
-  // Structural request words carry no information about WHICH row's disclosure control matters;
-  // every remaining term is content (battery, health, storage, display, …) and scores equally.
-  // Nothing here is specific to any one Settings page.
-  const structuralTerms = new Set(['computer', 'settings', 'check', 'open', 'percentage', 'percent', 'using', 'please', 'tell', 'show', 'find', 'exact', 'value', 'current']);
-  const requestTerms = Array.from(new Set(requestText.toLocaleLowerCase().match(/[a-z]{4,}/g) || []))
-    .filter(term => !structuralTerms.has(term));
-  const candidates = observation.elements
-    .filter((element: any) => Number.isFinite(Number(element?.element_index))
-      && element?.frame
-      && /(?:show\s+detail|details?|info(?:rmation)?|disclosure|ellipsis)/i.test(String(element?.label || '')))
-    .map((element: any) => {
-      const label = String(element.label || '');
-      const haystack = `${label} ${element.context_label || ''}`.toLocaleLowerCase();
-      const score = requestTerms.filter(term => haystack.includes(term)).length;
-      return { element, label, score };
-    })
-    .sort((a: any, b: any) => b.score - a.score || Number(a.element.element_index) - Number(b.element.element_index));
-  const best = candidates[0];
-  if (!best || best.score <= 0) return '';
-  const requestedDatum = asksForBatteryHealth ? 'battery Maximum Capacity percentage' : 'requested percentage';
-  return `[COMPUTER COMPLETION GATE] The user's ${requestedDatum} is still missing; "${proposedAnswer.slice(0, 160)}" does not contain a numeric percentage. Do not stop or repeat that category. The newest observation exposes the relevant visible control: elementIndex ${Number(best.element.element_index)}, "${best.label}". Call ComputerTool click on that fresh elementIndex now, inspect the returned screen, and answer only after the numeric percentage is visible or the detail view proves it unavailable.`;
-}
-
-/** Refuse a messaging-task success claim when the recorded ComputerTool sequence never committed
- * the freshly typed/pasted content. This is deliberately mechanical: it does not guess from pixels
- * or trust prose. A successful Return/Enter key or a semantic Send/Submit/Post click must occur in
- * the same app after the latest type/paste, and its result must carry a fresh screenshot. Honest
- * blocker/failure reports remain allowed so an inaccessible app cannot trap the loop forever. */
-export function computerCommitCompletionNudge(messages: Message[], proposedAnswer: string): string {
-  const request = [...messages].reverse().find(message => message.role === 'user'
-    && !isScreenshotObservationMessage(message)
-    && !/\[COMPUTER (?:COMMIT|COMPLETION) GATE\]/.test(contentToText(message.content as any)));
-  const requestText = request ? contentToText(request.content as any) : '';
-  // "text" and "share" are deliberately absent: "read the text in a document" is not a send request, and
-  // this gate must not hold a finished read-only task hostage.
-  const asksToCommit = /\b(?:send|sends|sent|message|messages|reply|replies|respond|post|posts|dm)\b/i.test(requestText);
-  if (!asksToCommit || /\b(?:blocked|couldn['’]?t|cannot|can['’]?t|failed|not sent|permission denied)\b/i.test(proposedAnswer)) return '';
-
-  const results = computerToolResults(messages).filter(result => result?.ok !== false);
-  if (results.length === 0) return '';
-
-  // For the common literal form "send <content> to <recipient>", verify the actual latest type call
-  // entered that content. This closes a subtle hole where typing "Mom" into Search and pressing
-  // Return looked like content-entry + commit even though the message composer was never touched.
-  const literal = requestText.match(/\b(?:send|text|message|dm)\s+(.+?)\s+to\s+(?:my\s+)?(.+)$/i);
-  const requestedContent = literal?.[1]?.trim().replace(/^['"“”]|['"“”]$/g, '');
-  // The trailing delivery surface is grammatical, not a product roster. Keeping a list here made
-  // recipient proof work only for apps known when this code was written. The active app is already
-  // scoped by ComputerTool evidence below, so strip any final "on/via/using <surface>" phrase.
-  const recipient = literal?.[2]?.replace(/\s+(?:on|via|using)\s+.+$/i, '').trim();
-  const isConcreteLiteral = !!requestedContent
-    && !/^(?:it|this|that|the result|the link|a message|something)$/i.test(requestedContent)
-    && !/\b(?:file|photo|image|jpeg|jpg|png|document|attachment|video|audio)\b/i.test(requestedContent);
-  if (isConcreteLiteral) {
-    const steps = computerToolSteps(messages).filter(step => step.result?.ok !== false);
-    const latestTyped = [...steps].reverse().find(step => /^(?:type|set_value)$/i.test(String(step.result.action || '')));
-    const actual = latestTyped
-      ? String(latestTyped.args.text ?? latestTyped.args.value ?? '').trim()
-      : '';
-    if (latestTyped && actual !== requestedContent) {
-      return `[COMPUTER COMMIT GATE] The user's exact requested message is "${requestedContent}", but the latest successful text-entry action entered "${actual}". That may be recipient/search navigation, not composer input. Prove the ${recipient ? `"${recipient}" ` : ''}conversation, type exactly "${requestedContent}" into its message composer, then commit and verify the new transcript entry. Do not claim success from old transcript content.`;
-    }
-  }
-
-  // Same definition of "committed" the todo gate uses — one rule, imported, so the two gates cannot
-  // drift into disagreeing about what counts as proof.
-  const inputIndex = lastContentEntryIndex(results);
-  if (commitProvenAfter(results, inputIndex)) return '';
-
-  const latest = results[results.length - 1];
-  const inputApp = inputIndex >= 0 ? String(results[inputIndex]?.app || '') : '';
-  const next = inputIndex < 0
-    ? 'Continue navigating to the intended conversation/record and type or paste the requested content into its actual composer.'
-    : `The content was entered in ${inputApp || 'the target app'} but no later successful Return/Enter or semantic Send/Submit/Post action with a changed fresh frame proves it was committed.`;
-  // Name the precise escape hatch. If the commit control is an unlabeled icon — which this project's
-  // persona warns is the common case — no label can read as a commit, and `expect` is the only way to
-  // prove the send rather than argue about it.
-  return `[COMPUTER COMMIT GATE] The user's messaging task is not yet proven complete; the latest recorded UI action was ${String(latest?.action || 'unknown')}. ${next} Commit it now with key combo="return" in the composer, or click the send control with expect="<text that will appear in the transcript>" so the runtime proves the postcondition directly — that is what an unlabeled send icon requires. Do not claim success until the post-commit frame shows the content in the transcript/record and the composer is cleared.`;
-}
 
 export class AgentLoop {
   private contextManager: ContextManager;
@@ -320,11 +213,13 @@ export class AgentLoop {
     // finish (or keeps re-opening items) can't spin the loop forever.
     let persistenceNudges = 0;
     const MAX_PERSISTENCE_NUDGES = 4;
-    let computerCompletionNudges = 0;
-    const MAX_COMPUTER_COMPLETION_NUDGES = 2;
     let requiredToolUsed = false;
     let requiredToolNudges = 0;
     const MAX_REQUIRED_TOOL_NUDGES = 2;
+    // Armed only after an unresolved operation round returned prose/emptiness instead of acting.
+    // The next provider request then names the required function explicitly. Successful action
+    // rounds return to auto selection so AskUserTool remains reachable for real ambiguities.
+    let forceRequiredToolNextRound = false;
     // Black-box recorder: every execute() is an episode — each LLM call in this run is
     // recorded (request hash + response stream) to a bundle under .bimax/episodes/,
     // self-flushing per call. /episodes replays it; BIMAX_RECORDER=0 disables.
@@ -340,6 +235,9 @@ export class AgentLoop {
       'gen_ai.agent.name': 'bimax',
     });
     let llmRounds = 0;
+    // Per-task counters. A nested execute() (sub-agent) is ignored by begin(), so the outer task
+    // keeps owning the turn count — see src/telemetry/task.metrics.ts.
+    taskMetrics.begin(options?.metricsLabel);
     try {
 
     for (let i = 0; i < maxIter; i++) {
@@ -366,16 +264,19 @@ export class AgentLoop {
       // is recomputed each turn so a tool discovered mid-task becomes available immediately.
       const callOutputTokenBudget = nextOutputTokenBudget;
       const allowedToolNames = options?.toolNames ? new Set(options.toolNames) : null;
-      // A specialized turn's explicit allow-list is authoritative. In smart mode ComputerTool is
-      // normally deferred, so filtering the smart working set by the allow-list accidentally sent
-      // no ComputerTool schema at all. Models then had to infer an invocation from prompt prose;
-      // stronger ones sometimes managed it, while weaker/VLM follow-up turns merely narrated the
-      // next action. Start from the full registry for an explicit allow-list, then narrow it.
+      // A specialized turn's explicit allow-list is authoritative. Start from the full registry for
+      // an explicit allow-list, then narrow it so dynamically supplied tools remain selectable.
       const schemaPool = allowedToolNames
         ? this.tools.getAllSchemas()
         : this.tools.getSchemas({ mode: contextMode });
       const schemas = schemaPool
         .filter((schema: any) => !allowedToolNames || allowedToolNames.has(String(schema?.name || '')));
+      // Once an external operation starts, prose cannot advance it. Ask the provider to require the
+      // named native function until evidence proves the operation complete; then return to auto so
+      // the model can provide its final answer. This closes the live failure where a capable model
+      // called `open` once, then narrated "I will type" forever despite repeated textual nudges.
+      const forceRequiredTool = options?.requireTool && (!requiredToolUsed || forceRequiredToolNextRound);
+      forceRequiredToolNextRound = false;
       const generator = recordedLlm.chat(this.messages, {
         system: systemPrompt,
         tools: schemas as any,
@@ -383,6 +284,9 @@ export class AgentLoop {
         // Tier routing: when the turn was routed to the lite model, every step of this loop
         // (incl. tool-call follow-ups) runs on lite. Heavy turns leave this unset → coding model.
         lite: options?.useLite,
+        ...(forceRequiredTool ? {
+          toolChoice: { type: 'function' as const, function: { name: options.requireTool! } },
+        } : {}),
         // CRITICAL: thread the interrupt signal into the request so Ctrl+C/esc aborts the underlying
         // fetch IMMEDIATELY. Without it the signal only took effect between stream events — so a hung
         // cold-starting model (no chunks) couldn't be stopped until the 60–180s timeout ("no stop
@@ -405,6 +309,7 @@ export class AgentLoop {
       let turnTruncated = false;
 
       llmRounds++;
+      taskMetrics.recordTurn();
       const chatSpan = tracer.startSpan(
         `chat ${String((this.llm as any)?.userModel || (this.llm as any)?.defaultModel || 'unknown')}`,
         {
@@ -670,8 +575,15 @@ export class AgentLoop {
 
       // Recover any tool call the model wrote as plain-text JSON instead of via the
       // function-calling API. Gated on real tool names, so user JSON is never run.
+      // On an operation turn the required tool is also offered as the owner of a NAMELESS argument
+      // object: mid-operation, models drop the wrapper and emit bare `{"action":…}`, which is a
+      // complete invocation of the one tool the turn requires. Without this the operation ends
+      // silently one action short — the observed "printed the click instead of clicking" failure.
       if (toolCalls.length === 0 && currentContent) {
-        const recovered = extractTextToolCalls(currentContent, (n) => !!this.tools.getTool(n));
+        const requiredTool = options?.requireTool ? this.tools.getTool(options.requireTool) : undefined;
+        const recovered = extractTextToolCalls(currentContent, (n) => !!this.tools.getTool(n), {
+          ...(requiredTool ? { defaultTool: { name: requiredTool.name, schema: requiredTool.schema } } : {}),
+        });
         if (recovered.toolCalls.length > 0) {
           toolCalls.push(...recovered.toolCalls);
           // The visible text was just a malformed invocation wrapper ("The final
@@ -683,7 +595,7 @@ export class AgentLoop {
       }
 
       // Specialized operation turns must begin by attempting their real capability. The generic
-      // empty-turn correction says "reply in plain text"; on a desktop task that instruction caused
+      // empty-turn correction says "reply in plain text"; on a required-capability task that can cause
       // the exact observed failure: hidden reasoning ended empty, then the retry confidently claimed
       // it had no app access. Re-ask for the required tool instead, bounded so a model that cannot
       // call tools still terminates honestly. This is capability-level routing, not an app workflow.
@@ -694,7 +606,7 @@ export class AgentLoop {
           // round will produce the real, evidence-backed user-facing answer.
           currentContent = '';
         } else if (toolCalls.length > 0) {
-          // Let bookkeeping/approval tools run before the operation tool. Multi-step desktop work
+          // Let bookkeeping/approval tools run before the operation tool. Multi-step provider work
           // may legitimately create a checklist or outcome contract first; the gate applies to
           // termination, not to the exact ordering of preparatory tool calls.
           currentContent = '';
@@ -745,7 +657,21 @@ export class AgentLoop {
       // typo-tolerant requests such as "200 wrd" and carries the target through follow-ups like
       // "make it horror". WriteFileTool then rejects an approximate draft before disk mutation.
       for (const tc of toolCalls) {
+        // Repair into a parseable object BEFORE applying deterministic user constraints. Small
+        // tool-tuned models often emit the right rough call with one broken quote. Previously the
+        // constraint compilers saw invalid JSON and had to leave it untouched; the generic repair
+        // ran afterwards, producing a valid but unconstrained coordinate click.
+        const emitted = canonicalToolArgs(tc.args);
+        if (emitted?.repaired) {
+          Logger.warn(`[AgentLoop] Repaired malformed ${tc.name} argument JSON before execution.`);
+          tc.args = emitted.json;
+        }
         if (tc.name === 'WriteFileTool') tc.args = applyImplicitWriteConstraints(tc.args, this.messages);
+        const canonical = canonicalToolArgs(tc.args);
+        if (canonical?.repaired) {
+          Logger.warn(`[AgentLoop] Repaired malformed ${tc.name} argument JSON before execution.`);
+          tc.args = canonical.json;
+        }
       }
 
       if (toolCalls.length > 0) {
@@ -775,13 +701,7 @@ export class AgentLoop {
         }
         this.messages.push(asstMsg);
 
-        // Execute at most ONE ComputerTool action from this model turn. A second computer call was
-        // planned from the same pre-action screenshot, so executing it after the first action would
-        // be blind. Return a well-formed deferred result for every extra call; the fresh screenshot
-        // from the first call is attached below and the model can choose the next action from it.
-        const computerCalls = toolCalls.filter(tc => tc.name === 'ComputerTool');
-        const deferredComputerIds = new Set(computerCalls.slice(1).map(tc => tc.id));
-        const executableCalls = toolCalls.filter(tc => !deferredComputerIds.has(tc.id));
+        const executableCalls = toolCalls;
 
         // Partition into parallel (safe) and sequential (destructive).
         const parallel = executableCalls.filter(tc => this.tools.getTool(tc.name)?.isConcurrencySafe);
@@ -945,6 +865,7 @@ export class AgentLoop {
             let typed: TypedOutcome | undefined;
             const toolContext = {
               ...(context || { cwd: process.cwd() }), signal,
+              sessionId: options?.sessionId,
               reportOutcome: (o: TypedOutcome) => { typed = o; },
               // The LIVE conversation array for this loop, so context-management tools
               // (FreeContextTool) can act on the real session context, not a stale copy.
@@ -962,20 +883,6 @@ export class AgentLoop {
         const resultById = new Map<string, { result: string; isError: boolean }>();
         const parallelResults = await Promise.all(parallel.map(tc => executeTool(tc)));
         for (const res of parallelResults) resultById.set(res.id, { result: res.result, isError: res.isError });
-        for (const tc of computerCalls.slice(1)) {
-          let action = 'unknown';
-          try { action = String(JSON.parse(tc.args || '{}')?.action || 'unknown'); } catch { /* canonical history still gets a result */ }
-          resultById.set(tc.id, {
-            result: JSON.stringify({
-              ok: false,
-              action,
-              deferred: true,
-              summary: 'Deferred because Bimax executes one ComputerTool action per model turn. Inspect the fresh post-action screenshot, then issue exactly one next ComputerTool action.',
-            }),
-            isError: false,
-          });
-        }
-
         let interrupted = false;
         for (const tc of sequential) {
           // Interrupted mid-chain: stop before starting the next tool so esc halts a continuous
@@ -995,7 +902,7 @@ export class AgentLoop {
         const loopSignals: LoopSignal[] = [];
         const screenshotPaths: Array<{
           path: string;
-          source: 'BrowserTool' | 'ComputerTool';
+          source: string;
           action?: string;
           width?: number;
           height?: number;
@@ -1007,7 +914,6 @@ export class AgentLoop {
           displayWidth?: number;
           displayHeight?: number;
         }> = [];
-        let sawComputerResult = false;
         for (const tc of toolCalls) {
           const ran = resultById.get(tc.id);
           const result = ran ? ran.result : 'Tool call interrupted before it ran.';
@@ -1021,7 +927,7 @@ export class AgentLoop {
               try { metadata = JSON.parse(result); } catch { /* path alone remains useful */ }
               screenshotPaths.push({
                 path: shot,
-                source: tc.name as 'BrowserTool' | 'ComputerTool',
+                source: tc.name,
                 action: typeof metadata?.action === 'string' ? metadata.action : undefined,
                 width: Number.isFinite(Number(metadata?.width)) ? Number(metadata.width) : undefined,
                 height: Number.isFinite(Number(metadata?.height)) ? Number(metadata.height) : undefined,
@@ -1034,15 +940,7 @@ export class AgentLoop {
                 displayHeight: Number.isFinite(Number(metadata?.displayHeight)) ? Number(metadata.displayHeight) : undefined,
               });
             }
-            if (tc.name === 'ComputerTool') sawComputerResult = true;
           }
-        }
-        // Long computer-use runs: as soon as a newer observation lands, older accessibility
-        // trees/element dumps describe a dead screen — stub them out so hours of stepping never
-        // drowns the model in stale screen state (that drift is what made it start "explaining
-        // the picture" instead of acting).
-        if (sawComputerResult) {
-          try { pruneStaleToolObservations(this.messages); } catch { /* hygiene must never break the loop */ }
         }
         // History is now well-formed (every tool_call answered) even on interrupt — so stop here
         // instead of leaving a dangling turn, and the next user message appends to a valid log.
@@ -1113,18 +1011,6 @@ export class AgentLoop {
 
         // Loop continues so LLM can react to tool results
       } else {
-        const computerCompletionNudge = currentContent
-          ? computerCommitCompletionNudge(this.messages, currentContent)
-            || computerPercentageCompletionNudge(this.messages, currentContent)
-          : '';
-        if (computerCompletionNudge && computerCompletionNudges < MAX_COMPUTER_COMPLETION_NUDGES) {
-          computerCompletionNudges++;
-          this.messages.push({ role: 'user', content: computerCompletionNudge });
-          cliEvents.emit('status', computerCompletionNudge.includes('[COMPUTER COMMIT GATE]')
-            ? 'Message/upload not yet committed — continuing to a proven post-commit frame'
-            : 'Exact percentage not yet verified — continuing through the relevant detail control');
-          continue;
-        }
         // A turn with no tool call that collapsed to pure filler gave the user
         // nothing. Rather than silently ending on an empty reply, nudge the model
         // once to answer directly and let the loop run again. Guarded against spin.
@@ -1208,6 +1094,10 @@ export class AgentLoop {
         ...(signal?.aborted ? { 'bimax.agent.interrupted': true } : {}),
       });
       rootSpan.end();
+      // Close the task on every exit path, including throw and interrupt. An interrupted task is
+      // recorded but flagged, so its short turn count is never read as efficiency.
+      if (signal?.aborted) taskMetrics.markInterrupted();
+      taskMetrics.end();
     }
   }
 }

@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import { openClient } from '../mcp/client';
 import { BimaxComputerRuntime } from '../computer/desktop.runtime';
 import { classifyVerification, toActionResult } from '../computer/verification';
+import { unwrapActionEnvelope, validateModelComputerCommand } from '../computer/action.contract';
 import { __resetConfigForTests } from '../cli/config';
 
 /**
@@ -339,5 +340,55 @@ describe('fallback close is truthful (delivered-but-unverified)', () => {
     const rc = new RecoveryController();
     expect(rc.record(closed.actionResult!.observed)).toBe('continue');
     expect(rc.succeeded).toBe(false);
+  });
+});
+
+/**
+ * The action-as-envelope shape, and refusals a model can act on.
+ *
+ * Measured on the Phase 10 baseline (2026-08-08, nvidia/nemotron-nano-12b-v2-vl driving the fixture
+ * app): the model sent `{"click":{...}}` rather than `{"action":"click",...}`, was told
+ * `unknown public action: undefined`, and repeated the IDENTICAL call six times before giving up.
+ * The refusal named the symptom, never the mistake, so nothing in it could teach the model what to
+ * change. See docs/BIMAX_CU_BASELINE_v1.1.0.md.
+ */
+describe('malformed model call shapes', () => {
+  test('unwraps the action-as-envelope form into a real command', () => {
+    const unwrapped = unwrapActionEnvelope({ click: { elementIndex: 2 } });
+    expect(unwrapped).toEqual({ action: 'click', elementIndex: 2 });
+    // ...and the unwrapped command is then judged on its merits, not rejected as "undefined".
+    expect(validateModelComputerCommand(unwrapped as any)).toBeNull();
+  });
+
+  test('leaves a well-formed command exactly as it arrived', () => {
+    const good = { action: 'click', query: 'OK' };
+    expect(unwrapActionEnvelope({ ...good })).toEqual(good);
+    // An `action` key present anywhere means the envelope form was not used, even if a same-named
+    // key rides alongside it — rewriting there would silently retarget a real command.
+    expect(unwrapActionEnvelope({ action: 'type', click: { query: 'OK' } }))
+      .toEqual({ action: 'type', click: { query: 'OK' } });
+  });
+
+  test('refuses to rewrite anything that is not unambiguously the envelope', () => {
+    // Two keys: not an envelope.
+    expect(unwrapActionEnvelope({ click: { query: 'a' }, scroll: { dy: 1 } }))
+      .toEqual({ click: { query: 'a' }, scroll: { dy: 1 } });
+    // Single key that is not a public action.
+    expect(unwrapActionEnvelope({ frobnicate: { query: 'a' } })).toEqual({ frobnicate: { query: 'a' } });
+    // Single action-named key whose value is not an argument object.
+    expect(unwrapActionEnvelope({ click: 'OK' })).toEqual({ click: 'OK' });
+    expect(unwrapActionEnvelope({ click: ['OK'] })).toEqual({ click: ['OK'] });
+  });
+
+  test('normalizes SHAPE only — a conflicting selector set is still refused', () => {
+    // The baseline call carried query AND elementIndex AND x+y at once. Unwrapping must not be
+    // mistaken for disambiguating: choosing one for the model lands a click nobody asked for.
+    const unwrapped = unwrapActionEnvelope({
+      click: { query: 'pop-up button', elementIndex: 2, x: 450, y: 300, frameId: 'f1' },
+    });
+    const refusal = validateModelComputerCommand(unwrapped as any);
+    expect(refusal).toMatch(/exactly one selector/);
+    // The refusal names what it received, so the model can see its own mistake rather than repeat it.
+    expect(refusal).toMatch(/query \+ elementIndex \+ x\+y/);
   });
 });

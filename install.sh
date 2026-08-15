@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — BiMax one-click installer
+# install.sh — Bimax Terminal one-click macOS installer
 #
 #   curl -fsSL https://bimax-liard.vercel.app/install | bash
 #
@@ -73,8 +73,7 @@ echo ""
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$os" in
   darwin) os=darwin ;;
-  linux)  os=linux ;;
-  *) die "unsupported OS: $os (macOS and Linux are supported)" ;;
+  *) die "unsupported OS: $os (Bimax Terminal is macOS-only)" ;;
 esac
 arch="$(uname -m)"
 case "$arch" in

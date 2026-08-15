@@ -1,7 +1,13 @@
 /**
  * Lightweight in-memory telemetry — per-tool latency histograms + cache-hit tracking.
  * No external SDK required. Data lives in memory for the session; exposed via /diagnostics.
+ *
+ * These are SESSION-wide aggregates. Per-task counters (turns, tool calls, tokens for one
+ * `execute()`) live in `./task.metrics`, which this module forwards to so that a tool call is
+ * counted in exactly one place.
  */
+
+import { taskMetrics } from './task.metrics';
 
 export interface ToolSummary {
   name: string;
@@ -32,6 +38,11 @@ class TelemetryStore {
   private totalPromptTokens = 0;
 
   recordToolCall(toolName: string, durationMs: number): void {
+    // Forward to the live task, if one is recording. Done here rather than at the agent-loop call
+    // site so the per-task counters cannot drift from the session-wide ones: there is exactly one
+    // place a tool call is counted, and both consumers read it.
+    taskMetrics.recordToolCall(toolName);
+
     let s = this.toolStats.get(toolName);
     if (!s) {
       s = { count: 0, totalMs: 0, minMs: Infinity, maxMs: 0, reservoir: [] };
@@ -52,6 +63,8 @@ class TelemetryStore {
   }
 
   recordUsage(promptTokens: number, cacheRead: number, cacheCreation: number): void {
+    taskMetrics.recordUsage(promptTokens, cacheRead, cacheCreation);
+
     this.totalPromptTokens += promptTokens;
     this.cacheReadTokens += cacheRead;
     this.cacheCreationTokens += cacheCreation;

@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import type { Browser, ElementHandle, HTTPResponse, Page } from 'puppeteer';
+import type { Browser, CDPSession, Dialog, ElementHandle, HTTPResponse, Page } from 'puppeteer';
+import { SafetyPolicy } from '../governor/policy.engine';
 
 export type BrowserWaitUntil = 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2';
 
@@ -19,10 +20,24 @@ export interface BrowserAssertion {
 export interface BrowserCommand {
   action: 'navigate' | 'snapshot' | 'click' | 'type' | 'press' | 'select' | 'hover'
     | 'scroll' | 'wait' | 'inspect' | 'screenshot' | 'compare'
-    | 'assert' | 'viewport' | 'upload' | 'back' | 'reload' | 'status' | 'close';
+    | 'assert' | 'viewport' | 'upload' | 'back' | 'reload' | 'tabs' | 'switch_tab'
+    | 'close_tab' | 'dialogs'
+    | 'download_prepare' | 'downloads' | 'download_wait' | 'download_cancel'
+    | 'status' | 'close';
+  /** Opaque live-tab identity returned by tabs/snapshot/navigation receipts. */
+  tabRef?: string;
+  /** Exact document epoch. A navigation or reload makes the prior ref stale. */
+  documentRef?: string;
   url?: string;
   selector?: string;
   elementIndex?: number | string;
+  /** Opaque observation-scoped ref returned beside each snapshot element. Preferred over the
+   * compatibility index because it cannot silently rebind when a later snapshot reuses an index. */
+  elementRef?: string;
+  /** Opaque identity of a download returned by downloads/download_wait. */
+  downloadRef?: string;
+  /** Maximum bytes accepted by a one-shot download permit. */
+  maxBytes?: number;
   text?: string;
   key?: string;
   values?: string[];
@@ -47,7 +62,7 @@ export interface BrowserCommand {
   /** Mutating actions: how long to let the page react before the automatic fresh observation
    * (0–5000 ms, default 800). The wait ends at the FIRST DOM mutation — it never sleeps blind. */
   settleMs?: number;
-  /** click: interpret x/y in the 0–1000 normalized space VLMs emit (Gemini computer-use
+  /** click: interpret x/y in the 0–1000 normalized space some vision models emit
    * convention) and scale to the live viewport before dispatching. */
   normalized?: boolean;
   /** wait: resolve when the DOM mutates (or the timeout elapses) instead of sleeping blind —
@@ -68,6 +83,54 @@ export interface BrowserCommandResult {
   failedRequests: string[];
   attempts: number;
   durationMs: number;
+  target?: BrowserDocumentTarget;
+  navigation?: BrowserNavigationOutcome;
+  dialog?: BrowserDialogInfo;
+  download?: BrowserDownloadInfo;
+}
+
+export interface BrowserDocumentTarget {
+  tabRef: string;
+  documentRef: string;
+}
+
+export interface BrowserTabInfo extends BrowserDocumentTarget {
+  url: string;
+  title: string;
+  active: boolean;
+}
+
+export interface BrowserNavigationOutcome {
+  kind: 'navigate' | 'back' | 'reload' | 'action';
+  from: BrowserDocumentTarget;
+  to: BrowserDocumentTarget;
+  url: string;
+  documentChanged: boolean;
+  status?: number;
+}
+
+export interface BrowserDialogInfo extends BrowserDocumentTarget {
+  dialogRef: string;
+  type: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+  message: string;
+  defaultValue?: string;
+  openedAt: number;
+  resolution?: 'dismissed_safely';
+}
+
+export interface BrowserDownloadInfo extends BrowserDocumentTarget {
+  downloadRef: string;
+  url: string;
+  suggestedFilename: string;
+  state: 'in_progress' | 'completed' | 'canceled' | 'failed';
+  receivedBytes: number;
+  totalBytes?: number;
+  maxBytes: number;
+  path?: string;
+  sha256?: string;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
 }
 
 export interface BrowserRuntimePort {
@@ -78,12 +141,16 @@ export interface BrowserRuntimePort {
   currentUrl?(): string | null;
   /** Value-safe metadata of one element from the CURRENT observation (null when the index is not
    * part of it). Lets the tool layer classify impact before acting. Optional for test doubles. */
-  indexedElementInfo?(index: number | string | undefined): SnapshotElementInfo | null;
+  indexedElementInfo?(index: number | string | undefined, elementRef?: string): SnapshotElementInfo | null;
+  /** Synchronous no-I/O target check so stale tab/document refs are refused before approval. */
+  preflightTarget?(command: BrowserCommand): { ok: true } | { ok: false; error: string };
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const MAX_DIAGNOSTICS = 100;
+const DEFAULT_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
 /** Hard cap on live pages. target=_blank links and window.open popups create pages this runtime
  * never drives; unchecked they accumulate for hours (tab explosion → memory growth → crash). */
 const MAX_PAGES = 4;
@@ -104,6 +171,8 @@ export function isBrowserCrashError(message: string): boolean {
 export function browserActionKey(command: BrowserCommand): string {
   return [
     command.action, command.url || '', command.selector || '',
+    command.tabRef || '', command.documentRef || '', command.elementRef || '',
+    command.downloadRef || '',
     String(command.elementIndex ?? ''), command.key || '',
   ].join('|');
 }
@@ -195,7 +264,7 @@ export function matchesElementFilter(info: SnapshotElementInfo, filter?: string)
 }
 
 /** Map one coordinate from the 0–1000 normalized space VLMs emit to real pixels (Gemini
- * computer-use denormalization: value / 1000 × size, clamped into the viewport). */
+ * normalized denormalization: value / 1000 × size, clamped into the viewport). */
 export function denormalizeCoordinate(value: number, size: number): number {
   if (!Number.isFinite(value) || !Number.isFinite(size) || size <= 0) return 0;
   return Math.min(Math.max(Math.round((value / 1000) * size), 0), Math.max(0, Math.round(size) - 1));
@@ -210,20 +279,70 @@ function safeName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'page';
 }
 
-export function findBrowserExecutable(): string | undefined {
-  const configured = process.env.BIMAX_BROWSER_EXECUTABLE || process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-  const candidates = [
-    configured,
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
-    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe') : undefined,
-    process.env.PROGRAMFILES ? path.join(process.env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe') : undefined,
-  ].filter((value): value is string => !!value);
-  return candidates.find(candidate => {
-    try { return fs.statSync(candidate).isFile(); } catch { return false; }
+/** Resolve a model-supplied destination without allowing a symlinked existing ancestor to escape
+ * the active workspace. The Governor repeats this check at the policy boundary; the runtime keeps
+ * its own fail-closed check because it is the component that eventually writes bytes. */
+export function resolveBrowserWorkspacePath(root: string, requested: string):
+  { ok: true; path: string } | { ok: false; reason: string } {
+  const workspace = path.resolve(root);
+  const candidate = path.resolve(workspace, requested);
+  if (!within(workspace, candidate)) return { ok: false, reason: 'Path must stay inside the active workspace.' };
+  try {
+    const workspaceReal = fs.realpathSync(workspace);
+    let existing = candidate;
+    while (!fs.existsSync(existing)) {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      existing = parent;
+    }
+    const existingReal = fs.realpathSync(existing);
+    if (!within(workspaceReal, existingReal)) {
+      return { ok: false, reason: 'Path resolves outside the active workspace through a symlink.' };
+    }
+  } catch {
+    return { ok: false, reason: 'Could not verify the destination against the active workspace.' };
+  }
+  return { ok: true, path: candidate };
+}
+
+function safeDownloadFilename(value: string): string {
+  const withoutControls = Array.from(value || 'download')
+    .filter(character => character.charCodeAt(0) > 31 && character.charCodeAt(0) !== 127)
+    .join('');
+  const leaf = path.basename(withoutControls)
+    .replace(/^\.+/, '')
+    .slice(0, 180);
+  return leaf || 'download';
+}
+
+function availableDownloadPath(root: string, filename: string): string {
+  const parsed = path.parse(filename);
+  for (let i = 0; i < 10_000; i++) {
+    const suffix = i === 0 ? '' : `-${i + 1}`;
+    const candidate = path.join(root, `${parsed.name || 'download'}${suffix}${parsed.ext}`);
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(root, `${parsed.name || 'download'}-${crypto.randomUUID()}${parsed.ext}`);
+}
+
+async function sha256File(file: string): Promise<string> {
+  const hash = crypto.createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(file);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.once('error', reject);
+    stream.once('end', resolve);
   });
+  return hash.digest('hex');
+}
+
+export function findBrowserExecutable(): string | undefined {
+  // Default Puppeteer owns the browser revision it was tested against. Never silently attach the
+  // user's personal Chrome binary: that makes Chrome bounce in the Dock, blurs profile boundaries
+  // and can drift out of protocol compatibility. A system browser is an expert opt-in only.
+  const configured = process.env.BIMAX_BROWSER_EXECUTABLE || process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (!configured) return undefined;
+  try { return fs.statSync(configured).isFile() ? configured : undefined; } catch { return undefined; }
 }
 
 /** Page-side mutation counter: lets the runtime detect "the page reacted" without blind sleeps.
@@ -257,6 +376,24 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
  * session data survive CLI restarts through userDataDir; lightweight navigation metadata is also
  * checkpointed so recovery can explain where the previous run stopped.
  */
+interface PendingBrowserDialog {
+  dialog: Dialog;
+  info: BrowserDialogInfo;
+}
+
+interface ArmedBrowserDownload {
+  root: string;
+  maxBytes: number;
+  target: BrowserDocumentTarget;
+}
+
+interface BrowserDownloadRecord {
+  guid: string;
+  root: string;
+  internalPath: string;
+  info: BrowserDownloadInfo;
+}
+
 export class BrowserRuntime implements BrowserRuntimePort {
   private browser: Browser | null = null;
   private page: Page | null = null;
@@ -272,6 +409,18 @@ export class BrowserRuntime implements BrowserRuntimePort {
   private indexedElements = new Map<number, ElementHandle<Element>>();
   /** Value-safe metadata mirror of indexedElements, for impact classification and state surfaces. */
   private indexedElementMeta = new Map<number, SnapshotElementInfo>();
+  private indexedElementRefs = new Map<string, number>();
+  private readonly tabRefs = new Map<Page, string>();
+  private readonly pagesByTabRef = new Map<string, Page>();
+  private readonly documentRefs = new Map<Page, string>();
+  private readonly initializedPages = new WeakSet<Page>();
+  private readonly pendingDialogs = new Map<Page, PendingBrowserDialog>();
+  private readonly dialogResolutions = new Map<Page, Promise<void>>();
+  private readonly recentDialogs: BrowserDialogInfo[] = [];
+  private downloadSession: CDPSession | null = null;
+  private armedDownload: ArmedBrowserDownload | null = null;
+  private readonly downloadRecords = new Map<string, BrowserDownloadRecord>();
+  private readonly downloadRefsByGuid = new Map<string, string>();
   /** Signatures of the previous snapshot's elements (same filter only), fueling successor diffs. */
   private lastSnapshotSignatures: string[] | null = null;
   private lastSnapshotFilter = '';
@@ -282,11 +431,276 @@ export class BrowserRuntime implements BrowserRuntimePort {
   }
 
   /** Value-safe metadata of an element in the CURRENT observation, or null. Never launches. */
-  indexedElementInfo(raw: number | string | undefined): SnapshotElementInfo | null {
+  indexedElementInfo(raw: number | string | undefined, elementRef?: string): SnapshotElementInfo | null {
+    if (elementRef !== undefined) {
+      const refIndex = this.indexedElementRefs.get(elementRef);
+      if (refIndex === undefined || (raw !== undefined && raw !== null && raw !== '' && Number(raw) !== refIndex)) return null;
+      return this.indexedElementMeta.get(refIndex) || null;
+    }
     if (raw === undefined || raw === null || raw === '') return null;
     const index = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isInteger(index) || index < 0) return null;
     return this.indexedElementMeta.get(index) || null;
+  }
+
+  private pendingDialogInfo(dialogRef?: string): BrowserDialogInfo | null {
+    const pending = this.page ? this.pendingDialogs.get(this.page) : undefined;
+    if (!pending || (dialogRef && pending.info.dialogRef !== dialogRef)) return null;
+    return { ...pending.info };
+  }
+
+  preflightTarget(command: BrowserCommand): { ok: true } | { ok: false; error: string } {
+    let target = this.page;
+    if (command.tabRef) {
+      target = this.pagesByTabRef.get(command.tabRef) || null;
+      if (!target || target.isClosed()) return { ok: false, error: 'tabRef is stale. Call tabs for current refs.' };
+      if (!['switch_tab', 'close_tab'].includes(command.action) && target !== this.page) {
+        return { ok: false, error: 'tabRef is not active. Call switch_tab before operating it.' };
+      }
+    } else if (command.documentRef) {
+      return { ok: false, error: 'documentRef requires tabRef.' };
+    }
+    if (target && command.documentRef && this.documentRefs.get(target) !== command.documentRef) {
+      return { ok: false, error: 'documentRef is stale because that tab navigated or reloaded.' };
+    }
+    const pending = target ? this.pendingDialogs.get(target) : undefined;
+    const allowedWhileDialogOpen = ['dialogs', 'tabs', 'switch_tab', 'close_tab', 'status', 'close'];
+    if (pending && !allowedWhileDialogOpen.includes(command.action)) {
+      return { ok: false, error: `A ${pending.info.type} dialog is blocking this tab. Inspect, accept, or dismiss it first.` };
+    }
+    return { ok: true };
+  }
+
+  private newOpaqueRef(kind: 'tab' | 'document' | 'dialog' | 'download'): string {
+    return `bimax-browser-${kind}-${crypto.randomUUID()}`;
+  }
+
+  private bindPage(page: Page): BrowserDocumentTarget {
+    let tabRef = this.tabRefs.get(page);
+    if (!tabRef) {
+      tabRef = this.newOpaqueRef('tab');
+      this.tabRefs.set(page, tabRef);
+      this.pagesByTabRef.set(tabRef, page);
+    }
+    let documentRef = this.documentRefs.get(page);
+    if (!documentRef) {
+      documentRef = this.newOpaqueRef('document');
+      this.documentRefs.set(page, documentRef);
+    }
+    return { tabRef, documentRef };
+  }
+
+  private rotateDocument(page: Page): BrowserDocumentTarget {
+    const target = this.bindPage(page);
+    const documentRef = this.newOpaqueRef('document');
+    this.documentRefs.set(page, documentRef);
+    if (page === this.page) void this.clearIndexedElements();
+    return { tabRef: target.tabRef, documentRef };
+  }
+
+  private targetFor(page: Page | null = this.page): BrowserDocumentTarget | undefined {
+    return page && !page.isClosed() ? this.bindPage(page) : undefined;
+  }
+
+  private async initializePage(page: Page): Promise<void> {
+    this.bindPage(page);
+    if (this.initializedPages.has(page)) return;
+    this.initializedPages.add(page);
+    page.on('console', message => {
+      if (message.type() === 'error') this.consoleErrors.push(message.text().slice(0, 2000));
+      if (this.consoleErrors.length > MAX_DIAGNOSTICS) this.consoleErrors.shift();
+    });
+    page.on('pageerror', error => {
+      this.consoleErrors.push(String(error).slice(0, 2000));
+      if (this.consoleErrors.length > MAX_DIAGNOSTICS) this.consoleErrors.shift();
+    });
+    page.on('requestfailed', request => {
+      this.failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText || 'failed'}`.slice(0, 2500));
+      if (this.failedRequests.length > MAX_DIAGNOSTICS) this.failedRequests.shift();
+    });
+    page.on('dialog', dialog => {
+      const target = this.bindPage(page);
+      const defaultValue = dialog.defaultValue();
+      const pending: PendingBrowserDialog = {
+        dialog,
+        info: {
+          ...target,
+          dialogRef: this.newOpaqueRef('dialog'),
+          type: dialog.type(),
+          message: dialog.message().slice(0, 4000),
+          ...(defaultValue ? { defaultValue: defaultValue.slice(0, 2000) } : {}),
+          openedAt: Date.now(),
+        },
+      };
+      this.pendingDialogs.set(page, pending);
+      // Chromium's trusted-input command stays blocked until the modal is resolved. A deferred
+      // model/human decision therefore deadlocks the page. Fail safe: dismiss immediately, retain
+      // the typed receipt for inspection, and do not advertise accept/dismiss as supported.
+      const resolution = dialog.dismiss().then(() => {
+        if (this.pendingDialogs.get(page) === pending) this.pendingDialogs.delete(page);
+        pending.info.resolution = 'dismissed_safely';
+        this.recentDialogs.unshift({ ...pending.info });
+        if (this.recentDialogs.length > 50) this.recentDialogs.length = 50;
+      }).finally(() => {
+        if (this.dialogResolutions.get(page) === resolution) this.dialogResolutions.delete(page);
+      });
+      void resolution.catch(() => { /* the triggering BrowserTool action reports the failure */ });
+      this.dialogResolutions.set(page, resolution);
+      void this.clearIndexedElements();
+    });
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) this.rotateDocument(page);
+    });
+    page.once('close', () => {
+      const ref = this.tabRefs.get(page);
+      if (ref) this.pagesByTabRef.delete(ref);
+      this.tabRefs.delete(page);
+      this.documentRefs.delete(page);
+      this.pendingDialogs.delete(page);
+      this.dialogResolutions.delete(page);
+    });
+    page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+    await page.evaluateOnNewDocument(MUTATION_COUNTER_SCRIPT);
+    await page.evaluate(MUTATION_COUNTER_SCRIPT).catch(() => { /* about:blank etc. */ });
+  }
+
+  private async syncPages(): Promise<Page[]> {
+    if (!this.browser?.connected) return [];
+    const pages = (await this.browser.pages()).filter(page => !page.isClosed());
+    await Promise.all(pages.map(page => this.initializePage(page)));
+    return pages;
+  }
+
+  private async tabInfos(): Promise<BrowserTabInfo[]> {
+    const pages = await this.syncPages();
+    return Promise.all(pages.map(async page => ({
+      ...this.bindPage(page), url: page.url(),
+      title: String(await page.title().catch(() => '')).slice(0, 500), active: page === this.page,
+    })));
+  }
+
+  private downloadInfos(): BrowserDownloadInfo[] {
+    return Array.from(this.downloadRecords.values())
+      .map(record => ({ ...record.info }))
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, 50);
+  }
+
+  private async denyDownloads(): Promise<void> {
+    this.armedDownload = null;
+    await this.downloadSession?.send('Browser.setDownloadBehavior', {
+      behavior: 'deny', eventsEnabled: true,
+    }).catch(() => {});
+  }
+
+  private async initializeDownloads(): Promise<void> {
+    if (!this.browser || this.downloadSession) return;
+    const session = await this.browser.target().createCDPSession();
+    this.downloadSession = session;
+    session.on('Browser.downloadWillBegin', (event: {
+      guid: string; url: string; suggestedFilename: string;
+    }) => {
+      const armed = this.armedDownload;
+      if (!armed) {
+        void session.send('Browser.cancelDownload', { guid: event.guid }).catch(() => {});
+        return;
+      }
+      this.armedDownload = null;
+      const downloadRef = this.newOpaqueRef('download');
+      const record: BrowserDownloadRecord = {
+        guid: event.guid,
+        root: armed.root,
+        internalPath: path.join(armed.root, event.guid),
+        info: {
+          ...armed.target,
+          downloadRef,
+          url: event.url.slice(0, 4000),
+          suggestedFilename: safeDownloadFilename(event.suggestedFilename),
+          state: 'in_progress', receivedBytes: 0, maxBytes: armed.maxBytes,
+          startedAt: Date.now(),
+        },
+      };
+      this.downloadRecords.set(downloadRef, record);
+      this.downloadRefsByGuid.set(event.guid, downloadRef);
+    });
+    session.on('Browser.downloadProgress', (event: {
+      guid: string; totalBytes: number; receivedBytes: number;
+      state: 'inProgress' | 'completed' | 'canceled';
+    }) => { void this.updateDownloadProgress(event); });
+    await this.denyDownloads();
+  }
+
+  private async updateDownloadProgress(event: {
+    guid: string; totalBytes: number; receivedBytes: number;
+    state: 'inProgress' | 'completed' | 'canceled';
+  }): Promise<void> {
+    const ref = this.downloadRefsByGuid.get(event.guid);
+    const record = ref ? this.downloadRecords.get(ref) : undefined;
+    if (!record) return;
+    record.info.receivedBytes = Math.max(0, event.receivedBytes);
+    if (event.totalBytes > 0) record.info.totalBytes = event.totalBytes;
+
+    if (event.receivedBytes > record.info.maxBytes || event.totalBytes > record.info.maxBytes) {
+      record.info.state = 'canceled';
+      record.info.error = `Download exceeded the approved ${record.info.maxBytes}-byte limit.`;
+      record.info.completedAt = Date.now();
+      await this.downloadSession?.send('Browser.cancelDownload', { guid: event.guid }).catch(() => {});
+      fs.rmSync(record.internalPath, { force: true });
+      this.downloadRefsByGuid.delete(event.guid);
+      await this.denyDownloads();
+      return;
+    }
+    if (event.state === 'inProgress') return;
+
+    if (event.state === 'canceled') {
+      record.info.state = 'canceled';
+      record.info.completedAt = Date.now();
+      record.info.error ||= 'Chromium canceled the download.';
+      fs.rmSync(record.internalPath, { force: true });
+      this.downloadRefsByGuid.delete(event.guid);
+      await this.denyDownloads();
+      return;
+    }
+
+    try {
+      const filename = safeDownloadFilename(record.info.suggestedFilename);
+      const finalPath = availableDownloadPath(record.root, filename);
+      const normalized = finalPath.toLowerCase();
+      if (SafetyPolicy.forbiddenExtensions.includes(path.extname(normalized))
+        || SafetyPolicy.forbiddenRegex.some(pattern => pattern.test(normalized))) {
+        throw new Error('Downloaded filename is blocked by the workspace file policy.');
+      }
+      const actualBytes = fs.statSync(record.internalPath).size;
+      if (actualBytes > record.info.maxBytes) throw new Error(`Download exceeded the approved ${record.info.maxBytes}-byte limit.`);
+      fs.renameSync(record.internalPath, finalPath);
+      record.info.state = 'completed';
+      record.info.receivedBytes = actualBytes;
+      record.info.path = path.relative(this.projectRoot, finalPath);
+      record.info.sha256 = await sha256File(finalPath);
+      record.info.completedAt = Date.now();
+    } catch (error: any) {
+      record.info.state = 'failed';
+      record.info.error = String(error?.message || error).slice(0, 1000);
+      record.info.completedAt = Date.now();
+      fs.rmSync(record.internalPath, { force: true });
+    } finally {
+      this.downloadRefsByGuid.delete(event.guid);
+      await this.denyDownloads();
+    }
+  }
+
+  private navigationOutcome(
+    kind: BrowserNavigationOutcome['kind'],
+    from: BrowserDocumentTarget,
+    page: Page,
+    status?: number,
+  ): BrowserNavigationOutcome {
+    let to = this.targetFor(page)!;
+    // Puppeteer normally emits main-frame navigation before the awaited command resolves. Keep
+    // the epoch contract independent of that event timing: every successful explicit reload or
+    // navigation gets a new document ref even if an exotic target omitted the event.
+    if (to.documentRef === from.documentRef) to = this.rotateDocument(page);
+    return { kind, from, to, url: page.url(), documentChanged: true, status };
   }
 
   private roots(cwd: string) {
@@ -319,23 +733,38 @@ export class BrowserRuntime implements BrowserRuntimePort {
     const handles = Array.from(this.indexedElements.values());
     this.indexedElements.clear();
     this.indexedElementMeta.clear();
+    this.indexedElementRefs.clear();
     await Promise.all(handles.map(handle => handle.dispose().catch(() => {})));
   }
 
   /** Resolve an elementIndex against the CURRENT observation. `{stale}` means the caller passed a
    * real index that is no longer part of it (consumed by an action or navigation) — the action
    * must fail truthfully instead of falling back to a misleading "requires selector" message. */
-  private resolveIndexed(raw: number | string | undefined):
-    { handle: ElementHandle<Element> } | { stale: number } | null {
+  private resolveIndexed(raw: number | string | undefined, elementRef?: string):
+    { handle: ElementHandle<Element> } | { error: string } | null {
+    if (elementRef !== undefined) {
+      if (typeof elementRef !== 'string' || !elementRef || elementRef.length > 128 || elementRef.includes('\0')) {
+        return { error: 'elementRef is malformed. Take a fresh snapshot.' };
+      }
+      const refIndex = this.indexedElementRefs.get(elementRef);
+      if (refIndex === undefined) {
+        return { error: 'elementRef is stale: its observation was consumed or replaced. Take a fresh snapshot.' };
+      }
+      if (raw !== undefined && raw !== null && raw !== '' && Number(raw) !== refIndex) {
+        return { error: 'elementRef and elementIndex identify different elements. Take a fresh snapshot.' };
+      }
+      const handle = this.indexedElements.get(refIndex);
+      return handle ? { handle } : { error: 'elementRef is stale: its element is no longer retained.' };
+    }
     if (raw === undefined || raw === null || raw === '') return null;
     const index = typeof raw === 'number' ? raw : Number(raw);
     if (!Number.isInteger(index) || index < 0) return null;
     const handle = this.indexedElements.get(index);
-    return handle ? { handle } : { stale: index };
+    return handle ? { handle } : { error: `elementIndex ${index} is stale: the observation it came from was consumed by a previous action or navigation. Use the fresh \`observation.elements\` returned by your last action, or take a new snapshot.` };
   }
 
-  private staleIndexResult(base: (ok: boolean, summary: string, data?: unknown) => BrowserCommandResult, index: number): BrowserCommandResult {
-    return base(false, `elementIndex ${index} is stale: the observation it came from was consumed by a previous action or navigation. Use the fresh \`observation.elements\` returned by your last action, or take a new snapshot.`);
+  private staleTargetResult(base: (ok: boolean, summary: string, data?: unknown) => BrowserCommandResult, error: string): BrowserCommandResult {
+    return base(false, error);
   }
 
   private async ensure(cwd: string): Promise<Page> {
@@ -360,21 +789,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
     });
     this.projectRoot = roots.root;
     this.page = (await this.browser.pages())[0] || await this.browser.newPage();
-    this.page.on('console', message => {
-      if (message.type() === 'error') this.consoleErrors.push(message.text().slice(0, 2000));
-      if (this.consoleErrors.length > MAX_DIAGNOSTICS) this.consoleErrors.shift();
-    });
-    this.page.on('pageerror', error => {
-      this.consoleErrors.push(String(error).slice(0, 2000));
-      if (this.consoleErrors.length > MAX_DIAGNOSTICS) this.consoleErrors.shift();
-    });
-    this.page.on('requestfailed', request => {
-      this.failedRequests.push(`${request.method()} ${request.url()} — ${request.failure()?.errorText || 'failed'}`.slice(0, 2500));
-      if (this.failedRequests.length > MAX_DIAGNOSTICS) this.failedRequests.shift();
-    });
-    this.page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
-    await this.page.evaluateOnNewDocument(MUTATION_COUNTER_SCRIPT);
-    await this.page.evaluate(MUTATION_COUNTER_SCRIPT).catch(() => { /* about:blank etc. */ });
+    await this.initializePage(this.page);
+    await this.initializeDownloads();
     // Task workspace: a live automated browser is a first-class task — visible in the task panel,
     // cancellable (closes the browser). No pause: CDP sessions have no real suspend (honesty rule).
     try {
@@ -418,11 +834,44 @@ export class BrowserRuntime implements BrowserRuntimePort {
     if (!hit.ownsPoint) {
       throw new Error(`browser click target is obscured at ${Math.round(point.x)},${Math.round(point.y)}: expected ${hit.target}, hit ${hit.actual}; take a fresh snapshot or dismiss the overlay`);
     }
-    await page.mouse.move(point.x, point.y, { steps: 3 });
-    await page.mouse.down({ button: 'left' });
-    await delay(8);
-    await page.mouse.up({ button: 'left' });
+    await this.deliverMouseClick(page, point.x, point.y);
     return { x: Math.round(point.x), y: Math.round(point.y), target: hit.target };
+  }
+
+  /** Chromium may withhold the mouse-release acknowledgement while a JavaScript modal is open.
+   * Race that acknowledgement against the dialog event so the caller receives the dialogRef needed
+   * to resolve it instead of deadlocking behind the very modal it just opened. */
+  private async deliverMouseClick(page: Page, x: number, y: number): Promise<void> {
+    let onDialog: (() => void) | undefined;
+    const dialogOpened = new Promise<'dialog'>(resolve => {
+      onDialog = () => resolve('dialog');
+      page.once('dialog', onDialog);
+    });
+    const inputSession = await page.target().createCDPSession();
+    try {
+      await inputSession.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x, y, button: 'none', buttons: 0,
+      });
+      await inputSession.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1,
+      });
+      await delay(8);
+      const release = inputSession.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1,
+      }).then(() => 'released' as const);
+      const first = await Promise.race([release, dialogOpened]);
+      if (first === 'dialog') {
+        await this.dialogResolutions.get(page);
+        await release;
+      } else {
+        // CDP can acknowledge input immediately before dispatching the dialog event. Give that
+        // event one short task turn so finishAction does not start a blocked DOM observation.
+        await Promise.race([dialogOpened, delay(25)]);
+      }
+    } finally {
+      if (onDialog) page.off('dialog', onDialog);
+      await inputSession.detach().catch(() => {});
+    }
   }
 
   private async clickViewportPoint(page: Page, x: number, y: number): Promise<{ x: number; y: number; target: string }> {
@@ -438,10 +887,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
       return `${node.tagName.toLowerCase()}${node.id ? `#${node.id}` : ''}${name ? ` "${name}"` : ''}`;
     }, { x, y });
     if (target === '(nothing)') throw new Error(`browser click ${x},${y} has no live DOM target; take a fresh screenshot or snapshot`);
-    await page.mouse.move(x, y, { steps: 3 });
-    await page.mouse.down({ button: 'left' });
-    await delay(8);
-    await page.mouse.up({ button: 'left' });
+    await this.deliverMouseClick(page, x, y);
     return { x: Math.round(x), y: Math.round(y), target };
   }
 
@@ -451,6 +897,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
     elements: Array<Record<string, unknown>>;
     signatures: string[];
     truncated: boolean;
+    target: BrowserDocumentTarget;
   }> {
     await this.clearIndexedElements();
     const candidates = await page.$$('a[href], area[href], button, input:not([type="hidden"]), textarea, select, summary, [contenteditable="true"], [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [tabindex]:not([tabindex="-1"])');
@@ -482,18 +929,21 @@ export class BrowserRuntime implements BrowserRuntimePort {
       }).catch(() => null);
       if (!info || !matchesElementFilter(info as SnapshotElementInfo, filter)) { await handle.dispose().catch(() => {}); continue; }
       const index = elements.length;
+      const ref = `bimax-browser-element-${crypto.randomUUID()}`;
       this.indexedElements.set(index, handle);
+      this.indexedElementRefs.set(ref, index);
       this.indexedElementMeta.set(index, {
         tag: String(info.tag), role: String(info.role), type: info.type as string | undefined,
         name: String(info.name), value: info.value as string | undefined,
         checked: info.checked as boolean | undefined, disabled: !!info.disabled,
       });
-      elements.push({ index, ...info });
+      elements.push({ index, ref, ...info });
     }
     return {
       elements,
       signatures: elements.map(e => elementSignature(e as unknown as SnapshotElementInfo)),
       truncated: candidates.length > maxElements,
+      target: this.targetFor(page)!,
     };
   }
 
@@ -532,6 +982,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
     const diff = previous !== null ? diffSnapshots(previous, captured.signatures) : null;
     this.lastSnapshotSignatures = captured.signatures;
     return {
+      target: captured.target,
       ...(filter ? { filter } : {}),
       elements: captured.elements.slice(0, 60),
       truncated: captured.truncated || captured.elements.length > 60,
@@ -604,7 +1055,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
     const base = (ok: boolean, summary: string, data?: unknown): BrowserCommandResult => ({
       ok, action: command.action, url: this.page?.url(), status: this.lastStatus,
       summary, data, consoleErrors: this.consoleErrors.slice(-20), failedRequests: this.failedRequests.slice(-20),
-      attempts, durationMs: Date.now() - started,
+      attempts, durationMs: Date.now() - started, target: this.targetFor(),
+      ...(this.pendingDialogInfo() ? { dialog: this.pendingDialogInfo()! } : {}),
     });
 
     try {
@@ -615,23 +1067,41 @@ export class BrowserRuntime implements BrowserRuntimePort {
       const page = await this.ensure(cwd);
       page.setDefaultTimeout(timeout);
       if (context.signal?.aborted) throw new Error('Browser action interrupted.');
+      const targetCheck = this.preflightTarget(command);
+      if (!targetCheck.ok) return base(false, targetCheck.error);
+      const beforeTarget = this.targetFor(page)!;
 
       // Observe→act→observe: mutating actions consume the current observation and return a fresh
       // one. Read the page's mutation counter BEFORE acting so the settle wait can end at the
       // first post-action mutation instead of sleeping blind.
-      const isMutatingAction = ['click', 'type', 'press', 'select', 'hover', 'upload'].includes(command.action);
+      const isMutatingAction = [
+        'click', 'type', 'press', 'select', 'hover', 'upload',
+      ].includes(command.action);
       const settleMs = boundedInt(command.settleMs, 800, 0, 5000);
       const preMutations = isMutatingAction
         ? (await page.evaluate(() => (window as any).__bimaxMutations || 0).catch(() => 0)) as number
         : 0;
       const finishAction = async (ok: boolean, summary: string, extra?: Record<string, unknown>): Promise<BrowserCommandResult> => {
-        const observation = await this.observeAfterAction(page, preMutations, context.signal, settleMs)
-          .catch((e: any) => { if (context.signal?.aborted) throw e; return null; });
+        // A JavaScript dialog blocks every DOM/CDP evaluation in its page. Returning its exact
+        // typed ref is the only honest post-action observation; DOM observation resumes after the
+        // caller accepts or dismisses it. Waiting here would deadlock until the page timeout.
+        const observation = this.pendingDialogs.has(page) ? null
+          : await this.observeAfterAction(page, preMutations, context.signal, settleMs)
+            .catch((e: any) => { if (context.signal?.aborted) throw e; return null; });
         this.checkpoint(cwd);
-        return base(ok, `${summary}${observation ? this.observationNote(observation) : ''}`, {
+        const afterTarget = this.targetFor(page)!;
+        const navigation: BrowserNavigationOutcome | undefined = beforeTarget.documentRef !== afterTarget.documentRef
+          ? {
+            kind: 'action', from: beforeTarget, to: afterTarget, url: page.url(),
+            documentChanged: true, status: this.lastStatus,
+          } : undefined;
+        const download = this.downloadInfos().find(item => item.startedAt >= started);
+        const dialog = this.recentDialogs.find(item => item.openedAt >= started);
+        return { ...base(ok, `${summary}${observation ? this.observationNote(observation) : ''}`, {
           ...(extra || {}),
           ...(observation ? { observation } : {}),
-        });
+        }), ...(navigation ? { navigation } : {}), ...(download ? { download } : {}),
+        ...(dialog ? { dialog: { ...dialog } } : {}) };
       };
 
       switch (command.action) {
@@ -648,7 +1118,10 @@ export class BrowserRuntime implements BrowserRuntimePort {
           await this.prunePages();
           const title = await page.title();
           this.checkpoint(cwd);
-          return { ...base(response.ok(), `Loaded ${page.url()} (${response.status()})`), title };
+          return {
+            ...base(response.ok(), `Loaded ${page.url()} (${response.status()})`), title,
+            navigation: this.navigationOutcome('navigate', beforeTarget, page, response.status()),
+          };
         }
         case 'snapshot': {
           await this.prunePages();
@@ -665,6 +1138,7 @@ export class BrowserRuntime implements BrowserRuntimePort {
           const bodyText = await page.$eval('body', node => (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 20_000));
           return {
             ...base(true, `Captured ${captured.elements.length} indexed interactive element(s)${filter ? ` matching "${filter}"` : ''}${diff ? ` (${diff.changed ? `since last snapshot: +${diff.addedCount} −${diff.removedCount}` : 'no element changes since last snapshot'})` : ''}. Indexes are valid until your next action, navigation, or snapshot.`, {
+              target: captured.target,
               text: bodyText,
               elements: captured.elements,
               truncated: captured.truncated,
@@ -674,8 +1148,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
           };
         }
         case 'click': {
-          const resolved = this.resolveIndexed(command.elementIndex);
-          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const resolved = this.resolveIndexed(command.elementIndex, command.elementRef);
+          if (resolved && 'error' in resolved) return this.staleTargetResult(base, resolved.error);
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           const hasCoordinates = Number.isFinite(command.x) && Number.isFinite(command.y);
           if (!command.selector && !indexed && !hasCoordinates) return base(false, 'click requires selector, elementIndex from snapshot, or x/y coordinates.');
@@ -703,8 +1177,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
             : hasCoordinates ? `Mouse-clicked ${click.x},${click.y}.` : `Mouse-clicked ${command.selector} at ${click.x},${click.y}.`, { input: click });
         }
         case 'type': {
-          const resolved = this.resolveIndexed(command.elementIndex);
-          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const resolved = this.resolveIndexed(command.elementIndex, command.elementRef);
+          if (resolved && 'error' in resolved) return this.staleTargetResult(base, resolved.error);
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           if (!command.selector && !indexed) return base(false, 'type requires selector or elementIndex from snapshot.');
           const run = await this.retry(maxAttempts, context.signal, async () => {
@@ -724,8 +1198,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
         }
         case 'press': {
           if (!command.key) return base(false, 'press requires key.');
-          const resolved = this.resolveIndexed(command.elementIndex);
-          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const resolved = this.resolveIndexed(command.elementIndex, command.elementRef);
+          if (resolved && 'error' in resolved) return this.staleTargetResult(base, resolved.error);
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           if (indexed) await indexed.focus();
           else if (command.selector) {
@@ -737,8 +1211,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
           return finishAction(true, `Pressed ${command.key}${indexed ? ` on elementIndex ${command.elementIndex}` : ''}.`);
         }
         case 'select': {
-          const resolved = this.resolveIndexed(command.elementIndex);
-          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const resolved = this.resolveIndexed(command.elementIndex, command.elementRef);
+          if (resolved && 'error' in resolved) return this.staleTargetResult(base, resolved.error);
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           if (!command.selector && !indexed) return base(false, 'select requires selector or elementIndex from snapshot.');
           if (!command.values?.length) return base(false, 'select requires at least one value.');
@@ -748,8 +1222,8 @@ export class BrowserRuntime implements BrowserRuntimePort {
           return finishAction(true, `Selected ${selected.join(', ') || '(none)'}.`, { selected });
         }
         case 'hover': {
-          const resolved = this.resolveIndexed(command.elementIndex);
-          if (resolved && 'stale' in resolved) return this.staleIndexResult(base, resolved.stale);
+          const resolved = this.resolveIndexed(command.elementIndex, command.elementRef);
+          if (resolved && 'error' in resolved) return this.staleTargetResult(base, resolved.error);
           const indexed = resolved && 'handle' in resolved ? resolved.handle : null;
           if (!command.selector && !indexed) return base(false, 'hover requires selector or elementIndex from snapshot.');
           const target = indexed || await page.waitForSelector(command.selector!, { visible: true, timeout });
@@ -798,12 +1272,126 @@ export class BrowserRuntime implements BrowserRuntimePort {
           response = await page.goBack({ waitUntil: command.waitUntil || 'networkidle2', timeout });
           await this.clearIndexedElements();
           this.lastStatus = response?.status(); this.checkpoint(cwd);
-          return base(!!response?.ok(), `Navigated back to ${page.url()}.`);
+          return response ? {
+            ...base(response.ok(), `Navigated back to ${page.url()}.`),
+            navigation: this.navigationOutcome('back', beforeTarget, page, response.status()),
+          } : base(false, 'No browser history entry was available to navigate back to.');
         case 'reload':
           response = await page.reload({ waitUntil: command.waitUntil || 'networkidle2', timeout });
           await this.clearIndexedElements();
           this.lastStatus = response?.status(); this.checkpoint(cwd);
-          return base(!!response?.ok(), `Reloaded ${page.url()}.`);
+          return {
+            ...base(!!response?.ok(), `Reloaded ${page.url()}.`),
+            navigation: this.navigationOutcome('reload', beforeTarget, page, response?.status()),
+          };
+        case 'tabs': {
+          const tabs = await this.tabInfos();
+          return base(true, `Found ${tabs.length} live browser tab(s).`, { tabs });
+        }
+        case 'switch_tab': {
+          if (!command.tabRef) return base(false, 'switch_tab requires tabRef from tabs.');
+          const targetPage = this.pagesByTabRef.get(command.tabRef);
+          if (!targetPage || targetPage.isClosed()) return base(false, 'tabRef is stale. Call tabs for current refs.');
+          await this.clearIndexedElements();
+          this.page = targetPage;
+          await this.initializePage(targetPage);
+          await targetPage.bringToFront();
+          this.lastSnapshotSignatures = null;
+          this.checkpoint(cwd);
+          const active = (await this.tabInfos()).find(tab => tab.tabRef === command.tabRef)!;
+          return { ...base(true, `Switched to tab at ${targetPage.url()}.`, { tab: active }), title: active.title };
+        }
+        case 'close_tab': {
+          if (!command.tabRef) return base(false, 'close_tab requires tabRef from tabs.');
+          const targetPage = this.pagesByTabRef.get(command.tabRef);
+          if (!targetPage || targetPage.isClosed()) return base(false, 'tabRef is stale. Call tabs for current refs.');
+          const closingActive = targetPage === this.page;
+          await targetPage.close();
+          if (closingActive) {
+            const remaining = await this.syncPages();
+            this.page = remaining.at(-1) || await this.browser!.newPage();
+            await this.initializePage(this.page);
+            await this.page.bringToFront();
+            await this.clearIndexedElements();
+            this.lastSnapshotSignatures = null;
+          }
+          const tabs = await this.tabInfos();
+          this.checkpoint(cwd);
+          return base(true, `Closed browser tab; ${tabs.length} tab(s) remain.`, { tabs });
+        }
+        case 'dialogs': {
+          const pending = Array.from(this.pendingDialogs.entries())
+            .filter(([dialogPage]) => !dialogPage.isClosed())
+            .map(([, pending]) => ({ ...pending.info }));
+          const dialogs = [...pending, ...this.recentDialogs]
+            .filter((dialog, index, all) => all.findIndex(item => item.dialogRef === dialog.dialogRef) === index)
+            .slice(0, 50);
+          return base(true, `Found ${dialogs.length} recorded browser dialog(s).`, { dialogs });
+        }
+        case 'download_prepare': {
+          if (!command.path) return base(false, 'download_prepare requires a destination directory path.');
+          if (this.armedDownload) return base(false, 'A one-shot download permit is already armed. Trigger it or close the browser before arming another.');
+          const resolved = resolveBrowserWorkspacePath(cwd, command.path);
+          if (!resolved.ok) return base(false, resolved.reason);
+          const requestedMax = command.maxBytes ?? DEFAULT_DOWNLOAD_MAX_BYTES;
+          if (!Number.isInteger(requestedMax) || requestedMax < 1 || requestedMax > MAX_DOWNLOAD_BYTES) {
+            return base(false, `maxBytes must be an integer from 1 to ${MAX_DOWNLOAD_BYTES}.`);
+          }
+          fs.mkdirSync(resolved.path, { recursive: true });
+          const permit: ArmedBrowserDownload = {
+            root: resolved.path, maxBytes: requestedMax, target: beforeTarget,
+          };
+          this.armedDownload = permit;
+          try {
+            await this.downloadSession!.send('Browser.setDownloadBehavior', {
+              behavior: 'allowAndName', downloadPath: resolved.path, eventsEnabled: true,
+            });
+          } catch (error) {
+            this.armedDownload = null;
+            throw error;
+          }
+          return base(true, `Armed one download to ${path.relative(cwd, resolved.path)} with a ${requestedMax}-byte limit.`, {
+            prepared: { ...beforeTarget, path: path.relative(cwd, resolved.path), maxBytes: requestedMax, oneShot: true },
+          });
+        }
+        case 'downloads': {
+          const downloads = this.downloadInfos();
+          return base(true, `Found ${downloads.length} recorded browser download(s).`, { downloads });
+        }
+        case 'download_wait': {
+          if (!command.downloadRef) return base(false, 'download_wait requires downloadRef from downloads or the triggering action result.');
+          let record = this.downloadRecords.get(command.downloadRef);
+          if (!record) return base(false, 'downloadRef is stale or unknown. Call downloads for current records.');
+          const deadline = Date.now() + timeout;
+          while (record.info.state === 'in_progress' && Date.now() < deadline) {
+            await delay(Math.min(100, Math.max(1, deadline - Date.now())), context.signal);
+            record = this.downloadRecords.get(command.downloadRef)!;
+          }
+          const done = record.info.state !== 'in_progress';
+          const ok = record.info.state === 'completed';
+          return {
+            ...base(ok, done
+              ? `Download ${record.info.state}${record.info.path ? ` at ${record.info.path}` : ''}.`
+              : `Download is still in progress after ${timeout}ms.`, { download: { ...record.info } }),
+            download: { ...record.info },
+          };
+        }
+        case 'download_cancel': {
+          if (!command.downloadRef) return base(false, 'download_cancel requires downloadRef from downloads.');
+          const record = this.downloadRecords.get(command.downloadRef);
+          if (!record) return base(false, 'downloadRef is stale or unknown. Call downloads for current records.');
+          if (record.info.state !== 'in_progress') {
+            return { ...base(false, `Download is already ${record.info.state}.`, { download: { ...record.info } }), download: { ...record.info } };
+          }
+          await this.downloadSession!.send('Browser.cancelDownload', { guid: record.guid });
+          record.info.state = 'canceled';
+          record.info.error = 'Canceled by BrowserTool.';
+          record.info.completedAt = Date.now();
+          fs.rmSync(record.internalPath, { force: true });
+          this.downloadRefsByGuid.delete(record.guid);
+          await this.denyDownloads();
+          return { ...base(true, 'Canceled browser download.', { download: { ...record.info } }), download: { ...record.info } };
+        }
         case 'inspect': {
           const selector = command.selector || 'body';
           const data = await page.$eval(selector, element => ({
@@ -903,10 +1491,13 @@ export class BrowserRuntime implements BrowserRuntimePort {
 
   async close(): Promise<void> {
     const browser = this.browser;
+    const downloadSession = this.downloadSession;
     await this.clearIndexedElements();
     this.lastSnapshotSignatures = null;
     this.lastSnapshotFilter = '';
     this.page = null; this.browser = null; this.projectRoot = '';
+    this.downloadSession = null;
+    this.armedDownload = null;
     this.failureLoop = null;
     // Close out the browser task honestly: cancelled if a cancel was requested, completed otherwise.
     if (this.taskId) {
@@ -930,6 +1521,18 @@ export class BrowserRuntime implements BrowserRuntimePort {
       ]);
       try { browser.process()?.kill('SIGKILL'); } catch { /* already gone */ }
     }
+    this.tabRefs.clear();
+    this.pagesByTabRef.clear();
+    this.documentRefs.clear();
+    this.pendingDialogs.clear();
+    this.dialogResolutions.clear();
+    this.recentDialogs.length = 0;
+    for (const record of this.downloadRecords.values()) {
+      if (record.info.state === 'in_progress') fs.rmSync(record.internalPath, { force: true });
+    }
+    this.downloadRecords.clear();
+    this.downloadRefsByGuid.clear();
+    await downloadSession?.detach().catch(() => {});
   }
 }
 

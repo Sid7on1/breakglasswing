@@ -45,6 +45,30 @@ describe('model catalog', () => {
     expect(avoided.has(DEFAULT_LITE_MODEL)).toBe(false);
   });
 
+  it('the shipped config defaults ARE the catalog defaults, and are all selectable', () => {
+    // Two files held the same three model ids and drifted apart: the catalog still advertised
+    // mistral-nemotron as the default Work model long after config.ts had abandoned it for
+    // declaring no Function Calling, while config.ts shipped step-3.7-flash and
+    // nemotron-3-nano-omni — both of which the catalog flags avoidAutoSelect from live probes.
+    //
+    // That drift is not cosmetic. The failover path (core/agent.loop.ts fallbackModelFor) consults
+    // the CATALOG to decide whether a model is safe to select automatically, so a default the
+    // catalog silently disagrees with is handed to every new user while the guard reports itself
+    // satisfied. Asserting the agreement is what keeps one of these edits from moving alone.
+    const { DEFAULTS } = require('../cli/config') as typeof import('../cli/config');
+    const avoided = new Set(MODEL_CATALOG.filter(m => m.avoidAutoSelect).map(m => m.value));
+
+    expect(DEFAULTS.model).toBe(DEFAULT_CODING_MODEL);
+    expect(DEFAULTS.liteModel).toBe(DEFAULT_LITE_MODEL);
+
+    for (const [slot, id] of Object.entries({
+      model: DEFAULTS.model, liteModel: DEFAULTS.liteModel, visionModel: DEFAULTS.visionModel,
+    })) {
+      expect(MODEL_CATALOG.map(m => m.value)).toContain(id); // a default must be a real catalog id
+      expect({ slot, avoided: avoided.has(id) }).toEqual({ slot, avoided: false });
+    }
+  });
+
   it('the quick-slot default is a plain model, never a reasoner', () => {
     // The slot exists to answer "hi" instantly. This is the rule the catalog states for itself;
     // it regressed once already when the default was set to a reasoning model.

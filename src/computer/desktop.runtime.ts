@@ -3,14 +3,15 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile, spawn } from 'child_process';
-import { DESKTOP_HELPER_SOURCE, DESKTOP_HELPER_VERSION } from './helper.source';
+import { phaseTrace } from './phase.trace';
+import { allowsEvidenceFocus } from './delivery.policy';
 import { cliEvents } from '../cli/events';
 import { loadConfig } from '../cli/config';
 import { normalizedToPixel, screenshotToGlobal, elementCenterToScreenshot, globalFrameToScreenshot, frameCenter, pixelInImage, Frame } from './coordinates';
 import { SurfaceRegistry, ExecutionSurface, InputOwner, chooseMechanism, AutomationMechanism } from './surface';
 import { DragMachine } from './drag';
 import { pointInFrame } from './coordinates';
-import { classifyVerification, VerificationResult } from './verification';
+import { classifyVerification, VerificationResult, evaluateExpectation } from './verification';
 import { RecoveryController, RecoveryDecision } from './recovery';
 import { ActionHistory, ActionHistorySummary, ComputerSessionState, writeSessionState, readSessionState } from './durability';
 import { RecordingController } from './recording';
@@ -23,6 +24,7 @@ import { TargetSwitch, SwitchLatencyLog } from './switch';
 import { InputExecutor, heldButtonFor } from './input.executor';
 import { waitUntil, waitFor } from './settle';
 import { rankSemanticTargets } from './semantic.targeting';
+import { foldTreeTextIntoElements } from './tree.text';
 import {
   VisualFingerprint, VisualDelta, NativeVisualSignature, parseVisualFingerprint,
   diffVisualFingerprints, visualElementIdentities, compactVisualEvidence,
@@ -35,8 +37,8 @@ import {
 /**
  * Offline/development fallback for Bimax Computer Use.
  *
- * On macOS this is a small in-repo Swift helper (helper.source.ts), compiled once with the system
- * toolchain and cached under ~/.bimax/native by source hash. Degradation ladder when swiftc is
+ * On macOS this is a small in-repo Swift helper (helper.source.ts), compiled and signed at build
+ * time. End-user machines never need Xcode Command Line Tools. Degradation ladder when the helper is
  * absent: cliclick → AppleScript System Events. On Linux the fallback is xdotool. Shipped builds
  * normally use BimaxComputerRuntime below, backed by the pinned native sidecar.
  *
@@ -76,6 +78,8 @@ export interface DesktopCommand {
   modifier?: Array<'cmd' | 'shift' | 'alt' | 'ctrl' | 'fn'>;
   count?: number;
   text?: string;
+  /** type: select the target editable field's existing contents before entering text. */
+  replaceExisting?: boolean;
   combo?: string;
   app?: string;
   bundleId?: string;
@@ -94,6 +98,11 @@ export interface DesktopCommand {
   toElementIndex?: number;
   maxElements?: number;
   includeScreenshot?: boolean;
+  /** INTERNAL, never part of the public tool surface. Set on observations the runtime makes on
+   * behalf of an action (post-action evidence, semantic re-grounding): those cannot use a menu-only
+   * background frame for anything, so they may focus the target app once and re-walk it. A caller's
+   * own observe must never steal the user's focus, so it leaves this unset. */
+  focusIfBackground?: boolean;
   value?: string;
   /** clipboard: absolute file paths to place on the pasteboard, so an app can receive them by paste. */
   paths?: string[];
@@ -255,10 +264,18 @@ export interface DesktopResult {
     kind: 'pointer' | 'keyboard';
     target: { app?: string; pid: number; windowId?: number; element?: string; role?: string };
     preflight: {
-      recipientPid?: number; recipientApp?: string; windowMatched: boolean;
+      /**
+       * Did the intended window prove it would receive the event? `undefined` means the probe could
+       * not answer — which is NOT the same as true, and must never be rendered as if it were. Both
+       * this field and `commit.recipientApp` are omitted rather than defaulted to the intended
+       * target, because restating the request as its own confirmation is how a click delivered into
+       * a different application still produced a receipt naming the one that was asked for.
+       */
+      recipientPid?: number; recipientApp?: string; windowMatched?: boolean;
       elementMatched?: boolean; elementConfidence?: 'high' | 'medium' | 'none';
       stable?: boolean; editable?: boolean | null; reason: string;
     };
+    /** `recipientApp` is what the driver observed receiving the event; absent when it did not say. */
     commit: { delivered: boolean; recipientApp?: string };
     postcondition?: { query: string; matched: boolean };
   };
@@ -277,6 +294,9 @@ export interface DesktopResult {
   pid?: number;
   windowId?: number;
   elements?: unknown[];
+  /** How many elements the capture resolved when the payload deliberately does not list them
+   * (`screenshot`). The map itself is cached on the runtime, so semantic targeting is unaffected. */
+  elementCount?: number;
   /** Internal native sampler result. Model-visible observations receive compact evidence per item. */
   visualSignatures?: Array<NativeVisualSignature & { id?: unknown }>;
   /** On-device Vision fallback. OCR text is content by design; shape results contain geometry only. */
@@ -373,6 +393,9 @@ type ObservedElement = {
   visual?: VisualFingerprint;
   visualDelta?: VisualDelta;
   visualOnly?: boolean;
+  /** AX actions the control publishes, folded from the tree. Absent means the tree did not say;
+   * an empty array means it said "none". Only the latter proves background delivery cannot work. */
+  axActions?: string[];
 };
 
 /** App-level AXWindowCreated notifications are emitted with the AXApplication as their element on
@@ -383,10 +406,26 @@ type ObservedElement = {
 export function accessibilityEventInvalidatesObservation(event: AccessibilityEvent): boolean {
   if (event.notification !== 'AXWindowCreated') return true;
   const frame = (event.element as any)?.frame;
-  return !!frame
-    && Number(frame.w ?? frame.width) > 0
-    && Number(frame.h ?? frame.height) > 0;
+  const w = Number(frame?.w ?? frame?.width);
+  const h = Number(frame?.h ?? frame?.height);
+  if (!frame || !(w > 0) || !(h > 0)) return false;
+  // A positive frame is not enough: apps publish DECORATIVE windows that no user could interact
+  // with. Measured in Notes — a 66x20 `AXWindow` (subrole AXDialog, identifier `_NS:8`, title
+  // "Window") is created while the note list settles, and treating it as a real new surface
+  // invalidated the frame the caller had just observed. Every click was then refused with "the
+  // element you named is no longer in the tree", which reads as the app being unclickable.
+  //
+  // Direction of safety is deliberate. Ignoring a real new window costs at most one action aimed at
+  // a superseded surface, and the geometry/target guards on the frame registry still catch that.
+  // Honouring a decoration costs EVERY action, permanently. So a created window has to be big
+  // enough to hold a control before it may invalidate anything; any genuine dialog, sheet or
+  // palette clears this comfortably.
+  return w >= MIN_REAL_WINDOW_W && h >= MIN_REAL_WINDOW_H;
 }
+
+/** Smallest created window that could plausibly carry a control the user acts on, in points. */
+const MIN_REAL_WINDOW_W = 80;
+const MIN_REAL_WINDOW_H = 60;
 
 /** All the text one observed element contributes, normalized for comparison across frames. */
 export function observedElementText(element: any): string {
@@ -479,17 +518,23 @@ type FocusProbe = {
   chain: NativeElementReceipt[];
 };
 
+// AXMenuItem earns its place here the moment an open menu became visible at all: a command in an
+// open menu is the most actionable thing on the screen. It is only ever present while a menu is
+// open — the observation filter drops closed ones — so every heuristic counting actionable controls
+// behaves exactly as before on a window with no menu showing.
 const ACTIONABLE_AX_ROLES = new Set([
   'AXButton', 'AXCheckBox', 'AXComboBox', 'AXDisclosureTriangle', 'AXLink', 'AXMenuButton',
-  'AXPopUpButton', 'AXRadioButton', 'AXSearchField', 'AXSlider', 'AXSwitch', 'AXTab',
+  'AXMenuItem', 'AXPopUpButton', 'AXRadioButton', 'AXSearchField', 'AXSlider', 'AXSwitch', 'AXTab',
   'AXTextArea', 'AXTextField',
 ]);
-const STRUCTURAL_AX_ROLES = new Set(['AXWindow', 'AXOutline', 'AXGroup', 'AXScrollArea', 'AXToolbar']);
+// AXMenu is the open menu's PANEL. It is a container in the same sense as a toolbar — the commands
+// are its children — so clicking it is refused with a message naming what to click instead.
+const STRUCTURAL_AX_ROLES = new Set(['AXWindow', 'AXOutline', 'AXGroup', 'AXScrollArea', 'AXToolbar', 'AXMenu']);
 /** Roles where the visible CENTER is always at least as good a click target as any pixel inside —
  * an edge-grazing raw click on one of these delivers fine yet activates nothing. Text inputs are
  * excluded (the click point places the caret) and sliders are excluded (position IS the value). */
 const SNAP_TO_CENTER_AX_ROLES = new Set([
-  'AXButton', 'AXCheckBox', 'AXDisclosureTriangle', 'AXLink', 'AXMenuButton',
+  'AXButton', 'AXCheckBox', 'AXDisclosureTriangle', 'AXLink', 'AXMenuButton', 'AXMenuItem',
   'AXPopUpButton', 'AXRadioButton', 'AXSwitch', 'AXTab',
 ]);
 
@@ -590,6 +635,29 @@ export function normalizeDesktopAction(action: string): string {
 
 /** Text fields on a driver element that a human — or a `query` — would ever read. */
 const ELEMENT_TEXT_KEYS = ['label', 'value', 'description', 'original_label', 'context_label', 'title', 'placeholder'];
+
+/**
+ * Another application's window owns the point, so the physical channel cannot reach the target.
+ *
+ * Distinguished from every other preflight refusal because nothing is wrong with the caller's
+ * target: the element identity still holds, only the pixel route to it is blocked. A caller that
+ * named its target semantically can therefore be re-routed through accessibility instead of refused,
+ * while a caller that supplied raw pixels genuinely has nowhere else to go.
+ */
+export class OccludedPointError extends Error {
+  constructor(message: string, readonly occluder: { pid?: number; name?: string }) {
+    super(message);
+    this.name = 'OccludedPointError';
+  }
+}
+
+/** The coordinate-free way to address an element, if this element has one. */
+function accessibilityHandle(element?: { elementToken?: string; elementIndex?: number }):
+  { element_token: string } | { element_index: number } | null {
+  if (element?.elementToken) return { element_token: element.elementToken };
+  if (element?.elementIndex != null) return { element_index: Math.floor(element.elementIndex) };
+  return null;
+}
 
 /**
  * Turn a named layout into a rectangle inside a screen's VISIBLE area.
@@ -817,16 +885,22 @@ function foregroundSurfaceNotice(elements: any[]): string | null {
 /**
  * Warn when the app publishes almost nothing nameable.
  *
- * Mac Catalyst apps (WhatsApp) and some Chromium apps expose a shell: measured live, WhatsApp gave
- * 31 elements of which 22 were unlabeled buttons, against 397 labelled ones from a native app of
- * the same size. Silence here is expensive — the model keeps issuing `query` for an "attachment
- * button" that is not in the map, and every miss looks like a broken click. Naming the condition
- * lets it switch to the screenshot, which is the only place that information exists.
+ * Some Chromium and Electron shells publish almost no accessibility text. Silence there is expensive
+ * — the model keeps issuing `query` for an "attachment button" that is not in the map, and every miss
+ * looks like a broken click. Naming the condition lets it switch to the screenshot, which is the only
+ * place that information exists.
+ *
+ * The opposite failure is worse, and it is what this used to do. WhatsApp was the app this notice was
+ * written for ("31 elements of which 22 unlabeled"), but re-measured on 2026-08-05 it publishes a NAME
+ * for nearly every control — Heman, Dad, Mom 2, Park+, Send, Compose message. The old count only ever
+ * measured how many controls a rewrite had touched, so the notice fired on a perfectly nameable app
+ * and told the model to stop using names. Thin trees are a real shape; WhatsApp is not one, and a
+ * low element COUNT is not the same thing as a low name count.
  */
-function thinTreeNotice(elements: any[]): string | null {
+export function thinTreeNotice(elements: any[]): string | null {
   const actionable = elements.filter(element => ACTIONABLE_AX_ROLES.has(String(element?.role || '')));
   if (actionable.length === 0) return null;
-  const unlabeled = actionable.filter(element => !String(element?.original_label || '').trim());
+  const unlabeled = actionable.filter(element => !hasSayableName(element));
   if (unlabeled.length < 6 || unlabeled.length / actionable.length < 0.6) return null;
   return `This app exposes little accessibility text: ${unlabeled.length} of ${actionable.length} controls have no name of their own `
     + `(the "unlabeled …" entries are positions this runtime assigned, not names the app supplied). `
@@ -836,10 +910,10 @@ function thinTreeNotice(elements: any[]): string | null {
 
 /** Recommend a universal preparation step when a cramped, icon-heavy window makes precision poor.
  * The rule is geometric rather than app-specific, so it applies equally to software not yet known. */
-function windowPreparationNotice(elements: any[], width?: number, height?: number): string | null {
+export function windowPreparationNotice(elements: any[], width?: number, height?: number): string | null {
   if (!width || !height) return null;
   const actionable = elements.filter(element => ACTIONABLE_AX_ROLES.has(String(element?.role || '')));
-  const unlabeled = actionable.filter(element => !String(element?.original_label || '').trim());
+  const unlabeled = actionable.filter(element => !hasSayableName(element));
   const compact = actionable.filter(element => {
     const frame = elementFrame(element);
     return !!frame && (frame.w < 24 || frame.h < 24);
@@ -974,8 +1048,46 @@ export function describeUnlabeledControls(elements: any[]): any[] {
     const description = descriptions.get(element);
     if (!description) return element;
     const role = String(element?.role || '').replace(/^AX/, '') || 'Control';
-    return { ...element, context_label: description, label: `unlabeled ${role} ${description}` };
+    // Mark the name as OURS. A positional placeholder reads like a label and sits in the same field
+    // as one, so without this marker the only way to tell it from a name the app published is to
+    // sniff the "unlabeled " prefix — and the notices below, which must count exactly these, instead
+    // guessed from `original_label` and got the answer backwards.
+    return {
+      ...element, context_label: description, label_source: 'synthesized',
+      label: `unlabeled ${role} ${description}`,
+    };
   });
+}
+
+/** Why background delivery cannot activate this control, and what does work.
+ *
+ * Background delivery activates an element through its published AX action, and plenty of ordinary
+ * controls publish none: a Notes note row advertises `actions=[showmenu]` and nothing else, so
+ * AXPress answers -25206 and the row cannot be activated that way AT ALL — while a foreground click
+ * opens the same row in ~1.0s. Two callers reach this: one that read the published actions before
+ * trying, and one that got -25206 back from the attempt. `evidence` is the only difference.
+ *
+ * Deliberately a REFUSAL rather than an automatic downgrade to a physical click: foreground delivery
+ * moves the real cursor and takes focus, which is precisely what a background caller asked to avoid,
+ * and silently swapping it is the same dishonesty the off-Space guard refuses. */
+function noAxPressRefusal(name: string, evidence: string): string {
+  return `"${name}" publishes no accessibility press action, so it cannot be activated by background delivery `
+    + `(${evidence}). This is a property of the control, not a transient failure — retrying background delivery will fail identically. `
+    + 'Use deliveryMode="foreground" to deliver a real click to the same target, which does activate it; that brings the window forward and moves the cursor.';
+}
+
+/** Can a caller name this control out loud and expect it to resolve?
+ *
+ * True for a name the app published, and equally true for one folded out of the tree text — that is
+ * text the app rendered inside the control, so the user can see it and say it. False only when there
+ * is no text anywhere, or when the sole "name" is a positional placeholder this runtime invented.
+ *
+ * Deliberately NOT `original_label`: that field holds the name a control had BEFORE a rewrite, so it
+ * exists only on rewritten controls. Reading its absence as namelessness inverts the question and
+ * was measured on WhatsApp reporting 29 of 31 controls nameless while every row carried its name. */
+function hasSayableName(element: any): boolean {
+  if (String(element?.label_source || '') === 'synthesized') return false;
+  return ELEMENT_TEXT_KEYS.some(key => String(element?.[key] || '').trim());
 }
 
 export interface DesktopRuntimePort {
@@ -1083,6 +1195,64 @@ const FRAME_GATED_VERBS = new Set<DesktopAction>([
   'hover', 'hold', 'mouse_down', 'mouse_up', 'copy', 'paste', 'arrange',
 ]);
 
+/** Frame-gated verbs addressed by an IDENTITY the element map cannot invalidate.
+ *
+ * They still require a fresh frame of the intended window — laying out the wrong window, or typing
+ * into the wrong app, is as bad as clicking the wrong control — but an accessibility event cannot
+ * invalidate them the way it invalidates a coordinate or an element handle.
+ *
+ * `arrange` is addressed by WINDOW identity: the window id is still the window id. Refusing it for
+ * "the app changed after observation" is self-inflicted, and measured — `open` mints AXWindowCreated
+ * for the very window the following `arrange` was told to lay out, so `arrange` failed in ~1ms
+ * against a window that had existed for one call.
+ *
+ * `key` is addressed by FOCUS identity: a combo carries no coordinate and no element handle, and the
+ * key path never reads the element map — it hands the combo to the focused app. The guard's own
+ * sentence is "the visible element map may no longer own those coordinates", and there are none.
+ * Measured live on WhatsApp 2026-08-05: opening the app raised its own "New chat" popover, the
+ * runtime's guidance said to dismiss it with escape, and escape was refused because of the app's own
+ * AXFocusedUIElementChanged. The guard was contradicting the advice, and escape is exactly how a
+ * caller answers a surface that just appeared.
+ *
+ * Same family as the semantic re-grounding below, which exists because opening Messages refused the
+ * operation's own next step. Note what is NOT here: `type` and `paste` insert content and are aimed
+ * by focus too, but a focus change is precisely what puts that content in the wrong field, so they
+ * keep the guard and recover through re-grounding. */
+const IDENTITY_SCOPED_FRAME_VERBS = new Set<DesktopAction>(['arrange', 'key']);
+
+/** Content insertion aimed by keyboard focus rather than by a coordinate or an element handle.
+ *
+ * These cannot be exempted from the frame gate wholesale — the sentence above says why: a focus
+ * change is what puts the content in the wrong field. But "an accessibility event happened" is not
+ * the same fact as "focus moved", and using the first as a proxy for the second refuses the
+ * operation's own side effects. */
+const FOCUS_ADDRESSED_INSERT_VERBS = new Set<DesktopAction>(['type', 'paste']);
+
+/**
+ * The accessibility notifications that can actually move keyboard focus off the intended field.
+ *
+ * The watcher subscribes at two levels (`watch-events` in helper.source.ts). App-level events say
+ * focus or window composition changed. The rest are registered on the CURRENTLY FOCUSED ELEMENT by
+ * registerChangingElement — so AXValueChanged, AXSelectedChildrenChanged and AXSelectedTextChanged
+ * are emitted BY the very field the text is going into. They mean "the thing you are typing into
+ * changed", which is what typing does.
+ *
+ * Measured live 2026-08-06: `key cmd+shift+g` opened Finder's Go to Folder sheet, whose completion
+ * list posted AXSelectedChildrenChanged, and the `type` that was the entire point of opening the
+ * sheet was refused at epoch 7 — with the message "the visible element map may no longer own those
+ * coordinates" for an action that carries no coordinates. Intermittent, because it is a race with
+ * the app's own autocompletion.
+ *
+ * Focus itself is still verified at delivery, and more precisely than any event can: the type and
+ * paste paths run keyboardAppPreflight, which reads who actually owns keyboard focus and refuses
+ * when it is not the target. This set narrows a proxy; it does not remove the guarantee.
+ */
+const FOCUS_INVALIDATING_AX_NOTIFICATIONS = new Set([
+  'AXFocusedUIElementChanged',
+  'AXFocusedWindowChanged',
+  'AXUIElementDestroyed',
+]);
+
 /** Operations that mutate the one active perception/target pipeline. Observe and screenshot do not
  * move input, but they replace the global frame, element map and PiP geometry; allowing one to finish
  * during an app switch is enough to pair Notes pixels with a WhatsApp input target. */
@@ -1116,6 +1286,8 @@ export function stampSummaryVerdict(result: DesktopResult): DesktopResult {
     ? ' — screen did NOT change: the input landed but nothing visibly happened; re-observe and adjust rather than assuming it worked'
     : outcome.observed === 'expectation-missed'
       ? ' — EXPECTED RESULT NOT FOUND in the fresh frame; recover or choose a different action instead of claiming completion'
+    : outcome.observed === 'expectation-indeterminate'
+      ? ' — your expect described a state instead of naming on-screen text, so it proves NOTHING either way: this is not a failure and not a success. Judge the effect from this frame; do not repeat a delivered action on the strength of it'
     : outcome.observed === 'rejected'
       ? ` — APPLICATION REJECTED THE OPERATION${outcome.failureReason ? `: ${outcome.failureReason.replace(/^application visibly rejected the operation:\s*/i, '')}` : ''}; do not claim success or repeat the same approach`
     : outcome.observed === 'unverified'
@@ -1136,6 +1308,18 @@ export const BIMAX_DRIVER_LABEL = 'bimax-computer-use 0.12.3';
  * not-frontmost, failing every keyboard action with "could not focus X; frontmost app is X". */
 export function appNamesMatch(actual: string, expected: string): boolean {
   return !!appKey(actual) && appKey(actual) === appKey(expected);
+}
+
+/**
+ * Does this string look like a bundle identifier rather than an app a human would name?
+ *
+ * Reverse-DNS with no whitespace. Deliberately shape-based and not a list: the point is to notice
+ * that the caller addressed the OS in the wrong field, which is app-agnostic. "Adobe Photoshop 2024"
+ * has spaces, "Messages" has no dot — neither is mistaken for an identifier.
+ */
+export function looksLikeBundleId(value: string): boolean {
+  const candidate = stripInvisibleMarks(String(value || '')).trim();
+  return /^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*){2,}$/.test(candidate);
 }
 
 /** The canonical form of an app name — the same normalization appNamesMatch compares on. Use it as a
@@ -1160,36 +1344,38 @@ export class DesktopRuntime implements DesktopRuntimePort {
 
   // ---- driver resolution ----------------------------------------------------------------------
 
-  /** Compile (once) and return the Swift helper path, or null when the toolchain is unavailable. */
+  /**
+   * Resolve the build-time helper. Phase 9 forbids runtime Swift compilation on user machines, so
+   * this only ever LOCATES an already-built binary — it never builds one.
+   *
+   * Discovery, not just the environment override. The Electron app and the Go TUI each locate this
+   * binary themselves and inject `BIMAX_DESKTOP_HELPER` when they spawn the engine, so every path
+   * that does NOT go through those hosts — `bimax mcp-computer`, a headless engine, a smoke script —
+   * resolved to null and silently lost every capability built on the helper: the AX hit test that
+   * proves which app will receive a click, the AXManualAccessibility/AXEnhancedUserInterface opt-in
+   * that makes Electron and AppKit apps publish a real tree, and the modal-frame probe. Those did
+   * not fail loudly; they degraded, and the click preflight in particular then reported "not
+   * probed" as "verified". The engine must be able to find its own helper.
+   */
   private resolveHelper(): string | null {
     if (this.helperPath !== undefined) return this.helperPath;
     this.helperPath = null;
     if (process.platform !== 'darwin') return null;
-    const override = process.env.BIMAX_DESKTOP_HELPER;
-    if (override) { this.helperPath = fs.existsSync(override) ? override : null; return this.helperPath; }
-    try {
-      const hash = crypto.createHash('sha256').update(`${DESKTOP_HELPER_VERSION}\n${DESKTOP_HELPER_SOURCE}`).digest('hex').slice(0, 8);
-      const dir = path.join(os.homedir(), '.bimax', 'native');
-      const bin = path.join(dir, `bimax-desktop-${hash}`);
-      if (fs.existsSync(bin)) { this.helperPath = bin; return bin; }
-      if (!binExists('swiftc')) return null;
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const src = path.join(dir, `bimax-desktop-${hash}.swift`);
-      fs.writeFileSync(src, DESKTOP_HELPER_SOURCE, { mode: 0o600 });
-      const { execFileSync } = require('child_process');
-      execFileSync('swiftc', ['-O', '-o', bin, src], { timeout: 120_000, stdio: 'pipe' });
-      fs.chmodSync(bin, 0o700);
-      fs.rmSync(src, { force: true });
-      // Sweep superseded builds so ~/.bimax/native never accumulates stale binaries.
-      for (const f of fs.readdirSync(dir)) {
-        if (f.startsWith('bimax-desktop-') && !f.includes(hash)) fs.rmSync(path.join(dir, f), { force: true });
-      }
-      this.helperPath = bin;
-      return bin;
-    } catch {
-      this.helperPath = null;
-      return null;
+    const override = process.env.BIMAX_DESKTOP_HELPER?.trim();
+    if (override) {
+      this.helperPath = fs.existsSync(override) ? override : null;
+      return this.helperPath;
     }
+    // `__dirname` is <repo>/src/computer under tsx and <repo>/dist/computer once built; both are two
+    // levels below the repo root, which is where the hosts stage the binary.
+    const root = path.resolve(__dirname, '..', '..');
+    const candidates = [
+      path.join(root, 'app', 'native-service', 'bimax-desktop-helper'),
+      path.join(root, 'tui', 'embed', 'bimax-desktop-helper'),
+      path.join(os.homedir(), '.bimax', 'native', 'bimax-desktop-helper'),
+    ];
+    this.helperPath = candidates.find(candidate => fs.existsSync(candidate)) ?? null;
+    return this.helperPath;
   }
 
   private driverName(): string {
@@ -1209,7 +1395,7 @@ export class DesktopRuntime implements DesktopRuntimePort {
       if (this.helperPath) driver = 'native-helper';
       else if (this.helperPath === null && binExists('cliclick')) driver = 'cliclick';
       else if (this.helperPath === null) driver = 'applescript';
-      else driver = binExists('swiftc') ? 'native-helper (compiles on first use)' : (binExists('cliclick') ? 'cliclick' : 'applescript');
+      else driver = binExists('cliclick') ? 'cliclick' : 'applescript';
     } else {
       driver = this.driverName();
     }
@@ -1566,7 +1752,11 @@ export class DesktopRuntime implements DesktopRuntimePort {
         }
         case 'ax_enable': {
           const r = await this.helper(['ax-enable', String(cmd.pid)], signal, 5_000);
-          return { applied: !!r.applied, summary: r.applied ? 'requested the full accessibility tree' : 'app declined the accessibility opt-in' };
+          const accepted = [r.manual ? 'manual' : '', r.enhanced ? 'enhanced' : ''].filter(Boolean).join('+');
+          return {
+            applied: !!r.applied,
+            summary: r.applied ? `requested the full accessibility tree (${accepted})` : 'app declined the accessibility opt-in',
+          };
         }
         case 'modal_frame': {
           const r = await this.helper(['modal-frame', String(cmd.pid)], signal, 5_000);
@@ -1882,6 +2072,17 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private readonly targets = new TargetOwnership();
   private indexedElements = new Map<string, ObservedElement>();
   private observedElements: ObservedElement[] = [];
+  /** The target app's other windows at last window selection — recovery detail for a failed query. */
+  private siblingWindows: Array<{ windowId: number; title: string }> = [];
+  /**
+   * A window the CALLER named explicitly, which the heuristic picker must not overrule.
+   *
+   * `refreshTargetWindow` picks by focus/size because usually nothing better is known. But once a
+   * caller has enumerated `windows` and said which one it wants — the recovery this runtime itself
+   * recommends when a query misses — re-deriving the "good" window silently discards that choice and
+   * the caller is stuck on the same surface no matter what it asks for.
+   */
+  private pinnedWindow: { pid: number; windowId: number } | null = null;
   /**
    * Apps proven undriveable in background delivery, latched for the session.
    *
@@ -1959,6 +2160,16 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
    * additively — Stage 1 of the surface architecture. Delivery routing still lives in run(). */
   private readonly surfaces = new SurfaceRegistry();
   private lastMechanismChoice: AutomationMechanism | null = null;
+  /** Set when the live app invalidated the caller's frame and perception was re-run for its query,
+   * so the returned summary can disclose that the action used a replacement picture. */
+  private lastSemanticRegrounding: { notification: string; windowChanged: boolean; reacquiredHandle?: string } | null = null;
+
+  /** Read and clear the pending re-grounding disclosure. */
+  private takeSemanticRegrounding(): { notification: string; windowChanged: boolean; reacquiredHandle?: string } | null {
+    const pending = this.lastSemanticRegrounding;
+    this.lastSemanticRegrounding = null;
+    return pending;
+  }
   /** Pixel digest of the most recent frame — the baseline the NEXT action's outcome is judged against. */
   private prevFrameHash: string | undefined;
   /** Consecutive no-effect actions, for runtime-level no-progress detection. */
@@ -1972,6 +2183,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   /** Whether this process has already attempted a one-time resume from the persisted session file. */
   private resumedFromDisk = false;
   private activeAction = '';
+  /** Delivery contract for the operation currently inside the serialized runtime.
+   *
+   * Automatic evidence is allowed to re-focus a target only for an explicitly foreground
+   * operation. A background operation may return AX-thin/degraded evidence, but it must never steal
+   * focus merely to improve that evidence. */
+  private activeDelivery: 'foreground' | 'background' = 'foreground';
   /** Optional postcondition for the action currently inside the serialized control loop. Keeping it
    * here lets every delivery path (pointer, keyboard, drag, paste…) share one verifier. */
   private activeExpectation: {
@@ -1995,6 +2212,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   public constructor(
     private readonly fallback: DesktopRuntimePort = new DesktopRuntime(),
     private readonly livePip: LivePipPort = new NativeLivePip(),
+    /** Stable Bimax task identity. Omitted by direct/test callers to retain the legacy file path. */
+    private readonly persistenceSessionId?: string,
   ) {}
 
   private watchTargetAccessibility(target: ComputerTarget): void {
@@ -2158,7 +2377,15 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     }
   }
 
-  private sessionStateFile(cwd: string): string { return path.join(cwd, '.bimax', 'computer', 'session.json'); }
+  private sessionStorageDir(cwd: string): string {
+    if (!this.persistenceSessionId) return path.join(cwd, '.bimax', 'computer');
+    const safe = this.persistenceSessionId.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80);
+    return path.join(cwd, '.bimax', 'computer', 'sessions', safe);
+  }
+
+  private sessionStateFile(cwd: string): string {
+    return path.join(this.sessionStorageDir(cwd), 'session.json');
+  }
 
   /** Where the durable session state currently lives (active surface + compressed action history). */
   private buildSessionState(): ComputerSessionState {
@@ -2277,6 +2504,64 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     return key ? this.indexedElements.get(key) || null : null;
   }
 
+  /**
+   * The durable part of a label this runtime may have synthesized.
+   *
+   * An anonymous list row gets its name by folding its descendant `AXStaticText` leaves into one
+   * string, so the "label" of a chat row is really `name, last message, date`. Every one of those
+   * trailing components is live content: a new message, a date rolling over, or one extra leaf
+   * appearing in the next walk rewrites the composite while the row itself never changed. The
+   * leading component is the one the fold puts first and the one that identifies the row.
+   */
+  private stableLabelCore(label: unknown): string {
+    return String(label ?? '').split(',')[0]!.trim();
+  }
+
+  /**
+   * Re-acquire a named handle in a freshly walked tree.
+   *
+   * Exact equality on role+label+value is the only fully safe match and stays the first choice. It
+   * is not sufficient on its own, though, and the failure is not hypothetical: a Messages
+   * conversation row was refused as "no longer in the tree" — killing the run — because the
+   * composite WE synthesized for it had picked up a different trailing segment. Refusing there is
+   * as wrong as clicking blindly; the row was visible on screen the whole time.
+   *
+   * So fall back, but never to a best guess. Each weaker key is accepted only when it matches
+   * EXACTLY ONE element: ambiguity is still a refusal, because a near-miss is a silent click on the
+   * wrong control and that is the failure this guard exists to prevent.
+   */
+  public reacquireByIdentity(identity: ObservedElement): ObservedElement | null {
+    // Every element is registered under BOTH `token:` and `index:`, so `.values()` yields each one
+    // twice. `find()` never noticed; a uniqueness test does — it saw two hits for a single row and
+    // refused it as ambiguous. Dedupe by object identity: both keys hold the same reference.
+    const candidates = [...new Set(this.indexedElements.values())];
+    const sameRole = (element: ObservedElement) =>
+      String(element.role || '') === String(identity.role || '');
+
+    const exact = candidates.find(element => sameRole(element)
+      && String(element.label ?? '') === String(identity.label ?? '')
+      && String(element.value ?? '') === String(identity.value ?? ''));
+    if (exact) return exact;
+
+    // The element's OWN AX label, before any folding — untouched by what its descendants did.
+    const originalLabel = String(identity.originalLabel ?? '').trim();
+    if (originalLabel) {
+      const byOriginal = candidates.filter(element => sameRole(element)
+        && String(element.originalLabel ?? '').trim() === originalLabel);
+      if (byOriginal.length === 1) return byOriginal[0]!;
+    }
+
+    const core = this.stableLabelCore(identity.label);
+    // A one-word core like "Open" repeats across a window; requiring uniqueness already refuses
+    // those, but a very short core is not worth attempting at all.
+    if (core.length >= 3) {
+      const byCore = candidates.filter(element => sameRole(element)
+        && this.stableLabelCore(element.label) === core);
+      if (byCore.length === 1) return byCore[0]!;
+    }
+    return null;
+  }
+
   public async dispose(): Promise<void> {
     const wasRecording = this.recording.started;
     // Release anything the desktop is still physically holding BEFORE tearing state down. A turn
@@ -2299,6 +2584,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     this.axWatcherPid = null;
     this.latestAxEvent = null;
     this.targets.clear();
+    this.pinnedWindow = null;
     this.pipGeneration++;
     this.pipPaused = false;
     this.indexedElements.clear();
@@ -2402,13 +2688,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   private async startRecording(cwd: string, cmd: DesktopCommand): Promise<any> {
     const cfg = await loadConfig().catch(() => ({} as any));
     if (cfg.computerRecord !== true) {
-      throw new Error('screen recording is disabled — it is opt-in. Enable it first (/computer record on), then retry record_start.');
+      // Deliberately NOT model-settable: recording the user's screen is a decision the user makes,
+      // never one an agent can talk itself into. But the remediation has to be honest about who can
+      // perform it — an MCP caller has no `/computer` command, so telling it to run one sends it
+      // into a retry loop against a gate it cannot open.
+      throw new Error('screen recording is disabled — it is opt-in and only the user can enable it, '
+        + 'by running `/computer record on` in the Bimax CLI (or setting computerRecord: true in the '
+        + 'Bimax config) and restarting this server. It cannot be enabled through this tool; do not retry.');
     }
     // Consume the token exactly once, and only if it was genuinely minted by this runtime.
     const approvedFullDisplay = !!cmd.fullDisplayToken && this.fullDisplayTokens.delete(cmd.fullDisplayToken);
     return this.recording.start({
       cwd,
       outputDir: cmd.outputDir,
+      storageRoot: path.join(this.sessionStorageDir(cwd), 'recordings'),
       recordVideo: cmd.recordVideo !== false,
       approveFullDisplay: approvedFullDisplay,
       scopeTarget: cmd.captureScope === 'display' ? null : this.captureSurface(),
@@ -2424,7 +2717,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const ranked = rankSemanticTargets(query, this.observedElements);
     if (ranked.ranked.length === 0 || ranked.confidence === 'none') {
       const labels = this.observedElements.map(element => element.label).filter(Boolean).slice(0, 12).join(', ');
-      throw new Error(`no semantic element matched "${query}"${labels ? `; visible labels include: ${labels}` : ''}`);
+      const siblings = this.siblingWindows
+        .map(w => `${w.windowId}${w.title ? ` ("${w.title}")` : ''}`)
+        .slice(0, 4).join(', ');
+      throw new Error(`no semantic element matched "${query}"${labels ? `; visible labels include: ${labels}` : ''}`
+        + (siblings
+          ? `. ${target.app || 'This app'} has other window(s): ${siblings} — if what you named is on one of those, call focus with app="${target.app}" and windowId=<id>, then observe.`
+          : ''));
     }
     const top = ranked.ranked[0];
     if (ranked.ambiguous || ranked.confidence === 'low') {
@@ -2881,10 +3180,42 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
    * windows correctly fall through. Anything the probe cannot answer leaves the click alone —
    * a guard that cannot see must not veto.
    */
+  /**
+   * Is the target window actually on the Space the user is looking at?
+   *
+   * A window capture happily photographs a window parked on an inactive Space or behind a fullscreen
+   * app, but a synthesized CGEvent goes to screen COORDINATES — so the model reasons about a picture
+   * of one app and the click lands in whatever occupies that rectangle on the visible Space.
+   * Measured live: with ChatGPT fullscreen, every click aimed at a Notes row was delivered into
+   * ChatGPT, selecting its text, while the receipt reported the click as owned by Notes.
+   *
+   * `is_on_screen` is the right signal and was verified to mean what is needed here rather than
+   * assumed: with two apps on the active Space, the BACKGROUND one still reports true (so ordinary
+   * click-behind-a-window is not refused), while windows on another Space, minimized, or hidden
+   * report false. Only a positive false refuses; silence leaves the click alone.
+   */
+  private async targetWindowOffScreen(target: ComputerTarget): Promise<boolean> {
+    if (!target.pid || !target.windowId) return false;
+    try {
+      const data = await this.call('list_windows', { pid: target.pid });
+      const windows: any[] = Array.isArray(data?.windows) ? data.windows : [];
+      const window = windows.find((w: any) => Number(w?.window_id) === target.windowId);
+      return window?.is_on_screen === false;
+    } catch { return false; }
+  }
+
   private async ensureTargetReceivesPoint(
     target: ComputerTarget, point: { x: number; y: number }, frame: Frame | null,
     expectedElement?: ObservedElement,
   ): Promise<PointPreflight> {
+    if (await this.targetWindowOffScreen(target)) {
+      throw new Error(
+        `${target.app || `pid ${target.pid}`} window ${target.windowId} is not on the active Space — it is behind a fullscreen app, minimized, or on another desktop. `
+        + 'The screenshot still shows it because a window capture ignores Spaces, but a physical click goes to screen coordinates and would land in whatever app is actually visible there. '
+        + `Call focus with app="${target.app || ''}" to bring it to the visible Space, observe again, then retry. `
+        + 'To act WITHOUT bringing it forward, use deliveryMode="background" with a NAMED target (query/elementToken/elementIndex) so the input routes through accessibility — background delivery aimed at a bare x/y still has to synthesize a real cursor event and is refused here for the same reason.',
+      );
+    }
     const recipientAt = async (): Promise<{ pid: number; name: string; windowId: number; topName: string; chain: NativeElementReceipt[] } | null> => {
       try {
         const probe = await this.fallback.run({ action: 'window_at', x: point.x, y: point.y });
@@ -2978,9 +3309,88 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       if (who.pid === target.pid) return validateElement(who);
     }
 
-    throw new Error(`${who.name || `pid ${who.pid}`} is on top of (${point.x},${point.y}), so the click would land there `
+    throw new OccludedPointError(
+      `${who.name || `pid ${who.pid}`} is on top of (${point.x},${point.y}), so the click would land there `
       + `instead of in ${target.app || `pid ${target.pid}`}. The screenshot does not show it, because a window capture `
-      + `excludes whatever covers the window. Move or close that window (or use arrange to place them side by side), then re-observe.`);
+      + `excludes whatever covers the window. Move or close that window (or use arrange to place them side by side), then re-observe.`,
+      { pid: who.pid, name: who.name },
+    );
+  }
+
+  /**
+   * Activate a semantically resolved element through Accessibility because the physical point is
+   * covered by another window.
+   *
+   * The pixel route and the element identity fail independently: an overlay blocks the former and
+   * leaves the latter untouched. Refusing the whole click in that situation strands a target the OS
+   * can still activate, which is what made an occluded control permanently unreachable.
+   *
+   * This mechanism is genuinely weaker than a real CGEvent — measured, native AX activation reports a
+   * no-op in some apps — so it is never trusted on the driver's return alone. The post-action frame
+   * must actually differ; when it does not, the original occlusion refusal is raised WITH the fact
+   * that activation changed nothing. An honest failure, never a false success.
+   */
+  private async clickThroughAccessibility(input: {
+    target: ComputerTarget;
+    cwd: string;
+    session: string;
+    driver: string;
+    cmd: DesktopCommand;
+    args: Record<string, unknown>;
+    handle: { element_token: string } | { element_index: number };
+    occlusion: OccludedPointError;
+    resolvedLabel: string;
+    targeting: DesktopResult['targeting'];
+    expectedElement?: ObservedElement;
+  }): Promise<DesktopResult> {
+    const { target, cwd, session, driver, cmd, args, handle, occlusion } = input;
+    const { resolvedLabel, targeting, expectedElement } = input;
+    const named = resolvedLabel || cmd.query || 'the target';
+    const occluder = occlusion.occluder.name
+      || (occlusion.occluder.pid ? `pid ${occlusion.occluder.pid}` : 'another window');
+    const failed = (why: string) => new Error(`${occlusion.message} Accessibility activation of `
+      + `"${named}" was attempted instead and ${why}`);
+
+    const axArgs: Record<string, unknown> = { ...args, ...handle };
+    delete axArgs.x;
+    delete axArgs.y;
+    const data = await this.call('click', axArgs);
+    if (data?.ok === false) {
+      throw failed(`failed: ${data.error || data.summary || 'no reason reported'}`);
+    }
+    const evidence = await this.postActionEvidence(target, cwd, session);
+    this.synthesizeStatefulClickPostcondition(expectedElement, evidence);
+    if (evidence.progressCheck && !evidence.progressCheck.frameChanged) {
+      throw failed('changed nothing on screen, so the click did not happen. Move or close the '
+        + 'covering window, then click the visible control.');
+    }
+    this.lastMechanismChoice = 'accessibility';
+    return {
+      ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
+      details: { path: 'accessibility-activation', occludedBy: occlusion.occluder, result: data },
+      actionReceipt: {
+        kind: 'pointer',
+        target: {
+          app: target.app, pid: target.pid, windowId: target.windowId,
+          element: expectedElement?.label || expectedElement?.value, role: expectedElement?.role,
+        },
+        preflight: {
+          recipientPid: occlusion.occluder.pid,
+          recipientApp: occlusion.occluder.name,
+          // The physical point demonstrably belonged to someone else. Recording that honestly is the
+          // point of the receipt; what changed is that delivery no longer depended on the point.
+          windowMatched: false,
+          reason: `physical point was covered by ${occluder}, so the named element was activated through accessibility instead`,
+        },
+        commit: { delivered: true, recipientApp: target.app },
+        ...(evidence.actionResult?.postcondition ? { postcondition: evidence.actionResult.postcondition } : {}),
+      },
+      targeting,
+      ...evidence,
+      summary: `${occluder} covers that point, so "${named}" was activated through accessibility instead `
+        + `of the physical cursor — no pointer moved, and the screen changed. Confirm the intended result `
+        + `in the attached frame before calling the task done.`,
+    };
   }
 
   private verifyPhysicalClick(target: ComputerTarget, requested: { x: number; y: number }, result: DesktopResult): void {
@@ -3101,7 +3511,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
   }
 
   private screenshotPath(cwd: string): string {
-    const dir = path.join(cwd, '.bimax', 'computer');
+    const dir = this.persistenceSessionId
+      ? path.join(this.sessionStorageDir(cwd), 'frames')
+      : this.sessionStorageDir(cwd);
     fs.mkdirSync(dir, { recursive: true });
     sweepShots(dir);
     return path.join(dir, `window-${Date.now()}.png`);
@@ -3210,12 +3622,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     target: ComputerTarget,
     cwd: string,
     session: string,
-    cmd: Pick<DesktopCommand, 'action' | 'query' | 'maxElements' | 'includeScreenshot'>,
+    cmd: Pick<DesktopCommand, 'action' | 'query' | 'maxElements' | 'includeScreenshot' | 'focusIfBackground'>,
     windowReconcileAttempt = 0,
     windowAcquireAttempt = 0,
+    focusAttempt = 0,
   ): Promise<DesktopResult> {
     if (!target.windowId) throw new Error('observe needs pid + windowId; open or select an application window first');
-    this.watchTargetAccessibility(target);
+    phaseTrace.sync('watch_accessibility', () => this.watchTargetAccessibility(target));
     const screenshot = this.screenshotPath(cwd);
     const maxElements = Math.max(1, Math.min(2000, Math.floor(cmd.maxElements ?? 60)));
     // macOS exposes the application menu tree alongside the window. Traverse deeply, then remove
@@ -3242,29 +3655,84 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const DRIVER_MAX_SCAN = 2000;
     // Chromium apps publish a placeholder tree until asked; do it before the scan, not after, or
     // this observation is the thin one and the model acts on it.
-    await this.enableRichAccessibility(target.pid);
+    await phaseTrace.time('ax_enable', () => this.enableRichAccessibility(target.pid));
     const firstScan = Math.min(DRIVER_MAX_SCAN, cmd.query
       ? Math.max(180, maxElements)
       : Math.max(120, maxElements));
+    // The driver's own `query` parameter is deliberately NOT forwarded. It does not widen or narrow
+    // the element walk — measured at caps 180 and 600 in Notes, the returned `element_index` set is
+    // identical with and without it — but it replaces `tree_markdown` with just the matched node's
+    // ancestry: 367 lines became 8. That tree is the only place AXStaticText leaves appear, and
+    // folding them onto their container is what gives an anonymous list row its name, so forwarding
+    // the query destroyed every name EXCEPT the one being searched for.
+    //
+    // The cost fell on the frame the model plans its NEXT action from. `postActionEvidence` re-
+    // observes with the active expectation as its query, so after any action carrying `expect` the
+    // whole element map came back as bare `ICMNoteListCell` — 46 indistinguishable rows — and the
+    // following click by name resolved to the OCR twin or refused as ambiguous. Nothing here needs
+    // the driver to do the matching: `verification`, the match ordering below and the semantic
+    // resolver all run locally over the elements this walk returns.
     const requestWindowState = (cap: number) => this.call('get_window_state', {
       pid: target.pid,
       window_id: target.windowId,
       session,
       include_screenshot: cmd.includeScreenshot !== false,
       screenshot_out_file: screenshot,
-      ...(cmd.query ? { query: cmd.query } : {}),
       max_elements: cap,
     });
-    const menuRoles = new Set(['AXMenuBar', 'AXMenuBarItem', 'AXMenu', 'AXMenuItem']);
+    // An OPEN menu is part of the window's surface; the app's static menu BAR is not.
+    //
+    // Every menu role used to be dropped here, which made right-click context menus invisible to the
+    // model — the one thing a right-click exists to produce. Measured live in Finder on 2026-08-06,
+    // both halves of that:
+    //
+    //   * the menu is NOT a separate window. list_windows returned 55 windows before the right-click
+    //     and the same 55 after, no new entry. It arrives inside the owned window's own element list
+    //     (`AXWindow > AXList("icon view") > AXMenu`), which this observation already fetches.
+    //   * dropping every menu role was the only reason it was unusable. The raw payload carried the
+    //     real thing: AXMenu at 269x509+587+125 with AXMenuItem children labelled Open, Open With,
+    //     Always Open With — frames and names, ready to click.
+    //
+    // The blanket filter still had a real job, so it is narrowed rather than removed: the same
+    // payload carries Finder's whole menu bar, 380 nodes against the window's 28 rows, and surfacing
+    // that would bury the window's actual controls.
+    //
+    // The separator is layout state, and it is exact. macOS lays a menu out only while it is open,
+    // so a frame IS the proof it is on screen: with nothing open 321 of 330 menu nodes had no frame
+    // at all, with the context menu open 33 gained one, and after Escape it fell back to 9. The nine
+    // that always have one are the menu bar and its top-level titles, filtered by role below.
+    //
+    // Stating it as "laid out" rather than "is a context menu" is what makes it universal. A menu-bar
+    // menu the user pulls down is also laid out only while open, so File > Save As surfaces through
+    // this same test with no rule of its own — and when no menu is open anywhere, nothing survives
+    // and every observation is byte-for-byte what it was before.
+    const menuChromeRoles = new Set(['AXMenuBar', 'AXMenuBarItem']);
+    const openableMenuRoles = new Set(['AXMenu', 'AXMenuItem']);
+    const keepsMenuElement = (element: any): boolean => {
+      const role = String(element?.role || '');
+      if (menuChromeRoles.has(role)) return false;
+      if (!openableMenuRoles.has(role)) return true;
+      if (!elementFrame(element)) return false;
+      // A separator is an AXMenuItem with no name of any kind. It activates nothing, so offering it
+      // would cost a turn to discover that — and describeUnlabeledControls would otherwise hand it a
+      // positional placeholder that reads exactly like a real command.
+      return role !== 'AXMenuItem' || ELEMENT_TEXT_KEYS.some(key => String(element?.[key] || '').trim());
+    };
     // Describe the blanks only AFTER the generic-label pass, so a control that enrichControlLabels
     // could name from its row keeps that real name instead of a positional placeholder.
-    const windowElementsOf = (raw: any[]) => describeUnlabeledControls(enrichControlLabels(
-      raw.filter((element: any) => !menuRoles.has(String(element?.role || ''))),
+    // Fold the tree's text onto its containers FIRST. The driver's `elements` omit AXStaticText
+    // leaves entirely — they are not addressable — so a list row arrives anonymous or carrying its
+    // AX identifier, and both later passes would then paper over it: enrichControlLabels only
+    // rewrites labels it considers generic, and describeUnlabeledControls would replace a real name
+    // it never saw with a positional placeholder. Naming from the tree first means those passes only
+    // handle what genuinely has no text anywhere.
+    const windowElementsOf = (raw: any[], tree: string) => describeUnlabeledControls(enrichControlLabels(
+      foldTreeTextIntoElements(raw, tree).filter(keepsMenuElement),
     ));
     const scanCaps: number[] = [];
     const requestMeasured = async (cap: number) => {
       scanCaps.push(cap);
-      return requestWindowState(cap);
+      return phaseTrace.time(`driver:get_window_state(cap=${cap})`, () => requestWindowState(cap));
     };
     const rawContainsQuery = (elements: any[]): boolean => {
       const needle = String(cmd.query || '').trim().toLocaleLowerCase();
@@ -3272,9 +3740,17 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     };
     let scanElements = firstScan;
     let data = await requestMeasured(scanElements);
-    let rawElements: any[] = withoutWindowChrome(sanitizeDriverElements(Array.isArray(data?.elements) ? data.elements : []));
-    let windowElements = windowElementsOf(rawElements);
-    // A named target gets a progressive search. Common controls resolve in the cheap pass; a target
+    let rawElements: any[] = phaseTrace.sync('sanitize_elements', () => withoutWindowChrome(sanitizeDriverElements(Array.isArray(data?.elements) ? data.elements : [])));
+    let windowElements = phaseTrace.sync('enrich_labels', () => windowElementsOf(rawElements, String(data?.tree_markdown || '')));
+    // A retry at a DELIBERATELY NARROWER cap used to sit here, on the theory that a wider element
+    // walk truncates the tree and deletes the names it was widening to find. That theory was wrong,
+    // and the measurement that replaced it is worth keeping: tree coverage grows monotonically with
+    // the cap. Named rows in Notes went 9 (cap 80), 16 (120), 25 (180), 35 (260), 52 (400), 77 (600),
+    // 127 (1000) — never a collapse. The collapse the retry was chasing came entirely from
+    // forwarding `query` to the driver, which is fixed at the request above, so scanning narrower
+    // buys strictly less evidence for an extra round trip and the retry is gone.
+    //
+    // A named target instead gets a progressive search. Common controls resolve in the cheap pass; a target
     // below the fold/tree boundary pays for 600 and then 2000 nodes only when the prior pass was
     // actually truncated. maxElements=2000 is also the explicit exhaustive/absence-proof path.
     if (cmd.query && !rawContainsQuery(windowElements) && scanElements < DRIVER_MAX_SCAN && rawElements.length >= scanElements) {
@@ -3284,7 +3760,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         scanElements = cap;
         data = await requestMeasured(scanElements);
         rawElements = withoutWindowChrome(sanitizeDriverElements(Array.isArray(data?.elements) ? data.elements : []));
-        windowElements = windowElementsOf(rawElements);
+        windowElements = windowElementsOf(rawElements, String(data?.tree_markdown || ''));
         if (rawContainsQuery(windowElements) || rawElements.length < scanElements) break;
       }
     }
@@ -3294,7 +3770,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     if (windowElements.length === 0 && rawElements.length >= scanElements && scanElements < DRIVER_MAX_SCAN) {
       data = await requestMeasured(DRIVER_MAX_SCAN);
       rawElements = withoutWindowChrome(sanitizeDriverElements(Array.isArray(data?.elements) ? data.elements : []));
-      windowElements = windowElementsOf(rawElements);
+      windowElements = windowElementsOf(rawElements, String(data?.tree_markdown || ''));
     }
     // A walk that yields not one window element has not observed the window — it has observed the
     // application's menu bar. That is a FAILED WINDOW ACQUISITION, not a thin tree: the window this
@@ -3315,6 +3791,34 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           return this.observeTarget(target, cwd, session, cmd, windowReconcileAttempt, 1);
         }
       } catch { /* fall through to the honest degraded observation below */ }
+    }
+    // A menu-only walk is usually not an AX-silent window — it is a BACKGROUND app. Measured
+    // 2026-07-31 against driver 0.12.3, one window, one cap, nothing else varied:
+    //   Terminal in background → 355 elements, 355 of them menu roles, 0 window elements
+    //   Terminal frontmost     → 365 elements, 9 window elements including its AXWindow
+    // windowElementsOf strips the menu roles, so the background read lands here with zero and the
+    // observation is rebuilt from OCR. That is how a healthy window returns a vision-only frame with
+    // no handles, and why the degraded summary's "observing again will not produce handles for this
+    // window" was actively false — observing again AFTER a focus does produce them.
+    //
+    // Neither escalation above can reach this: the walk was not truncated (355 < cap), so the
+    // ceiling rescan is skipped, and the window id is perfectly valid, so re-acquisition is a no-op.
+    //
+    // Focus is a visible side effect, so only observations made ON BEHALF OF AN ACTION take it
+    // (post-action evidence, semantic re-grounding) — those are already driving this app and cannot
+    // use a menu-only frame for anything. A user-issued observe never steals focus; it reports the
+    // cause instead, via the summary and guidance below.
+    let backgroundAppBlockedWalk = '';
+    if (windowElements.length === 0 && target.app) {
+      backgroundAppBlockedWalk = await this.frontmostMismatch(target.app);
+      if (backgroundAppBlockedWalk && cmd.focusIfBackground && focusAttempt === 0) {
+        try {
+          try { await this.call('bring_to_front', { pid: target.pid, window_id: target.windowId }); }
+          catch { await this.fallback.run({ action: 'open', app: target.app }); }
+          await waitUntil(async () => !(await this.frontmostMismatch(target.app!)), { timeoutMs: 900, intervalMs: 40 });
+          return this.observeTarget(target, cwd, session, cmd, windowReconcileAttempt, windowAcquireAttempt, 1);
+        } catch { /* fall through and report the cause rather than pretending the tree is silent */ }
+      }
     }
     const screenshotFile = String(data?.screenshot_file_path || screenshot);
     let pngDimensions: { width: number; height: number } | null = null;
@@ -3354,7 +3858,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     let cgFrame: Frame | null = null;
     let liveWindows: any[] = [];
     try {
-      const wins = await this.call('list_windows', { pid: target.pid });
+      const wins = await phaseTrace.time('driver:list_windows', () => this.call('list_windows', { pid: target.pid }));
       liveWindows = Array.isArray(wins?.windows) ? wins.windows : [];
       const win = liveWindows
         .find((candidate: any) => Number(candidate?.window_id) === Number(target.windowId));
@@ -3378,7 +3882,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     if (windowReconcileAttempt === 0 && cgFrame && target.windowId) {
       try {
         const centre = frameCenter(cgFrame);
-        const probe = await this.fallback.run({ action: 'window_at', x: centre.x, y: centre.y });
+        const probe = await phaseTrace.time('helper:window_at', () => this.fallback.run({ action: 'window_at', x: centre.x, y: centre.y }));
         const hit = probe.windowAt;
         const liveId = Number(hit?.window_id || hit?.top_window_id || 0);
         const sameProcess = Number(hit?.owner_pid || 0) === target.pid;
@@ -3422,7 +3926,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       && !!this.observedWindowFrame && !!screenshotWidth && !!screenshotHeight
       && this.fallback.quickStatus().driver.startsWith('native-helper');
     if (canSampleVisuals) {
-      const candidates = windowElements.map((element: any, order: number) => {
+      const candidates = phaseTrace.sync('visual_candidates', () => windowElements.map((element: any, order: number) => {
         const frame = elementFrame(element);
         const screenshotFrame = frame && globalFrameToScreenshot(
           frame,
@@ -3433,7 +3937,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       }).filter(candidate => candidate.screenshotFrame)
         .sort((a, b) => Number(ACTIONABLE_AX_ROLES.has(String(b.element?.role || '')))
           - Number(ACTIONABLE_AX_ROLES.has(String(a.element?.role || ''))) || a.order - b.order)
-        .slice(0, 120);
+        .slice(0, 120));
       const regions = candidates.map((candidate, index) => ({
         id: `visual-${index}`,
         x: candidate.screenshotFrame!.x, y: candidate.screenshotFrame!.y,
@@ -3441,9 +3945,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       }));
       if (regions.length) {
         try {
-          const sampled = await this.fallback.run({
+          const sampled = await phaseTrace.time(`helper:visual_signatures(${regions.length})`, () => this.fallback.run({
             action: 'visual_signatures', imagePath: screenshotFile, regions,
-          });
+          }));
           const byId = new Map((sampled.visualSignatures || []).map(signature => [String(signature.id || ''), signature]));
           const surfaceKey = `${target.pid}:${target.windowId}`;
           const previous = this.visualHistory.get(surfaceKey) || new Map<string, VisualFingerprint>();
@@ -3495,7 +3999,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     const exposesReadableText = windowElements.some((element: any) =>
       readableTextRoles.has(String(element?.role || '')) || String(element?.value ?? '').trim().length > 0);
     const outputInvisible = actionableCount > 0 && !exposesReadableText;
-    if (canSampleVisuals && (nativeQueryMissing || thinUnnamedTree || outputInvisible)) {
+    // The most degraded tree of all — NO elements whatsoever — used to trigger nothing, because
+    // every test above measures the quality of elements that exist. `thinUnnamedTree` needs at least
+    // four unnamed actionables and `outputInvisible` needs actionableCount > 0, so a window that
+    // publishes an empty tree scored as healthy and the observation returned zero targets with no
+    // fallback attempted. Measured on the ChatGPT desktop app: System Events confirms the window has
+    // no UI elements at all, the AX opt-ins are refused (-25205 / -25208 on macOS 26.5), and the
+    // model was handed an empty element list for a window full of visible, readable content.
+    //
+    // An app that publishes nothing is exactly the case vision exists for. Any AX-opaque surface —
+    // a web-view app, a canvas, a game, a remote desktop, a video player — lands here.
+    const emptyTree = windowElements.length === 0;
+    if (canSampleVisuals && (nativeQueryMissing || thinUnnamedTree || outputInvisible || emptyTree)) {
       foveatedTriggered = true;
       const shapeRegions = unnamedActionables.map((element: any, index: number) => {
         const global = elementFrame(element);
@@ -3509,9 +4024,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         ...shapeRegions,
       ];
       try {
-        const analysed = await this.fallback.run({
+        const analysed = await phaseTrace.time(`helper:visual_analysis(${regions.length})`, () => this.fallback.run({
           action: 'visual_analysis', imagePath: screenshotFile, regions, query: cmd.query,
-        });
+        }));
         const vision = analysed.visualAnalysis;
         const texts = (vision?.texts || []).filter(item =>
           typeof item?.text === 'string' && item.text.trim() && Number(item.confidence) >= 0.3);
@@ -3560,7 +4075,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // A model-visible Safari index could consequently resolve to a global "Calculator" menu item
     // from the same raw AX walk: the screenshot and action registry described different worlds.
     // Iterate the filtered/enriched window collection only, so an unseen element is unaddressable.
-    for (const windowElement of windowElements as any[]) {
+    phaseTrace.sync('index_elements', () => { for (const windowElement of windowElements as any[]) {
       const element = (windowElement?.element_token && enrichedByToken.get(String(windowElement.element_token)))
         || (windowElement?.element_index != null && enrichedByIndex.get(Number(windowElement.element_index)))
         || windowElement;
@@ -3576,11 +4091,12 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         visual: element?.visual as VisualFingerprint | undefined,
         visualDelta: element?.visual_delta as VisualDelta | undefined,
         visualOnly: element?.visual_only === true,
+        axActions: Array.isArray(element?.ax_actions) ? element.ax_actions as string[] : undefined,
       };
       if (element?.element_token) this.indexedElements.set(`token:${element.element_token}`, safe);
       if (element?.element_index != null) this.indexedElements.set(`index:${Number(element.element_index)}`, safe);
       this.observedElements.push(safe);
-    }
+    } });
     const verificationQuery = cmd.query?.trim() || '';
     const queryNeedle = verificationQuery.toLocaleLowerCase();
     const matchesQuery = (element: any) => !!queryNeedle
@@ -3599,9 +4115,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         // refuses to reason about them. Return no targets and let the screenshot be the truth, which
         // is what the degraded guidance already instructs.
         : []);
-    const elements = orderedElements.slice(0, maxElements).map((element: any) => {
+    const elements = phaseTrace.sync('serialize_elements', () => orderedElements.slice(0, maxElements).map((element: any) => {
       const compact: Record<string, unknown> = {};
-      for (const key of ['element_index', 'element_token', 'role', 'label', 'context_label', 'value', 'description', 'enabled', 'focused', 'editable', 'frame']) {
+      for (const key of ['element_index', 'element_token', 'role', 'label', 'context_label', 'value', 'description', 'enabled', 'focused', 'editable', 'label_source', 'frame']) {
         if (element?.[key] === undefined || element?.[key] === null || element?.[key] === '') continue;
         if (key === 'frame' && this.observedWindowFrame && screenshotWidth && screenshotHeight) {
           compact.frame = globalFrameToScreenshot(
@@ -3613,9 +4129,18 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       const visual = compactVisualEvidence(element?.visual, element?.visual_delta);
       if (visual) compact.visual = visual;
       if (element?.visual_only === true) compact.source = 'on_device_vision';
+      // Say up front when a control cannot be activated in the background, so the caller can CHOOSE
+      // foreground rather than spend a turn discovering it. Emitted only when the tree published an
+      // action list that lacks `press` — silence stays silent, and the full list is left off the wire
+      // because "press or not" is the only part that changes what a caller can do.
+      // The window itself is not a click target — it publishes `raise` and nothing else by nature, so
+      // flagging it would only tell a caller to "use foreground" for something nobody clicks.
+      if (Array.isArray(element?.ax_actions) && element.ax_actions.length
+        && !element.ax_actions.includes('press')
+        && String(element?.role || '') !== 'AXWindow') compact.background_activatable = false;
       return compact;
-    });
-    const treeLines = String(data?.tree_markdown || '').split('\n');
+    }));
+    const treeLines = phaseTrace.sync('tree_markdown', () => String(data?.tree_markdown || '').split('\n'));
     const tree = treeLines.length > 120
       ? `${treeLines.slice(0, 120).join('\n')}\n… ${treeLines.length - 120} more tree lines omitted; observe with query for a narrower view`
       : treeLines.join('\n');
@@ -3626,24 +4151,25 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // Refresh the surface's bounds from the geometry we just observed, so window moves/resizes keep
     // the tracked surface (and any PiP built on it) aligned with the real window.
     const activeTarget = this.targets.current();
-    if (activeTarget?.pid === target.pid && activeTarget.windowId === target.windowId) this.syncSurface();
-    const frameHash = cmd.includeScreenshot === false ? undefined : this.screenshotHash(screenshotFile);
+    if (activeTarget?.pid === target.pid && activeTarget.windowId === target.windowId) phaseTrace.sync('sync_surface', () => this.syncSurface());
+    const frameHash = cmd.includeScreenshot === false ? undefined : phaseTrace.sync('screenshot_hash', () => this.screenshotHash(screenshotFile));
     // Any fresh frame becomes the baseline the next action's outcome is judged against.
     if (frameHash) this.prevFrameHash = frameHash;
     // Mint the frame identity this observation's coordinates belong to. Every acting verb planned
     // from this picture is checked against it, so a stale frame of the SAME window is caught rather
     // than silently clicking whatever now occupies those pixels.
-    const frame = this.mintFrame({
+    const frame = phaseTrace.sync('mint_frame', () => this.mintFrame({
       captureKind: 'window', target, frameHash,
       bounds: this.observedWindowFrame,
       image: { width: screenshotWidth, height: screenshotHeight },
-    });
+    }));
     // Everything through frame minting is represented by this observation. Only a later event may
     // invalidate it; taking the baseline earlier would race the AX/tree and screenshot reads.
     this.observedAxEventEpoch = this.axEventEpoch;
     // The observation is complete, so this is the first moment the evidence exists to judge whether
     // background delivery can drive this app at all.
-    const backgroundEscalation = this.noteBackgroundViability(target.app, await this.defaultDelivery({ action: 'observe' } as DesktopCommand));
+    const backgroundEscalation = this.noteBackgroundViability(target.app,
+      await phaseTrace.time('default_delivery', () => this.defaultDelivery({ action: 'observe' } as DesktopCommand)));
     // Deliberately NOT auto-activating here. Fronting the app inside an observation was tried and
     // measured: bring_to_front succeeded, the tree stayed Vision-only, and the result was one more
     // fallback that mostly did not work. The honest, useful thing an observation can do is name the
@@ -3680,6 +4206,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         windowPreparationNotice(windowElements, screenshotWidth, screenshotHeight) || '',
         visualSampled ? 'Element RGB labels are sRGB-normalized supporting evidence; combine them with native label, role, geometry, and a fresh screenshot rather than clicking by colour alone.' : '',
         foveatedTriggered ? 'Items marked source=on_device_vision were discovered from screenshot pixels. They can propose a target, but input is still refused unless the native hit-test receipt confirms the live app, label/role context, and geometry.' : '',
+        backgroundAppBlockedWalk ? `This window exposed no accessibility content because ${backgroundAppBlockedWalk} is frontmost, not ${target.app || 'the target app'}. Do not conclude the app has a thin tree and do not fall back to clicking OCR pixels: focus the target app, then observe again.` : '',
       ].filter(Boolean).join(' '),
       elements, tree, degraded, verification,
       summary: verification
@@ -3689,7 +4216,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // reads as advice about reading, so the model kept reaching for elementIndex anyway and then
           // followed the stale-handle error into an observe→click→observe loop. Naming the two
           // targeting modes that survive a vision-only frame is what actually redirects it.
-          ? `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: native text is degraded, so this frame has NO element indexes or tokens — target by query="<visible label>" or by x/y read from the attached screenshot, which is the source of truth. Observing again will not produce handles for this window`
+          ? (backgroundAppBlockedWalk
+            ? `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: its accessibility walk returned only this app's menu bar because ${backgroundAppBlockedWalk} is frontmost, so this frame has NO element indexes or tokens and its labels come from OCR. This is a FOCUS problem, not a silent tree — focus ${target.app || `pid ${target.pid}`} and observe again to get real handles`
+            : `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: native text is degraded, so this frame has NO element indexes or tokens — target by query="<visible label>" or by x/y read from the attached screenshot, which is the source of truth. Observing again will not produce handles for this window`)
           : `observed ${target.app || `pid ${target.pid}`} window ${target.windowId}: fresh screenshot + ${elements.length} optional native targets`,
     };
     return cmd.includeScreenshot === false
@@ -3720,6 +4249,11 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         // Proving absence requires exhausting the tree; presence can use the progressive query path.
         maxElements: expectation?.mode === 'absent' ? 2000 : POST_ACTION_ELEMENT_BUDGET,
         ...(expectation ? { query: expectation.query } : {}),
+        // A foreground click that hands focus to another app makes the post-action walk menu-only,
+        // which reads as "the effect vanished" and fails every postcondition. Re-focus once for an
+        // explicitly foreground operation. Background delivery must remain background even when
+        // that means returning an AX-thin/degraded observation.
+        focusIfBackground: allowsEvidenceFocus(this.activeDelivery),
       });
       // The observation may reconcile the initially selected same-app window to another
       // WindowServer surface. Its returned pixels/frame are final: keep ownership and the action
@@ -3736,10 +4270,16 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         refreshed.windowId = evidenceWindowId;
         this.targets.retargetWindow(refreshed.pid, evidenceWindowId);
       }
+      // `observed.verification` answers "did the SEARCH query appear", which is a substring test and
+      // the right contract for observe. A postcondition is a different question and gets the real
+      // evaluator, judged against the full post-action population rather than the capped list.
+      const expectationCheck = expectation
+        ? evaluateExpectation(expectation.query, JSON.stringify(this.observedElements))
+        : null;
       const desiredAfter = expectation
         ? expectation.mode === 'present'
-          ? observed.verification?.matched === true
-          : observed.verification?.matched === false
+          ? expectationCheck!.matched
+          : !expectationCheck!.matched && !expectationCheck!.indeterminate
         : undefined;
       // Expectations prove effects, not static screen contents. Without this transition check a
       // model can click an arbitrary old conversation and use an already-visible message as proof
@@ -3747,6 +4287,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       const expectationMatched = expectation
         ? desiredAfter === true && !expectation.desiredBefore
         : undefined;
+      // A transition that failed because the text was ALREADY there is a real, decidable miss, so
+      // indeterminacy is only ever inherited from the evaluator itself.
+      const expectationIndeterminate = !!expectationCheck?.indeterminate;
       // Judge against the FULL post-action population, not the serialized `observed.elements`: that
       // list is capped and reordered for the model, so an error dialog past the cap would be invisible
       // here, and it drops `originalLabel` — the only way to tell an app-supplied "Close" from one
@@ -3760,6 +4303,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         targetWindowId: evidenceWindowId, actualWindowId: observed.windowId,
         queryMatched: expectationMatched,
         queryRequired: !!expectation,
+        queryIndeterminate: expectationIndeterminate,
         observedFailure: observedFailure || undefined,
       });
       const verb = this.activeAction || 'action';
@@ -3778,7 +4322,13 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       // A proven per-action postcondition is progress, not proof that the user's entire multi-step
       // task is finished. Feed it as changed so the task-level recovery controller never latches a
       // premature stop-success after an intermediate step.
-      const recoveryOutcome = progressCheck.outcome === 'confirmed' ? 'changed' : progressCheck.outcome;
+      // An unjudgeable postcondition is not evidence of failure, so it must not spend the recovery
+      // budget either. Feed the frame-level truth instead: the action either changed the screen or
+      // it did not, and the model decides from the attached frame.
+      const recoveryOutcome = progressCheck.outcome === 'confirmed' ? 'changed'
+        : progressCheck.outcome === 'expectation-indeterminate'
+          ? (progressCheck.frameChanged ? 'changed' : 'no-change')
+          : progressCheck.outcome;
       const recoveryDecision: RecoveryDecision = countsForProgress ? this.recovery.record(recoveryOutcome) : 'continue';
       const recoveryHint = recoveryDecision === 'stop-failure'
         ? `no visible progress after repeated attempts — stopping to avoid a loop; re-observe (screenshot/observe) and target a different element, or ask the user`
@@ -3786,6 +4336,8 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           ? `cheap recovery options are exhausted — re-observe and try a clearly different approach, or ask the user before continuing`
           : progressCheck.outcome === 'expectation-missed'
             ? `the requested semantic postcondition was not found in the fresh frame — inspect the returned candidates and recover instead of repeating the same action`
+          : progressCheck.outcome === 'expectation-indeterminate'
+            ? `expect="${expectation?.query || ''}" describes a state instead of naming text that appears on screen${expectationCheck?.missing.length ? ` (not in this frame: ${expectationCheck.missing.slice(0, 6).join(', ')})` : ''}, so it proves nothing either way. Read the attached frame to decide, and do NOT repeat a delivered action on the strength of this — for a send/submit that would commit it twice. Next time pass the exact text that will appear.`
           : progressCheck.outcome === 'rejected'
             ? `the application explicitly rejected this operation${observedFailure ? `: ${observedFailure}` : ''}; dismiss the error and choose a different supported approach`
           : this.noChangeStreak >= 3
@@ -3796,6 +4348,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           ? `${expectation.desiredBefore ? 'new ' : ''}absence of "${expectation.query}"`
           : `${expectation.desiredBefore ? 'new ' : ''}presence of "${expectation.query}"`,
         matched: expectationMatched === true,
+        ...(expectationIndeterminate ? { indeterminate: true } : {}),
       } : undefined;
       return {
         // The post-action capture SUPERSEDES the frame the action was planned from, so the caller
@@ -3899,9 +4452,11 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     for (let attempt = 0; attempt < 4; attempt++) {
       const data = await this.call('list_windows', { pid: target.pid });
       windows = Array.isArray(data?.windows) ? data.windows : [];
-      // `is_on_screen=false` does not mean "not a real window". It is also how WindowServer
-      // reports an ordinary app window while the app is hidden/minimized or another app owns the
-      // foreground — precisely the state background delivery is designed to operate. Reject by
+      // `is_on_screen=false` does not mean "not a real window". It is how WindowServer reports an
+      // ordinary app window that is hidden, minimized, or on another Space — precisely the state
+      // background delivery is designed to operate in. (It is NOT merely "another app is in front":
+      // a window sitting behind another app on the ACTIVE Space still reports true, which is what
+      // makes the signal usable as the Space guard in ensureTargetReceivesPoint.) Reject by
       // geometry first, then prefer an on-screen surface when one exists; if none does, retain the
       // real off-screen document instead of collapsing onto a 33px menu-bar/toolbar proxy.
       const usable = windows.filter((w: any) =>
@@ -3971,7 +4526,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             && rectMostlyInside(focused?.bounds, largest?.bounds);
           if (focusedIsTransientChild) focused = undefined;
         } catch { /* AX unavailable: retain the current/largest WindowServer fallback below */ }
-        const good = focused || (current && area(current) >= area(largest) * 0.5 ? current : largest);
+        // An explicit caller choice outranks every heuristic below, as long as that window is still
+        // a real, usable surface of this process.
+        const pinned = this.pinnedWindow?.pid === target.pid
+          ? selectable.find((w: any) => Number(w?.window_id) === this.pinnedWindow!.windowId)
+          : undefined;
+        const good = pinned || focused || (current && area(current) >= area(largest) * 0.5 ? current : largest);
+        // Remember the app's OTHER surfaces. An app routinely owns a main window plus a document
+        // window (Notes: the note list, and a note opened in its own window), and only one of them
+        // can be the observed target. When a semantic query then fails, "no element matched" is a
+        // dead end unless the model is told the thing it named may simply be on another window of
+        // the same app — which it cannot discover without being told to go and enumerate.
+        this.siblingWindows = selectable
+          .filter((w: any) => Number(w?.window_id || 0) && Number(w.window_id) !== Number(good?.window_id || 0))
+          .map((w: any) => ({ windowId: Number(w.window_id), title: String(w?.title || '').trim() }));
         return { ...target, windowId: Number(good?.window_id || 0) || target.windowId };
       }
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1))); // let it finish rendering
@@ -4028,6 +4596,34 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     } catch {
       return null; // no helper / no Accessibility permission — never guess a blocker into existence
     }
+  }
+
+  /**
+   * Poll briefly for a usable window before concluding the app has none.
+   *
+   * The Cmd+N recovery this gates is DESTRUCTIVE in a document app: in Notes it creates a real note
+   * in the user's library, in an editor an untitled document. A cold launch routinely has no drawn
+   * window for a few hundred milliseconds, so a single-shot check declared "no window" for an app
+   * that was merely still starting, and fired the recovery anyway. Measured across one session that
+   * never asked for a new note: Notes went from 193 notes to 195, one empty note per cold `open`.
+   *
+   * Waiting costs nothing when the window is already there — the first poll returns immediately, and
+   * only the genuinely windowless case pays. Recovery still runs for an app that really has closed
+   * its last window, which is the case it was written for.
+   */
+  private async waitForUsableTargetWindow(target: ComputerTarget, timeoutMs = 2000): Promise<boolean> {
+    // The common case costs nothing: a window that is already there answers on the first probe, with
+    // no timer at all. Only a genuinely windowless app pays the budget.
+    //
+    // Budget from measurement, not from taste: a cold Notes draws its first window 0.79s after it is
+    // ACTIVATED (it draws nothing at all while merely launched in the background, which is how
+    // `launch_app` starts it). 2s gives that ~2.5x headroom on a memory-pressured machine, while
+    // 1.5s was measured as too short — the recovery fired and created a note. Callers that have
+    // ALREADY paid this wait once (the re-check after the reopen event) pass a short budget instead,
+    // so the windowless path stays bounded rather than waiting the full grace twice.
+    if (await this.hasUsableTargetWindow(target)) return true;
+    const settled = await waitUntil(() => this.hasUsableTargetWindow(target), { timeoutMs, intervalMs: 120 });
+    return settled.settled;
   }
 
   private async hasUsableTargetWindow(target: ComputerTarget): Promise<boolean> {
@@ -4185,8 +4781,21 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       // showing only its menu/desktop proxy, or any app whose last window was closed. Ask the app
       // for a new window once (Cmd+N) and reacquire. Probed, never keyed on an app name, so every
       // app with this shape gets the same recovery.
-      if (process.platform === 'darwin' && !await this.hasUsableTargetWindow(opened)) {
-        const newWindow = await this.fallback.run({ action: 'key', combo: 'cmd+n', app: opened.app }, ctx);
+      if (process.platform === 'darwin' && !await this.waitForUsableTargetWindow(opened)) {
+        // Cmd+N is the LAST resort, because in a document app it creates user data — a note in
+        // Notes, an untitled document in an editor. Try the OS reopen event first: it asks the app
+        // to show its existing main window (applicationShouldHandleReopen) and creates nothing when
+        // a window is merely hidden or still starting. Only if that yields no window do we ask for
+        // a brand new one.
+        try { await this.fallback.run({ action: 'open', app: opened.app }, ctx); } catch { /* fall through to Cmd+N */ }
+        const reopenedWindow = await this.waitForUsableTargetWindow(opened, 1200);
+        if (reopenedWindow) {
+          opened = await this.refreshTargetWindow(opened);
+          this.targets.set(opened);
+        }
+        const newWindow = reopenedWindow
+          ? { ok: false }
+          : await this.fallback.run({ action: 'key', combo: 'cmd+n', app: opened.app }, ctx);
         if (newWindow.ok) {
           // Wait for the new window to actually exist rather than assuming 350 ms was enough.
           const created = await waitFor(
@@ -4219,9 +4828,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // controls (degraded), which the model reads as "not the right window, can't proceed". Fire the
     // native reopen event once and re-capture; if it is still unusable, WARN plainly instead of
     // claiming a clean activation.
-    const shouldReopenClosedWindow = delivery === 'foreground'
+    let shouldReopenClosedWindow = delivery === 'foreground'
       ? evidence.degraded === true || !!evidence.visualEvidenceError
       : !opened.windowId;
+    // A COLD LAUNCH makes that first capture degraded for a reason that is not "the window is
+    // closed": the app is running but has not drawn yet. Everything below escalates toward Cmd+N,
+    // which in a document app CREATES USER DATA — an empty note in Notes, an untitled document in
+    // an editor. Measured: every cold `open` of Notes added a note, so a session that never asked
+    // for one still moved the library from 193 notes to 195.
+    //
+    // So wait for the window to actually appear and capture once more before believing the first
+    // frame. This does not weaken the recovery it guards: an app whose last window really is closed
+    // never produces a usable window here, and the "zombie" case — geometry-valid window that
+    // captures zero pixels — still comes back degraded from the second capture and still escalates.
+    if (shouldReopenClosedWindow && delivery === 'foreground' && await this.waitForUsableTargetWindow(opened, 1200)) {
+      evidence = await this.postActionEvidence(opened, cwd, session);
+      shouldReopenClosedWindow = evidence.degraded === true || !!evidence.visualEvidenceError;
+    }
     if (shouldReopenClosedWindow) {
       const initialCaptureWasEmpty = !!evidence.visualEvidenceError;
       const reopened = await this.reopenClosedMainWindow(opened, cwd, session, ctx, delivery);
@@ -4531,6 +5154,51 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     } catch { return false; }
   }
 
+  /**
+   * Find a RUNNING app's best window without launching anything.
+   *
+   * `focus` used to serve only apps this session had itself opened, so the very common case — the
+   * app is already running because the user left it open — dead-ended: focus refused with "not open
+   * in this session" and the only escape was `open`, which re-launches and discards the app's state.
+   * hermes-agent models focus_app as a pure window SELECTOR over `list_windows` for this reason
+   * (tools/computer_use/cua_backend.py), and that is what this is.
+   *
+   * Matching order is exact-before-substring, also from hermes: querying "Code" must not select
+   * "Visual Studio Code" merely because it happens to be in front. Among the windows that do match,
+   * the frontmost (highest `z_index`) wins, and `preferWindowId` overrides everything so a caller
+   * that already enumerated `windows` can name the exact surface it wants.
+   *
+   * Only on-screen windows are eligible: an off-screen one cannot receive foreground input at all
+   * (see the Space guard in ensureTargetReceivesPoint), so adopting one would hand back a target
+   * that refuses every subsequent click.
+   */
+  private async adoptRunningApp(app?: string, preferWindowId?: number): Promise<ComputerTarget | null> {
+    const wanted = app?.trim();
+    if (!wanted) return null;
+    let windows: any[];
+    try {
+      const data = await this.call('list_windows', {});
+      windows = Array.isArray(data?.windows) ? data.windows : [];
+    } catch { return null; }
+    const onScreen = windows.filter((w: any) => w?.is_on_screen !== false && Number(w?.pid || 0) > 0);
+    const nameOf = (w: any) => String(w?.app_name || '').trim();
+    const exact = onScreen.filter((w: any) => nameOf(w).toLocaleLowerCase() === wanted.toLocaleLowerCase());
+    const loose = onScreen.filter((w: any) => nameOf(w) && appNamesMatch(nameOf(w), wanted));
+    const candidates = exact.length ? exact : loose;
+    if (!candidates.length) return null;
+    const byWindowId = preferWindowId
+      ? candidates.find((w: any) => Number(w?.window_id) === preferWindowId)
+      : undefined;
+    // Frontmost first: cua-driver defines a higher z_index as closer to the front.
+    const ordered = [...candidates].sort((a: any, b: any) => Number(b?.z_index || 0) - Number(a?.z_index || 0));
+    const chosen = byWindowId || ordered[0];
+    return {
+      app: nameOf(chosen) || wanted,
+      pid: Number(chosen.pid),
+      windowId: Number(chosen.window_id || 0) || undefined,
+    };
+  }
+
   /** Read the pasteboard through whichever driver tier is available. */
   private async readClipboard(ctx?: { cwd?: string; signal?: AbortSignal }): Promise<ClipboardSnapshot> {
     const read = await this.fallback.run({ action: 'clipboard_read' }, ctx);
@@ -4688,7 +5356,15 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       }
       element = matched.recipient;
     }
-    if (element?.editable === false) {
+    // "Focus a text field first" is only actionable advice when the window HAS one. Calculator,
+    // games, and shortcut-driven apps expose no editable element at all and are driven by typing
+    // straight at the window — for them this guard removed the only way to interact, and it is why
+    // `npm run test:computer` could not get past its own type step. Same test the type path already
+    // uses to decide between naming a field and typing at the surface: if an editable field exists,
+    // focus belonging to something else really is a mistake; if none exists, it is the normal state.
+    const exposesEditableField = this.observedElements.some(isEditableElement);
+    const surfaceHasNoField = this.observedElements.length > 0 && !exposesEditableField;
+    if (element?.editable === false && !surfaceHasNoField) {
       throw new Error(`keyboard preflight refused literal typing because the focused ${element.role || 'element'} "${element.title || element.description || '?'}" is not editable; focus a text field first`);
     }
     return {
@@ -4743,6 +5419,9 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     // Defense in depth: the tool layer already normalizes before gating, but /computer and other
     // direct callers reach the runtime without passing through it.
     cmd = { ...cmd, action: normalizeDesktopAction(cmd.action) as DesktopCommand['action'] };
+    // Cleared per call rather than in runInner, which returns early on the fallback path — a
+    // disclosure left over from a previous call would attach itself to an unrelated result.
+    this.takeSemanticRegrounding();
     // Serialize every operation that can replace the active target or perception snapshot. There is
     // one physical mouse AND one current frame: an overlapping observation finishing late can be as
     // dangerous as overlapping clicks because it rewrites the coordinates the next action trusts.
@@ -4751,6 +5430,20 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       : stampSummaryVerdict(ensureActionResult(await this.runInner(cmd, ctx)));
     if (result.visualEvidenceError && ACTING_VERBS.has(cmd.action)) {
       result.summary = `${cmd.action} was delivered, but the fresh post-action screen could not be captured. Re-observe before any next input: ${result.visualEvidenceError}`;
+    }
+    // Never let a replaced picture pass as the caller's own. The action succeeded against a tree
+    // the model has not seen, and an adopted window is a surface change it must know about.
+    const regrounded = this.takeSemanticRegrounding();
+    if (regrounded && result.ok) {
+      const how = cmd.query?.trim()
+        ? `"${cmd.query}" was re-resolved from a fresh observation`
+        : regrounded.reacquiredHandle
+          // The caller's index/token is dead the moment the tree is re-walked, so say which element
+          // identity was re-acquired and that the handle it names is a different number now.
+          ? `the element you addressed by handle ("${regrounded.reacquiredHandle}") was re-acquired by identity in a fresh observation and now carries a different index/token`
+          : 'a fresh observation replaced it before the action was delivered';
+      result.summary = `${result.summary || `${cmd.action} completed`} (your planning frame was superseded — ${regrounded.notification}; ${how}${regrounded.windowChanged ? ` on newly adopted window ${result.windowId}` : ''}; plan the next action from the attached screen)`;
+      result.details = { ...(result.details as object || {}), semanticRegrounding: regrounded };
     }
     if (result.ok && (ACTING_VERBS.has(cmd.action) || cmd.action === 'observe' || cmd.action === 'screenshot')) {
       this.failedActingStreak = 0;
@@ -4769,8 +5462,10 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
     this.activeAction = cmd.action;
     const expected = cmd.expect?.trim();
     const expectationMode = cmd.expectMode || 'present';
+    // Same evaluator as the post-action check, or the transition test compares two different
+    // questions and a state-shaped expect would look "new" purely because neither side could match.
     const expectedPresentBefore = expected
-      ? this.observedElements.some(element => JSON.stringify(element).toLocaleLowerCase().includes(expected.toLocaleLowerCase()))
+      ? evaluateExpectation(expected, JSON.stringify(this.observedElements)).matched
       : false;
     this.activeExpectation = expected ? {
       query: expected,
@@ -4783,6 +5478,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       const target = this.targetFor(cmd);
       const session = cmd.session || this.session;
       const delivery = await this.defaultDelivery(cmd);
+      this.activeDelivery = delivery;
 
       // Stage 3 — input ownership + mechanism routing. For acting verbs, consult the active surface
       // BEFORE delivering: (1) if the user has taken over, refuse rather than fight for the cursor;
@@ -4791,6 +5487,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
       // the working foreground path — this adds the guard and the ownership bookkeeping around it.
       const consumesFrame = FRAME_GATED_VERBS.has(cmd.action);
       const routesInput = consumesFrame || cmd.action === 'move';
+      let semanticFrameRegrounded = false;
       if (routesInput) {
         // Hard observe-before-act gate. Naming a pid/app is not visual evidence, and a failed
         // post-action capture invalidates the old frame. `move` changes no application state.
@@ -4808,15 +5505,98 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             summary: `${cmd.action} refused: observe the target window first`,
           };
         }
-        if (needsFreshFrame && target && this.axWatcherPid === target.pid
+        if (needsFreshFrame && !IDENTITY_SCOPED_FRAME_VERBS.has(cmd.action)
+          && target && this.axWatcherPid === target.pid
           && this.axEventEpoch !== this.observedAxEventEpoch) {
           const event = this.latestAxEvent;
-          return {
-            ok: false, action: cmd.action, driver,
-            error: `the target accessibility state changed after the screenshot (${event?.notification || 'native UI event'} at epoch ${this.axEventEpoch}); the visible element map may no longer own those coordinates — observe again before input`,
-            summary: `${cmd.action} refused: the app changed after observation`,
-            details: { accessibilityInvalidation: event || { pid: target.pid, epoch: this.axEventEpoch } },
-          };
+          // A semantic query describes the user's intended control, not a cached coordinate or
+          // ephemeral AX handle. Re-run perception for that query and resolve it from the new tree
+          // in this same serialized transaction. This is what lets continuously updating apps
+          // (Messages, chat clients, live dashboards) make progress without weakening the raw-pixel
+          // stale-frame guard.
+          //
+          // AXWindowCreated is NOT excluded here, and that exclusion was measured as the cause of a
+          // dead messaging flow: opening Messages creates its own window, and typing a contact into
+          // Search creates the results surface, so the very events this operation produces refused
+          // the operation's own next semantic action — observe, refuse, observe, refuse, turn over.
+          // Surface identity is still protected, by evidence rather than by refusal: the
+          // re-observation below adopts and reports a genuinely different window id, refreshes the
+          // AX-confirmed modal guard (which refuses any point outside a real blocker), and the
+          // pre-click accessibility hit test proves the target would receive the click. A query that
+          // no longer exists fails semantic resolution instead of landing somewhere arbitrary.
+          // An elementIndex/elementToken is a NAMED target too. It reads like a coordinate because
+          // it is a number, but it is a reference into a snapshot this runtime still holds, so the
+          // element's own identity (role + label) can be recovered from that snapshot BEFORE the
+          // re-observation and re-acquired by identity afterwards. Refusing it instead was measured
+          // on 2026-07-31 to be unrecoverable in practice: Messages with iCloud sync emits AX events
+          // continuously, so two consecutive indexed clicks were refused at epoch 3 and epoch 9 and
+          // no indexed click could ever be planned from a frame. The handle is NOT carried across —
+          // indexes are re-numbered by every walk (the same conversation row was 28, then 5, then 6
+          // in three successive frames of one run), so carrying it over is precisely the bug the
+          // guard exists to prevent.
+          const handleIdentity = !cmd.query?.trim() && (cmd.elementToken || cmd.elementIndex != null)
+            ? this.describeTarget(cmd)
+            : null;
+          const identityText = (handleIdentity?.label || handleIdentity?.value || '').trim();
+          const regroundQuery = cmd.query?.trim() || identityText;
+          // A focus-addressed insertion with nothing to re-ground survives an event that cannot have
+          // moved focus. An unnamed event does NOT qualify — not knowing what happened is a reason to
+          // refuse, not a reason to proceed.
+          const insertionSurvivesEvent = FOCUS_ADDRESSED_INSERT_VERBS.has(cmd.action)
+            && !!event?.notification
+            && !FOCUS_INVALIDATING_AX_NOTIFICATIONS.has(String(event.notification));
+          if (regroundQuery) {
+            try {
+              const refreshed = await this.observeTarget(target, cwd, session, {
+                action: 'observe',
+                query: regroundQuery,
+                maxElements: cmd.maxElements,
+                includeScreenshot: true,
+                // Re-grounding against a menu-only background frame resolves nothing and reports it
+                // as "no semantic element matched", naming OCR strings as the visible labels.
+                focusIfBackground: true,
+              });
+              if (!refreshed.ok) throw new Error(refreshed.error || refreshed.summary);
+              // Re-acquire the SAME element by identity in the new tree and rewrite the handle to
+              // that frame's numbering. An exact role+label match only: a near-miss here would be a
+              // silent click on a different control, which is worse than the refusal it replaces.
+              if (handleIdentity) {
+                const reacquired = this.reacquireByIdentity(handleIdentity);
+                if (!reacquired) {
+                  throw new Error(`the element you named (${handleIdentity.role || 'element'} "${identityText}") is no longer in the tree after the app changed`);
+                }
+                cmd.elementToken = reacquired.elementToken;
+                cmd.elementIndex = reacquired.elementToken ? undefined : reacquired.elementIndex;
+              }
+              const captured = this.frames.current();
+              const windowChanged = !!(captured?.pid === target.pid && captured.windowId
+                && captured.windowId !== target.windowId);
+              if (windowChanged) {
+                target.windowId = captured!.windowId!;
+                this.targets.retargetWindow(target.pid, captured!.windowId!);
+              }
+              semanticFrameRegrounded = true;
+              this.lastSemanticRegrounding = {
+                notification: event?.notification || 'native UI event',
+                windowChanged,
+                ...(handleIdentity ? { reacquiredHandle: identityText || String(handleIdentity.role || 'element') } : {}),
+              };
+            } catch (error: any) {
+              return {
+                ok: false, action: cmd.action, driver,
+                error: `the target accessibility state changed after the screenshot and semantic re-grounding failed: ${String(error?.message || error)}`,
+                summary: `${cmd.action} refused: the app changed and the named target could not be reacquired`,
+                details: { accessibilityInvalidation: event || { pid: target.pid, epoch: this.axEventEpoch } },
+              };
+            }
+          } else if (!insertionSurvivesEvent) {
+            return {
+              ok: false, action: cmd.action, driver,
+              error: `the target accessibility state changed after the screenshot (${event?.notification || 'native UI event'} at epoch ${this.axEventEpoch}); the visible element map may no longer own those coordinates — observe again before input`,
+              summary: `${cmd.action} refused: the app changed after observation`,
+              details: { accessibilityInvalidation: event || { pid: target.pid, epoch: this.axEventEpoch } },
+            };
+          }
         }
         if (target) {
           const pipelineIssue = await this.ensureTargetPipeline(target);
@@ -4874,17 +5654,63 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               }
             : liveBounds;
           const check = this.frames.check({
-            frameId: cmd.frameId,
+            // A successful semantic refresh deliberately supersedes the model's old picture. The
+            // query is resolved below from the replacement tree; only raw/handle actions remain
+            // bound to the caller's original frame id.
+            frameId: semanticFrameRegrounded ? undefined : cmd.frameId,
             pid: target?.pid,
             windowId: target?.windowId,
             liveBounds: validationBounds ?? undefined,
           });
           if (!check.ok) {
-            return {
-              ok: false, action: cmd.action, driver,
-              error: `stale frame (${check.reason}): ${check.note}`,
-              summary: `${cmd.action} refused: ${check.reason} — observe again before acting`,
-            };
+            // "Your picture is old" is a refreshable condition, not a failure — unless the caller
+            // supplied raw pixels, which are meaningless against any other picture. A keystroke and
+            // a named target both survive a new capture, so refuse only what genuinely cannot.
+            //
+            // Refusing them was a deadlock, observed live: the messaging phase gate told the model
+            // that pressing Return was the ONLY legal action, while this check refused that same
+            // Return as expired and told it to observe first. Each side demanded what the other
+            // forbade, and the run spun until the user killed it.
+            const usesRawCoordinates = cmd.x != null || cmd.y != null
+              || cmd.toX != null || cmd.toY != null;
+            const refreshable = !usesRawCoordinates
+              && (check.reason === 'expired' || check.reason === 'superseded' || check.reason === 'geometry-changed');
+            if (!refreshable) {
+              return {
+                ok: false, action: cmd.action, driver,
+                error: `stale frame (${check.reason}): ${check.note}`,
+                summary: `${cmd.action} refused: ${check.reason} — observe again before acting`,
+              };
+            }
+            if (!target) {
+              return {
+                ok: false, action: cmd.action, driver,
+                error: `stale frame (${check.reason}): ${check.note}`,
+                summary: `${cmd.action} refused: ${check.reason} — observe the intended window before acting`,
+              };
+            }
+            try {
+              // Capture only; observation deliberately never fronts the app, so keyboard focus —
+              // the thing a pending Return depends on — is untouched.
+              const refreshed = await this.observeTarget(target, cwd, session, {
+                action: 'observe',
+                ...(cmd.query?.trim() ? { query: cmd.query } : {}),
+                maxElements: cmd.maxElements,
+                includeScreenshot: true,
+              });
+              if (!refreshed.ok) throw new Error(refreshed.error || refreshed.summary);
+              semanticFrameRegrounded = true;
+              this.lastSemanticRegrounding = {
+                notification: `stale frame (${check.reason})`,
+                windowChanged: false,
+              };
+            } catch (error: any) {
+              return {
+                ok: false, action: cmd.action, driver,
+                error: `the planning frame was ${check.reason} and could not be refreshed: ${String(error?.message || error)}`,
+                summary: `${cmd.action} refused: ${check.reason} — observe again before acting`,
+              };
+            }
           }
         }
         const hasAxHandle = !!(cmd.elementToken || cmd.elementIndex != null || cmd.query?.trim());
@@ -4934,10 +5760,44 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // Surface the session's measured switch latency alongside permissions: the p95 target for
           // target switching is only meaningful if the number is readable without a debugger.
           const switchStats = this.switchLatency.summary();
+          // `health_report` is NOT session-scoped: it answered "session_active: pass, overall:
+          // ready" while every session-scoped call was being rejected for a retired session. A
+          // status that cannot be wrong about liveness is the whole point of a status verb, so
+          // probe a real session-scoped call when there is a target to probe it against, and say
+          // plainly when there is not — never let the driver's self-report stand in for evidence.
+          let sessionProbe: { probed: boolean; reachable: boolean | null; note: string };
+          if (target?.pid && target?.windowId) {
+            try {
+              await this.call('get_window_state', {
+                pid: target.pid, window_id: target.windowId, session,
+                include_screenshot: false, max_elements: 1,
+              });
+              sessionProbe = { probed: true, reachable: true, note: 'a session-scoped call succeeded' };
+            } catch (probeErr: any) {
+              sessionProbe = {
+                probed: true, reachable: false,
+                note: `a session-scoped call was rejected: ${String(probeErr?.message || probeErr).slice(0, 200)}`,
+              };
+            }
+          } else {
+            sessionProbe = {
+              probed: false, reachable: null,
+              note: 'no target window yet, so session liveness was NOT probed — permissions below say nothing about it. Run open/observe first.',
+            };
+          }
+          const liveOverall = sessionProbe.reachable === false ? 'degraded' : overall;
           return {
-            ok: overall !== 'failed', action: cmd.action, driver, ...this.lastStatus,
-            details: { ...(details as Record<string, unknown>), targetSwitchLatencyMs: switchStats },
-            summary: `Bimax Computer Use ${overall}${switchStats.count ? ` · target switch p50 ${switchStats.p50}ms / p95 ${switchStats.p95}ms over ${switchStats.count}` : ''}`,
+            ok: liveOverall !== 'failed' && sessionProbe.reachable !== false,
+            action: cmd.action, driver, ...this.lastStatus,
+            details: {
+              ...(details as Record<string, unknown>),
+              overall: liveOverall,
+              sessionProbe,
+              targetSwitchLatencyMs: switchStats,
+            },
+            summary: `Bimax Computer Use ${liveOverall}${sessionProbe.reachable === false ? ' — session unreachable' : ''}`
+              + `${sessionProbe.probed ? '' : ' (session liveness unprobed)'}`
+              + `${switchStats.count ? ` · target switch p50 ${switchStats.p50}ms / p95 ${switchStats.p95}ms over ${switchStats.count}` : ''}`,
           };
         }
         case 'request_access': {
@@ -4969,9 +5829,22 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           };
         }
         case 'record_stop': {
+          const wasRecording = this.recording.started;
           const data = await this.call('stop_recording');
           this.recording.markStopped();
           const videoPath = String(data?.last_video_path || data?.video_path || '') || undefined;
+          // "Stopped" with nothing to show for it is a success report for work that never happened:
+          // record_start is gated behind an opt-in the caller may never have satisfied, and stopping
+          // a recording that was never running still answered ok:true, "recording stopped".
+          if (!videoPath && !wasRecording) {
+            return {
+              ok: false, action: cmd.action, driver, details: data,
+              recording: { enabled: false, outputDir: this.recording.outputDir },
+              actionResult: { delivered: false, observed: 'no-change', confidence: 'proven', failureReason: 'no recording was running' },
+              error: 'no recording was running, so nothing was stopped and no video exists',
+              summary: 'record_stop: nothing was recording',
+            };
+          }
           return {
             ok: true, action: cmd.action, driver, details: data,
             recording: { enabled: false, outputDir: this.recording.outputDir, videoPath },
@@ -4980,19 +5853,69 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
         }
         case 'apps': {
           const data = await this.call('list_apps');
-          return { ok: true, action: cmd.action, driver, details: data, summary: `found ${data?.apps?.length || 0} applications` };
+          const all: any[] = Array.isArray(data?.apps) ? data.apps : [];
+          // `list_apps` returns every installed app carrying a per-app `windows` array the driver
+          // never fills — measured empty even for RUNNING apps — plus launch paths and last-used
+          // timestamps no caller acts on. 106 apps in that shape cost 22KB of context to answer
+          // "what can I open". Project the fields a caller can act on, put running apps first
+          // (those are the ones `focus` can reach), and let `query` narrow the rest by name.
+          const wanted = String(cmd.query || '').trim().toLocaleLowerCase();
+          const projected = all
+            .map(app => ({
+              name: stripInvisibleMarks(String(app?.name || '')),
+              bundle_id: app?.bundle_id,
+              running: !!app?.running,
+              ...(app?.running ? { pid: Number(app?.pid || 0), active: !!app?.active } : {}),
+            }))
+            .filter(app => !wanted || app.name.toLocaleLowerCase().includes(wanted)
+              || String(app.bundle_id || '').toLocaleLowerCase().includes(wanted))
+            .sort((a, b) => Number(b.running) - Number(a.running) || a.name.localeCompare(b.name));
+          const running = projected.filter(app => app.running).length;
+          return {
+            ok: true, action: cmd.action, driver,
+            details: { apps: projected, total: all.length, running, filteredBy: wanted || undefined },
+            summary: `${projected.length} application(s)${wanted ? ` matching "${wanted}"` : ''} — ${running} running`
+              + `${projected.length < all.length ? ` (of ${all.length} installed; pass query to narrow)` : ''}`,
+          };
         }
         case 'windows': {
           const data = await this.call('list_windows', target?.pid ? { pid: target.pid } : {});
-          return { ok: true, action: cmd.action, driver, pid: target?.pid, details: data, summary: `found ${data?.windows?.length || 0} windows${target?.app ? ` for ${target.app}` : ''}` };
+          const all: any[] = Array.isArray(data?.windows) ? data.windows : [];
+          // Most of what the WindowServer enumerates cannot be a target: full-width 33px menu-bar
+          // proxies, 64×64 service surfaces and 0×0 placeholders, all untitled. Measured 35–52
+          // entries per call of which 3 were real. Suppress only the provably unactionable ones —
+          // untitled AND degenerate geometry — so a titled window or a legitimately off-screen one
+          // (another Space) is never hidden from a caller trying to find it.
+          const degenerate = (w: any) => !String(w?.title || '').trim()
+            && (Number(w?.bounds?.height || 0) <= 40 || Number(w?.bounds?.width || 0) <= 64);
+          // The driver's own capture surface enumerates as a full-screen window above the app it is
+          // driving. It is never a target and offering it as one invites a click into our own overlay.
+          const isOwnCaptureSurface = (w: any) => /^bimax-computer-use/i.test(String(w?.app_name || ''));
+          const windows = all.filter(w => !degenerate(w) && !isOwnCaptureSurface(w));
+          const suppressed = all.length - windows.length;
+          return {
+            ok: true, action: cmd.action, driver, pid: target?.pid,
+            details: { ...data, windows, suppressed },
+            summary: `found ${windows.length} addressable window(s)${target?.app ? ` for ${target.app}` : ''}`
+              + `${suppressed ? ` (${suppressed} untitled menu-bar/service surfaces hidden)` : ''}`,
+          };
         }
         case 'open': {
           if (!cmd.app?.trim() && !cmd.bundleId?.trim()) throw new Error('open needs app or bundleId');
-          const requestedApp = cmd.app?.trim();
+          const rawApp = cmd.app?.trim();
+          // A bundle id handed in as `app` is a routine model slip — `{"action":"open","app":
+          // "com.apple.Messages"}` cost a whole turn on "No installed macOS app found for name
+          // 'com.apple.Messages'". Launch Services has no app NAMED that, and asking it to resolve a
+          // bundle id as a display name is a guaranteed miss, so recognise the shape and address the
+          // OS with the field it actually understands.
+          const appIsBundleShaped = !!rawApp && looksLikeBundleId(rawApp);
+          const requestedApp = appIsBundleShaped ? undefined : rawApp;
           // The sidecar's name lookup can miss an app whose bundle id launches fine, so resolve the
           // bundle id from the OS when the caller gave only a name. Asking Launch Services covers
           // every app on the machine instead of a hand-maintained list of well-known aliases.
-          const requestedBundleId = cmd.bundleId?.trim() || await this.resolveBundleId(requestedApp);
+          const requestedBundleId = cmd.bundleId?.trim()
+            || (appIsBundleShaped ? rawApp : undefined)
+            || await this.resolveBundleId(requestedApp);
           // A second instance is only meaningful for an app the OS is willing to run twice. Rather
           // than carrying a list of macOS singletons, ask whether this app is ALREADY running: a
           // running system process cannot be duplicated, and requesting it fails confusingly.
@@ -5010,17 +5933,42 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             });
           } catch (err: any) {
             const reason = String(err?.message || err);
-            // Models sometimes remember a historical bundle id even when they also provide the
-            // correct human app name alongside an obsolete bundle id. A missing bundle-id
-            // lookup proves that nothing launched, so retrying once through Launch Services by name
-            // is safe. Keep every other launch error intact: a timeout or permission failure may have
-            // delivered, and blindly retrying those could create an unintended second instance.
-            const staleBundleId = !!requestedBundleId && !!requestedApp
-              && /no installed macos app found for bundle[_ ]id/i.test(reason);
-            if (!staleBundleId) throw err;
-            data = await this.call('launch_app', { name: requestedApp, ...instanceArgs });
+            // "No installed app found" is the ONE launch failure that proves nothing started, so it
+            // is the only one worth asking a different way. Every other error stands: a timeout or a
+            // permission failure may well have delivered, and retrying those risks a second
+            // instance the user never asked for.
+            if (!/no installed macos app found/i.test(reason)) throw err;
+            // Ordered, bounded, each a genuinely DIFFERENT question for Launch Services.
+            const retries: Array<Record<string, string>> = [];
+            // A model that remembers a historical bundle id often still passes the correct human
+            // name beside it (com.apple.iChat + "Messages").
+            if (requestedBundleId && requestedApp) retries.push({ name: requestedApp });
+            // A bundle id whose LAST component is the app's display name — com.apple.Messages, whose
+            // real id is com.apple.MobileSMS, so neither the name nor the id lookup can succeed and
+            // the run dead-ends on a wrong guess the model has no way to correct. The leaf is only
+            // ever offered to Launch Services as a name: if no such app exists, this still fails.
+            if (appIsBundleShaped) {
+              const leaf = stripInvisibleMarks(rawApp!).trim().split('.').pop()!.trim();
+              if (leaf && !appNamesMatch(leaf, rawApp!)) retries.push({ name: leaf });
+            }
+            let launched: any;
+            let lastError: any = err;
+            for (const attempt of retries) {
+              try {
+                launched = await this.call('launch_app', { ...attempt, ...instanceArgs });
+                break;
+              } catch (retryError: any) {
+                lastError = retryError;
+                if (!/no installed macos app found/i.test(String(retryError?.message || retryError))) throw retryError;
+              }
+            }
+            if (!launched) throw lastError;
+            data = launched;
           }
           const requestedWindowId = Number(cmd.windowId || 0);
+          // `open` with an explicit window is the same caller choice `focus` makes; honour it for the
+          // rest of the session, and drop a stale pin when the caller did not name one.
+          if (!requestedWindowId) this.pinnedWindow = null;
           let launchedWindows = Array.isArray(data?.windows) ? data.windows : [];
           let window = requestedWindowId
             ? launchedWindows.find((candidate: any) => Number(candidate?.window_id) === requestedWindowId)
@@ -5050,6 +5998,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           const previousTarget = this.targets.current();
           // open() establishes ownership: from here every action routes to THIS app/window.
           this.targets.set(opened);
+          if (requestedWindowId) this.pinnedWindow = { pid: opened.pid, windowId: requestedWindowId };
           // Resume: if this is the first open of a fresh process and a persisted session for this
           // same app is on disk, restore its bounded history before this open records onto it.
           this.maybeResumeHistory(cwd);
@@ -5064,7 +6013,28 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // off-screen while open() claimed it was ready, so observe walked the global menu bar and
           // every screenshot-local action was grounded against the wrong state. Activate first,
           // allow WindowServer to settle, then reacquire the actual visible application window.
-          const activated = await this.activateAndCapture(opened, cwd, session, delivery, ctx, previousTarget);
+          let activated: { target: ComputerTarget; evidence: Partial<DesktopResult>; frontmostWarning?: string; switchMs?: number };
+          try {
+            activated = await this.activateAndCapture(opened, cwd, session, delivery, ctx, previousTarget);
+          } catch (captureError: any) {
+            // The launch ALREADY happened; the app is on the user's machine no matter what this
+            // call returns. Letting the capture failure escape as a plain throw reported
+            // delivered:false for a side effect that did occur — observed live when a retired
+            // session made the first observation fail: `open` said "failed" while TextEdit was
+            // starting. The documented consequence of that lie is a retry, i.e. a second open.
+            // Report the launch as delivered and the VERIFICATION as the thing that failed.
+            const detail = String(captureError?.message || captureError);
+            return {
+              ok: false, action: cmd.action, driver,
+              app: opened.app, pid: opened.pid, windowId: opened.windowId, details: data,
+              actionResult: {
+                delivered: true, observed: 'unverified', confidence: 'unknown',
+                failureReason: `launched, but the first observation failed: ${detail}`,
+              },
+              error: `${opened.app} LAUNCHED as pid ${opened.pid}, but its first frame could not be captured: ${detail}. Do NOT open it again — it is already running; observe it instead.`,
+              summary: `opened ${opened.app} as pid ${opened.pid}, but the first screen capture failed — the app IS running; observe before acting`,
+            };
+          }
           opened = activated.target;
           const frontmostWarning = activated.frontmostWarning;
           return {
@@ -5081,14 +6051,37 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // afterwards under the same "act only on the newest frame of the exact target" rule.
           const wanted = cmd.app?.trim();
           const byPid = Number(cmd.pid || 0);
-          const registered = byPid
+          const wantWindowId = Number(cmd.windowId || 0) || undefined;
+          let registered = byPid
             ? this.targets.all().find(t => t.pid === byPid) || null
             : wanted ? this.targets.find(wanted) : this.targets.current();
+          // Not opened by this session does NOT mean unavailable: the app is very often already
+          // running because the user left it open. Adopt its live window instead of dead-ending on
+          // `open`, which would re-launch it and throw away whatever state it is in.
+          if (!registered && wanted) {
+            const adopted = await this.adoptRunningApp(wanted, wantWindowId);
+            if (adopted) {
+              this.targets.set(adopted);
+              registered = adopted;
+            }
+          }
           if (!registered) {
             const known = this.targets.all().map(t => t.app).filter(Boolean);
             throw new Error(wanted || byPid
-              ? `${wanted || `pid ${byPid}`} is not open in this session${known.length ? ` (open: ${known.join(', ')})` : ''} — use action=open to launch it`
+              ? `${wanted || `pid ${byPid}`} is not running (no on-screen window found)${known.length ? `; open in this session: ${known.join(', ')}` : ''} — use action=open to launch it`
               : 'focus needs app or pid');
+          }
+          // An app can own several windows (a document window plus its main browser/list window).
+          // Honour an explicit windowId so a caller that enumerated `windows` can select the exact
+          // surface, rather than being pinned to whichever one the picker preferred.
+          if (wantWindowId) {
+            this.targets.retargetWindow(registered.pid, wantWindowId);
+            registered = { ...registered, windowId: wantWindowId };
+            this.pinnedWindow = { pid: registered.pid, windowId: wantWindowId };
+          } else if (this.pinnedWindow?.pid !== registered.pid) {
+            // Focusing a different app, or the same app with no window named: the previous pin is
+            // not about this surface any more and must not follow the session around.
+            this.pinnedWindow = null;
           }
           // Capture the predecessor before activation moves ownership, so the switch transaction
           // measures a real app-to-app switch rather than reading the destination as its own origin.
@@ -5136,7 +6129,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               ? `no window is currently owned — ${stale} is no longer open at the window Bimax was driving. Call action=open with app="${stale}" to establish a target, then observe.`
               : 'no application window is owned yet; call action=open with the app you want to control before observe or any input');
           }
-          const observed = await this.observeTarget(capture, cwd, session, cmd);
+          const observed = await phaseTrace.time('observeTarget', () => this.observeTarget(capture, cwd, session, cmd));
           // observeTarget can reconcile a transient/focused same-process window to the exact window
           // whose pixels it ultimately captured. Make that captured identity authoritative for the
           // next action. Otherwise ownership can retain the pre-reconciliation child id while the
@@ -5158,6 +6151,23 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // no-progress stop clear. Merely issuing observe/screenshot (or a capture that failed to
           // produce a frame) does NOT reset or bypass the latch.
           if (observed.ok && observed.frameHash) this.recovery.reset();
+          // `screenshot` and `observe` were the same call under two names: identical payload, same
+          // summary, ~21KB each. A caller that only wants to LOOK paid for the full element list
+          // every time, and a caller comparing the two learned nothing from having both.
+          //
+          // They differ now in what they RETURN, not in what they do: the capture, the frame and the
+          // element map are produced identically, and the map is cached on the runtime, so `click
+          // query=…` works exactly the same after a screenshot. Only the echo of the element arrays
+          // is dropped — which is the part that costs the tokens.
+          if (cmd.action === 'screenshot' && observed.ok) {
+            const { elements, tree, ...picture } = observed;
+            const count = Array.isArray(elements) ? elements.length : 0;
+            return {
+              ...picture,
+              elementCount: count,
+              summary: `${observed.summary || 'captured'}${count ? ` — ${count} element(s) resolved and kept for targeting, not listed here; use observe to see them` : ''}`,
+            };
+          }
           return observed;
         }
         case 'cursor': {
@@ -5259,9 +6269,54 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           // its overlay cursor. SwiftUI/System Settings can ignore that event. Visible mode means
           // a real global CGEvent: front the pinned window, glide the macOS cursor, click, then use
           // the same sidecar session for the fresh post-action capture.
+          // Background delivery is only background when it routes through an ACCESSIBILITY HANDLE.
+          // Handed raw coordinates the driver has nothing to address, so it synthesizes a real
+          // global CGEvent — the very thing the Space guard below refuses for foreground. The two
+          // together were a hole: the guard is foreground-only, and its own remediation text
+          // recommends `deliveryMode="background"` as the way to act on an off-Space window. So the
+          // documented escape from "this click would land in the wrong app" was a click that landed
+          // in the wrong app, unguarded. Measured on an off-Space Notes window: a background click
+          // came back `path: "cgevent"` while a fullscreen ChatGPT owned those screen coordinates.
+          //
+          // Refuse instead of silently downgrading — hermes-agent takes the same line for an
+          // unsupported delivery mode (`foreground_unsupported`, tools/computer_use/cua_backend.py):
+          // a delivery that cannot be honoured as asked must be reported, never quietly swapped.
+          if (delivery === 'background' && args.x != null && args.y != null
+            && args.element_token == null && args.element_index == null
+            && await this.targetWindowOffScreen(target)) {
+            throw new Error(
+              `${target.app || `pid ${target.pid}`} window ${target.windowId} is not on the active Space, and this background click has only a screen COORDINATE to aim at — `
+              + 'with no accessibility handle the driver must synthesize a real cursor event, which would land in whatever app is actually visible at that point. '
+              + 'Background delivery is safe here only through a named target: re-observe and pass query/elementToken/elementIndex so the click routes through accessibility. '
+              + `Otherwise call focus with app="${target.app || ''}" to bring the window to the visible Space first.`,
+            );
+          }
           if (delivery === 'foreground' && args.x != null && args.y != null) {
             const screenshotPoint = { x: Number(args.x), y: Number(args.y) };
-            const globalPoint = await this.preparePhysicalPoint(target, screenshotPoint, expectedElement);
+            let globalPoint;
+            try {
+              globalPoint = await this.preparePhysicalPoint(target, screenshotPoint, expectedElement);
+            } catch (error) {
+              // An occluding window blocks the PIXEL ROUTE, not the target. A semantically named
+              // element can still be activated through accessibility, which uses no coordinates and
+              // therefore cannot be covered.
+              //
+              // Only a plain single left click may be re-routed. Accessibility activation is a press:
+              // it cannot express a right-click, a modifier-click, or a double-click, and quietly
+              // turning one of those into a plain press would deliver a DIFFERENT action than asked.
+              // Raw-pixel callers are excluded too — they asked for a point, and when that point is
+              // covered the refusal (with its remediation) is the honest answer.
+              const reRoutable = !rawPixelTarget
+                && (cmd.button || 'left') === 'left'
+                && !cmd.modifier?.length
+                && (cmd.count || 1) === 1;
+              const handle = reRoutable ? accessibilityHandle(expectedElement) : null;
+              if (!(error instanceof OccludedPointError) || !handle) throw error;
+              return await this.clickThroughAccessibility({
+                target, cwd, session, driver, cmd, args, handle, occlusion: error,
+                resolvedLabel, targeting, expectedElement,
+              });
+            }
             const native = await this.fallback.run({
               action: 'click', x: globalPoint.x, y: globalPoint.y,
               button: cmd.button || 'left', count: cmd.count || 1,
@@ -5300,14 +6355,27 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
                 preflight: {
                   recipientPid: globalPoint.preflight?.recipientPid,
                   recipientApp: globalPoint.preflight?.recipientApp,
+                  // Absence of evidence is NOT evidence of ownership. The probe returns an empty
+                  // preflight whenever it could not answer — most commonly because the AX hit-test
+                  // helper is unavailable — and the old fallback turned that silence into
+                  // `windowMatched: true` with the reassuring reason below. Measured live: with the
+                  // target window parked on an inactive Space, every click was delivered into a
+                  // DIFFERENT app's fullscreen window while the receipt read "target application
+                  // owned the live point". A guard that cannot see must not veto, but it must not
+                  // vouch either — unknown stays unknown.
                   windowMatched: globalPoint.preflight?.windowMatched
-                    ?? (!globalPoint.preflight?.recipientPid || globalPoint.preflight.recipientPid === target.pid),
+                    ?? (globalPoint.preflight?.recipientPid
+                      ? globalPoint.preflight.recipientPid === target.pid
+                      : undefined),
                   elementMatched: globalPoint.preflight?.elementMatch?.matched,
                   elementConfidence: globalPoint.preflight?.elementMatch?.confidence,
                   stable: globalPoint.preflight?.stable,
-                  reason: globalPoint.preflight?.elementMatch?.reason || 'target application owned the live point',
+                  reason: globalPoint.preflight?.elementMatch?.reason
+                    || (globalPoint.preflight?.recipientPid
+                      ? 'target application owned the live point'
+                      : 'recipient could not be probed — delivery target was NOT verified'),
                 },
-                commit: { delivered: true, recipientApp: native.app || target.app },
+                commit: { delivered: true, ...(native.app ? { recipientApp: native.app } : {}) },
                 ...(evidence.actionResult?.postcondition ? { postcondition: evidence.actionResult.postcondition } : {}),
               },
               targeting,
@@ -5315,11 +6383,43 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
               summary: `physical mouse click${resolvedLabel ? ` on "${resolvedLabel}"` : ''} delivered to ${target.app || `pid ${target.pid}`}; fresh screen attached`,
             };
           }
+          // Ask BEFORE attempting. The tree reports the actions each control publishes, so a control
+          // that cannot be pressed is knowable in advance rather than only from the -25206 that comes
+          // back after the attempt. This is what stops the refusal from firing "on discovery": the
+          // answer is read from the same observation the caller planned against.
+          //
+          // Evidence only. A missing list means the tree said nothing about this control, and silence
+          // is not a "no" — the attempt still goes through and the reactive catch below still stands.
+          if (delivery === 'background' && expectedElement?.axActions?.length
+            && !expectedElement.axActions.includes('press')) {
+            throw new Error(noAxPressRefusal(
+              resolvedLabel || cmd.query || 'this element',
+              `it publishes only ${expectedElement.axActions.map(action => `\`${action}\``).join(', ')}`,
+            ));
+          }
           // Do not pre-position with move_cursor here. Click coordinates are window-local pixels,
           // while move_cursor consumes screen-space overlay coordinates; forwarding x/y directly
           // visibly pointed far away from the actual control. The click RPC owns the window-to-screen
           // conversion and updates the session cursor in the same coordinate frame as delivery.
-          const data = await this.call('click', args);
+          const data = await this.call('click', args).catch((error: unknown) => {
+            // Background delivery activates an element through its published AX action. Plenty of
+            // ordinary controls do not publish one: a Notes note row advertises `actions=[showmenu]`
+            // and nothing else, so AXPress comes back -25206 (kAXErrorActionUnsupported) and the row
+            // cannot be activated this way AT ALL. Measured on the same row that a foreground click
+            // opens correctly in ~1.0s.
+            //
+            // The raw driver string is a dead end — it names an AX constant and offers no next step,
+            // so the model retries the identical call. Name the cause and the one delivery that can
+            // work instead. Deliberately a REFUSAL rather than an automatic downgrade to a physical
+            // click: foreground delivery moves the real cursor and takes focus, which is precisely
+            // what the caller asked to avoid, and silently swapping it is the same dishonesty the
+            // off-Space background guard above refuses.
+            if (!/\b-?25206\b|ActionUnsupported/i.test(String((error as Error)?.message || error))) throw error;
+            throw new Error(noAxPressRefusal(
+              resolvedLabel || cmd.query || 'this element',
+              'the app answered AXPress with -25206, action unsupported',
+            ));
+          });
           const evidence = await this.postActionEvidence(target, cwd, session);
           return {
             ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
@@ -5348,6 +6448,11 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             const focusedTarget = await this.focusRequestedTextTarget(target, cmd, ctx);
             if (!focusedTarget.element) await this.ensureCursorInTargetWindow(target, ctx);
             const beforeFocus = await this.keyboardPreflight(target, focusedTarget.element, ctx);
+            if (cmd.replaceExisting) {
+              const selected = await this.fallback.run({ action: 'key', combo: 'cmd+a', app: target.app }, ctx);
+              if (!selected.ok) throw new Error(selected.error || selected.summary);
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
             const native = await this.fallback.run({ action: 'type', text: cmd.text || '', app: target.app }, ctx);
             if (!native.ok) throw new Error(native.error || native.summary);
             const afterProbe = await this.probeKeyboardFocus(ctx);
@@ -5391,7 +6496,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
                   editable: beforeFocus.element?.editable ?? null,
                   reason: beforeFocus.reason,
                 },
-                commit: { delivered: true, recipientApp: native.app || target.app },
+                commit: { delivered: true, ...(native.app ? { recipientApp: native.app } : {}) },
                 ...(evidence.actionResult?.postcondition ? { postcondition: evidence.actionResult.postcondition } : {}),
               },
               ...evidence,
@@ -5434,6 +6539,14 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           } else if (cmd.elementToken) args.element_token = cmd.elementToken;
           else if (cmd.elementIndex != null) args.element_index = Math.floor(cmd.elementIndex);
           else if (cmd.x != null && cmd.y != null) { args.x = cmd.x; args.y = cmd.y; }
+          if (cmd.replaceExisting) {
+            const selectionTarget: any = { pid: target.pid, session, delivery_mode: delivery };
+            if (target.windowId) selectionTarget.window_id = target.windowId;
+            if (args.element_token) selectionTarget.element_token = args.element_token;
+            else if (args.element_index != null) selectionTarget.element_index = args.element_index;
+            const selected = await this.call('hotkey', { ...selectionTarget, keys: ['cmd', 'a'] });
+            if (selected?.ok === false) throw new Error(selected.error || selected.summary || 'failed to select existing editable contents');
+          }
           const data = await this.call('type_text', args);
           const evidence = await this.postActionEvidence(target, cwd, session);
           return { ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId, details: data, ...evidence, summary: `typed ${(cmd.text || '').length} characters into ${target.app || `pid ${target.pid}`}; fresh screen attached` };
@@ -5479,7 +6592,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
                   windowMatched: !focusProbe?.pid || focusProbe.pid === target.pid,
                   reason: focusProbe?.pid ? `target pid ${target.pid} owned keyboard focus` : 'native focus metadata unavailable',
                 },
-                commit: { delivered: true, recipientApp: native.app || target.app },
+                commit: { delivered: true, ...(native.app ? { recipientApp: native.app } : {}) },
                 ...(evidence.actionResult?.postcondition ? { postcondition: evidence.actionResult.postcondition } : {}),
               },
               summary: `pressed ${cmd.combo} with native keyboard in ${target.app || `pid ${target.pid}`}; fresh screen attached`,
@@ -5659,20 +6772,31 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           const got = placed.windowFrame;
           const exact = frameMatches(want, got);
           const evidence = await this.postActionEvidence(target, cwd, session);
+          // An app that enforces a minimum size gets the position it was asked for but not the size.
+          // Saying so is the difference between "tiled" and "tiled, and still overlapping the other
+          // half" — which the caller can only account for if it is told. It is told by `ok` as well
+          // as by the sentence: a maximize that returned 603x505 did not maximize, and reporting
+          // ok:true for it made the one honest field disagree with the summary beside it. This
+          // matches how `copy` already reports "delivered, but the postcondition did not hold".
+          const name = target.app || `pid ${target.pid}`;
           return {
             ok: true, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
             windowFrame: got, requestedFrame: want, ...evidence,
             actionResult: {
-              delivered: true, observed: exact ? 'confirmed' : 'changed',
+              delivered: true, observed: exact ? 'confirmed' : 'expectation-missed',
               postcondition: { query: `window placed at ${want.w}x${want.h}+${want.x}+${want.y}`, matched: exact },
               confidence: exact ? 'proven' : 'likely',
+              ...(exact ? {} : { failureReason: 'the app overrode the requested geometry and will do so again' }),
             },
-            // An app that enforces a minimum size gets the position it was asked for but not the
-            // size. Saying so is the difference between "tiled" and "tiled, and still overlapping
-            // the other half" — which the caller can only account for if it is told.
+            // The window DID move, so this is not a delivery failure and `ok` stays true — the
+            // mismatch is reported by postcondition.matched and by the sentence. What was missing is
+            // the only thing a caller can act on: whether to try again. An app enforcing a minimum
+            // size will enforce it every time, so say that instead of leaving a retry on the table.
             summary: exact
-              ? `${target.app || `pid ${target.pid}`} placed at ${got!.w}x${got!.h} (${got!.x},${got!.y})${layout ? ` [${layout}]` : ''}; fresh screen attached`
-              : `${target.app || `pid ${target.pid}`} moved, but the app adjusted the size: asked ${want.w}x${want.h} at (${want.x},${want.y}), got ${got?.w}x${got?.h} at (${got?.x},${got?.y}) — the app enforces its own minimum size or size increments`,
+              ? `${name} placed at ${got!.w}x${got!.h} (${got!.x},${got!.y})${layout ? ` [${layout}]` : ''}; fresh screen attached`
+              : `${name} moved, but the app adjusted the size: asked ${want.w}x${want.h} at (${want.x},${want.y}), got ${got?.w}x${got?.h} at (${got?.x},${got?.y})`
+                + ' — the app enforces its own minimum size or size increments, so retrying this layout will produce the same geometry;'
+                + ' plan against windowFrame, and do not treat the window as filling the requested rectangle',
           };
         }
         case 'clipboard': {
@@ -5850,10 +6974,71 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             ? { element_token: resolved.elementToken }
             : resolved.elementIndex != null ? { element_index: resolved.elementIndex } : null;
           if (!handle) throw new Error('set_value target has no fresh native handle; observe again');
-          const data = await this.call('set_value', {
-            pid: target.pid, window_id: target.windowId, session, value: requested.value,
-            ...handle,
-          });
+          let data: any;
+          try {
+            data = await this.call('set_value', {
+              pid: target.pid, window_id: target.windowId, session, value: requested.value,
+              ...handle,
+            });
+          } catch (error) {
+            // AppKit NSPopUpButton often publishes no AX children until it is physically opened,
+            // so direct AX value assignment has no option node to select. Waiting a whole model
+            // round after opening is unreliable: the transient menu can disappear while a hosted
+            // model/provider is thinking. In foreground mode, complete the ordinary human gesture
+            // synchronously from two fresh semantic frames: click the pop-up, then its exact item.
+            // Background mode never silently escalates to cursor/focus stealing.
+            if (role !== 'AXPopUpButton' || delivery !== 'foreground') throw error;
+            const requestedLabel = String(cmd.value).trim();
+            const savedExpectation = this.activeExpectation;
+            this.activeExpectation = null;
+            try {
+              const opened = await this.runInner({
+                action: 'click', session, deliveryMode: 'foreground',
+                ...(resolved.elementToken ? { elementToken: resolved.elementToken }
+                  : { elementIndex: resolved.elementIndex }),
+              }, ctx);
+              if (!opened.ok) throw new Error(opened.error || opened.summary || 'failed to open pop-up menu');
+              const item = this.observedElements.find(element => String(element.role || '') === 'AXMenuItem'
+                && String(element.label || '').trim().toLocaleLowerCase() === requestedLabel.toLocaleLowerCase());
+              if (!item) {
+                throw new Error(`pop-up opened, but no exact menu item ${JSON.stringify(requestedLabel)} was present in the fresh menu state`);
+              }
+              const chosen = await this.runInner({
+                action: 'click', session, deliveryMode: 'foreground',
+                ...(item.elementToken ? { elementToken: item.elementToken }
+                  : { elementIndex: item.elementIndex }),
+              }, ctx);
+              if (!chosen.ok) throw new Error(chosen.error || chosen.summary || `failed to select ${requestedLabel}`);
+              // The immediate post-click frame may still contain the closing menu. Let AppKit settle,
+              // then read the owning window again before declaring the exact value applied.
+              await new Promise(resolve => setTimeout(resolve, 160));
+            } finally {
+              this.activeExpectation = savedExpectation;
+              this.activeAction = 'set_value';
+            }
+            const evidence = await this.postActionEvidence(target, cwd, session);
+            const popup = this.observedElements.find(element => String(element.role || '') === 'AXPopUpButton');
+            const applied = String(popup?.value || popup?.label || '').trim().toLocaleLowerCase()
+              === requestedLabel.toLocaleLowerCase();
+            if (evidence.progressCheck) {
+              evidence.actionResult = toActionResult(evidence.progressCheck, {
+                query: `${resolved.label || 'pop-up'} exact option ${JSON.stringify(requestedLabel)}`,
+                matched: applied,
+              });
+            }
+            return {
+              ok: applied, action: cmd.action, driver, app: target.app, pid: target.pid, windowId: target.windowId,
+              details: {
+                fallback: 'foreground-popup-menu', target: { label: resolved.label, role },
+                requestedValue: cmd.value, appliedValue: popup?.value || popup?.label,
+              },
+              ...evidence,
+              ...(applied ? {} : { error: `pop-up did not settle on ${JSON.stringify(requestedLabel)}` }),
+              summary: applied
+                ? `selected exact pop-up option ${JSON.stringify(requestedLabel)} through its fresh native menu; fresh screen attached`
+                : `pop-up selection did not settle on ${JSON.stringify(requestedLabel)}`,
+            };
+          }
           const evidence = await this.postActionEvidence(target, cwd, session);
           const exactEndpoint = role === 'AXSlider' && requested.endpoint;
           if (exactEndpoint && evidence.progressCheck) {
@@ -6068,6 +7253,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
             // being asked is exactly how coordinates end up delivered to the wrong window. The model
             // picks the next surface explicitly with focus, which returns a fresh frame.
             this.targets.forget(target.pid);
+            this.pinnedWindow = null;
             this.syncLivePip();
           }
           return {
@@ -6092,6 +7278,7 @@ export class BimaxComputerRuntime implements DesktopRuntimePort {
           this.surfaces.remove(`native:${target.pid}`);
           // Drop only the quit app — other apps this session opened stay registered and focusable.
           this.targets.forget(target.pid);
+          this.pinnedWindow = null;
           // A quit app must not linger as a re-acquirable identity: the next turn's observe would
           // chase a pid the OS may already have recycled onto an unrelated process.
           if (this.lastOwnedTarget?.pid === target.pid) this.lastOwnedTarget = null;

@@ -415,17 +415,6 @@ func (m model) footerLine() string {
 		}
 		core = append(core, footerHint.Render(label))
 	}
-	// Live browser session chip: a real automated page is open right now. Host only — details
-	// live in /computer. Warn-tinted when untrusted web content has entered the conversation
-	// window (taint), so the risk posture rides with the session indicator.
-	if m.fComputer != nil && m.fComputer.BrowserURL != "" {
-		chip := "◍ " + urlHost(m.fComputer.BrowserURL)
-		if m.fComputer.Tainted {
-			core = append(core, warnStyle.Render(chip))
-		} else {
-			core = append(core, footerHint.Render(chip))
-		}
-	}
 	if m.busy {
 		// Only numbers that are TRUE go on screen: streamed characters (counted) and elapsed time
 		// (measured). The old "tok/s" was chars/4/elapsed — an estimate dressed up as telemetry.
@@ -602,12 +591,12 @@ func lerpRGB(a, b rgb, t float64) rgb {
 }
 
 var (
-	baseRGB    = rgb{215, 133, 98}  // colAccent (#D78562) — ember
-	shimmerRGB = rgb{232, 255, 248} // near-white with a cool phosphor cast for the highlight
-	errorRGB   = rgb{223, 118, 111} // colErr (#DF766F) — the stall tint mirrors the real error token
+	baseRGB    = rgb{237, 237, 235} // colAccent (#EDEDEB) — silver
+	shimmerRGB = rgb{255, 255, 255} // colShimmer (#FFFFFF)
+	errorRGB   = rgb{226, 226, 223} // colErr (#E2E2DF) — the stall tint mirrors the real error token
 )
 
-// renderShimmerVerb renders the working verb as a single CALM whole-word breath — one phosphor pulse
+// renderShimmerVerb renders the working verb as a single calm whole-word silver pulse
 // on a slow sine, not a per-character glimmer sweep. It reads as "alive and focused" without the
 // frenetic recolor-every-glyph churn (the old sweep was the "busy, not calm" tell). A stall tints the
 // whole word toward red; the tool phase breathes a touch faster than the thinking phase.

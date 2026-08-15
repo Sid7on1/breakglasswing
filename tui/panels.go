@@ -153,7 +153,8 @@ func (m model) subAgentPanel() string {
 	}
 	// Fixed content width (not auto-hug): the panel keeps ONE stable width instead of resizing on every
 	// streamed tool action — a calm, non-jittering box reads as far more polished. textW < m.width so
-	// the bordered box never reaches the last column (which would wrap the inline renderer and ghost).
+	// the bordered box never reaches the last column, which would auto-wrap and cost a second row
+	// (see TestViewLinesStayInsideLastColumn).
 	return todoPanel.Width(textW).Render(strings.TrimRight(b.String(), "\n"))
 }
 
@@ -332,9 +333,8 @@ func clipLines(s string, width, max int) []string {
 func (m model) mapPanelView() string {
 	// Fix the inner content width so the box stays one column SHORT of the terminal. Border (2) +
 	// padding (2) = 4 cols of chrome, plus 1 spare column so the placed line is m.width-1 wide. A
-	// full-width line auto-wraps the cursor, which desyncs the inline renderer's row count and makes
-	// this box ghost/duplicate on resize (and overflow when zoomed narrow). Keeping it < m.width fixes
-	// both.
+	// full-width line auto-wraps the cursor onto a second row, so the frame silently grows past the
+	// height budget and the panel overflows when zoomed narrow. Keeping it < m.width fixes both.
 	inner := m.width - 5
 	if inner < 12 {
 		return "" // too narrow for the panel — skip it rather than spill over the transcript
@@ -389,8 +389,8 @@ func (m model) compactMapView() string {
 	}
 	// LEFT-aligned, plain (no wide/ambiguous glyphs), and truncated to width-2 — NOT right-aligned and
 	// padded to full width. A full-width line with a width-miscounted glyph (the old ⛁/● right-aligned
-	// version) overflows the terminal, wraps, and desyncs Bubble Tea's inline cursor-up clear → the
-	// whole live region multiplies on every tea.Println / zoom. A short left-aligned line can't wrap.
+	// version) is measured as fitting but rendered wider, so the terminal wraps it and the frame
+	// exceeds its row budget. A short left-aligned line cannot wrap however the glyph measures.
 	var b strings.Builder
 	if cbm {
 		fmt.Fprintf(&b, "%s", logOK.Render("↯ codebase-memory"))
@@ -503,8 +503,8 @@ func (m model) taskPanel() string {
 	if live == 0 && attention == 0 && !m.tkFocus {
 		return ""
 	}
-	// Narrow-terminal degradation: below ~48 cols a bordered multi-row panel would wrap and ghost
-	// the inline renderer — collapse to one plain summary line instead.
+	// Narrow-terminal degradation: below ~48 cols a bordered multi-row panel wraps, and each wrapped
+	// row eats another line of the height budget — collapse to one plain summary line instead.
 	if m.width < 48 {
 		s := fmt.Sprintf("◍ %d task", live)
 		if live != 1 {

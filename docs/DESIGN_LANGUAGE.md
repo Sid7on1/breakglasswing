@@ -1,26 +1,26 @@
-# The BiMax Design Language — Graphite & Ember
+# The BiMAX Design Language — Starlight & Moonlight
 
 This document describes the design system **as implemented** in `tui/styles.go`,
 `app/src/renderer/src/styles.css`, and the copy conventions across the engine.
 It is a contract, not a mood board: if a change violates a rule here, the change
 is wrong or this document must be amended in the same commit.
 
-BiMax's identity: **a quiet instrument that is visibly alive.** Warm graphite
-neutrals carry all chrome; a single ember accent marks what is live or focused;
-colour is otherwise reserved strictly for state. The product speaks briefly when
+BiMAX's identity: **a quiet instrument that is visibly alive.** Black, white,
+pearl and silver carry every surface; stronger contrast marks what is live or focused.
+State remains explicit in words and symbols, never hue alone. The product speaks briefly when
 things are routine and precisely when evidence matters.
 
 ---
 
 ## 1. Principles
 
-1. **Foreground only.** BiMax paints text; the ground is the user's own
+1. **Foreground only.** BiMAX paints text; the ground is the user's own
    terminal. No full-background repaints, no wall-to-wall fills.
-2. **One accent.** Ember (`#D78562`) means *live / focused / active* — the
+2. **One light.** Silver (`#EDEDEB`) means *live / focused / active* — the
    user's own words, the running spinner, the selected row, the active tab.
    Nothing decorative may use it.
-3. **Colour is state.** Green = succeeded, red = failed, amber = caution,
-   blue = information. A colour never appears for variety.
+3. **Meaning survives monochrome.** Success, failure, caution and information
+   use labels and symbols first; stepped silver values add hierarchy without hue.
 4. **Hierarchy through ink, not boxes.** Four text tones (primary → secondary →
    tertiary → decorative) do the layout work. Borders are hairline, dim, and
    rounded — they group, they do not decorate.
@@ -35,16 +35,16 @@ things are routine and precisely when evidence matters.
 
 | Token | Hex | Meaning |
 |---|---|---|
-| `colAccent` (Ember) | `#D78562` | live, focused, active, "yours" |
-| `colShimmer` | `#E59A77` | animated live shimmer only |
-| `colText` | `#F1EFE9` | primary ink |
-| `colInactive` | `#B0ADA5` | secondary text, summaries |
-| `colSubtle` | `#77746E` | tertiary — gutters, hints |
-| `colDim` | `#383734` | decorative only (hairlines, empty meter track) — **never text** |
-| `colOK` | `#82AD89` | success, additions, tool completion |
-| `colErr` | `#DF766F` | failure, deletions |
-| `colWarn` | `#D4A35F` | caution, degraded, needs attention |
-| `colInfo` | `#78A9D4` | neutral information, links, hunks |
+| `colAccent` (Silver) | `#EDEDEB` | live, focused, active, "yours" |
+| `colShimmer` | `#FFFFFF` | animated live shimmer only |
+| `colText` | `#F5F5F4` | primary ink |
+| `colInactive` | `#B8B8B5` | secondary text, summaries |
+| `colSubtle` | `#7C7C78` | tertiary — gutters, hints |
+| `colDim` | `#303030` | decorative only (hairlines, empty meter track) — **never text** |
+| `colOK` | `#D3D3CF` | success, additions, tool completion |
+| `colErr` | `#E2E2DF` | failure, deletions |
+| `colWarn` | `#B9B9B4` | caution, degraded, needs attention |
+| `colInfo` | `#C4C4C1` | neutral information, links, hunks |
 | `colInk` | `#1A1A1A` | dark text ON a coloured block (chips, search hit) |
 
 Rules:
@@ -52,14 +52,14 @@ Rules:
   is a separate, deliberate exception; gradient math in `views.go`/`welcome.go`
   decomposes these same tokens and says so inline).
 - `colDim` fails WCAG on purpose and is therefore banned for text.
-- Mode chips are the one place a solid colour block is allowed (dark ink on
-  colour), because the active mode must be unmissable.
+- Mode chips are the one place a solid light block is allowed (dark ink on
+  silver), because the active mode must be unmissable.
 
 ## 3. Symbols
 
 | Symbol | Use |
 |---|---|
-| `⏺` | a tool call (green done · amber running · red failed) |
+| `⏺` | a tool call (label and silver intensity distinguish done · running · failed) |
 | `⎿` | the tool's one-line result, indented under its call |
 | `●` | "current" marker in pickers |
 | `◉` | slot rows in the model hub |
@@ -68,7 +68,7 @@ Rules:
 | `◍` | live browser session (host only; warn-tinted when tainted) |
 | `🤖` | live sub-agent |
 | `🧠` | mind layer chip |
-| braille spinner | the only spinner; ember-tinted; frozen under reduced motion |
+| braille spinner | the only spinner; silver-tinted; frozen under reduced motion |
 
 No decorative ASCII, no box-drawing walls, no emoji outside this table.
 
@@ -83,8 +83,8 @@ No decorative ASCII, no box-drawing walls, no emoji outside this table.
   `Padding(0,1)`, pinned above the prompt.
 - **Narrow terminals**: chips collapse to counts (`⌂ 4 repos`), panels clip
   before the transcript does, nothing wraps into corruption.
-- Diffs: whole-line tinted backgrounds (deep green/red, not neon) with a bold
-  bright line-number gutter; word-level tints inside edit previews.
+- Diffs: stepped neutral backgrounds with explicit `+`/`-` markers and a bold
+  bright line-number gutter; word-level intensity inside edit previews.
 
 ## 5. Vocabulary
 
@@ -100,7 +100,7 @@ they must never appear in rendered UI text. The live routing chip says
 
 ## 6. Voice
 
-BiMax is direct without being robotic, confident without pretending certainty,
+BiMAX is direct without being robotic, confident without pretending certainty,
 calm during failures, brief during routine.
 
 **Rules:**
@@ -124,14 +124,14 @@ calm during failures, brief during routine.
 
 ## 7. Motion
 
-- One braille spinner, ember-tinted, for "working"; a shimmer phrase for
+- One braille spinner, silver-tinted, for "working"; a shimmer phrase for
   "thinking". Nothing else animates.
 - `--no-anim` / `BIMAX_REDUCED_MOTION=1` freezes both; state is still legible
   because colour and text carry the meaning, not the motion.
 
 ## 8. Anti-patterns (rejected deliberately)
 
-Gradients beyond the wordmark · neon/cyberpunk hues · glowing borders ·
+Graphic logos · gradients beyond the text-only wordmark · neon/cyberpunk hues · glowing borders ·
 badge/pill proliferation · decorative separators · spinners for instant
 operations · loud success banners · provider jargon in primary surfaces ·
-copying Claude Code / Codex / Gemini CLI surface language.
+copying Claude Code / Codex / Gemini CLI surface language verbatim.

@@ -144,7 +144,6 @@ func (m *model) renderMessage(me MessageEntry) {
 					}
 				}
 			}
-			m.relayout()
 		}
 		return
 	case "HelpDashboard", "StatsDashboard", "DataTableDashboard":

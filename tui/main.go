@@ -78,12 +78,22 @@ func main() {
 		case "--help", "-h":
 			fmt.Println("bimax — build software with an agent team")
 			fmt.Println("usage: bimax            open Bimax in the current project")
+			fmt.Println("       bimax --headless run the Terminal engine over NDJSON stdio")
 			fmt.Println("       bimax --version  print the version and exit")
 			fmt.Println("       bimax --third-party-notices  print bundled licenses")
 			fmt.Println("       bimax --no-anim  reduce motion (freeze spinner/shimmer)")
 			fmt.Println()
 			fmt.Println("env:   NO_COLOR=1              plain output, no color")
 			fmt.Println("       BIMAX_REDUCED_MOTION=1  same as --no-anim")
+			return
+		}
+	}
+	for _, a := range os.Args[1:] {
+		if a == "--headless" {
+			if err := RunHeadlessEngine(ResolveRoot()); err != nil {
+				fmt.Fprintln(os.Stderr, "headless engine failed:", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}

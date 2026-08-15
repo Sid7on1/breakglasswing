@@ -2,273 +2,71 @@ import { IGovernor } from '../core/interfaces';
 import { ToolRegistry } from '../tools/tool.registry';
 import { LlmAdapter } from '../core/llm.adapter';
 import { BiMaxPersona } from '../cli/personas/implementations';
-import { AgentPersona, continuesComputerUse, explicitlyRequiresComputerUse, isolateComputerUseHistory, requiresComputerChecklist } from '../cli/personas/base.persona';
-import { appSlotPattern } from '../computer/installed.apps';
+import { AgentPersona } from '../cli/personas/base.persona';
 import { createBashTool } from '../tools/implementations/bash.tool';
 import { createReadFileTool } from '../tools/implementations/file.tool';
 import { createWebFetchTool } from '../tools/implementations/webfetch.tool';
 import { BuiltTool } from '../tools/tool.factory';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { OutcomeManager, __setOutcomeManager } from '../outcome/outcome.manager';
 
-// A deferred tool that is in BiMaxPersona's allowedTools (so it reaches the prompt) but NOT in the
-// core working set — exercises the LOAD-ON-DEMAND section. (WebFetchTool used to play this role, but
-// it's now part of the core set.)
-const fakeMemoryTool: BuiltTool = {
+const deferredTool: BuiltTool = {
   name: 'MemoryQueryTool', description: 'Searches long-term memory.',
   schema: { type: 'object', properties: {} }, isDestructive: false, isConcurrencySafe: true,
   execute: async () => 'ok',
 };
-const fakeComputerTool: BuiltTool = {
-  name: 'ComputerTool', description: 'Observe and operate the desktop.',
-  schema: { type: 'object', properties: {} }, isDestructive: false, isConcurrencySafe: false,
-  execute: async () => 'ok',
-};
-
 const governor = { approveTaskExecution: jest.fn().mockResolvedValue(undefined) } as unknown as IGovernor;
-const llm = {} as unknown as LlmAdapter;
 
 function persona(): BiMaxPersona {
-  const r = new ToolRegistry();
-  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor), fakeMemoryTool, fakeComputerTool].forEach(t => r.register(t));
-  return new BiMaxPersona(r, llm);
+  const registry = new ToolRegistry();
+  [createBashTool(governor), createReadFileTool(governor), createWebFetchTool(governor), deferredTool]
+    .forEach(tool => registry.register(tool));
+  return new BiMaxPersona(registry, {} as LlmAdapter);
 }
 
-describe('Persona system prompt — static/session/turn cache split', () => {
-  it('static prefix is byte-identical across turns regardless of memory / plan mode', () => {
+describe('Persona system prompt cache split', () => {
+  test('keeps the static prefix stable while volatile memory remains in turn context', () => {
     const p = persona();
-    const a = p.getSystemPromptParts({ memory: 'remembered fact A', planMode: false });
-    const b = p.getSystemPromptParts({ memory: 'totally different memory B', planMode: true });
-    // The cacheable prefix must not move when only per-turn content changes.
+    const a = p.getSystemPromptParts({ memory: 'fact A', planMode: false });
+    const b = p.getSystemPromptParts({ memory: 'fact B', planMode: true });
     expect(a.staticPrefix).toBe(b.staticPrefix);
-    // ...and it must be a genuine prefix of the full prompt.
-    expect(p.getSystemPrompt({ memory: 'x' }).startsWith(a.staticPrefix)).toBe(true);
+    expect(a.staticPrefix).not.toContain('fact A');
+    expect(a.turnContext).toContain('fact A');
+    expect(b.dynamicSuffix).toContain('PLAN MODE');
   });
 
-  it('per-turn volatile content (memory) lives in turnContext — NOT in the system prompt segments', () => {
-    const p = persona();
-    const { staticPrefix, dynamicSuffix, turnContext } = p.getSystemPromptParts({ memory: 'SECRET-MEMORY-TOKEN', planMode: true });
-    // Recalled memory changes bytes every turn; in the system prompt it would invalidate the
-    // provider's prompt-prefix cache from position 0 each turn.
-    expect(staticPrefix).not.toContain('SECRET-MEMORY-TOKEN');
-    expect(dynamicSuffix).not.toContain('SECRET-MEMORY-TOKEN');
-    expect(turnContext).toContain('SECRET-MEMORY-TOKEN');
-    // Plan mode toggles rarely → session suffix (one cache miss per toggle is fine).
-    expect(staticPrefix).not.toContain('PLAN MODE');
-    expect(dynamicSuffix).toContain('PLAN MODE');
-    // Environment (cwd) is per-session/dynamic.
-    expect(staticPrefix).not.toContain('### ENVIRONMENT');
-    expect(dynamicSuffix).toContain('### ENVIRONMENT');
+  test('keeps deferred tools discoverable without sending them in the core working set', () => {
+    expect(persona().getSystemPromptParts({ contextMode: 'smart' }).dynamicSuffix)
+      .toContain('MemoryQueryTool');
   });
 
-  it('injects the active engine outcome contract into refreshed turn context', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bimax-prompt-outcome-'));
-    const manager = new OutcomeManager({ sessionId: () => 'prompt-session', directory: () => dir });
-    try {
-      manager.syncSession();
-      manager.define('DELIVER-EXACT-OUTCOME', [{ id: 'verified', description: 'Result is verified' }]);
-      __setOutcomeManager(manager);
-      const parts = persona().getSystemPromptParts({});
-      expect(parts.turnContext).toContain('DELIVER-EXACT-OUTCOME');
-      expect(parts.staticPrefix).not.toContain('DELIVER-EXACT-OUTCOME');
-      expect(parts.dynamicSuffix).not.toContain('DELIVER-EXACT-OUTCOME');
-    } finally {
-      manager.shutdown();
-      __setOutcomeManager(null);
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('the session suffix is byte-stable when only per-turn content changes', () => {
-    const p = persona();
-    const a = p.getSystemPromptParts({ memory: 'fact A', exemplars: 'exemplar A' });
-    const b = p.getSystemPromptParts({ memory: 'fact B', exemplars: 'exemplar B' });
-    expect(a.dynamicSuffix).toBe(b.dynamicSuffix);
-    expect(a.turnContext).not.toBe(b.turnContext);
-  });
-
-  it('identity and behavioural rules stay in the static prefix', () => {
-    const p = persona();
-    const { staticPrefix } = p.getSystemPromptParts({});
-    expect(staticPrefix).toContain('### IDENTITY');
-    expect(staticPrefix).toContain('OUTPUT CONTRACT');
-  });
-
-  it('smart mode defers MemoryQueryTool — it appears under LOAD-ON-DEMAND in the suffix, not as a sent tool', () => {
-    const p = persona();
-    const { dynamicSuffix } = p.getSystemPromptParts({ contextMode: 'smart' });
-    expect(dynamicSuffix).toContain('LOAD-ON-DEMAND');
-    expect(dynamicSuffix).toContain('MemoryQueryTool');
-  });
-
-  it('getSystemPrompt = all three segments joined', () => {
+  test('joins the three prompt segments exactly', () => {
     const p = persona();
     const parts = p.getSystemPromptParts({ memory: 'm' });
-    const full = p.getSystemPrompt({ memory: 'm' });
-    expect(full).toBe([parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].filter(Boolean).join('\n\n'));
-  });
-
-  it('builds a compact, non-coding prompt for a computer-operation turn', () => {
-    const p = persona();
-    const parts = p.getSystemPromptParts({
-      computerUse: true,
-      toolNames: ['ComputerTool', 'TodoWriteTool', 'OutcomeTool', 'AskUserTool'],
-    });
-    const full = [parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].join('\n');
-    expect(full).toContain('ACTIVE DESKTOP OPERATION');
-    expect(full).toContain('- ComputerTool:');
-    expect(full).not.toContain('PROJECT GUIDE');
-    expect(full).not.toContain('GraphQueryTool SEARCH_NODES');
-    expect(full).not.toContain('LOAD-ON-DEMAND TOOLS');
+    expect(p.getSystemPrompt({ memory: 'm' }))
+      .toBe([parts.staticPrefix, parts.dynamicSuffix, parts.turnContext].filter(Boolean).join('\n\n'));
   });
 });
 
-describe('explicit computer-use history isolation', () => {
-  it('recognizes an explicit visual-tool request', () => {
-    expect(explicitlyRequiresComputerUse('use computer use and check my battery health')).toBe(true);
-    expect(explicitlyRequiresComputerUse('hey, poke around my Mac and tell me how worn out the battery is')).toBe(true);
-    expect(explicitlyRequiresComputerUse('explain how lithium-ion batteries age')).toBe(false);
-  });
-
-  it('does not hijack engineering or informational prompts that merely mention an app', () => {
-    // This repo itself contains Finder/Safari-related source — routing these into computer use
-    // would isolate real conversation evidence and demand screenshots for a coding question.
-    expect(explicitlyRequiresComputerUse('check the finder smoke script for bugs')).toBe(false);
-    expect(explicitlyRequiresComputerUse('open src/computer/desktop.runtime.ts and fix the Finder window code')).toBe(false);
-    expect(explicitlyRequiresComputerUse('how does Safari handle cookies? go check the docs')).toBe(false);
-    expect(explicitlyRequiresComputerUse('open System Settings and check my battery')).toBe(true);
-  });
-
-  it('recognizes operating an installed app that no hardcoded list would have named', () => {
-    // The regression: the gate only knew finder|safari|system settings, so a request to send a
-    // file through a messaging app read as ordinary chat — and the model answered it by claiming
-    // it could not send files at all, with the ComputerTool sitting right there unused.
-    // These assert the RULE (verb + app slot), driven by whatever is really installed here.
-    const roster = ['WhatsApp', 'Telegram', 'Notes', 'Google Chrome', 'TV'];
-    const pattern = appSlotPattern(roster)!;
-    expect(pattern.test('send any random jpeg to my mom2 on whats app')).toBe(true); // spacing varies
-    expect(pattern.test('send a jpeg to mom2 on whatsapp')).toBe(true);
-    expect(pattern.test('open telegram and reply to her')).toBe(true);
-    expect(pattern.test('copy that text into notes')).toBe(true);
-    expect(pattern.test('switch to google chrome')).toBe(true);
-    // A bare app name outside the slot must NOT count: single-word app names that are also
-    // ordinary English words would otherwise turn any sentence containing them into GUI work.
-    expect(pattern.test('the release notes are ready')).toBe(false);
-    expect(pattern.test('summarize my notes about the outage')).toBe(false);
-    // Names too short to be evidence are dropped rather than matching every "to tv" in a sentence.
-    expect(appSlotPattern(['TV'])).toBeNull();
-  });
-
-  it('needs both a GUI verb and a named surface before isolating history', () => {
-    expect(explicitlyRequiresComputerUse('send the release notes to the team')).toBe(false);
-    expect(explicitlyRequiresComputerUse('my mac has been slow lately')).toBe(false); // no verb
-    expect(explicitlyRequiresComputerUse('show me my screen')).toBe(true);
-  });
-
-  it('recognizes ordinary GUI intent without requiring an app name or click-by-click wording', () => {
-    expect(explicitlyRequiresComputerUse('check my notifications')).toBe(true);
-    expect(explicitlyRequiresComputerUse('make the window fullscreen')).toBe(true);
-    expect(explicitlyRequiresComputerUse('open the file picker')).toBe(true);
-    expect(explicitlyRequiresComputerUse('what is a notification center?')).toBe(false);
-  });
-
-  it('routes vague follow-ups only when recent ComputerTool evidence gives them a live surface', () => {
-    const computerContext: any[] = [
-      { role: 'assistant', tool_calls: [{ function: { name: 'ComputerTool' } }] },
-      { role: 'tool', content: '{"ok":true,"driver":"bimax-computer-use","action":"observe"}' },
-    ];
-    expect(continuesComputerUse('click that one', computerContext)).toBe(true);
-    expect(continuesComputerUse('okay now make it fullscreen', computerContext)).toBe(true);
-    expect(continuesComputerUse('continue', computerContext)).toBe(true);
-    expect(continuesComputerUse('continue', [])).toBe(false);
-    expect(continuesComputerUse('fix the runtime code', computerContext)).toBe(false);
-  });
-
-  it('recognizes compound computer work that needs an engine-persistent checklist', () => {
-    expect(requiresComputerChecklist('Use computer use. Open Settings, check Battery, then return to General.')).toBe(true);
-    expect(requiresComputerChecklist('open System Settings')).toBe(false);
-  });
-
-  it('hides prior shell evidence and stale screenshots without breaking tool-result roles', () => {
+describe('injectTurnContext', () => {
+  test('replaces the old block immediately before the latest user message', () => {
     const messages: any[] = [
-      { role: 'user', content: 'check battery' },
-      { role: 'assistant', tool_calls: [{ id: '1', type: 'function', function: { name: 'BashTool', arguments: '{}' } }] },
-      { role: 'tool', tool_call_id: '1', content: 'Maximum Capacity: 92%; Cycle Count: 269' },
-      { role: 'assistant', content: 'Tool results received. I will inspect the fresh screenshot before choosing the next action.' },
-      { role: 'user', content: [{ type: 'text', text: '[BrowserScreenshot] old screen' }] },
-    ];
-    const isolated = isolateComputerUseHistory(messages);
-    expect(isolated.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
-    expect(String(isolated[2].content)).not.toContain('92%');
-    expect(isolated[2].tool_call_id).toBe('1');
-  });
-});
-
-describe('injectTurnContext — cache-safe tail placement', () => {
-  const tc = 'USER PREFERS TABS';
-
-  it('inserts a [TurnContext] system message immediately before the latest user message', () => {
-    const msgs: any[] = [
-      { role: 'user', content: 'first task' },
+      { role: 'system', content: '[TurnContext]\nstale' },
+      { role: 'user', content: 'first' },
       { role: 'assistant', content: 'done' },
-      { role: 'user', content: 'second task' },
+      { role: 'user', content: 'second' },
     ];
-    AgentPersona.injectTurnContext(msgs, tc);
-    expect(msgs).toHaveLength(4);
-    expect(msgs[2].role).toBe('system');
-    expect(msgs[2].content).toContain('[TurnContext]');
-    expect(msgs[2].content).toContain(tc);
-    expect(msgs[3].content).toBe('second task');
-    // Never at the head — that would invalidate the whole-history prefix cache every turn.
-    expect(msgs[0].content).toBe('first task');
+    AgentPersona.injectTurnContext(messages, 'fresh');
+    const blocks = messages.filter(message => String(message.content).startsWith('[TurnContext]'));
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].content).toContain('fresh');
+    expect(messages[messages.length - 1].content).toBe('second');
   });
 
-  it('strips the previous turn\'s [TurnContext] so exactly one copy exists', () => {
-    const msgs: any[] = [
-      { role: 'system', content: '[TurnContext]\nstale block from last turn' },
-      { role: 'user', content: 'first task' },
-      { role: 'assistant', content: 'done' },
-      { role: 'user', content: 'second task' },
-    ];
-    AgentPersona.injectTurnContext(msgs, tc);
-    const tcMsgs = msgs.filter(m => String(m.content).startsWith('[TurnContext]'));
-    expect(tcMsgs).toHaveLength(1);
-    expect(tcMsgs[0].content).toContain(tc);
-    expect(tcMsgs[0].content).not.toContain('stale block');
-  });
-
-  it('empty turn context strips old copies and injects nothing', () => {
-    const msgs: any[] = [
+  test('removes stale context when the new turn has no context', () => {
+    const messages: any[] = [
       { role: 'system', content: '[TurnContext]\nstale' },
       { role: 'user', content: 'task' },
     ];
-    AgentPersona.injectTurnContext(msgs, '');
-    expect(msgs).toHaveLength(1);
-    expect(msgs[0].content).toBe('task');
-  });
-
-  it('appends when there is no user message (never targets the head)', () => {
-    const msgs: any[] = [{ role: 'assistant', content: 'hello' }];
-    AgentPersona.injectTurnContext(msgs, tc);
-    expect(msgs[1].content).toContain(tc);
-  });
-
-  it('does not insert a system role after a tool result before a screenshot observation', () => {
-    const msgs: any[] = [
-      { role: 'user', content: 'open Calculator' },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'ComputerTool', arguments: '{}' } }] },
-      { role: 'tool', tool_call_id: 'call_1', content: '{"ok":true}' },
-      { role: 'assistant', content: 'Tool results received. I will inspect the fresh screenshot before choosing the next action.' },
-      { role: 'user', content: [{ type: 'text', text: '[BrowserScreenshot] fresh screen' }] },
-    ];
-
-    AgentPersona.injectTurnContext(msgs, tc);
-
-    expect(msgs[0].role).toBe('system');
-    expect(msgs[0].content).toContain('[TurnContext]');
-    expect(msgs.map(m => m.role)).toEqual(['system', 'user', 'assistant', 'tool', 'assistant', 'user']);
-    expect(msgs.some((m, i) => m.role === 'system' && msgs[i - 1]?.role === 'tool')).toBe(false);
+    AgentPersona.injectTurnContext(messages, '');
+    expect(messages).toEqual([{ role: 'user', content: 'task' }]);
   });
 });

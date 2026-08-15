@@ -148,9 +148,9 @@ export function contentToText(content: string | ContentPart[] | undefined): stri
     .join('\n');
 }
 
-// --- Browser/desktop screenshot → next-turn visual observation (vision models only) -----------
+// --- Tool screenshot → next-turn visual observation (vision models only) ----------------------
 //
-// The Gemini computer-use loop feeds the model a fresh screenshot after every action and prunes
+// Vision action loops feed the model a fresh screenshot after every action and prune
 // old ones from history (MAX_RECENT_TURN_WITH_SCREENSHOTS). BiMax adopts the gated version of
 // that: a BrowserTool screenshot becomes an image observation on the NEXT model turn only when
 // the ACTIVE model advertises vision (caps.visionInput); text-only models keep the plain JSON
@@ -168,9 +168,9 @@ export const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
  * Messages task grow from ~7k to ~22k prompt tokens without adding usable evidence. */
 export const MAX_SCREENSHOT_OBSERVATIONS = 1;
 
-/** Pull the evidence screenshot path out of a BrowserTool result string, when the call made one. */
+/** Pull an evidence screenshot path from any structured tool result. */
 export function screenshotFromToolResult(toolName: string, result: string): string | null {
-  if ((toolName !== 'BrowserTool' && toolName !== 'ComputerTool') || !result) return null;
+  if (!toolName || !result) return null;
   try {
     const parsed = JSON.parse(result);
     if (parsed && parsed.ok === true && typeof parsed.screenshot === 'string' && parsed.screenshot) {
@@ -185,7 +185,7 @@ export function screenshotFromToolResult(toolName: string, result: string): stri
  * or unreadable (the caller then simply attaches nothing — never a broken request).
  */
 export interface ScreenshotObservationContext {
-  source?: 'BrowserTool' | 'ComputerTool';
+  source?: string;
   action?: string;
   width?: number;
   height?: number;
@@ -193,7 +193,7 @@ export interface ScreenshotObservationContext {
   app?: string;
   pid?: number;
   windowId?: number;
-  /** Optional whole-display context paired with a ComputerTool target-window action frame. */
+  /** Optional wider context paired with the exact action frame. */
   displayScreenshot?: string;
   displayWidth?: number;
   displayHeight?: number;
@@ -209,17 +209,15 @@ export function buildScreenshotObservation(
   } catch { return null; }
   const image = imagePartFromSource(screenshotPath);
   if (!image) return null;
-  const source = context.source || 'BrowserTool';
+  const source = context.source || 'tool';
   const size = context.width && context.height ? ` size=${context.width}x${context.height}` : '';
   const frame = context.frameId ? ` frameId=${context.frameId}` : '';
-  const target = source === 'ComputerTool' && (context.app || context.pid || context.windowId)
+  const target = context.app || context.pid || context.windowId
     ? ` target=${JSON.stringify({ app: context.app, pid: context.pid, windowId: context.windowId })}`
     : '';
-  const coordinates = source === 'ComputerTool'
-    ? 'ComputerTool x/y are pixels in this exact image; prefer semantic handles from the preceding result.'
-    : 'BrowserTool targets must come from this exact page state.';
+  const coordinates = 'Any coordinates or semantic handles must come from this exact observed state.';
   let displayImage: ImagePart | null = null;
-  if (source === 'ComputerTool' && context.displayScreenshot) {
+  if (context.displayScreenshot) {
     try {
       const stat = fs.statSync(context.displayScreenshot);
       if (stat.isFile() && stat.size <= MAX_SCREENSHOT_BYTES) {
@@ -240,7 +238,7 @@ export function buildScreenshotObservation(
   if (displayImage && context.displayScreenshot) {
     content.push({
       type: 'text',
-      text: `Image 2 is DISPLAY CONTEXT ONLY${displaySize} file=${path.basename(context.displayScreenshot)}. It shows the whole human-visible desktop for occlusion, dialogs, menus, Dock and app/window changes. Never use Image 2 pixels as ComputerTool x/y; coordinates and semantic handles belong only to Image 1.`,
+      text: `Image 2 is WIDER CONTEXT ONLY${displaySize} file=${path.basename(context.displayScreenshot)}. Never use Image 2 coordinates; coordinates and semantic handles belong only to Image 1.`,
     }, displayImage);
   }
   return {
@@ -276,7 +274,7 @@ export function appendScreenshotObservation(
 }
 
 /**
- * Truncate all but the newest `keep` bulky computer-use screen RESULTS (explicit observations and
+ * Truncate all but the newest `keep` bulky structured screen results (explicit observations and
  * the automatic post-action evidence attached to click/type/key/etc.). In an hours-long desktop
  * run these are the dominant context eaters, and every stale one describes pixels that no longer
  * exist. The tool_call_id and message shape are preserved for strict providers; only the payload

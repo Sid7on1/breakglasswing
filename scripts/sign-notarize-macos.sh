@@ -35,7 +35,7 @@ done
 (
   cd build
   : > SHA256SUMS
-  for archive in bimax-darwin-arm64.tar.gz bimax-darwin-x64.tar.gz bimax-linux-x64.tar.gz bimax-linux-arm64.tar.gz; do
+  for archive in bimax-darwin-arm64.tar.gz bimax-darwin-x64.tar.gz; do
     [ -f "$archive" ] || { echo "error: missing release archive $archive" >&2; exit 1; }
     shasum -a 256 "$archive" >> SHA256SUMS
   done

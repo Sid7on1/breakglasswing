@@ -153,7 +153,6 @@ func (m *model) handleEvent(o Outbound) {
 			m.ctxBaseline = s.TokensBaseline
 			m.ctxSaved = s.CompressionSaved
 			m.fWorkspace = s.Workspace
-			m.fComputer = s.Computer
 			m.fTasks = s.Tasks
 			// Keep the selection valid as the strip shrinks; release focus when it empties so the
 			// panel's stolen keys (↑/↓/enter/c/p/r) go back to the input.

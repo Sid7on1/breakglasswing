@@ -1,0 +1,84 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-11T18-21-38-640Z",
+  "started_at": "2026-08-11T18:21:38.643Z",
+  "ended_at": "2026-08-11T18:21:44.053Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J4",
+      "name": "Diagnose Mac permissions while coding stays usable",
+      "outcome": "pass",
+      "checks": [
+        {
+          "name": "the denied permission is named",
+          "pass": true,
+          "observed": "permission row"
+        },
+        {
+          "name": "the blocker is stated in plain language",
+          "pass": true,
+          "observed": "blocker"
+        },
+        {
+          "name": "coding is shown as unaffected",
+          "pass": true,
+          "observed": "coding stays available"
+        },
+        {
+          "name": "Bimax does not claim it can grant the permission",
+          "pass": true,
+          "observed": "honest wording"
+        },
+        {
+          "name": "the grant path starts the exact Accessibility drag coach",
+          "pass": true,
+          "observed": "[{\"name\":\"permissionCoach.start\",\"payload\":\"accessibility\",\"at\":1786472502354}]"
+        },
+        {
+          "name": "the drag coach survives the inactive-to-active React transition",
+          "pass": true,
+          "observed": "[]"
+        },
+        {
+          "name": "a coding instruction still reaches the engine",
+          "pass": true,
+          "observed": "coding usable"
+        }
+      ],
+      "pageErrors": [],
+      "accessibilityFindings": [],
+      "error": null
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 1,
+    "failed": 0
+  }
+}

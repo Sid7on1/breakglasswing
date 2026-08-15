@@ -5,13 +5,17 @@ cd "$(dirname "$0")/.."
 
 release_repo="${BIMAX_RELEASE_REPO:-Sid7on1/bimax-releases}"
 version="$(node -p "require('./package.json').version")"
+protocol_version="$(node -p "require('fs').readFileSync('src/protocol/protocol.ts','utf8').match(/PROTOCOL_SEMVER\\s*=\\s*'([^']+)'/)[1]")"
 tag="v${version}"
 title="Bimax ${tag} (unsigned macOS beta)"
 assets=(
   build/bimax-darwin-arm64.tar.gz
   build/bimax-darwin-x64.tar.gz
-  build/bimax-linux-x64.tar.gz
-  build/bimax-linux-arm64.tar.gz
+  build/bimax-engine-darwin-arm64
+  build/bimax-engine-darwin-x64
+  build/bimax-engine-manifest.json
+  build/ENGINE_SHA256SUMS
+  "build/bimax-client-protocol-v${protocol_version}.tar.gz"
   build/SHA256SUMS
 )
 
@@ -20,6 +24,7 @@ for asset in "${assets[@]}"; do
 done
 
 ( cd build && shasum -a 256 -c SHA256SUMS )
+( cd build && shasum -a 256 -c ENGINE_SHA256SUMS )
 notes="$(mktemp)"
 trap 'rm -f "$notes"' EXIT
 {

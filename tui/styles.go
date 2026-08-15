@@ -2,29 +2,29 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// Lip Gloss palette for the Bimax TUI — the same warm Graphite system as the desktop app.
-// Quiet graphite neutrals carry the chrome, one ember accent marks what is live/focused, and functional
-// semantics are reserved strictly for state. Truecolor hex; lipgloss degrades it for 256/16-color
+// Lip Gloss palette for the BiMAX TUI — the same Moonlight system as the desktop app.
+// Black, white and silver carry the entire hierarchy; brighter silver marks what is live/focused.
+// Truecolor hex; lipgloss degrades it for 256/16-color
 // terminals automatically. We paint foreground only — the ground is the user's own terminal.
 var (
-	// Warm Graphite core palette — synchronized with app/src/renderer/src/styles.css.
-	colAccent   = lipgloss.Color("#D78562") // Ember — the one signal accent (live / focus / active)
-	colShimmer  = lipgloss.Color("#E59A77") // lighter ember for subtle live shimmer
-	colText     = lipgloss.Color("#F1EFE9") // warm primary ink
-	colInactive = lipgloss.Color("#B0ADA5") // secondary text / summaries
-	colSubtle   = lipgloss.Color("#77746E") // tertiary — dim chrome (gutters, hints)
-	colDim      = lipgloss.Color("#383734") // faint graphite — DECORATIVE ONLY (panel hairline borders,
+	// Moonlight core palette — synchronized with app/src/renderer/src/styles.css.
+	colAccent   = lipgloss.Color("#EDEDEB") // silver — live / focus / active
+	colShimmer  = lipgloss.Color("#FFFFFF") // white highlight for subtle live shimmer
+	colText     = lipgloss.Color("#F5F5F4") // primary moonlight ink
+	colInactive = lipgloss.Color("#B8B8B5") // secondary text / summaries
+	colSubtle   = lipgloss.Color("#7C7C78") // tertiary — dim chrome (gutters, hints)
+	colDim      = lipgloss.Color("#303030") // faint graphite — DECORATIVE ONLY (panel hairline borders,
 	//                                         empty meter track); 2.2:1, WCAG-exempt. Never use for text.
-	colUser    = lipgloss.Color("#F1EFE9")
-	colAsst    = lipgloss.Color("#F1EFE9")
-	colTool    = lipgloss.Color("#82AD89")
-	colErr     = lipgloss.Color("#DF766F")
-	colWarn    = lipgloss.Color("#D4A35F")
-	colOK      = lipgloss.Color("#82AD89")
-	colInfo    = lipgloss.Color("#78A9D4")
-	colDiffAdd = lipgloss.Color("#82AD89")
-	colDiffDel = lipgloss.Color("#DF766F")
-	colHunk    = lipgloss.Color("#78A9D4")
+	colUser    = lipgloss.Color("#F5F5F4")
+	colAsst    = lipgloss.Color("#F5F5F4")
+	colTool    = lipgloss.Color("#D3D3CF")
+	colErr     = lipgloss.Color("#E2E2DF")
+	colWarn    = lipgloss.Color("#B9B9B4")
+	colOK      = lipgloss.Color("#D3D3CF")
+	colInfo    = lipgloss.Color("#C4C4C1")
+	colDiffAdd = lipgloss.Color("#D3D3CF")
+	colDiffDel = lipgloss.Color("#E2E2DF")
+	colHunk    = lipgloss.Color("#C4C4C1")
 
 	// Extended semantic tokens (WS3-B) — named so NO style below carries a raw hex; this block is
 	// the single source of truth for every colour in the TUI's chrome. (The code-syntax palette in
@@ -32,8 +32,8 @@ var (
 	// of these tokens for gradient math, annotated with the token they mirror.)
 	colInk       = lipgloss.Color("#1A1A1A") // near-black text ON a colored block (mode chip, search hit)
 	colBright    = lipgloss.Color("#FFFFFF") // max-contrast text (diff line numbers)
-	colDiffAddBg = lipgloss.Color("#0E2A1C") // deep green fill behind an added diff line / word
-	colDiffDelBg = lipgloss.Color("#2E1416") // deep red fill behind a removed diff line / word
+	colDiffAddBg = lipgloss.Color("#1C1C1C") // neutral lift behind an added diff line / word
+	colDiffDelBg = lipgloss.Color("#262626") // stronger neutral lift behind a removed diff line / word
 
 	// Welcome banner / wordmark.
 	logoStyle   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
@@ -44,7 +44,7 @@ var (
 	metaVal     = lipgloss.NewStyle().Foreground(colInactive)
 	statusStyle = lipgloss.NewStyle().Foreground(colInactive)
 
-	// User echo is the accent color (phosphor) so a turn's prompt is instantly distinct from the
+	// User echo is the silver accent so a turn's prompt is instantly distinct from the
 	// white assistant reply — they were both bright white before and ran together.
 	userStyle   = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 	caretStyle  = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
@@ -85,15 +85,15 @@ var (
 	footerMode = lipgloss.NewStyle().Foreground(colOK).Bold(true)
 	footerSep  = lipgloss.NewStyle().Foreground(colSubtle).Render(" · ")
 
-	// Per-mode footer CHIP: bold, uppercase, a solid colored block (reads big/loud at terminal scale).
-	// general = yellow (the base); every other mode a distinct hue so the active mode is unmissable.
-	colSketch     = lipgloss.Color("#B084EB") // purple — the architect
+	// Per-mode footer CHIP: bold, uppercase and deliberately monochrome. Shape and label—not hue—
+	// communicate the mode, so status remains legible in every terminal color profile.
+	colSketch     = lipgloss.Color("#AAAAA6")
 	modeChipColor = map[string]lipgloss.Color{
-		"general": colInfo,   // blue (base)
-		"explore": colWarn,   // yellow / amber
-		"sketch":  colSketch, // purple
-		"code":    colOK,     // green
-		"beast":   colAccent, // phosphor (brand)
+		"general": colInfo,
+		"explore": colWarn,
+		"sketch":  colSketch,
+		"code":    colOK,
+		"beast":   colAccent,
 	}
 	// dark text on the colored block for contrast.
 	modeChipBase = lipgloss.NewStyle().Bold(true).Foreground(colInk).Padding(0, 1)
@@ -114,10 +114,8 @@ var (
 	diffDel  = lipgloss.NewStyle().Foreground(colDiffDel)
 	diffHunk = lipgloss.NewStyle().Foreground(colHunk)
 
-	// Full-line diff (Claude-Code style): the WHOLE changed line gets a coloured background with
-	// bright readable text — dark green for additions, dark red for deletions (not neon; respects the
-	// graphite theme). Line numbers sit in a dim gutter.
-	// Graphite-tinted diff pair: a deep green/red fill with a phosphor-adjacent readable fg.
+	// Full-line diff: the WHOLE changed line gets a neutral stepped background with bright readable
+	// text. Symbols and labels carry add/delete meaning without relying on color.
 	diffAddLine = lipgloss.NewStyle().Background(colDiffAddBg).Foreground(colDiffAdd)
 	diffDelLine = lipgloss.NewStyle().Background(colDiffDelBg).Foreground(colDiffDel)
 	// Diff gutter line numbers: bright white + bold so they read as a clear, prominent column (the

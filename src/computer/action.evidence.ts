@@ -53,11 +53,22 @@ const RETURN_KEY = /\b(?:return|enter)\b/i;
  * transcript must not strand a task that really did complete. */
 export function computerToolResults(messages: Message[] | undefined): ComputerActionResult[] {
   if (!Array.isArray(messages)) return [];
+  const computerCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    for (const call of message.tool_calls || []) {
+      if (call.function.name === 'ComputerTool') computerCallIds.add(call.id);
+    }
+  }
   return messages.flatMap(message => {
     if (message.role !== 'tool' || typeof message.content !== 'string') return [];
     try {
       const parsed = JSON.parse(message.content);
-      return String(parsed?.driver || '').startsWith('bimax-computer-use') && parsed?.action
+      // Current providers do not all preserve the desktop runtime's driver label. The tool-call id
+      // is the authoritative provenance when it is available; the driver remains a compatibility
+      // fallback for compacted/legacy transcripts whose assistant call was already discarded.
+      const belongsToComputerTool = Boolean(message.tool_call_id && computerCallIds.has(message.tool_call_id));
+      return (belongsToComputerTool || String(parsed?.driver || '').startsWith('bimax-computer-use')) && parsed?.action
         ? [parsed as ComputerActionResult]
         : [];
     } catch { return []; /* compacted or non-JSON tool result */ }
@@ -88,7 +99,9 @@ export function computerToolSteps(messages: Message[] | undefined): ComputerTool
     if (!args) continue;
     try {
       const parsed = JSON.parse(message.content);
-      if (String(parsed?.driver || '').startsWith('bimax-computer-use') && parsed?.action) {
+      // Pairing to an actual ComputerTool call is stronger evidence than a provider-specific driver
+      // string, and keeps compatibility/CUA adapters visible to the same completion gates.
+      if (parsed?.action) {
         steps.push({ args, result: parsed as ComputerActionResult });
       }
     } catch { /* compacted result: no evidence */ }

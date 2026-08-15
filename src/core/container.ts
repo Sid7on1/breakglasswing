@@ -42,9 +42,7 @@ import { createMcpManageTool } from '../tools/implementations/mcp.tool';
 import { createToolSearchTool } from '../tools/implementations/toolsearch.tool';
 import { createWebSearchTool } from '../tools/implementations/websearch.tool';
 import { createBrowserTool } from '../tools/implementations/browser.tool';
-import { createComputerTool } from '../tools/implementations/computer.tool';
 import { globalBrowserRuntime } from '../browser/browser.runtime';
-import { globalDesktopRuntime } from '../computer/desktop.runtime';
 import { shutdownTracer } from '../telemetry/trace';
 import { createSkillTool } from '../tools/implementations/skill.tool';
 import { createSkillInstallTool } from '../tools/implementations/skill.install.tool';
@@ -150,7 +148,7 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   const { isCodebase } = await import('../graph/graph.summary');
   if (isCodebase(projectRoot)) {
     const loadGraph = graphStore.loadFromDisk().then(() => {
-      // A deferred desktop load becomes visible as soon as it settles. The initial snapshot either
+      // A deferred provider load becomes visible as soon as it settles. The initial snapshot either
       // sees the populated graph or this event schedules the next one; no polling is required.
       cliEvents.emit('graph_changed');
     }).catch((err: any) => {
@@ -251,13 +249,10 @@ export async function createContainer(config?: Partial<CliConfig>): Promise<{
   toolRegistry.register(createToolSearchTool(governor, toolRegistry));
   toolRegistry.register(createWebSearchTool(governor));
   toolRegistry.register(createBrowserTool(governor));
-  // Native desktop control (first-party OS driver — screenshots, mouse, keyboard; no MCP).
-  toolRegistry.register(createComputerTool(governor));
   if (!browserShutdownWired) {
     browserShutdownWired = true;
     cliEvents.once('shutdown', () => {
       void globalBrowserRuntime.close();
-      void globalDesktopRuntime.dispose?.();
       void shutdownTracer();
     });
   }

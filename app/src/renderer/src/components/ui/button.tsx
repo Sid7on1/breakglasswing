@@ -4,7 +4,7 @@ import { cn } from '../../lib/cn';
 
 /** Shared button variants on the active Bimax appearance tokens. */
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors ' +
+  'pressable inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors ' +
     'cursor-pointer select-none whitespace-nowrap disabled:pointer-events-none disabled:opacity-45 ' +
     'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ember/60',
   {
@@ -12,7 +12,7 @@ const buttonVariants = cva(
       variant: {
         default:
           'border border-line bg-raise text-ink hover:border-ember hover:bg-ember/15',
-        accent: 'bg-ember font-semibold text-white hover:bg-ember-bright',
+        accent: 'bg-ember font-semibold text-bg hover:bg-ember-bright',
         ghost: 'text-dim hover:bg-hover hover:text-ink',
         destructive: 'bg-rust text-white hover:opacity-90',
         outline:

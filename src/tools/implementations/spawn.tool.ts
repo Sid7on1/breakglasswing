@@ -14,8 +14,8 @@ import {
   CAPACITY_LEASE_ENV,
   CAPACITY_PATH_ENV,
   CAPACITY_RUN_ENV,
-  MAX_CONCURRENT_SUBAGENTS,
   resolveCapacityContext,
+  runtimeConcurrentSubagentLimit,
   SubAgentCapacityCoordinator,
 } from '../../core/subagent.capacity';
 import { formatSubAgentResult } from '../../core/subagent.result';
@@ -71,6 +71,7 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
     execute: async (args: { agentType?: string, prompt: string, scope?: string, isolation?: 'worktree', model?: string, outcome_task_id?: string }, context?: any) => {
       // Default to a BiMax sub-agent (a copy of ourselves) — never a stray legacy persona.
       const agentType = args.agentType || 'BiMax';
+      const runtimeLimit = runtimeConcurrentSubagentLimit();
       // Engine-owned cap: models cannot request an arbitrary fan-out.
       let scope = args.scope || '';
       let isolation = args.isolation;
@@ -89,7 +90,7 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
           if (outcomeTask.mutates && !scope && isolation !== 'worktree') {
             return `Error: writable outcome task ${outcomeTask.id} needs a concrete scope or worktree isolation before parallel dispatch.`;
           }
-          const schedule = outcomeManager.schedule(MAX_CONCURRENT_SUBAGENTS);
+          const schedule = outcomeManager.schedule(runtimeLimit);
           if (outcomeTask.mutates && (schedule?.parallelTasks || 0) > 1 && isolation !== 'worktree') {
             return `Error: ${outcomeTask.id} is part of a ${schedule?.parallelTasks}-way writable dispatch. Parallel edits require worktree isolation.`;
           }
@@ -112,8 +113,8 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
       }
       // Hard cap — NOT model-controllable. Keeping this as a constant (not an arg) prevents
       // the model from passing maxSubAgents:100 and spawning 100 worker threads.
-      if (globalSubAgentManager.activeCount() >= MAX_CONCURRENT_SUBAGENTS) {
-        return `Error: Concurrent sub-agent limit reached (${MAX_CONCURRENT_SUBAGENTS}). Wait for running sub-agents to finish before spawning more.`;
+      if (globalSubAgentManager.activeCount() >= runtimeLimit) {
+        return `Error: Concurrent sub-agent limit reached (${runtimeLimit}). Wait for running sub-agents to finish before spawning more.`;
       }
 
       // Phase 3a power-aware soft backoff: on battery / thermal throttle, serialize fan-out under a
@@ -133,8 +134,8 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
       process.env[CAPACITY_RUN_ENV] = capacityContext.runId;
       try {
         const globalActive = new SubAgentCapacityCoordinator(capacityContext.path).active().length;
-        if (globalActive >= MAX_CONCURRENT_SUBAGENTS) {
-          return `Error: Global sub-agent limit reached (${MAX_CONCURRENT_SUBAGENTS}) across the nested agent tree. Wait for a running assignment to finish.`;
+        if (globalActive >= runtimeLimit) {
+          return `Error: Global sub-agent limit reached (${runtimeLimit}) across the nested agent tree. Wait for a running assignment to finish.`;
         }
       } catch (error: any) {
         return `Error: ${error?.message || String(error)}`;
@@ -152,7 +153,7 @@ Use it when work can genuinely run in parallel (independent sub-tasks across dis
       const outcomeSessionId = outcomeManager?.activeSessionId() || '';
 
       if (outcomeManager && outcomeTask) {
-        try { outcomeManager.assignTask(outcomeTask.id, taskId, MAX_CONCURRENT_SUBAGENTS); }
+        try { outcomeManager.assignTask(outcomeTask.id, taskId, runtimeLimit); }
         catch (error: any) { return `Error: scheduler rejected ${outcomeTask.id}: ${error?.message || String(error)}`; }
       }
 

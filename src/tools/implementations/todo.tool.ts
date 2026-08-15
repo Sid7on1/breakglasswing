@@ -1,11 +1,6 @@
 import { IGovernor } from '../../core/interfaces';
 import { buildTool } from '../tool.factory';
 import { cliEvents } from '../../cli/events';
-import { Message } from '../../core/llm.provider';
-import {
-  appMentionedIn, clipboardWriteProven, commitProvenAfter, computerToolResults,
-  interactionProven, lastContentEntryIndex, scopeToApp,
-} from '../../computer/action.evidence';
 
 export interface TodoItem {
   content: string;
@@ -57,68 +52,6 @@ export function renderTodoList(todos: TodoItem[]): string {
 }
 
 /**
- * Todo statuses are model assertions, not evidence. When a checklist item claims a GUI effect that
- * the recorded ComputerTool sequence has not yet demonstrated, refuse the transition to completed.
- *
- * The motivating trace: the model marked "search results visibly loaded" complete immediately after
- * opening Safari, having typed nothing and pressed nothing.
- *
- * Three rules, each an app-agnostic property of the evidence rather than a scenario recogniser:
- *
- *   committed  — an item claiming content was sent/submitted/searched/saved needs a commit action
- *                (Return, or a click on a commit-named control) AFTER the last text entry, in the
- *                same app, with a changed frame.
- *   clipboard  — an item claiming content reached the clipboard needs a copy/clipboard action.
- *   displayed  — an item claiming a surface now shows something needs at least one non-navigational
- *                action with a changed frame. Opening an app and looking at it cannot satisfy this.
- *
- * Deliberately NOT here: any application name. An earlier draft hardcoded Safari/WhatsApp/
- * Calculator/TextEdit/Finder, which contradicts the project's standing rule that computer use is
- * universal and never per-app, and made this general-purpose tool behave differently depending on
- * which apps someone had tested with. The app to scope evidence to is derived from the results
- * themselves (see appMentionedIn), so an item naming any app gets the same treatment.
- *
- * Ordinary code/writing checklists are unaffected, and NOT merely because a session usually has no
- * ComputerTool results: "save the parsed result to disk" and "post the release note" share every verb
- * with a GUI task. The gate therefore establishes its own scope first — the item must name an app
- * that appears in the evidence, or speak about a GUI surface — before any rule may fire. Without
- * that, a mixed session (a desktop action early, code work after) would reject engineering items on
- * the strength of a shared word.
- */
-
-/** Vocabulary that only a claim about an on-screen surface uses. Deliberately about surfaces and
- * pointer/keyboard interaction rather than generic verbs, which engineering checklists share. */
-const GUI_SURFACE_VOCABULARY = /\b(?:click(?:ed|ing|s)?|tap(?:ped|ping|s)?|composer|address bar|search (?:bar|field)|text field|dialog|pop-?over|popup|sheet|menu|sidebar|on-?screen|screen|results? page|web results?|browser|chat|conversation|visibl[ey]|screenshot|desktop|clipboard)\b/i;
-
-export function computerTodoCompletionError(content: string, messages?: Message[]): string {
-  const text = String(content || '');
-  const all = computerToolResults(messages).filter(result => result?.ok !== false);
-  if (!all.length) return '';
-
-  // The app the item names, but only if that app appears in the evidence — never a hardcoded list.
-  const app = appMentionedIn(text, all);
-  if (!app && !GUI_SURFACE_VOCABULARY.test(text)) return ''; // not a claim about a screen
-  // An item that names no observed app is judged against the whole sequence.
-  const results = scopeToApp(all, app);
-
-  const claimsCommit = /\b(?:sent|send|submit(?:ted)?|post(?:ed)?|repl(?:y|ied)|shared?|upload(?:ed)?|search(?:ed|ing)?|saved?|publish(?:ed)?|messaged?)\b/i.test(text);
-  if (claimsCommit && !commitProvenAfter(results, lastContentEntryIndex(results))) {
-    return 'no text entry followed by a successful Return/Enter or commit-named click with a changed fresh frame proves the content was committed; content sitting in a field or composer is not a completed send/search/save. If the commit control is an unlabeled icon, click it with expect="<text that will appear afterwards>" so the postcondition is proven directly';
-  }
-
-  if (/\b(?:clipboard|copied|copy)\b/i.test(text) && !clipboardWriteProven(all)) {
-    return 'no successful ComputerTool copy/clipboard result proves the content reached the clipboard';
-  }
-
-  if (/\b(?:visibl[ey]|displayed|loaded|shown|showing|on-?screen|rendered)\b/i.test(text)
-    && !interactionProven(results)) {
-    return 'only navigation actions (open/focus/observe) have changed the screen so far; opening a surface and looking at it does not prove it now displays the claimed result';
-  }
-
-  return '';
-}
-
-/**
  * The live task checklist formatted for injection into the system prompt EVERY turn. This is the fix
  * for "what phases are you talking about?": the list is otherwise UI-only state that the model loses
  * as soon as the creating turn is compacted out of history. Empty when there's no list at all.
@@ -163,26 +96,13 @@ export const createTodoWriteTool = (governor: IGovernor) => buildTool({
     },
     required: ['todos'],
   },
-  execute: async (args: { todos: TodoItem[] }, context?: { sessionMessages?: Message[] }) => {
+  execute: async (args: { todos: TodoItem[] }) => {
     const todos = (args.todos || []).filter(
       (t): t is TodoItem =>
         !!t && typeof t.content === 'string' && t.content.trim().length > 0 &&
         (t.status === 'pending' || t.status === 'in_progress' || t.status === 'completed'),
     );
 
-    // Reject only NEW transitions into completed. An already-completed item remains stable when
-    // later phases update, and ordinary code/writing todos remain unaffected because the evidence
-    // recogniser above returns no requirement for them.
-    for (const todo of todos) {
-      const before = lastTodos.find(item => item.content === todo.content)?.status;
-      if (todo.status !== 'completed' || before === 'completed') continue;
-      const missing = computerTodoCompletionError(todo.content, context?.sessionMessages);
-      if (!missing) continue;
-      touchedThisTurn = true;
-      const note = `Todo completion rejected for "${todo.content}": ${missing}. Keep it in progress and perform/inspect the missing ComputerTool step first.`;
-      cliEvents.emit('status', note);
-      return `${note}\n\n${renderTodoList(lastTodos)}`;
-    }
 
     lastTodos = todos;      // durable: re-injected into the prompt every turn (task memory)
     touchedThisTurn = true; // this turn is actively working a checklist → persistence may auto-continue

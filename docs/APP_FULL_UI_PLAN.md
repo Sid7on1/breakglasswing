@@ -148,7 +148,7 @@ of plain text, so "command-palette only" commands still look first-class.
 Everything else needed is ALREADY on the wire: subagent_update, todo_update, mind detail,
 graph summary, menus, dashboards, veto/diff/input requests, completions, ping/pong.
 
-## 8. Phases (each ends green: typecheck + build + screenshot smoke via scripts/screenshot-ui.mjs, extended per panel)
+## 8. Phases (each ends green: typecheck + build + the Phase 5 renderer journeys via app/scripts/ui/journeys.mjs, extended per panel)
 
 - **P0 — Shell & system** ✅ DONE: 3-pane resizable/collapsible layout, lucide icon pass
   (kill emoji chrome), Inter self-hosted, z/elevation scales, ⌘K palette (engine completions),

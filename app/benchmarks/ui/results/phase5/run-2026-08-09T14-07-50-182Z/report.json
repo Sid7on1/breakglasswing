@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-09T14-07-50-182Z",
+  "started_at": "2026-08-09T14:07:50.185Z",
+  "ended_at": "2026-08-09T14:07:54.957Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J9",
+      "name": "Gate and resume the first Control Mac task",
+      "outcome": "pass",
+      "checks": [
+        {
+          "name": "the first Mac task opens contextual permission guidance",
+          "pass": true,
+          "observed": "waiting task named"
+        },
+        {
+          "name": "the blocked Mac task is not sent",
+          "pass": true,
+          "observed": "[]"
+        },
+        {
+          "name": "closing without grants keeps the task visible",
+          "pass": true,
+          "observed": "waiting banner"
+        },
+        {
+          "name": "a Code task still runs while the Mac task waits",
+          "pass": true,
+          "observed": "[{\"name\":\"send\",\"payload\":{\"t\":\"input\",\"text\":\"Add a test for the permission model\"},\"at\":1786284472569},{\"name\":\"send\",\"payload\":{\"t\":\"input\",\"text\":\"Open System Settings and click Privacy & Security\"},\"at\":1786284474319}]"
+        },
+        {
+          "name": "a fresh granted report visibly makes Mac control ready",
+          "pass": true,
+          "observed": "ready after re-check"
+        },
+        {
+          "name": "the original Mac task resumes exactly once after the grant",
+          "pass": true,
+          "observed": "[{\"name\":\"send\",\"payload\":{\"t\":\"input\",\"text\":\"Add a test for the permission model\"},\"at\":1786284472569},{\"name\":\"send\",\"payload\":{\"t\":\"input\",\"text\":\"Open System Settings and click Privacy & Security\"},\"at\":1786284474319}]"
+        }
+      ],
+      "pageErrors": [],
+      "accessibilityFindings": [],
+      "error": null
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 1,
+    "failed": 0
+  }
+}

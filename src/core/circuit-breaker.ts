@@ -9,7 +9,7 @@
  * or `check()` runs to completion without another thread observing an intermediate state — the data
  * races those primitives guard against cannot occur here.
  *
- * Purpose: a shared breaker sits in front of a flaky dependency (the computer-use desktop driver, an
+ * Purpose: a shared breaker sits in front of a flaky dependency (a local provider, an
  * LLM endpoint). Once the recent failure rate crosses a threshold it OPENS and sheds traffic for a
  * cool-down instead of hammering a dependency that is already failing; after the cool-down it admits
  * ONE probe (HalfOpen) and closes again on success or re-opens on failure.

@@ -6,6 +6,20 @@ jest.mock('../mcp/client', () => ({
   isDeadConnectionError: (e: any) => /connection closed|not connected|transport (?:closed|error)|EPIPE|ECONNRESET|write after end/i.test(String(e?.message || e)),
 }));
 
+// This suite waits on REAL settle timers, not on I/O — every call here is mocked. `open`, `focus`,
+// `close` and `quit_app` all sleep in desktop.runtime.ts because WindowServer genuinely needs the
+// time: 900 ms at :4513, a 200/400/600 ms frontmost retry at :4348, a 350/450/700 ms close poll at
+// :6572, and a 350 ms quit settle at :6611. A test driving four of those operations therefore needs
+// several real seconds and sits right on jest's 5 s default — it passed alone (162/162) and timed
+// out only in the full parallel run under memory pressure, on 2026-08-02.
+//
+// Raised here rather than globally, so slowness in unrelated suites still surfaces. NOT fixed by
+// shortening the production settles: they are live-debugged values covering real WindowServer
+// grace periods, and this is a harness limit, not a claim about how fast the runtime is. Nothing in
+// this file asserts a duration, so a larger budget hides nothing that exists today. If these ever
+// need to be fast, make the settle clock injectable — do not trim the constants.
+jest.setTimeout(30_000);
+
 import { openClient } from '../mcp/client';
 import { BimaxComputerRuntime, pngDimensionsFromBytes, layoutRect, screenForRect, classifySpaceCombo, resolveDesktopIcon, withoutWindowChrome, describeUnlabeledControls, visibleApplicationFailure } from '../computer/desktop.runtime';
 import { __resetConfigForTests, loadConfig } from '../cli/config';
@@ -239,6 +253,87 @@ describe('BimaxComputerRuntime', () => {
     expect(callTool).toHaveBeenCalledWith(expect.objectContaining({
       name: 'get_window_state', arguments: expect.objectContaining({ pid: 42, window_id: 9 }),
     }));
+  });
+
+  it('focuses an app that is already running but was never opened by this session', async () => {
+    // The everyday case: the user left the app open. Refusing with "not open in this session" forced
+    // `open`, which re-launches and discards whatever state the app was in.
+    const launch = jest.fn();
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') { launch(); return result({ name: 'Ledger', pid: 77, windows: [{ window_id: 3 }] }); }
+      if (name === 'list_windows') return result({ windows: [
+        { window_id: 3, app_name: 'Ledger', pid: 77, is_on_screen: true, z_index: 40, bounds: { x: 0, y: 0, width: 600, height: 800 } },
+      ] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/ledger.png', screenshot_width: 600, screenshot_height: 800,
+        elements: [{ role: 'AXWindow', label: 'Ledger', frame: { x: 0, y: 0, w: 600, h: 800 } }],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime({
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Ledger',
+    } as any);
+
+    const focused = await runtime.run({ action: 'focus', app: 'Ledger' });
+
+    expect(focused.ok).toBe(true);
+    expect(focused.pid).toBe(77);
+    // Adopting must not relaunch — that is the whole point of preferring focus over open.
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it('refuses to focus an app with no on-screen window rather than silently taking another app', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'list_windows') return result({ windows: [
+        { window_id: 3, app_name: 'Something Else', pid: 77, is_on_screen: true, z_index: 40, bounds: { x: 0, y: 0, width: 600, height: 800 } },
+      ] });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime({
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Something Else',
+    } as any);
+
+    const focused = await runtime.run({ action: 'focus', app: 'Ledger' });
+    expect(focused.ok).toBe(false);
+    expect(String(focused.error)).toMatch(/not running/i);
+  });
+
+  it('keeps an explicitly named window instead of re-deriving the largest one', async () => {
+    // Window 9 is deliberately the SMALLER surface, so passing the heuristic would pick 7. An app
+    // with a main window plus a document window is the real shape of this: the runtime's own
+    // "try another window" recovery is worthless if the pick is overruled on the next capture.
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Ledger', pid: 77, windows: [{ window_id: 7 }, { window_id: 9 }] });
+      if (name === 'list_windows') return result({ windows: [
+        { window_id: 7, app_name: 'Ledger', pid: 77, is_on_screen: true, z_index: 50, bounds: { x: 0, y: 0, width: 900, height: 900 } },
+        { window_id: 9, app_name: 'Ledger', pid: 77, is_on_screen: true, z_index: 40, bounds: { x: 0, y: 0, width: 400, height: 400 } },
+      ] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/ledger.png', screenshot_width: 400, screenshot_height: 400,
+        elements: [{ role: 'AXWindow', label: 'Ledger', frame: { x: 0, y: 0, w: 400, h: 400 } }],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime({
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Ledger',
+    } as any);
+
+    await runtime.run({ action: 'open', app: 'Ledger' });
+    const focused = await runtime.run({ action: 'focus', app: 'Ledger', windowId: 9 });
+    expect(focused.windowId).toBe(9);
+
+    // And it must SURVIVE the next capture, not just the call that set it.
+    const observed = await runtime.run({ action: 'observe' });
+    expect(observed.windowId).toBe(9);
   });
 
   it('honors background-first config without fronting the app and prefers semantic handles', async () => {
@@ -1097,14 +1192,17 @@ describe('BimaxComputerRuntime', () => {
     expect(refused.error).toMatch(/action=focus with app="Alpha"/);
   });
 
-  it('tells the model to open an app that focus does not know about', async () => {
+  it('tells the model to open an app that is neither registered nor running', async () => {
     callTool.mockImplementation(alphaBeta());
     const runtime = new BimaxComputerRuntime(simulatedNative());
     await runtime.run({ action: 'open', app: 'alpha' }, { cwd: '/tmp' });
     const missing = await runtime.run({ action: 'focus', app: 'Gamma' }, { cwd: '/tmp' });
     expect(missing.ok).toBe(false);
-    expect(missing.error).toMatch(/not open in this session/);
-    expect(missing.error).toMatch(/open: Alpha/);
+    // "not open in this session" was the old wording, and it was misleading once focus learned to
+    // adopt a running app: the session's own history is no longer what decides. What focus can now
+    // report is the thing that is actually true — no on-screen window belongs to Gamma.
+    expect(missing.error).toMatch(/not running/);
+    expect(missing.error).toMatch(/open in this session: Alpha/);
     expect(missing.error).toMatch(/action=open/);
   });
 
@@ -1205,6 +1303,43 @@ describe('BimaxComputerRuntime', () => {
     const runtime = new BimaxComputerRuntime(clip.native);
     await runtime.run({ action: 'open', app: 'alpha' }, { cwd: '/tmp' });
     expect((await runtime.run({ action: 'copy' }, { cwd: '/tmp' })).ok).toBe(true);
+  });
+
+  it('refuses a background click aimed at bare pixels when the window is off the active Space', async () => {
+    // The hole this closes: the Space guard only ran for FOREGROUND delivery, and its own
+    // remediation told the caller to use deliveryMode="background" instead. But background with
+    // nothing but an x/y has no accessibility handle to address, so the driver synthesizes a real
+    // global cursor event — landing in whatever app actually owns those screen coordinates.
+    process.env.BIMAX_COMPUTER_VISIBLE = '0';
+    __resetConfigForTests();
+    const clicks: any[] = [];
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Alpha', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: false, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/alpha-offspace.png', screenshot_width: 500, screenshot_height: 700,
+        elements: [{ element_index: 0, element_token: 'win', role: 'AXWindow', label: 'Alpha', frame: { x: 0, y: 0, w: 500, h: 700 } }],
+      });
+      if (name === 'click') { clicks.push(args); return result({ effect: 'delivered' }); }
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime({
+      run: jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action })),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Alpha',
+    } as any);
+    await runtime.run({ action: 'open', app: 'Alpha' }, { cwd: '/tmp' });
+    const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+
+    const refused = await runtime.run({
+      action: 'click', x: 100, y: 100, deliveryMode: 'background', frameId: observed.frameId,
+    }, { cwd: '/tmp' });
+
+    expect(refused.ok).toBe(false);
+    expect(String(refused.error)).toMatch(/not on the active Space/);
+    // The point of the guard: nothing may reach the driver.
+    expect(clicks).toHaveLength(0);
   });
 
   it('keeps copy and paste PID/window-scoped in background mode without fronting the app', async () => {
@@ -2132,6 +2267,78 @@ describe('BimaxComputerRuntime', () => {
     }));
   });
 
+  it('selects an AppKit pop-up option synchronously when direct AX set_value has no children', async () => {
+    let menuOpen = false;
+    let selected = false;
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'bring_to_front' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Fixture', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({
+        windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 400 } }],
+      });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/popup-fallback.png', screenshot_width: 500, screenshot_height: 400,
+        tree_markdown: '',
+        elements: [
+          { element_index: 0, element_token: 'window', role: 'AXWindow', label: 'Fixture', frame: { x: 0, y: 0, w: 500, h: 400 } },
+          { element_index: 8, element_token: 'popup', role: 'AXPopUpButton',
+            label: selected ? 'Third' : 'First', value: selected ? 'Third' : 'First',
+            frame: { x: 100, y: 100, w: 200, h: 30 } },
+          ...(menuOpen ? [
+            { element_index: 10, element_token: 'first', role: 'AXMenuItem', label: 'First', frame: { x: 100, y: 135, w: 200, h: 30 } },
+            { element_index: 11, element_token: 'second', role: 'AXMenuItem', label: 'Second', frame: { x: 100, y: 165, w: 200, h: 30 } },
+            { element_index: 12, element_token: 'third', role: 'AXMenuItem', label: 'Third', frame: { x: 100, y: 195, w: 200, h: 30 } },
+          ] : []),
+        ],
+      });
+      if (name === 'set_value') throw new Error('AXPopUpButton [8] has no AX children to match value');
+      return result({ ok: true });
+    });
+    const nativeRun = jest.fn(async (cmd: any) => {
+      const base = { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+      if (cmd.action === 'window_at') {
+        const item = Number(cmd.y) >= 180;
+        return { ...base, windowAt: {
+          owner_pid: 42, owner_name: 'Fixture', window_id: 7,
+          top_owner_name: 'Fixture', top_window_id: 7, layer: 0,
+          bounds: { x: 0, y: 0, w: 500, h: 400 },
+          element_chain: [item
+            ? { pid: 42, role: 'AXMenuItem', title: 'Third', enabled: true, frame: { x: 100, y: 195, w: 200, h: 30 } }
+            : { pid: 42, role: 'AXPopUpButton', title: selected ? 'Third' : 'First', enabled: true, frame: { x: 100, y: 100, w: 200, h: 30 } }],
+        } };
+      }
+      if (cmd.action === 'click') {
+        if (Number(cmd.y) >= 180) { selected = true; menuOpen = false; }
+        else menuOpen = true;
+        return { ...base, app: 'Fixture', x: cmd.x, y: cmd.y };
+      }
+      if (cmd.action === 'cursor') return { ...base, x: 200, y: 115 };
+      return base;
+    });
+    const native: any = {
+      run: nativeRun,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Fixture',
+    };
+    const runtime = new BimaxComputerRuntime(native);
+    await runtime.run({ action: 'open', app: 'Fixture', deliveryMode: 'foreground' });
+    const set = await runtime.run({ action: 'set_value', query: 'First', value: 'Third', deliveryMode: 'foreground' });
+
+    expect(set).toEqual(expect.objectContaining({
+      ok: true,
+      summary: 'selected exact pop-up option "Third" through its fresh native menu; fresh screen attached',
+      details: expect.objectContaining({
+        fallback: 'foreground-popup-menu', requestedValue: 'Third', appliedValue: 'Third',
+      }),
+      actionResult: expect.objectContaining({
+        confidence: 'proven',
+        postcondition: expect.objectContaining({ matched: true }),
+      }),
+    }));
+    expect(nativeRun.mock.calls.filter(([cmd]) => cmd.action === 'click')).toHaveLength(2);
+    expect(selected).toBe(true);
+  });
+
   it('reports embedded host attribution as ready when bundle identity is the only failed check', async () => {
     callTool.mockImplementation(async ({ name }: any) => {
       if (name === 'start_session') return result({ ok: true });
@@ -2150,9 +2357,189 @@ describe('BimaxComputerRuntime', () => {
     const status = await new BimaxComputerRuntime(simulatedNative()).run({ action: 'status' });
     expect(status).toEqual(expect.objectContaining({
       ok: true, accessibility: true, screenRecording: true,
-      summary: 'Bimax Computer Use ready',
       details: expect.objectContaining({ overall: 'ready', attribution: 'embedded_host' }),
     }));
+    // The property under test is that an embedded-identity failure alone is NOT degraded — not the
+    // exact sentence. With no target acquired there is no session-scoped call to probe, and status
+    // must say so rather than let the driver's own "session_active" claim pass as evidence.
+    expect(status.summary).toMatch(/^Bimax Computer Use ready/);
+    expect((status.details as any).sessionProbe).toEqual({ probed: false, reachable: null, note: expect.any(String) });
+  });
+
+  it('reports degraded when a session-scoped call is rejected, however healthy the permission report', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'health_report') return result({
+        overall: 'ready',
+        checks: [
+          { name: 'session_active', status: 'pass', message: 'MCP session is active.' },
+          { name: 'tcc_accessibility', status: 'pass' },
+          { name: 'tcc_screen_recording', status: 'pass' },
+        ],
+      });
+      if (name === 'launch_app') return result({ name: 'TextEdit', pid: 42, windows: [{ window_id: 7, title: 'TextEdit' }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      // The exact shape observed live: the driver retires the session and rejects every
+      // session-scoped call while still self-reporting "session_active: pass".
+      if (name === 'get_window_state') {
+        return { isError: true, content: [{ type: 'text', text: "session 'bimax-1-abcd' has ended; tool call 'get_window_state' was rejected." }] };
+      }
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'TextEdit' });
+    const status = await runtime.run({ action: 'status' });
+    expect(status.ok).toBe(false);
+    expect((status.details as any).overall).toBe('degraded');
+    expect((status.details as any).sessionProbe.reachable).toBe(false);
+    expect(status.summary).toContain('session unreachable');
+  });
+
+  it('revives a retired session in place and retries the call instead of wedging for the process lifetime', async () => {
+    // Observed live: the driver retires the session, and because that arrives as an app-level
+    // isError RESULT (not a rejected promise) it never reached the dead-connection branch, so the
+    // runtime reused a client whose session was gone and EVERY stateful call failed until restart.
+    let rejectedOnce = false;
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'launch_app') return result({ name: 'TextEdit', pid: 42, windows: [{ window_id: 7, title: 'TextEdit' }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') {
+        if (!rejectedOnce) {
+          rejectedOnce = true;
+          return { isError: true, content: [{ type: 'text', text: "session 'bimax-1-abcd' has ended; tool call 'get_window_state' was rejected. Call start_session with this id to revive it." }] };
+        }
+        return result({
+          screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+          tree_markdown: '[1] AXTextArea label="First Text View"',
+          elements: [{ element_index: 1, element_token: 's0002:1', role: 'AXTextArea', label: 'First Text View' }],
+        }, 'Cua Driver observation');
+      }
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'TextEdit' });
+    const observed = await runtime.run({ action: 'observe' });
+
+    expect(rejectedOnce).toBe(true);
+    // The retried call carries the real observation through, so the caller never sees the retirement.
+    expect(observed.ok).toBe(true);
+    expect(observed.elements).toEqual([expect.objectContaining({ label: 'First Text View' })]);
+    // Revived on the SAME connection — the repair the driver's own message asks for — rather than
+    // paying a fresh cold start: one handshake plus exactly one revive, and no re-open of the client.
+    expect(callTool.mock.calls.filter(([a]: any) => a.name === 'start_session')).toHaveLength(2);
+    expect(openClient as jest.Mock).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a launch it delivered even when the first frame cannot be captured', async () => {
+    // Observed live: `open` returned ok:false / delivered:false while TextEdit was starting,
+    // because the post-launch observation failed. delivered:false for a side effect that DID
+    // happen is the dangerous direction — the caller retries and launches the app twice.
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'launch_app') return result({ name: 'TextEdit', pid: 42, windows: [{ window_id: 7, title: 'TextEdit' }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return { isError: true, content: [{ type: 'text', text: 'the sidecar returned no usable pixels' }] };
+      return result({ ok: true });
+    });
+    const opened = await new BimaxComputerRuntime(simulatedNative()).run({ action: 'open', app: 'TextEdit' });
+    expect(opened.ok).toBe(false);
+    expect(opened.actionResult).toEqual(expect.objectContaining({ delivered: true, observed: 'unverified' }));
+    expect(opened.pid).toBe(42);
+    expect(String(opened.error)).toMatch(/LAUNCHED as pid 42/);
+    expect(String(opened.error)).toMatch(/Do NOT open it again/);
+  });
+
+  it('hides window-server furniture that can never be a target', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'list_windows') return result({
+        windows: [
+          { app_name: 'TextEdit', window_id: 7, title: 'Untitled', is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } },
+          // Untitled full-width 33px menu-bar proxies and 64x64 service surfaces: 50 of these per
+          // call, none of them addressable.
+          { app_name: 'Finder', window_id: 8, title: '', is_on_screen: false, bounds: { x: 0, y: 0, width: 1470, height: 33 } },
+          { app_name: 'CursorUIViewService', window_id: 9, title: '', is_on_screen: false, bounds: { x: 0, y: 456, width: 64, height: 64 } },
+          // The driver's OWN capture surface, which outranks the app it is driving.
+          { app_name: 'bimax-computer-use-a0c5e34a3594', window_id: 10, title: '', is_on_screen: true, bounds: { x: 0, y: 0, width: 1470, height: 956 } },
+          // A titled window that is off-screen (another Space) must still be findable.
+          { app_name: 'Notes', window_id: 11, title: 'Ideas', is_on_screen: false, bounds: { x: 0, y: 0, width: 800, height: 600 } },
+        ],
+      });
+      return result({ ok: true });
+    });
+    const listed = await new BimaxComputerRuntime(simulatedNative()).run({ action: 'windows' });
+    const ids = ((listed.details as any).windows as any[]).map(w => w.window_id);
+    expect(ids).toEqual([7, 11]);
+    expect((listed.details as any).suppressed).toBe(3);
+  });
+
+  it('narrows the installed-app list instead of returning the whole machine', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'list_apps') return result({
+        apps: [
+          // The driver fills `windows: []` for every app, running or not — dead weight in a payload
+          // that was 22KB for 106 apps.
+          { name: 'Safari', bundle_id: 'com.apple.Safari', running: false, pid: 0, windows: [], launch_path: '/Applications/Safari.app', last_used: '2026-06-24T23:58:17Z' },
+          { name: 'TextEdit', bundle_id: 'com.apple.TextEdit', running: true, pid: 42, active: true, windows: [], launch_path: '/System/Applications/TextEdit.app' },
+          { name: '‎WhatsApp', bundle_id: 'net.whatsapp.WhatsApp', running: false, pid: 0, windows: [] },
+        ],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    const all = await runtime.run({ action: 'apps' });
+    const apps = (all.details as any).apps as any[];
+    // Running first, no empty `windows` array, and the bidi mark stripped from the name so the
+    // string a caller reads back into `open` is the string it saw.
+    expect(apps[0]).toEqual({ name: 'TextEdit', bundle_id: 'com.apple.TextEdit', running: true, pid: 42, active: true });
+    expect(apps.some(a => 'windows' in a)).toBe(false);
+    expect(apps.map(a => a.name)).toContain('WhatsApp');
+
+    const filtered = await runtime.run({ action: 'apps', query: 'safari' });
+    expect(((filtered.details as any).apps as any[]).map(a => a.name)).toEqual(['Safari']);
+    expect((filtered.details as any).total).toBe(3);
+  });
+
+  it('makes screenshot the picture and observe the element list, without weakening targeting', async () => {
+    // They were the same call under two names: identical payload, identical summary, ~21KB each.
+    // The split is in what they RETURN — the capture and the element map are produced identically,
+    // and the map is cached on the runtime, so a semantic click after a screenshot still resolves.
+    const nativeRun = jest.fn(async (cmd: any) => ({
+      ok: true, action: cmd.action, driver: 'native-helper', app: 'Calculator',
+      x: cmd.x, y: cmd.y, summary: 'physical click delivered',
+    }));
+    const native: any = {
+      run: nativeRun,
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Calculator',
+    };
+    const runtime = new BimaxComputerRuntime(native);
+    await runtime.run({ action: 'open', app: 'Calculator', deliveryMode: 'foreground' });
+
+    const observed = await runtime.run({ action: 'observe' });
+    expect(Array.isArray(observed.elements)).toBe(true);
+    expect(observed.tree).toBeDefined();
+
+    const shot = await runtime.run({ action: 'screenshot' });
+    expect(shot.ok).toBe(true);
+    expect(shot.screenshot).toBe('/tmp/bimax-window.png');   // still the picture
+    expect(shot.frameId).toBeTruthy();                        // still a frame you can act from
+    expect(shot.elements).toBeUndefined();                    // but not the element echo
+    expect(shot.tree).toBeUndefined();
+    expect(shot.elementCount).toBeGreaterThan(0);
+    expect(JSON.stringify(shot).length).toBeLessThan(JSON.stringify(observed).length);
+
+    // The whole point: targeting still works from the map the screenshot resolved.
+    const clicked = await runtime.run({ action: 'click', query: 'Result', deliveryMode: 'foreground' });
+    expect(clicked.ok).toBe(true);
+  });
+
+  it('does not report a recording stopped when none was running', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'stop_recording') return result({ enabled: false });
+      return result({ ok: true });
+    });
+    const stopped = await new BimaxComputerRuntime(simulatedNative()).run({ action: 'record_stop' });
+    expect(stopped.ok).toBe(false);
+    expect(String(stopped.error)).toMatch(/no recording was running/);
   });
 
   it('physically clicks a fresh elementIndex at its screenshot center', async () => {
@@ -2549,6 +2936,151 @@ describe('BimaxComputerRuntime', () => {
       { name: 'launch_app', arguments: { bundle_id: 'com.apple.iChat' } },
       { name: 'launch_app', arguments: { name: 'Messages' } },
     ]);
+  });
+
+  /**
+   * Measured 2026-08-14: `{"action":"open","app":"com.apple.Messages"}` cost a whole turn on
+   * "No installed macOS app found for name 'com.apple.Messages'". Two separate mistakes had to line
+   * up — the identifier was in the `app` field, AND it was the wrong identifier (Messages is really
+   * com.apple.MobileSMS) — so neither the name lookup nor an id lookup can succeed. The display
+   * name is sitting in the last component the whole time.
+   */
+  it('recovers when a bundle id arrives in the app field, even a wrong one', async () => {
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app' && args?.bundle_id === 'com.apple.Messages') {
+        return {
+          isError: true,
+          structuredContent: {},
+          content: [{ type: 'text', text: "No installed macOS app found for bundle_id 'com.apple.Messages'." }],
+        };
+      }
+      if (name === 'launch_app' && args?.name === 'Messages') {
+        return result({ name: 'Messages', pid: 91942, windows: [{ window_id: 26998 }] });
+      }
+      if (name === 'list_windows') return result({ windows: [{
+        window_id: 26998, is_on_screen: true, bounds: { x: 0, y: 0, width: 900, height: 700 },
+      }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/messages.png', screenshot_width: 900, screenshot_height: 700,
+        elements: [],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+
+    const opened = await runtime.run({ action: 'open', app: 'com.apple.Messages', deliveryMode: 'background' });
+
+    expect(opened).toEqual(expect.objectContaining({ ok: true, app: 'Messages', pid: 91942 }));
+    const launches = callTool.mock.calls
+      .map(([call]) => call)
+      .filter((call: any) => call.name === 'launch_app');
+    // Addressed as an id first (never as a nonsense display name), then the leaf as a name.
+    expect(launches).toEqual([
+      { name: 'launch_app', arguments: { bundle_id: 'com.apple.Messages' } },
+      { name: 'launch_app', arguments: { name: 'Messages' } },
+    ]);
+  });
+
+  it('does not retry a launch failure that is not "no installed app"', async () => {
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+      if (name === 'launch_app') {
+        return { isError: true, structuredContent: {}, content: [{ type: 'text', text: 'launch timed out' }] };
+      }
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+
+    const opened = await runtime.run({ action: 'open', app: 'com.apple.Messages', deliveryMode: 'background' });
+
+    expect(opened.ok).toBe(false);
+    // A timeout may have delivered. Retrying it could open a second instance the user never asked for.
+    const launches = callTool.mock.calls
+      .map(([call]) => call)
+      .filter((call: any) => call.name === 'launch_app');
+    expect(launches).toHaveLength(1);
+  });
+
+  /**
+   * The refusal that killed a real run on 2026-08-14.
+   *
+   * A Messages conversation row is an anonymous container whose name this runtime SYNTHESIZES by
+   * folding its descendant AXStaticText leaves — so the "label" is `name, last message, date`. The
+   * app emitted AXUIElementDestroyed 1.5s after the frame (it was still settling after launch), the
+   * tree was re-walked, the composite came back with a different trailing segment, and exact
+   * equality refused a row that was visible on screen the entire time: "the element you named ... is
+   * no longer in the tree after the app changed". The run never recovered.
+   */
+  describe('re-acquiring a named handle after the app changed', () => {
+    const rowsWith = (mamaJiLabel: string) => [
+      { element_index: 28, element_token: 's:28', role: 'AXStaticText', label: 'Mom 2, Hi, Saturday', value: 'Mom 2, Hi, Saturday' },
+      { element_index: 32, element_token: 's:32', role: 'AXStaticText', label: mamaJiLabel, value: mamaJiLabel },
+      { element_index: 40, element_token: 's:40', role: 'AXToolbar', label: '' },
+    ];
+
+    const runtimeShowing = async (elements: any[]) => {
+      callTool.mockImplementation(async ({ name }: any) => {
+        if (name === 'start_session' || name === 'set_agent_cursor_enabled') return result({ ok: true });
+        if (name === 'launch_app') return result({ name: 'Messages', pid: 91942, windows: [{ window_id: 26998 }] });
+        if (name === 'list_windows') return result({ windows: [{ window_id: 26998, is_on_screen: true, bounds: { x: 0, y: 0, width: 900, height: 700 } }] });
+        if (name === 'get_window_state') return result({
+          screenshot_file_path: '/tmp/m.png', screenshot_width: 900, screenshot_height: 700, elements,
+        });
+        return result({ ok: true });
+      });
+      const runtime = new BimaxComputerRuntime(simulatedNative());
+      await runtime.run({ action: 'open', app: 'Messages', deliveryMode: 'background' });
+      return runtime;
+    };
+
+    it('re-acquires the row when a trailing segment of the folded label changed', async () => {
+      const before = await runtimeShowing(rowsWith('Mama Ji 🔥, 7732-091343 veeramani, 7/12/26'));
+      const identity = before.describeTarget({ action: 'click', elementToken: 's:32' } as any)!;
+      expect(identity).toBeTruthy();
+
+      // A new message arrives: same row, same leading name, different tail.
+      const after = await runtimeShowing(rowsWith('Mama Ji 🔥, ok see you then, Today'));
+      const reacquired = after.reacquireByIdentity(identity);
+
+      expect(reacquired).toBeTruthy();
+      expect(reacquired!.elementToken).toBe('s:32');
+    });
+
+    it('still prefers an exact match when one exists', async () => {
+      const before = await runtimeShowing(rowsWith('Mama Ji 🔥, 7732-091343 veeramani, 7/12/26'));
+      const identity = before.describeTarget({ action: 'click', elementToken: 's:32' } as any)!;
+      const after = await runtimeShowing(rowsWith('Mama Ji 🔥, 7732-091343 veeramani, 7/12/26'));
+
+      expect(after.reacquireByIdentity(identity)!.elementToken).toBe('s:32');
+    });
+
+    /**
+     * The invariant the strict match existed to protect. A near-miss is a silent click on the wrong
+     * control, which is worse than the refusal it replaces — so ambiguity must still refuse.
+     */
+    it('refuses rather than guess when the stable part matches two rows', async () => {
+      const before = await runtimeShowing(rowsWith('Mama Ji 🔥, 7732-091343 veeramani, 7/12/26'));
+      const identity = before.describeTarget({ action: 'click', elementToken: 's:32' } as any)!;
+
+      const after = await runtimeShowing([
+        { element_index: 32, element_token: 's:32', role: 'AXStaticText', label: 'Mama Ji 🔥, one, 7/12/26', value: 'Mama Ji 🔥, one, 7/12/26' },
+        { element_index: 33, element_token: 's:33', role: 'AXStaticText', label: 'Mama Ji 🔥, two, 7/13/26', value: 'Mama Ji 🔥, two, 7/13/26' },
+      ]);
+
+      expect(after.reacquireByIdentity(identity)).toBeNull();
+    });
+
+    it('refuses when the row is genuinely gone', async () => {
+      const before = await runtimeShowing(rowsWith('Mama Ji 🔥, 7732-091343 veeramani, 7/12/26'));
+      const identity = before.describeTarget({ action: 'click', elementToken: 's:32' } as any)!;
+
+      const after = await runtimeShowing([
+        { element_index: 28, element_token: 's:28', role: 'AXStaticText', label: 'Mom 2, Hi, Saturday', value: 'Mom 2, Hi, Saturday' },
+      ]);
+
+      expect(after.reacquireByIdentity(identity)).toBeNull();
+    });
   });
 
   it('warns instead of claiming success when an opened app never becomes frontmost', async () => {
@@ -3816,6 +4348,126 @@ describe('BimaxComputerRuntime', () => {
     });
   });
 
+  // Right-click produced a menu nobody could see. Every menu role was dropped from the element map,
+  // so the one thing a right-click exists to do was invisible — while the raw payload had carried the
+  // menu, with frames and names, the whole time.
+  //
+  // The shapes below are the live Finder measurement of 2026-08-06 (see COMPUTER_USE_HANDOFF_LOG
+  // section 17). macOS lays a menu out only while it is OPEN, so a frame is proof it is on screen:
+  // with nothing open 321 of 330 menu nodes had no frame, with a context menu open 33 gained one.
+  // That is why these fixtures differ only by frame — it is the whole discriminator.
+  describe('an open menu is part of the window; the static menu bar is not', () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const windowContent = [
+      { element_index: 0, role: 'AXWindow', label: 'Docs', frame: { x: 0, y: 0, w: 500, h: 700 } },
+      { element_index: 1, role: 'AXButton', label: 'Send', frame: { x: 10, y: 10, w: 60, h: 24 } },
+    ];
+    // Always present, always laid out, and never the target of a window-scoped observation.
+    const menuBar = [
+      { element_index: 10, role: 'AXMenuBar', label: 'menu bar', frame: { x: 0, y: 0, w: 1470, h: 33 } },
+      { element_index: 11, role: 'AXMenuBarItem', label: 'File', frame: { x: 106, y: 0, w: 42, h: 33 } },
+      // Closed: its children exist in the tree but are not laid out.
+      { element_index: 12, role: 'AXMenu', label: 'File' },
+      { element_index: 13, role: 'AXMenuItem', label: 'New Finder Window' },
+      { element_index: 14, role: 'AXMenuItem', label: 'Move to Trash' },
+    ];
+    const openContextMenu = [
+      { element_index: 20, role: 'AXMenu', frame: { x: 587, y: 125, w: 269, h: 509 } },
+      { element_index: 21, role: 'AXMenuItem', label: 'Open', frame: { x: 587, y: 130, w: 269, h: 24 } },
+      { element_index: 22, role: 'AXMenuItem', label: 'Get Info', frame: { x: 587, y: 154, w: 269, h: 24 } },
+      // A separator: laid out, thin, and carrying no name of any kind.
+      { element_index: 23, role: 'AXMenuItem', frame: { x: 587, y: 178, w: 269, h: 11 } },
+      // A submenu that has not been opened yet — laid out only once its parent is chosen.
+      { element_index: 24, role: 'AXMenu', label: 'Open With' },
+      { element_index: 25, role: 'AXMenuItem', label: 'TextEdit (default)' },
+    ];
+
+    const runWith = async (elements: unknown[], run: (runtime: BimaxComputerRuntime) => Promise<void>) => {
+      const tmp = path.join(os.tmpdir(), `bimax-menu-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+      fs.writeFileSync(tmp, Buffer.from([1, 2, 3, 4]));
+      callTool.mockImplementation(async ({ name }: any) => {
+        if (name === 'start_session') return result({ ok: true });
+        if (name === 'launch_app') return result({ name: 'Finder', pid: 42, windows: [{ window_id: 7 }] });
+        if (name === 'bring_to_front') return result({ activated: true });
+        if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'Finder', active: true }] });
+        if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+        if (name === 'get_window_state') return result({
+          screenshot_file_path: tmp, screenshot_width: 500, screenshot_height: 700, elements,
+        });
+        return result({ ok: true });
+      });
+      try {
+        const runtime = new BimaxComputerRuntime(simulatedNative());
+        await runtime.run({ action: 'open', app: 'Finder' });
+        await run(runtime);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    };
+
+    it('surfaces the commands of an open context menu, with their names', async () => {
+      await runWith([...windowContent, ...menuBar, ...openContextMenu], async runtime => {
+        const observed = await runtime.run({ action: 'observe' });
+        const labels = (observed.elements as any[]).map(e => e.label);
+        expect(labels).toContain('Open');
+        expect(labels).toContain('Get Info');
+        // The window's own content is not displaced by the menu.
+        expect(labels).toContain('Send');
+      });
+    });
+
+    it('keeps the static menu bar out, open menu or not', async () => {
+      for (const elements of [
+        [...windowContent, ...menuBar],                     // nothing open
+        [...windowContent, ...menuBar, ...openContextMenu], // context menu open
+      ]) {
+        await runWith(elements, async runtime => {
+          const observed = await runtime.run({ action: 'observe' });
+          const roles = (observed.elements as any[]).map(e => e.role);
+          expect(roles).not.toContain('AXMenuBar');
+          expect(roles).not.toContain('AXMenuBarItem');
+          const labels = (observed.elements as any[]).map(e => e.label);
+          // Laid out ≠ visible-as-a-command: these live under a CLOSED menu-bar menu.
+          expect(labels).not.toContain('New Finder Window');
+        });
+      }
+    });
+
+    it('offers nothing new when no menu is open', async () => {
+      await runWith([...windowContent, ...menuBar], async runtime => {
+        const observed = await runtime.run({ action: 'observe' });
+        const roles = (observed.elements as any[]).map(e => e.role);
+        expect(roles.filter(role => String(role).startsWith('AXMenu'))).toEqual([]);
+      });
+    });
+
+    it('drops separators and unopened submenus, which activate nothing', async () => {
+      await runWith([...windowContent, ...menuBar, ...openContextMenu], async runtime => {
+        const observed = await runtime.run({ action: 'observe' });
+        const items = (observed.elements as any[]).filter(e => e.role === 'AXMenuItem');
+        // Open + Get Info only: the nameless separator would otherwise be handed a positional
+        // placeholder that reads exactly like a real command.
+        expect(items.map(e => e.label).sort()).toEqual(['Get Info', 'Open']);
+        // The submenu's contents are not laid out until it is opened.
+        expect((observed.elements as any[]).map(e => e.label)).not.toContain('TextEdit (default)');
+      });
+    });
+
+    it('lets a menu command be clicked by name, and refuses the panel that holds it', async () => {
+      await runWith([...windowContent, ...menuBar, ...openContextMenu], async runtime => {
+        await runtime.run({ action: 'observe' });
+        const clicked = await runtime.run({ action: 'click', query: 'Get Info' });
+        expect(clicked.ok).toBe(true);
+        expect(clicked.targeting?.label).toBe('Get Info');
+
+        // The AXMenu panel is a container; the commands are its children.
+        const panel = await runtime.run({ action: 'click', elementIndex: 20 });
+        expect(panel.ok).toBe(false);
+        expect(panel.error).toMatch(/structural container/i);
+      });
+    });
+  });
+
   // A keystroke swallowed by an app-modal sheet is delivered and has no effect. Driving the runtime
   // directly during cross-app verification, a cleanup loop read `ok: true` as "it closed" and
   // pressed cmd+w five times against a save dialog that ate every one. The runtime was right and
@@ -3971,6 +4623,176 @@ describe('BimaxComputerRuntime', () => {
     }
   });
 
+  it('never forwards the search query to the driver, because that replaces the tree that names rows', async () => {
+    // The driver answers a `query` with the matched node's ancestry INSTEAD of the window tree —
+    // measured in Notes, 367 tree lines became 8 — while returning the identical element_index set.
+    // Since the AXStaticText leaves live only in that tree, forwarding the query stripped the name
+    // off every row except the searched one. It bit hardest on `postActionEvidence`, which re-
+    // observes using the active expectation as its query, so the frame handed back after any action
+    // carrying `expect` listed 46 indistinguishable `ICMNoteListCell`s.
+    const rowTree = [
+      '- [0] AXWindow "Notes" [id=_NS:6]',
+      '  - [1] AXCell [id=ICMNoteListCell]',
+      '    - AXStaticText = "Potatoes 1kg"',
+      '  - [2] AXCell [id=ICMNoteListCell]',
+      '    - AXStaticText = "Google Maps"',
+    ].join('\n');
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Notes', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+        tree_markdown: rowTree,
+        elements: [
+          { element_index: 1, element_token: 't1', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 0, w: 200, h: 40 } },
+          { element_index: 2, element_token: 't2', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 40, w: 200, h: 40 } },
+        ],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'Notes' });
+    const observed = await runtime.run({ action: 'observe', query: 'Google Maps' });
+
+    const stateCalls = callTool.mock.calls.filter(([arg]) => arg.name === 'get_window_state');
+    expect(stateCalls.length).toBeGreaterThan(0);
+    for (const [call] of stateCalls) expect(call.arguments).not.toHaveProperty('query');
+    // The query still does its job — it is matched locally, over the elements the walk returned.
+    expect(observed.verification).toEqual({ query: 'Google Maps', matched: true, matchCount: 1 });
+    // BOTH rows keep the name the tree gave them, not just the one that was searched for.
+    expect(observed.elements?.map((element: any) => element.label).sort())
+      .toEqual(['Google Maps', 'Potatoes 1kg']);
+  });
+
+  it('refuses a background click on a control with no AX press action, and names the delivery that works', async () => {
+    // A Notes row advertises `actions=[showmenu]` and no press, so background delivery cannot
+    // activate it at all — the app answers AXPress with -25206. The raw driver string named an AX
+    // constant and offered no next step, so the model reissued the identical call.
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Notes', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+        tree_markdown: '- [1] AXCell [id=ICMNoteListCell]\n  - AXStaticText = "Potatoes 1kg"',
+        elements: [{ element_index: 1, element_token: 't1', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 0, w: 200, h: 40 } }],
+      });
+      if (name === 'click') throw new Error('AX action failed: AXUIElementPerformAction(AXPress) returned -25206');
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'Notes' });
+    const clicked = await runtime.run({ action: 'click', query: 'Potatoes 1kg', deliveryMode: 'background' });
+    expect(clicked.ok).toBe(false);
+    expect(clicked.error).toContain('publishes no accessibility press action');
+    // Says it is permanent, so the caller stops retrying, and names the delivery that does work.
+    expect(clicked.error).toContain('retrying background delivery will fail identically');
+    expect(clicked.error).toContain('deliveryMode="foreground"');
+  });
+
+  it('refuses BEFORE attempting when the tree already published the control actions', async () => {
+    // The refusal above is correct but reactive: it only fires once the app has answered -25206, so
+    // it costs a round trip and "fires on discovery". The tree states what each control publishes, so
+    // when it says `actions=[showmenu]` the answer is already in the observation the caller planned
+    // from. Same message, no attempt.
+    const clicks: any[] = [];
+    callTool.mockImplementation(async ({ name, arguments: args }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Notes', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+        tree_markdown: '- [1] AXCell [id=ICMNoteListCell actions=[showmenu]]\n  - AXStaticText = "Potatoes 1kg"',
+        elements: [{ element_index: 1, element_token: 't1', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 0, w: 200, h: 40 } }],
+      });
+      if (name === 'click') { clicks.push(args); return result({ effect: 'delivered' }); }
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'Notes' });
+    const clicked = await runtime.run({ action: 'click', query: 'Potatoes 1kg', deliveryMode: 'background' });
+
+    expect(clicked.ok).toBe(false);
+    expect(clicked.error).toContain('publishes no accessibility press action');
+    expect(clicked.error).toContain('deliveryMode="foreground"');
+    // It names the evidence it actually had, rather than an error the app never sent.
+    expect(clicked.error).toContain('showmenu');
+    expect(clicked.error).not.toContain('-25206');
+    // And it never reached the driver.
+    expect(clicks).toHaveLength(0);
+  });
+
+  it('tells the caller up front which controls cannot take a background press', async () => {
+    // Measured live 2026-08-05: every one of Notes' 214 rows/cells publishes `showmenu` and no press,
+    // while 30 of WhatsApp's 31 controls accept one. Saying so in the observation lets a caller pick
+    // foreground BEFORE spending a turn on a refusal.
+    callTool.mockImplementation(async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Notes', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+        tree_markdown: [
+          '- [0] AXWindow "Notes" [actions=[raise]]',
+          '  - [1] AXCell [id=ICMNoteListCell actions=[showmenu]]',
+          '    - AXStaticText = "Potatoes 1kg"',
+          '  - [2] AXButton "Compose" [actions=[press,showmenu]]',
+          '  - [3] AXButton "Quiet" ',
+        ].join('\n'),
+        elements: [
+          { element_index: 0, role: 'AXWindow', label: 'Notes', frame: { x: 0, y: 0, w: 500, h: 700 } },
+          { element_index: 1, element_token: 't1', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 0, w: 200, h: 40 } },
+          { element_index: 2, element_token: 't2', role: 'AXButton', label: 'Compose', frame: { x: 0, y: 60, w: 80, h: 30 } },
+          { element_index: 3, element_token: 't3', role: 'AXButton', label: 'Quiet', frame: { x: 0, y: 100, w: 80, h: 30 } },
+        ],
+      });
+      return result({ ok: true });
+    });
+    const runtime = new BimaxComputerRuntime(simulatedNative());
+    await runtime.run({ action: 'open', app: 'Notes' });
+    const observed = await runtime.run({ action: 'observe' });
+    const byIndex = new Map((observed.elements as any[]).map(element => [element.element_index, element]));
+
+    // Publishes showmenu only — the -25206 case, stated before anyone tries it.
+    expect(byIndex.get(1).background_activatable).toBe(false);
+    // Publishes press — no flag, because there is nothing to warn about.
+    expect(byIndex.get(2).background_activatable).toBeUndefined();
+    // The tree said nothing about this one; silence is not a "no".
+    expect(byIndex.get(3).background_activatable).toBeUndefined();
+    // The window is not a click target, so it is never flagged even though it lacks press.
+    expect(byIndex.get(0).background_activatable).toBeUndefined();
+  });
+
+  it('does not pre-refuse a control the tree said nothing about, or one that can be pressed', async () => {
+    // Silence is not a "no". Only an explicit action list without `press` is evidence.
+    const attempted: string[] = [];
+    const withTree = (tree: string) => async ({ name, arguments: args }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Notes', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: '/tmp/bimax-window.png', screenshot_width: 500, screenshot_height: 700,
+        tree_markdown: tree,
+        elements: [{ element_index: 1, element_token: 't1', role: 'AXCell', label: 'ICMNoteListCell', frame: { x: 0, y: 0, w: 200, h: 40 } }],
+      });
+      if (name === 'click') { attempted.push(String(args?.element_token || args?.element_index)); return result({ effect: 'delivered' }); }
+      return result({ ok: true });
+    };
+
+    callTool.mockImplementation(withTree('- [1] AXCell [id=ICMNoteListCell]\n  - AXStaticText = "Potatoes 1kg"'));
+    const silent = new BimaxComputerRuntime(simulatedNative());
+    await silent.run({ action: 'open', app: 'Notes' });
+    expect((await silent.run({ action: 'click', query: 'Potatoes 1kg', deliveryMode: 'background' })).ok).toBe(true);
+
+    callTool.mockImplementation(withTree('- [1] AXCell [id=ICMNoteListCell actions=[press,showmenu]]\n  - AXStaticText = "Potatoes 1kg"'));
+    const pressable = new BimaxComputerRuntime(simulatedNative());
+    await pressable.run({ action: 'open', app: 'Notes' });
+    expect((await pressable.run({ action: 'click', query: 'Potatoes 1kg', deliveryMode: 'background' })).ok).toBe(true);
+
+    expect(attempted).toHaveLength(2);
+  });
+
   it('refuses to control a different app until it is explicitly opened', async () => {
     const runtime = new BimaxComputerRuntime(simulatedNative());
     await runtime.run({ action: 'open', app: 'Calculator' });
@@ -3979,10 +4801,16 @@ describe('BimaxComputerRuntime', () => {
     expect(callTool.mock.calls.some(([arg]) => arg.name === 'click')).toBe(false);
   });
 
-  // These two drive the no-usable-window recovery, whose waits are real polling budgets (a 1.2s
-  // window-creation wait plus activation confirmation), so the test legitimately runs for several
-  // seconds and crosses jest's 5s default whenever the machine is busy. The budget is stated here
-  // rather than left to luck — the assertions below are unchanged.
+  // These two drive the no-usable-window recovery, whose waits are real polling budgets, so they
+  // legitimately run for several seconds. `list_windows` returns [] for the whole fixture, so every
+  // one of those budgets runs to full timeout — that is the point of the fixture, and it is the
+  // slowest path the runtime has.
+  //
+  // It got slower deliberately. Reaching Cmd+W/Cmd+N means CREATING USER DATA in a document app (an
+  // empty note in Notes), so the runtime now proves the window is really absent first: a 2s
+  // cold-launch grace, a non-destructive OS reopen event, then a 1.2s re-check. Paying ~3s to avoid
+  // writing to the user's library is the intended trade, and this budget records it rather than
+  // leaving the suite to fail on a busy machine. The assertions below are unchanged.
   it('close closes ONLY the selected window (Cmd+W) — never quits the application', async () => {
     const nativeRun = jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', app: 'Calculator', summary: 'key delivered' }));
     const native: any = { run: nativeRun, quickStatus: () => ({ driver: 'native-helper', ready: true }), frontmostApp: async () => 'Calculator' };
@@ -4002,7 +4830,7 @@ describe('BimaxComputerRuntime', () => {
     expect(nativeRun).toHaveBeenCalledWith(expect.objectContaining({ action: 'key', combo: 'cmd+w' }), undefined);
     expect(callTool.mock.calls.some(([a]) => a.name === 'hotkey')).toBe(false);
     expect(callTool).toHaveBeenCalledWith({ name: 'list_windows', arguments: { pid: 42 } });
-  }, 15_000);
+  }, 30_000);
 
   it('quit_app is the separate action that quits the application and verifies it', async () => {
     const nativeRun = jest.fn(async (cmd: any) => ({ ok: true, action: cmd.action, driver: 'native-helper', app: 'Calculator', summary: 'key delivered' }));
@@ -4022,7 +4850,7 @@ describe('BimaxComputerRuntime', () => {
     expect(quit.summary).toContain('quit');
     expect(nativeRun).toHaveBeenCalledWith(expect.objectContaining({ action: 'key', combo: 'cmd+q' }), undefined);
     expect(callTool.mock.calls.some(([a]) => a.name === 'hotkey')).toBe(false);
-  }, 15_000);
+  }, 30_000);
 
   it('never exposes the upstream product name in model-visible failures', async () => {
     callTool.mockImplementation(async ({ name }: any) => {
@@ -4311,6 +5139,245 @@ describe('BimaxComputerRuntime', () => {
       const runtime = new BimaxComputerRuntime(failing);
       await runtime.run({ action: 'open', app: 'WhatsApp' }, { cwd: '/tmp' });
       expect((runtime as any).transientDialogFrame).toBeNull();
+    });
+  });
+
+  /**
+   * An overlay window blocks the PIXEL ROUTE to a control, not the control's identity. Measured live:
+   * Control Center covered a conversation title and every click on it was refused forever, so the
+   * target was unreachable even though the OS could still activate it. The pixel route and the
+   * element identity fail independently, and only one of them had actually failed.
+   */
+  describe('an occluded point re-routes a named target through accessibility', () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const button = { element_index: 4, element_token: 'send-token', role: 'AXButton', label: 'Send', frame: { x: 100, y: 200, w: 80, h: 32 } };
+    const windowElement = { element_index: 0, role: 'AXWindow', label: 'Chat', frame: { x: 0, y: 0, w: 500, h: 700 } };
+
+    /** Screens that differ every capture, so a re-routed click can prove it changed something. */
+    const changingScreens = () => {
+      let capture = 0;
+      return () => {
+        const file = path.join(os.tmpdir(), `bimax-occl-${process.pid}-${capture}.png`);
+        fs.writeFileSync(file, Buffer.from([capture, capture, capture, capture]));
+        capture++;
+        return file;
+      };
+    };
+    /** One unchanging screen, so a re-routed click can prove only that nothing happened. */
+    const staticScreen = () => {
+      const file = path.join(os.tmpdir(), `bimax-occl-static-${process.pid}.png`);
+      fs.writeFileSync(file, Buffer.from([5, 5, 5, 5]));
+      return () => file;
+    };
+
+    const driverWith = (nextScreen: () => string) => async ({ name }: any) => {
+      if (name === 'start_session') return result({ ok: true });
+      if (name === 'launch_app') return result({ name: 'Chat', pid: 42, windows: [{ window_id: 7 }] });
+      if (name === 'bring_to_front') return result({ activated: true });
+      if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'Chat', active: true }] });
+      if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+      if (name === 'get_window_state') return result({
+        screenshot_file_path: nextScreen(), screenshot_width: 500, screenshot_height: 700,
+        elements: [windowElement, button],
+      });
+      return result({ ok: true });
+    };
+
+    /** A native helper whose accessibility hit test always names someone else at the point. */
+    const occludedNative = () => {
+      const run = jest.fn(async (cmd: any) => {
+        if (cmd.action === 'window_at') {
+          return { ok: true, action: cmd.action, driver: 'native-helper', summary: 'hit', windowAt: {
+            owner_pid: 999, owner_name: 'Control Center', window_id: 11, top_owner_name: 'Control Center',
+          } };
+        }
+        return { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+      });
+      return { run, quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }), frontmostApp: async () => 'Chat' } as any;
+    };
+
+    const clickCalls = () => callTool.mock.calls
+      .map(([call]: any) => call)
+      .filter((call: any) => call.name === 'click')
+      .map((call: any) => call.arguments);
+
+    afterEach(() => {
+      for (const file of fs.readdirSync(os.tmpdir())) {
+        if (file.startsWith(`bimax-occl-${process.pid}`) || file.startsWith(`bimax-occl-static-${process.pid}`)) {
+          fs.rmSync(path.join(os.tmpdir(), file), { force: true });
+        }
+      }
+    });
+
+    it('activates the element with no coordinates and discloses the switch', async () => {
+      callTool.mockImplementation(driverWith(changingScreens()));
+      const runtime = new BimaxComputerRuntime(occludedNative());
+      await runtime.run({ action: 'open', app: 'Chat' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      const clicked = await runtime.run(
+        { action: 'click', query: 'Send', frameId: observed.frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+
+      expect(clicked.ok).toBe(true);
+      expect(clicked.summary).toMatch(/Control Center covers that point/);
+      expect(clicked.summary).toMatch(/activated through accessibility/);
+      // The occluder is named in the receipt rather than buried: the click really did not reach the
+      // point, and a later reader must be able to see which mechanism delivered it.
+      expect(clicked.actionReceipt?.preflight).toEqual(expect.objectContaining({
+        recipientApp: 'Control Center', recipientPid: 999, windowMatched: false,
+      }));
+      expect(runtime.lastMechanism()).toBe('accessibility');
+      // Delivery addressed the element, never a coordinate.
+      const routed = clickCalls().find((args: any) => args.element_token === 'send-token');
+      expect(routed).toBeDefined();
+      expect(routed.x).toBeUndefined();
+      expect(routed.y).toBeUndefined();
+      await runtime.dispose();
+    });
+
+    it('reports an honest failure when accessibility activation changes nothing', async () => {
+      // AX activation is measurably weaker than a real CGEvent — it no-ops in some apps. Trusting the
+      // driver's return would convert a permanently refused click into a permanently false success.
+      callTool.mockImplementation(driverWith(staticScreen()));
+      const runtime = new BimaxComputerRuntime(occludedNative());
+      await runtime.run({ action: 'open', app: 'Chat' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      const clicked = await runtime.run(
+        { action: 'click', query: 'Send', frameId: observed.frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+
+      expect(clicked.ok).toBe(false);
+      expect(clicked.error).toMatch(/Control Center is on top of/);
+      expect(clicked.error).toMatch(/changed nothing on screen, so the click did not happen/);
+      await runtime.dispose();
+    });
+
+    it('still refuses a raw-pixel click, which has no element to activate', async () => {
+      // A static screen so the raw-pixel freshness guard passes and the occlusion guard is what
+      // actually answers; with changing pixels the click is refused one step earlier for staleness.
+      callTool.mockImplementation(driverWith(staticScreen()));
+      const runtime = new BimaxComputerRuntime(occludedNative());
+      await runtime.run({ action: 'open', app: 'Chat' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      const clicked = await runtime.run(
+        { action: 'click', x: 140, y: 216, frameId: observed.frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+
+      expect(clicked.ok).toBe(false);
+      expect(clicked.error).toMatch(/Control Center is on top of/);
+      expect(clicked.error).toMatch(/Move or close that window/);
+      await runtime.dispose();
+    });
+
+    it('never downgrades a right-click or a double-click into a plain activation', async () => {
+      // An AX activation is a press. Silently substituting it would deliver a DIFFERENT action than
+      // the caller asked for — worse than refusing, because the caller cannot tell.
+      callTool.mockImplementation(driverWith(changingScreens()));
+      const runtime = new BimaxComputerRuntime(occludedNative());
+      await runtime.run({ action: 'open', app: 'Chat' }, { cwd: '/tmp' });
+
+      const rightClick = await runtime.run(
+        { action: 'click', query: 'Send', button: 'right', frameId: (await runtime.run({ action: 'observe' }, { cwd: '/tmp' })).frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+      expect(rightClick.ok).toBe(false);
+      expect(rightClick.error).toMatch(/Control Center is on top of/);
+
+      const doubleClick = await runtime.run(
+        { action: 'click', query: 'Send', count: 2, frameId: (await runtime.run({ action: 'observe' }, { cwd: '/tmp' })).frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+      expect(doubleClick.ok).toBe(false);
+      expect(doubleClick.error).toMatch(/Control Center is on top of/);
+      await runtime.dispose();
+    });
+  });
+
+  /**
+   * "Focus a text field first" is only actionable when the window HAS one. Calculator, games and
+   * shortcut-driven apps expose no editable element and are driven by typing straight at the window;
+   * refusing there removed the only way to interact, and it is why `npm run test:computer` could not
+   * get past its own type step at the v1.0.10 release commit.
+   */
+  describe('literal typing into a surface with no editable field', () => {
+    const fs = require('fs'), os = require('os'), path = require('path');
+
+    const driverFor = (elements: unknown[]) => {
+      let capture = 0;
+      return async ({ name }: any) => {
+        if (name === 'start_session') return result({ ok: true });
+        if (name === 'launch_app') return result({ name: 'Calculator', pid: 42, windows: [{ window_id: 7 }] });
+        if (name === 'bring_to_front') return result({ activated: true });
+        if (name === 'list_apps') return result({ apps: [{ pid: 42, name: 'Calculator', active: true }] });
+        if (name === 'list_windows') return result({ windows: [{ window_id: 7, is_on_screen: true, bounds: { x: 0, y: 0, width: 500, height: 700 } }] });
+        if (name === 'get_window_state') {
+          const file = path.join(os.tmpdir(), `bimax-nofield-${process.pid}-${capture}.png`);
+          fs.writeFileSync(file, Buffer.from([capture, capture, capture, capture]));
+          capture++;
+          return result({ screenshot_file_path: file, screenshot_width: 500, screenshot_height: 700, elements });
+        }
+        return result({ ok: true });
+      };
+    };
+
+    /** A helper whose focused element is a non-editable display, as Calculator's genuinely is. */
+    const nonEditableFocus = () => ({
+      run: jest.fn(async (cmd: any) => {
+        if (cmd.action === 'focused_element') {
+          return {
+            ok: true, action: cmd.action, driver: 'native-helper', summary: 'focus',
+            app: 'Calculator', pid: 42,
+            focusedElement: { pid: 42, role: 'AXUnknown', editable: false },
+            focusChain: [],
+          };
+        }
+        return { ok: true, action: cmd.action, driver: 'native-helper', summary: cmd.action };
+      }),
+      quickStatus: () => ({ driver: 'native-helper', ready: true, accessibility: true, screenRecording: true }),
+      frontmostApp: async () => 'Calculator',
+    } as any);
+
+    afterEach(() => {
+      for (const file of fs.readdirSync(os.tmpdir())) {
+        if (file.startsWith(`bimax-nofield-${process.pid}`)) fs.rmSync(path.join(os.tmpdir(), file), { force: true });
+      }
+    });
+
+    it('types at the window when the frame exposes no editable element anywhere', async () => {
+      callTool.mockImplementation(driverFor([
+        { element_index: 0, role: 'AXWindow', label: 'Calculator', frame: { x: 0, y: 0, w: 500, h: 700 } },
+        { element_index: 1, role: 'AXStaticText', label: '0', frame: { x: 20, y: 20, w: 200, h: 40 } },
+      ]));
+      const runtime = new BimaxComputerRuntime(nonEditableFocus());
+      await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      const typed = await runtime.run(
+        { action: 'type', text: '1271*170+104', frameId: observed.frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+      expect(typed.ok).toBe(true);
+      await runtime.dispose();
+    });
+
+    it('still refuses when the frame does expose a field and focus is somewhere else', async () => {
+      // Here "focus a text field first" is real advice, so the guard must keep its teeth.
+      callTool.mockImplementation(driverFor([
+        { element_index: 0, role: 'AXWindow', label: 'Chat', frame: { x: 0, y: 0, w: 500, h: 700 } },
+        { element_index: 1, role: 'AXTextField', label: 'Message', frame: { x: 20, y: 600, w: 400, h: 30 } },
+      ]));
+      const runtime = new BimaxComputerRuntime(nonEditableFocus());
+      await runtime.run({ action: 'open', app: 'Calculator' }, { cwd: '/tmp' });
+      const observed = await runtime.run({ action: 'observe' }, { cwd: '/tmp' });
+      const typed = await runtime.run(
+        { action: 'type', text: 'hi', frameId: observed.frameId, deliveryMode: 'foreground' },
+        { cwd: '/tmp' },
+      );
+      expect(typed.ok).toBe(false);
+      expect(typed.error).toMatch(/is not editable; focus a text field first/);
+      await runtime.dispose();
     });
   });
 });

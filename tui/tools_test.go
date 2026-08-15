@@ -1,11 +1,6 @@
 package main
 
 import (
-	"image"
-	"image/color"
-	"image/png"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,121 +41,32 @@ func TestEditSummaryDoesNotReportProtocolLineCount(t *testing.T) {
 	}
 }
 
-func TestComputerSummaryUsesSemanticResultInsteadOfJSONLineCount(t *testing.T) {
+// A mismatched engine may still send a Desktop-only tool frame. Terminal must give it no special
+// screenshot UI or non-collapsing behavior; it is merely an unknown additive tool frame.
+func TestDesktopToolPayloadGetsNoTerminalSpecificPresentation(t *testing.T) {
 	tc := ToolCall{
-		ToolName: "ComputerTool",
-		Output:   "{\n  \"ok\": true,\n  \"summary\": \"observed Settings: 60 indexed UI elements + screenshot\",\n  \"elements\": [\n    {}\n  ]\n}",
+		ToolName: "ExternalActionTool",
+		Status:   "success",
+		Output:   `{"ok":true,"summary":"fresh screen attached","screenshot":"/tmp/desktop-only.png"}`,
 	}
-
-	got := summarizeToolOutput(tc)
-	if got != "observed Settings: 60 indexed UI elements + screenshot" {
-		t.Fatalf("summarizeToolOutput() = %q", got)
-	}
-	if strings.Contains(got, "lines") {
-		t.Fatalf("computer summary leaked JSON line count: %q", got)
-	}
-}
-
-func writeTestScreenshot(t *testing.T, name string, w, h int) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{R: uint8(x * 30), G: uint8(y * 30), B: 120, A: 255})
+	got := renderToolCall(tc, 80)
+	for _, forbidden := range []string{"▣", "▀"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("Desktop-only presentation %q leaked into Terminal: %q", forbidden, got)
 		}
 	}
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := png.Encode(f, img); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
-	return path
-}
-
-// The default transcript must NOT contain inline pixel spam. A see→act loop captures a screen on
-// every action; rendering each as half-block pixels is the "[Image #1]" spam we removed. Instead a
-// clean one-line card names the exact file (with dimensions) so it stays inspectable.
-func TestComputerScreenshotRendersCompactCardNotPixelSpam(t *testing.T) {
-	t.Setenv("BIMAX_COMPUTER_THUMBS", "")
-	path := writeTestScreenshot(t, "screen.png", 8, 8)
-	tc := ToolCall{
-		ToolName: "ComputerTool", Status: "success",
-		Output: `{"ok":true,"summary":"visible native cursor click delivered to Notes","screenshot":"` + path + `"}`,
-	}
-	got := renderToolCall(tc, 80)
-	if strings.Contains(got, "▀") {
-		t.Fatalf("screenshot pixel spam leaked into the default transcript: %q", got)
-	}
-	if !strings.Contains(got, "screen.png") || !strings.Contains(got, "8×8") {
-		t.Fatalf("compact screenshot card missing dims/name: %q", got)
+	if !strings.Contains(got, `{"ok":true`) {
+		t.Fatalf("unknown tool frame should use the generic raw summary: %q", got)
 	}
 }
 
-// A screenshot/observe summary already names the file, so the card would be redundant — suppress it.
-func TestComputerScreenshotCardSuppressedWhenSummaryNamesFile(t *testing.T) {
-	t.Setenv("BIMAX_COMPUTER_THUMBS", "")
-	path := writeTestScreenshot(t, "shot.png", 8, 8)
-	tc := ToolCall{
-		ToolName: "ComputerTool", Status: "success",
-		Output: `{"ok":true,"summary":"screenshot of display 1 → shot.png (screen points 8×8)","screenshot":"` + path + `"}`,
-	}
-	got := renderToolCall(tc, 80)
-	if strings.Contains(got, "▣ screen") {
-		t.Fatalf("card should be suppressed when summary already names the file: %q", got)
-	}
-}
-
-// Debug opt-in still renders the inline pixel preview for developers who want it.
-func TestComputerScreenshotThumbnailBehindDebugFlag(t *testing.T) {
-	t.Setenv("BIMAX_COMPUTER_THUMBS", "1")
-	path := writeTestScreenshot(t, "screen.png", 8, 8)
-	tc := ToolCall{
-		ToolName: "ComputerTool", Status: "success",
-		Output: `{"ok":true,"summary":"fresh screen attached","screenshot":"` + path + `"}`,
-	}
-	got := renderToolCall(tc, 80)
-	if !strings.Contains(got, "\x1b[38;2;") || !strings.Contains(got, "▀") {
-		t.Fatalf("debug thumbnail not rendered under BIMAX_COMPUTER_THUMBS=1: %q", got)
-	}
-}
-
-func TestComputerCallsNeverCollapseAwayTheirScreens(t *testing.T) {
+func TestDesktopOnlyToolFramesFollowGenericCollapsePolicy(t *testing.T) {
 	run := make([]ToolCall, 6)
 	for i := range run {
-		run[i] = ToolCall{ID: string(rune('a' + i)), ToolName: "ComputerTool", Status: "success", Output: `{"summary":"screen"}`}
+		run[i] = ToolCall{ID: string(rune('a' + i)), ToolName: "ExternalActionTool", Status: "success", Output: `{"summary":"state"}`}
 	}
 	rows := formatRun(run, 100, true)
-	if len(rows) != len(run) {
-		t.Fatalf("computer calls collapsed: got %d rows, want %d", len(rows), len(run))
-	}
-}
-
-// The card must name what the capture actually covers. Calling a window capture "screen" is how a
-// one-window PNG got described to a user as a full-display screenshot of two apps.
-func TestScreenshotCardNamesTheCaptureScope(t *testing.T) {
-	t.Setenv("BIMAX_COMPUTER_THUMBS", "")
-	window := writeTestScreenshot(t, "window-1785001713014.png", 8, 8)
-	got := renderToolCall(ToolCall{
-		ToolName: "ComputerTool", Status: "success",
-		Output: `{"ok":true,"summary":"physical mouse click delivered to TextEdit","screenshot":"` + window + `"}`,
-	}, 80)
-	if !strings.Contains(got, "▣ window") {
-		t.Fatalf("window capture should be labelled a window: %q", got)
-	}
-	if strings.Contains(got, "▣ screen") {
-		t.Fatalf("window capture must not be labelled a screen: %q", got)
-	}
-
-	display := writeTestScreenshot(t, "shot-1785001713014.png", 8, 8)
-	got = renderToolCall(ToolCall{
-		ToolName: "ComputerTool", Status: "success",
-		Output: `{"ok":true,"summary":"physical mouse click delivered to TextEdit","screenshot":"` + display + `"}`,
-	}, 80)
-	if !strings.Contains(got, "▣ display") {
-		t.Fatalf("full-display capture should be labelled a display: %q", got)
+	if len(rows) != 1 {
+		t.Fatalf("Desktop-only tool frames bypassed generic collapse: got %d rows, want 1", len(rows))
 	}
 }

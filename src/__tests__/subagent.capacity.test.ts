@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   MAX_CONCURRENT_SUBAGENTS,
+  runtimeConcurrentSubagentLimit,
   SubAgentCapacityCoordinator,
   SubAgentCapacityError,
 } from '../core/subagent.capacity';
@@ -54,5 +55,15 @@ describe('SubAgentCapacityCoordinator', () => {
     fs.writeFileSync(file, '{broken');
     expect(() => new SubAgentCapacityCoordinator(file).acquire({ taskId: 'unsafe', runId: 'run' }))
       .toThrow(/corrupt.*denied safely/i);
+  });
+
+  it('lets Desktop constrain concurrency without ever widening the hard cap', () => {
+    expect(runtimeConcurrentSubagentLimit({ BIMAX_MAX_CONCURRENT_SUBAGENTS: '1' } as NodeJS.ProcessEnv)).toBe(1);
+    expect(runtimeConcurrentSubagentLimit({ BIMAX_MAX_CONCURRENT_SUBAGENTS: '3' } as NodeJS.ProcessEnv)).toBe(3);
+    expect(runtimeConcurrentSubagentLimit({ BIMAX_MAX_CONCURRENT_SUBAGENTS: '99' } as NodeJS.ProcessEnv))
+      .toBe(MAX_CONCURRENT_SUBAGENTS);
+    expect(runtimeConcurrentSubagentLimit({ BIMAX_MAX_CONCURRENT_SUBAGENTS: 'invalid' } as NodeJS.ProcessEnv))
+      .toBe(MAX_CONCURRENT_SUBAGENTS);
+    expect(runtimeConcurrentSubagentLimit({ BIMAX_MAX_CONCURRENT_SUBAGENTS: '0' } as NodeJS.ProcessEnv)).toBe(1);
   });
 });

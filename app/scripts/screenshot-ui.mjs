@@ -29,7 +29,7 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  executablePath: process.env.BIMAX_UI_CHROME || puppeteer.executablePath(),
   headless: 'new',
   args: ['--no-sandbox', '--hide-scrollbars'],
 });
@@ -102,6 +102,14 @@ await page.evaluateOnNewDocument(() => {
       action: async () => true,
       crashHistory: async () => [],
       diagnostics: async () => 'Bimax engine diagnostics',
+    },
+    phase9: {
+      adaptiveState: async () => null,
+      processProvenance: async () => [],
+      environment: async () => null,
+      alchemistStatus: async () => null,
+      reportInteraction: () => {},
+      onAdaptiveChanged: () => () => {},
     },
     git: {
       status: async () => ({

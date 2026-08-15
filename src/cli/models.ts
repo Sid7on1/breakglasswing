@@ -20,11 +20,16 @@ export interface ModelEntry {
 }
 
 // Recommendations are task-shaped live probes, not model-card guesses. The 2026-07-29 round used
-// the current provider catalog and three bounded checks: exact quick reply, ComputerTool from text,
-// and ComputerTool from a synthetic GUI screenshot. See `npm run benchmark:models`.
+// the current provider catalog and bounded checks for exact replies, tool calling, and grounded
+// image interpretation. See `npm run benchmark:models`.
 export const MODEL_CATALOG: ModelEntry[] = [
-  // — Work: does the real coding/agentic work AND drives computer use — (tier 'coding' internal key)
-  { label: 'Mistral Nemotron', value: 'mistralai/mistral-nemotron', desc: 'Default Work — exact reply 0.36s and correct text tool call 0.57s live', tier: 'coding' },
+  // — Work: does the real coding and agentic work — (tier 'coding' internal key)
+  // avoidAutoSelect: fast on raw latency, but its NIM card declares Reasoning ONLY — no Function
+  // Calling. That is disqualifying for the Work slot, whose whole job is calling tools: the observed
+  // failure is bare tool JSON printed as prose (the reason src/core/tool.args.ts exists) and
+  // "invalid action arguments" refusals. This row previously called it the default and carried no
+  // flag, which is how the failover path in agent.loop.ts kept selecting it on the user's behalf.
+  { label: 'Mistral Nemotron', value: 'mistralai/mistral-nemotron', desc: 'Fast replies but declares no Function Calling — prints bare tool JSON instead of calling tools', tier: 'coding', avoidAutoSelect: true },
   { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Fast multimodal reasoner, but chose wrong clicks in both grounded GUI probes', tier: 'coding', avoidAutoSelect: true },
   { label: 'Nemotron 3 Nano', value: 'nvidia/nemotron-3-nano-30b-a3b', desc: 'Fast text/tool controller (~0.9s); image turns need the Vision slot', tier: 'coding' },
   { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Previously fast + multimodal; not advertised to this NIM account on 2026-07-29', tier: 'coding', avoidAutoSelect: true },
@@ -47,8 +52,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'Nemotron Nano 12B VL', value: 'nvidia/nemotron-nano-12b-v2-vl', desc: 'Default Vision — grounded composer action; safely refused the unproven-recipient trap', tier: 'vision' },
   { label: 'Nemotron 3 Nano Omni', value: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning', desc: 'Chose a wrong click for both selected-contact and recipient-trap frames', tier: 'vision', avoidAutoSelect: true },
   { label: 'Mistral Small 4', value: 'mistralai/mistral-small-4-119b-2603', desc: 'Previously fast + multimodal; not advertised to this NIM account on 2026-07-29', tier: 'vision', avoidAutoSelect: true },
-  // 400s on every tools+image request, which is every computer-use step. This is what kept computer
-  // use dead: the slot was pinned here, so each screenshot turn failed before it began.
+  // 400s on tools+image requests makes it unsuitable for iterative visual work.
   { label: 'Step 3.7 Flash', value: 'stepfun-ai/step-3.7-flash', desc: '262K multimodal context — 400s on tools+image, and timed out (180s) on plain text (2026-07-27)', tier: 'vision', avoidAutoSelect: true },
   // Listed by /models yet every completion 404s — the exact trap `unservable` exists for. Kept in
   // the picker (other keys do serve it) but barred from automatic selection.
@@ -68,8 +72,17 @@ export const MODEL_CATALOG: ModelEntry[] = [
   { label: 'Gemini 2.0 Flash (Google)', value: 'gemini-2.0-flash', desc: 'Needs a Google key', tier: 'other' },
 ];
 
-/** Live 2026-07-29 defaults: 0.57s Mistral Work, grounded 12B VL Vision, 0.6s Llama Quick. */
-export const DEFAULT_CODING_MODEL = 'mistralai/mistral-nemotron';
+/**
+ * Slot defaults. These MUST equal `DEFAULTS` in cli/config.ts and MUST NOT be `avoidAutoSelect` —
+ * both are enforced by `src/__tests__/models.test.ts`, because the two files drifted apart once
+ * already: the catalog kept calling mistral-nemotron the default long after config.ts had moved
+ * away from it for declaring no Function Calling, and the failover path reads the catalog.
+ *
+ * The Work pick is the fastest catalog entry that is tool-capable AND carries no disqualifying
+ * probe result. Re-measure with `npm run benchmark:models` — that script, not this comment, is the
+ * authority.
+ */
+export const DEFAULT_CODING_MODEL = 'nvidia/nemotron-3-nano-30b-a3b';
 export const DEFAULT_LITE_MODEL = 'meta/llama-3.1-8b-instruct';
 export const LEGACY_SAFE_LITE_MODEL = 'meta/llama-3.1-8b-instruct';
 

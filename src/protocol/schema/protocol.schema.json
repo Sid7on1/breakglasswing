@@ -1,0 +1,590 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bimax.dev/protocol/3.1.0/ndjson-message.schema.json",
+  "title": "Bimax client NDJSON protocol 3.1.0",
+  "description": "One decoded NDJSON frame. Unknown additive properties remain allowed within a compatible major.",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "event"
+        },
+        "name": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "level": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "name",
+        "args"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "request"
+        },
+        "id": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string",
+          "const": "prompt"
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "isAsk": {
+          "type": "boolean"
+        },
+        "isMulti": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "kind",
+        "question",
+        "options"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "request"
+        },
+        "id": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string",
+          "const": "diff"
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "isAsk": {
+          "type": "boolean"
+        },
+        "isMulti": {
+          "type": "boolean"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "kind",
+        "question",
+        "options"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "request"
+        },
+        "id": {
+          "type": "number"
+        },
+        "kind": {
+          "type": "string",
+          "const": "input"
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {}
+        },
+        "isAsk": {
+          "type": "boolean"
+        },
+        "isMulti": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "kind",
+        "question",
+        "options"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "ready"
+        },
+        "protocol": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "protocol"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "hello"
+        },
+        "engine": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "buildCommit": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true,
+          "required": [
+            "version",
+            "buildCommit"
+          ]
+        },
+        "protocolVersion": {
+          "type": "string"
+        },
+        "protocolMajor": {
+          "type": "number"
+        },
+        "minCompatibleMajor": {
+          "type": "number"
+        },
+        "maxCompatibleMajor": {
+          "type": "number"
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "engine",
+        "protocolVersion",
+        "protocolMajor",
+        "minCompatibleMajor",
+        "maxCompatibleMajor",
+        "features"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "queryResult"
+        },
+        "id": {
+          "type": "number"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "desc": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "const": "command"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "disabledReason": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "items"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "pong"
+        },
+        "id": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "configResult"
+        },
+        "id": {
+          "type": "number"
+        },
+        "config": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "notificationBell": {
+              "type": "boolean"
+            },
+            "temperature": {
+              "type": "number"
+            },
+            "contextMode": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "config"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "boot"
+        },
+        "phase": {
+          "type": "string",
+          "const": "loading_graph"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "phase",
+        "pid"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "health"
+        },
+        "uptimeMs": {
+          "type": "number"
+        },
+        "rssMb": {
+          "type": "number"
+        },
+        "heapMb": {
+          "type": "number"
+        },
+        "eventLoopDelayMs": {
+          "type": "number"
+        },
+        "activeTurn": {
+          "type": "boolean"
+        },
+        "phase": {
+          "type": "string",
+          "const": "ready"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "uptimeMs",
+        "rssMb",
+        "heapMb",
+        "eventLoopDelayMs",
+        "activeTurn",
+        "phase"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "reply"
+        },
+        "id": {
+          "type": "number"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "value"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "input"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "interrupt"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "query"
+        },
+        "id": {
+          "type": "number"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "menuSelect"
+        },
+        "id": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "value"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "ping"
+        },
+        "id": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "configGet"
+        },
+        "id": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "configSet"
+        },
+        "id": {
+          "type": "number"
+        },
+        "patch": {
+          "type": "object",
+          "properties": {
+            "notificationBell": {
+              "type": "boolean"
+            },
+            "reasoningEffort": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id",
+        "patch"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "resume"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t",
+        "id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "controls"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        },
+        "autonomy": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "t"
+      ]
+    }
+  ]
+}

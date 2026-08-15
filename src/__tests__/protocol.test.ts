@@ -1,7 +1,10 @@
 import { EventEmitter } from 'events';
 import { encode, LineDecoder } from '../protocol/codec';
 import { ProtocolHost } from '../protocol/host';
-import { Outbound, Inbound, sanitizeArgs, PROTOCOL_VERSION } from '../protocol/protocol';
+import {
+  Outbound, Inbound, sanitizeArgs, PROTOCOL_VERSION, PROTOCOL_SEMVER,
+  PROTOCOL_MIN_COMPATIBLE_MAJOR, PROTOCOL_MAX_COMPATIBLE_MAJOR,
+} from '../protocol/protocol';
 
 // The protocol is the keystone of the hybrid TUI split: it lets the unchanged Node engine drive
 // an out-of-process front-end. These tests pin the wire framing and the engine-side host's two
@@ -62,7 +65,13 @@ describe('ProtocolHost', () => {
   afterEach(() => host.detach());
 
   it('emits a handshake on attach', () => {
-    expect(sent[0]).toEqual({ t: 'ready', protocol: PROTOCOL_VERSION });
+    expect(sent[0]).toMatchObject({
+      t: 'hello', protocolVersion: PROTOCOL_SEMVER, protocolMajor: PROTOCOL_VERSION,
+      minCompatibleMajor: PROTOCOL_MIN_COMPATIBLE_MAJOR,
+      maxCompatibleMajor: PROTOCOL_MAX_COMPATIBLE_MAJOR,
+      engine: { version: expect.any(String), buildCommit: expect.any(String) },
+    });
+    expect(sent[1]).toEqual({ t: 'ready', protocol: PROTOCOL_VERSION });
   });
 
   it('forwards a cliEvents emit as an event message with sanitized args', () => {

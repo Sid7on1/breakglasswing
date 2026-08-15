@@ -20,13 +20,11 @@ fail-closed**:
 
 Nothing partially verified is ever executed, and the old binary is preserved until the new one runs.
 
-The single Bimax executable also contains the native **Bimax Computer Use** sidecar. Release builds
-pin its upstream 0.12.3 platform archive and verify that archive against a hard-coded SHA-256 before
-embedding it; the outer Bimax archive checksum therefore covers both engine and computer-use code.
-The sidecar is extracted content-addressed into the Bimax cache, is not added to `PATH`, receives a
-scrubbed environment, and has upstream telemetry disabled. See `THIRD_PARTY_NOTICES.md` for source
-and license attribution; the same notice is bundled into the executable and can be printed with
-`bimax --third-party-notices`.
+The Bimax Terminal executable contains the coding engine, Go TUI, and license notices only. It does
+not embed the Computer Use driver, service, helper, bridge, or PiP. Native Mac control belongs to
+the separately distributed **Bimax.app**, whose bundle layout and hashes must be verified as part of
+the Desktop release. See `THIRD_PARTY_NOTICES.md` for source and license attribution; the notice can
+also be printed with `bimax --third-party-notices`.
 
 ## Verify a download yourself
 
@@ -42,6 +40,55 @@ minisign -Vm SHA256SUMS -P "$(cat bimax-minisign.pub)"
 The pinned public key also lives in `install.sh` (`MINISIGN_PUBKEY`). Trust is rooted in the script
 you already chose to run, so a compromised release host that swaps both the tarball and its adjacent
 `SHA256SUMS` still cannot forge a valid signature.
+
+## Bimax for Mac manual alpha
+
+The current Desktop channel is a deliberately **unsigned and unnotarized manual alpha**, not a
+stable release. A release is valid only when it includes the DMG, `Bimax-manual-alpha-manifest.json`
+(the exact DMG SHA-256 plus every file/symlink in `Bimax.app`), and `SHA256SUMS` (DMG + manifest).
+
+Verify before opening:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+# Or compare directly with the manifest's dmg.sha256 value:
+shasum -a 256 Bimax-1.1.0-arm64.dmg
+```
+
+Trust Center shows the running app executable SHA-256, every resolved engine/native component
+SHA-256, actual signature kind, and actual Gatekeeper/notarization assessment. An unavailable fact
+stays `unknown`; it is never rendered as trusted.
+
+### First open on a fresh Mac
+
+Because this channel is unsigned, Finder should warn for a browser download. Choose **Done**, open
+**System Settings → Privacy & Security**, scroll to Security, choose **Open Anyway** for Bimax,
+authenticate, and confirm **Open**. This is a manual-alpha bypass, not notarization. Never disable
+Gatekeeper globally.
+
+Grant Screen Recording or Accessibility only when a Control Mac task needs it; coding works with
+both denied. Replacing `Bimax.app` can make macOS ask for either grant again. Open Trust Center after
+every update and re-check before continuing Control Mac work.
+
+### Rollback-safe manual update
+
+Quit Bimax, mount the verified DMG, then use an explicit source and destination:
+
+```bash
+node app/scripts/install-manual-alpha.mjs \
+  --source "/Volumes/Bimax/Bimax.app" \
+  --destination "/Applications/Bimax.app" \
+  --manifest ./Bimax-manual-alpha-manifest.json
+```
+
+The installer verifies the complete source tree, copies to a sibling staging path, verifies again,
+atomically moves the old app to `Bimax.app.previous`, activates/re-verifies the new app, and restores
+the old app if the postcondition fails. It refuses to overwrite an existing `.previous` copy.
+Project directories are outside the app bundle and are not removed.
+
+Trust Center's **Export private diagnostics…** writes a user-selected local JSON file. It includes
+build/signature/hash/permission and bounded crash metadata, but excludes project paths, source/file
+contents, transcripts, credentials/environment values, raw logs and crash tails.
 
 ## macOS: signing, notarization, and the "no warning" question
 
@@ -61,43 +108,36 @@ spctl -a -vvv -t install "$(command -v bimax)"                  # Gatekeeper ass
 ```bash
 export MACOS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 export BIMAX_MINISIGN_SECKEY="$HOME/.minisign/bimax.key"   # signs SHA256SUMS
-./release.sh darwin-arm64 darwin-x64 linux-x64 linux-arm64
+./release.sh darwin-arm64 darwin-x64
 ```
 
 Without `MACOS_SIGN_IDENTITY` the build still succeeds but prints an UNSIGNED warning.
 
-### Release operator — notarizing the desktop DMG
+### Release operator — qualifying a stable desktop DMG
 
 Code signing (`codesign`) is **not** notarization. Notarization is an Apple-side scan; only a
 successful notarization + stapling clears Gatekeeper on a clean Mac. Do not claim notarization from a
 local `codesign` pass.
 
 ```bash
-# 1. Build a signed, hardened app (app/electron-builder.yml already declares hardenedRuntime +
-#    entitlements). Provide the cert + notarization credentials via env:
+# Build/staple the signed app before constructing the DMG, then notarize/staple the DMG. This
+# script refuses missing credentials, mismatched nested identities, or failed assessments:
 export CSC_LINK="/path/DeveloperIDApplication.p12"
 export CSC_KEY_PASSWORD="…"
-export APPLE_ID="you@example.com"
-export APPLE_APP_SPECIFIC_PASSWORD="abcd-efgh-ijkl-mnop"
-export APPLE_TEAM_ID="TEAMID"
-# In app/electron-builder.yml, remove `identity: null` and uncomment the `notarize` block, then:
-cd app && npm run build && npx electron-builder --mac
-
-# 2. If notarizing manually instead of via electron-builder:
-xcrun notarytool submit BiMax.dmg --apple-id "$APPLE_ID" \
-  --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-xcrun stapler staple BiMax.dmg
-
-# 3. VERIFY ON A CLEAN MAC (a machine that never built it):
-spctl -a -vvv -t install BiMax.dmg      # must say "source=Notarized Developer ID"
-xcrun stapler validate BiMax.dmg
+export APPLE_NOTARY_KEY_PATH="/path/AuthKey_ABC123.p8"
+export APPLE_NOTARY_KEY_ID="ABC123"
+export APPLE_NOTARY_ISSUER_ID="issuer-uuid"
+npm --prefix app run release:stable:mac -- arm64
 ```
 
-**Current status:** the CLI archives are checksum-verified in the private source workflow, archived
-as CI artifacts, and promoted to the separate public binary repository without exposing source.
-Independent minisign signing and macOS Developer ID signing/notarization are *wired* (config +
-release hooks above) but activate only when the signing credentials are supplied. The v1.0.5 macOS
-builds are published as an explicitly unsigned beta; verify the attached checksums.
+This is necessary but not sufficient. Stable status also requires the quarantined clean-Mac
+Gatekeeper/TCC update matrix and a signed update feed with rollback. Never infer either from a
+successful local build.
+
+**Current Desktop status (2026-08-09):** local arm64 manual-alpha artifact/hash/rollback gates pass.
+No valid Developer ID identity or notary credentials are available here, the configured public
+v1.1.0 engine manifest URL returns HTTP 404, and no clean-Mac matrix ran. Stable signing,
+notarization, publication, signed updates, Intel packaging and clean-Mac TCC remain Target.
 
 ## Uninstall — what each tier removes
 

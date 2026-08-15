@@ -4,7 +4,7 @@ import * as path from 'path';
 import { ToolRegistry } from '../tools/tool.registry';
 import { IGovernor } from '../core/interfaces';
 import { Logger } from '../utils/logger';
-import { McpServerSpec, loadMcpServers, normalizeArgs, missingPathArgs } from './config';
+import { McpServerSpec, loadHostCapabilityServers, loadMcpServers, normalizeArgs, missingPathArgs } from './config';
 import { connectAndRegister, ConnectedMcp } from './client';
 import { cliEvents } from '../cli/events';
 import { codebaseMemorySpec } from './builtin/codebaseMemory';
@@ -37,7 +37,7 @@ export interface McpHealth {
  * tools with BIMAX_CODEMEM_RAW_TOOLS=1.
  */
 async function builtinServers(): Promise<McpServerSpec[]> {
-  const out: McpServerSpec[] = [];
+  const out: McpServerSpec[] = loadHostCapabilityServers();
   if (process.env.BIMAX_CODEMEM_RAW_TOOLS === '1') {
     try {
       const cbm = await codebaseMemorySpec();
@@ -115,6 +115,7 @@ export class McpManager {
       }
 
       this.connections.set(conn.name, conn);
+      if (spec.eager) registry.markDiscovered(conn.toolNames);
       this.errors.delete(spec.name);
       return conn;
     } finally {

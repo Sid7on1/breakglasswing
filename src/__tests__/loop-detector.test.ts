@@ -65,21 +65,21 @@ describe('LoopDetector — error thrashing (varying args, repeated failure)', ()
   });
 });
 
-describe('LoopDetector — visual computer progress', () => {
+describe('LoopDetector — visual provider progress', () => {
   const result = (frameHash: string) => JSON.stringify({ ok: true, action: 'click', frameHash, screenshot: `/tmp/${Date.now()}.png` });
 
-  it('allows repeated computer actions while the captured pixels keep changing', () => {
+  it('allows repeated visual actions while the captured pixels keep changing', () => {
     const d = new LoopDetector();
     for (let i = 0; i < 500; i++) {
-      expect(d.record('ComputerTool', '{"action":"click","x":10,"y":10}', result(`frame-${i}`))).toBeNull();
+      expect(d.record('HostVisionTool', '{"action":"click","x":10,"y":10}', result(`frame-${i}`))).toBeNull();
     }
   });
 
-  it('detects a computer action polling the same unchanged frame', () => {
+  it('detects a visual action polling the same unchanged frame', () => {
     const d = new LoopDetector();
     const args = '{"action":"observe"}';
-    expect(d.record('ComputerTool', args, result('same-frame'))).toBeNull();
-    expect(d.record('ComputerTool', args, result('same-frame'))).toBeNull();
-    expect(d.record('ComputerTool', args, result('same-frame'))?.type).toBe('no_progress_poll');
+    expect(d.record('HostVisionTool', args, result('same-frame'))).toBeNull();
+    expect(d.record('HostVisionTool', args, result('same-frame'))).toBeNull();
+    expect(d.record('HostVisionTool', args, result('same-frame'))?.type).toBe('no_progress_poll');
   });
 });

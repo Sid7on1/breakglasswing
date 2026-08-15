@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": 6,
+  "status": "implemented-locally-measured",
+  "sourceCommit": "715dda912499100d6639dfa27e29ec56ed6cbf2a",
+  "snapshotCommit": "5e45f898ab39712f8a9c2999d951bf29635d2a69",
+  "outputRoot": "/private/tmp/bimax-phase6-20260809-final",
+  "terminal": {
+    "head": "6b4d2d352813a310ea4f2389a315ca2c36c4a7df",
+    "historyCommits": 208,
+    "trackedFiles": 2126,
+    "jest": {
+      "passedSuites": 178,
+      "skippedSuites": 1,
+      "passedTests": 1424,
+      "skippedTests": 2
+    },
+    "goSuite": "passed",
+    "releaseArchitectures": ["darwin-arm64", "darwin-x64"],
+    "protocol": {
+      "version": "3.1.0",
+      "coldReadyMs": 2916.6,
+      "warmReadyMs": 390.0,
+      "pingP95Ms": 2.4
+    }
+  },
+  "desktop": {
+    "head": "1851bbd07c9fd0bf3dfe23b049cec187dd8b5706",
+    "historyCommits": 34,
+    "trackedFiles": 492,
+    "capabilitySuitesPassed": 54,
+    "capabilityTestsPassed": 603,
+    "typecheck": "passed",
+    "electronBuild": "passed",
+    "swiftProducts": ["bimax-cu-service", "bimax-cu-bridge"],
+    "providerProbe": "passed",
+    "engineManifestSha256": "1ca60ac9554434749b65e35d1c9754ef1b635bb7570a003ce7d3b7c6520cb193",
+    "engineArchitectures": ["darwin-arm64", "darwin-x64"]
+  },
+  "ownership": {
+    "terminalHasDesktopApp": false,
+    "terminalHasNativeService": false,
+    "terminalHasComputerUseSource": false,
+    "desktopHasTerminalEngineSource": false,
+    "desktopHasTerminalTui": false
+  },
+  "externalTargets": [
+    "owner-confirmed-github-organization-and-repository-names",
+    "non-default-migration-branch-publication",
+    "hosted-ci",
+    "default-branch-cutover",
+    "monorepo-archive-after-rollback-window"
+  ]
+}

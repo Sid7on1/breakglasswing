@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { asGitPathspec } from './security';
 
 /**
  * Electron-native git reader for the Review panel — status/diff/branches/log only, exactly like
@@ -93,15 +94,22 @@ export async function gitStatus(cwd: string): Promise<GitStatusResult | null> {
 }
 
 /** Full pending change for one file (staged + unstaged vs HEAD); untracked diffs against /dev/null. */
-export async function gitDiff(cwd: string, file: string, untracked: boolean): Promise<string> {
+/**
+ * Diff one path. The pathspec is contained against `cwd` HERE rather than at the caller, because
+ * `diff --no-index` does not treat its operands as repository pathspecs — it reads them as plain
+ * filesystem paths, so an absolute or `../`-prefixed value would read any file on the disk. A path
+ * that escapes the project (or a request with no project open) throws InvalidPayloadError.
+ */
+export async function gitDiff(cwd: string, file: unknown, untracked: boolean): Promise<string> {
+  const pathspec = asGitPathspec(cwd, file);
   try {
     if (untracked) {
       // --no-index exits 1 when files differ — that's the success path here.
-      return await run(cwd, ['diff', '--no-index', '--', '/dev/null', file]);
+      return await run(cwd, ['diff', '--no-index', '--', '/dev/null', pathspec]);
     }
-    return await run(cwd, ['diff', 'HEAD', '--', file]);
+    return await run(cwd, ['diff', 'HEAD', '--', pathspec]);
   } catch {
-    try { return await run(cwd, ['diff', '--', file]); } catch { return ''; }
+    try { return await run(cwd, ['diff', '--', pathspec]); } catch { return ''; }
   }
 }
 

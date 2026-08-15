@@ -10,10 +10,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const logoLine = "  BIMAX"
+const logoLine = "  BiMAX"
 
-// gradientLine sweeps the wordmark left → right from the phosphor accent into its lighter shimmer
-// and back — depth within the one signal color, never a second hue. Spaces are skipped so the
+// gradientLine sweeps the text-only wordmark from silver into white and back. Spaces are skipped so the
 // escape-code cost stays proportional to visible glyphs.
 func gradientLine(ln string) string {
 	runes := []rune(ln)
@@ -27,12 +26,12 @@ func gradientLine(ln string) string {
 			b.WriteRune(r)
 			continue
 		}
-		// Triangle wave 0→1→0 across the line: edges phosphor, center the lighter shimmer.
+		// Triangle wave 0→1→0 across the line: silver edges, white center.
 		t := float64(i) / float64(n-1)
 		if t > 0.5 {
 			t = 1 - t
 		}
-		c := lerpRGB(baseRGB, rgb{229, 154, 119}, t*2) // colShimmer #E59A77
+		c := lerpRGB(baseRGB, rgb{255, 255, 255}, t*2) // colShimmer #FFFFFF
 		b.WriteString(logoStyle.Foreground(lipgloss.Color(c.hex())).Render(string(r)))
 	}
 	return b.String()

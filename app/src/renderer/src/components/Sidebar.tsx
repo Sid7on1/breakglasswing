@@ -49,7 +49,7 @@ export function Sidebar({
   const branch = snapshot?.git?.branch ?? '';
 
   return (
-    <aside className="sidebar-shell flex h-full flex-col text-[13px]">
+    <aside className="sidebar-shell glass-lens flex h-full flex-col text-[13px]">
       <div className="px-3 pt-3 pb-2">
         <div className="flex items-center gap-2.5 px-1 py-1.5">
           <BrandMark className="size-7 rounded-[8px]" />

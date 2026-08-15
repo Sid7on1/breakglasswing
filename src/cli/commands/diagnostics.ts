@@ -4,6 +4,7 @@ import { getConfig } from '../config';
 import { buildKeyPool, getCurrentProvider } from '../provider';
 import { capabilitiesFor, capabilityGlyphs } from '../../core/capabilities';
 import { globalTelemetry } from '../../telemetry/telemetry';
+import { taskMetrics } from '../../telemetry/task.metrics';
 import * as headroomProxy from '../../memory/headroomProxy';
 import { getHeadroomReport } from '../../memory/headroom.compress';
 import { globalMcpManager } from '../../mcp/manager';
@@ -141,6 +142,24 @@ globalCommandRegistry.register({
       toolLines.push('```');
     }
 
+    // Per-task counters (Phase 10.1). Medians, and interrupted tasks excluded — see
+    // src/telemetry/task.metrics.ts for why neither of those is cosmetic.
+    const taskLines: string[] = [];
+    const taskSummary = taskMetrics.summarize();
+    if (taskSummary.length > 0) {
+      taskLines.push('', '**Turns per task (this session, medians)**');
+      const header = `${'Surface'.padEnd(20)} ${'Tasks'.padStart(5)} ${'Turns'.padStart(6)} ${'Tools'.padStart(6)} ${'Prompt tok'.padStart(11)}`;
+      taskLines.push('```', header);
+      for (const s of taskSummary.slice(0, 12)) {
+        const name = (s.label ? `${s.surface}/${s.label}` : s.surface).slice(0, 19).padEnd(20);
+        taskLines.push(`${name} ${String(s.tasks).padStart(5)} ${String(s.medianTurns).padStart(6)} ${String(s.medianToolCalls).padStart(6)} ${s.medianPromptTokens.toLocaleString().padStart(11)}`);
+      }
+      taskLines.push('```');
+      if (process.env.BIMAX_TASK_METRICS !== '1') {
+        taskLines.push('_Set `BIMAX_TASK_METRICS=1` to also append each task to `.breakglass/metrics/task-runs.jsonl`._');
+      }
+    }
+
     const cacheLines: string[] = [];
     if (cacheStats.totalPrompt > 0) {
       cacheLines.push('', '**Prompt cache (Anthropic)**');
@@ -167,6 +186,7 @@ globalCommandRegistry.register({
       ...healthChecks(),
       ...mindLines(),
       ...toolLines,
+      ...taskLines,
       ...cacheLines,
       '',
       '_Spend → /cost · context usage → /context · plugins → /plugins · safety → /security · self-knowledge → /self_',

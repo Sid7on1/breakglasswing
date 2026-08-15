@@ -1,10 +1,15 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { app } from 'electron';
-import { existsSync, mkdirSync, createWriteStream, statSync } from 'node:fs';
+import { existsSync, mkdirSync, createWriteStream, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { EngineHandle, SpawnCallbacks } from './supervisor/supervisor';
+import { ProcessProvenanceTracker, type ProcessProvenanceRecord } from '../phase9/process.provenance';
+import {
+  resolveEngineCommand, resolveNativeComponent, describeRefusal, buildEngineChildEnv,
+  type RuntimeLayout, type Resolution, type ComponentName,
+} from './runtime.paths';
 
 /**
  * Finder-launched macOS apps inherit launchd's minimal PATH (/usr/bin:/bin:...), not the user's
@@ -39,13 +44,33 @@ function userShellPath(): string {
  * Lifecycle policy lives in supervisor/supervisor.ts — this file is deliberately dumb: resolve
  * the command, spawn, decode lines, report exits. It never restarts anything itself.
  *
- * Command resolution, in order (mirrors StartEngine in tui/engine.go):
- *   1. $BIMAX_ENGINE_CMD                  — explicit override (dev escape hatch)
- *   2. <resources>/engine/bimax-engine    — the bun-compiled standalone binary bundled by
- *                                           electron-builder (packaged app path)
- *   3. node <repo>/dist/index.js          — dev with a fresh compiled build (~3× faster boot)
- *   4. npx tsx <repo>/src/index.ts        — dev from source
+ * Command resolution differs by build, and the difference is the point — see runtime.paths.ts.
+ * A PACKAGED app resolves from its own bundle and nowhere else:
+ *   <resources>/engine/bimax-engine       — the bun-compiled standalone binary bundled by
+ *                                           electron-builder; absent means fail visibly, never
+ *                                           fall back to a development engine
+ * DEVELOPMENT uses the pinned artifact staged at app/engine/bimax-engine. Contributors can opt
+ * into a deliberate $BIMAX_ENGINE_CMD override; there is no implicit source compilation path.
  */
+
+/**
+ * Loopback credentials for the app-owned user takeover latch, published by index.ts once its
+ * broker is listening. They only ever reach the mac capability provider's own descriptor
+ * environment (runtime.paths.ts), never the generic engine environment and never the renderer.
+ */
+let takeoverBrokerCredentials: { endpoint: string; token: string } | null = null;
+
+// S28-D starts with the process tree Bimax itself launches. This bounded tracker contains no raw
+// argv, environment, project path, or network payload and needs no system-wide entitlement.
+const processProvenance = new ProcessProvenanceTracker();
+
+export function engineProcessProvenance(): ProcessProvenanceRecord[] {
+  return processProvenance.snapshot();
+}
+
+export function setTakeoverBrokerCredentials(value: { endpoint: string; token: string } | null): void {
+  takeoverBrokerCredentials = value;
+}
 
 // In dev the app lives at <repo>/app, so the engine repo is one level up from the app package.
 // electron-vite bundles main to app/out/main/index.js — walk up to app/, then to the repo.
@@ -53,41 +78,92 @@ function devRepoRoot(): string {
   return path.resolve(__dirname, '..', '..', '..');
 }
 
-function packagedEngineBinary(): string {
-  const name = process.platform === 'win32' ? 'bimax-engine.exe' : 'bimax-engine';
-  return path.join(process.resourcesPath, 'engine', name);
+/** The injected view of this build that runtime.paths.ts reasons about. */
+function runtimeLayout(): RuntimeLayout {
+  return {
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    devRepoRoot: devRepoRoot(),
+    env: process.env,
+    exists: existsSync,
+  };
 }
 
-function resolveCommand(projectDir: string): { cmd: string; args: string[]; cwd: string } {
-  const override = process.env.BIMAX_ENGINE_CMD;
-  if (override && override.trim()) {
-    const parts = override.trim().split(/\s+/);
-    return { cmd: parts[0], args: parts.slice(1), cwd: projectDir };
-  }
-  const bundled = packagedEngineBinary();
-  if (app.isPackaged && existsSync(bundled)) {
-    return { cmd: bundled, args: [], cwd: projectDir };
-  }
-  const repo = devRepoRoot();
-  const dist = path.join(repo, 'dist', 'index.js');
-  if (existsSync(dist) && distFresh(repo)) {
-    return { cmd: process.execPath, args: [dist], cwd: repo };
-  }
-  return { cmd: 'npx', args: ['tsx', path.join('src', 'index.ts')], cwd: repo };
+/**
+ * Native component lookups. Each returns the bundle path in a packaged run, honours the dev
+ * override only outside one, and reports a refused override so it can be logged rather than
+ * silently swallowed.
+ */
+function nativeComponent(component: 'macCapability' | 'cuService' | 'cuBridge' | 'desktopHelper'): Resolution {
+  return resolveNativeComponent(runtimeLayout(), component);
 }
 
-// A compiled build older than any source file is a trap: the app would silently run stale code.
-// Cheap freshness probe (mtime of dist/index.js vs the newest of a handful of src entry files) —
-// the Go TUI does a full walk; a sample is enough here since dev builds go through `npm run build`.
-function distFresh(repo: string): boolean {
+/**
+ * The same resolution the spawn path uses, exposed for Trust diagnostics. Reporting must describe
+ * exactly what a launch would do, so it deliberately shares one code path rather than re-deriving
+ * paths — a diagnostics view that disagrees with the launcher is worse than none.
+ */
+export function componentResolutions(): Array<{ name: ComponentName; resolution: Resolution }> {
+  const layout = runtimeLayout();
+  const native = (['macCapability', 'cuService', 'cuBridge', 'desktopHelper'] as const).map((name) => ({
+    name: name as ComponentName,
+    resolution: resolveNativeComponent(layout, name),
+  }));
+
+  // The engine is resolved by a different function because a packaged build with no engine throws.
+  // For reporting, that condition is a missing component, not an exception.
+  let engine: Resolution;
   try {
-    const distM = statSync(path.join(repo, 'dist', 'index.js')).mtimeMs;
-    const probes = ['src/index.ts', 'src/protocol/headless.entry.ts', 'src/protocol/protocol.ts'];
-    return probes.every((p) => {
-      try { return statSync(path.join(repo, p)).mtimeMs <= distM; } catch { return true; }
-    });
+    const resolved = resolveEngineCommand(layout, layout.devRepoRoot);
+    engine = {
+      path: resolved.cmd || undefined,
+      source: resolved.source,
+      ...(resolved.refusedOverride ? { refusedOverride: resolved.refusedOverride } : {}),
+    };
   } catch {
-    return false;
+    engine = { source: 'missing' };
+  }
+  return [{ name: 'engine' as ComponentName, resolution: engine }, ...native];
+}
+
+export function bimaxCuServiceBinary(): string | undefined {
+  return nativeComponent('cuService').path;
+}
+
+export function bimaxCuBridgeBinary(): string | undefined {
+  return nativeComponent('cuBridge').path;
+}
+
+export function bimaxDesktopHelperBinary(): string | undefined {
+  return nativeComponent('desktopHelper').path;
+}
+
+function resolveCommand(projectDir: string): { cmd: string; args: string[]; cwd: string; refusals: string[] } {
+  const layout = runtimeLayout();
+  const resolved = resolveEngineCommand(layout, projectDir);
+  const refusals: string[] = [];
+  if (resolved.refusedOverride) refusals.push(describeRefusal(resolved.refusedOverride));
+
+  return { cmd: resolved.cmd, args: resolved.args, cwd: resolved.cwd, refusals };
+}
+
+function engineReleaseEnv(command: string): Record<string, string> {
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(path.dirname(command), 'manifest.json'), 'utf8')) as {
+      engine?: { version?: string; buildCommit?: string };
+      artifacts?: Array<{ platform?: string; arch?: string; sizeBytes?: number }>;
+    };
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const artifact = manifest.artifacts?.find((a) => a.platform === 'darwin' && a.arch === arch);
+    if (!artifact || statSync(command).size !== artifact.sizeBytes) return {};
+    return {
+      BIMAX_ENGINE_VERSION: String(manifest.engine?.version || 'unknown'),
+      BIMAX_ENGINE_COMMIT: String(manifest.engine?.buildCommit || 'unknown'),
+    };
+  } catch {
+    // Explicit contributor overrides are allowed to have no release manifest. Their hello identity
+    // remains dev/unknown, which is more truthful than inventing release provenance.
+    return {};
   }
 }
 
@@ -112,7 +188,7 @@ export function recentEngineLog(maxChars = 6000): string {
  * reaches the renderer), and cleanup of streams + listeners happens on exit here.
  */
 export function spawnEngineProcess(projectDir: string, extraEnv: Record<string, string>, cb: SpawnCallbacks): EngineHandle {
-  const { cmd, args, cwd } = resolveCommand(projectDir);
+  const { cmd, args, cwd, refusals } = resolveCommand(projectDir);
   const startedAt = Date.now();
   const command = `${cmd} ${args.join(' ')}`.trim();
 
@@ -127,18 +203,52 @@ export function spawnEngineProcess(projectDir: string, extraEnv: Record<string, 
   };
   logLine(`[desktop] ${new Date().toISOString()} starting engine for ${projectDir}: ${command}`);
 
+  // Every override a packaged build refused is written before the child starts. A refusal that is
+  // never reported is indistinguishable from an override that silently failed to apply.
+  const nativeService = nativeComponent('cuService');
+  const nativeBridge = nativeComponent('cuBridge');
+  const desktopHelper = nativeComponent('desktopHelper');
+  const macCapability = nativeComponent('macCapability');
+  for (const refusal of [
+    ...refusals,
+    ...[macCapability, nativeService, nativeBridge, desktopHelper]
+      .map((r) => r.refusedOverride)
+      .filter((r): r is NonNullable<typeof r> => !!r)
+      .map(describeRefusal),
+  ]) logLine(refusal);
+
+  const nativeServiceBinary = nativeService.path;
+  const nativeBridgeBinary = nativeBridge.path;
+  const desktopHelperBinary = desktopHelper.path;
+
   // The engine must START where its runtime resolves (repo root in dev), but the user's project
   // is projectDir — BIMAX_CWD tells the engine to chdir there (same contract as the Go TUI).
+  // extraEnv is the supervisor's capability plan (headroom/codemem/autoIndex/drives gates).
+  // buildEngineChildEnv owns the native-component stripping — see its doc comment.
   const child = spawn(cmd, args, {
     cwd,
-    env: {
-      ...process.env,
-      ...extraEnv, // the supervisor's capability plan (headroom/codemem/autoIndex/drives gates)
-      PATH: userShellPath(),
-      BIMAX_HEADLESS: '1',
-      BIMAX_CWD: projectDir,
-    },
+    env: buildEngineChildEnv({
+      parentEnv: process.env,
+      extraEnv: { ...extraEnv, ...engineReleaseEnv(cmd) },
+      packaged: app.isPackaged,
+      path: userShellPath(),
+      projectDir,
+      architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
+      ...(takeoverBrokerCredentials ? { takeover: takeoverBrokerCredentials } : {}),
+      resolved: {
+        macCapability: macCapability.path,
+        cuService: nativeServiceBinary,
+        cuBridge: nativeBridgeBinary,
+        desktopHelper: desktopHelperBinary,
+      },
+    }),
     stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const provenanceLaunchId = processProvenance.begin({
+    pid: child.pid,
+    executableBasename: path.basename(cmd),
+    cwdClass: 'project',
+    argumentClasses: ['headless-agent-protocol'],
   });
 
   // stderr → engine.log + the in-memory ring (journal evidence), never the protocol stream.
@@ -173,6 +283,7 @@ export function spawnEngineProcess(projectDir: string, extraEnv: Record<string, 
   child.on('exit', (code, signal) => {
     if (settled) return;
     settled = true;
+    processProvenance.finish(provenanceLaunchId, { exitCode: code, signal });
     if (stderrBuf) logLine(stderrBuf); // flush a final partial stderr line
     logLine(`[desktop] engine exited after ${Date.now() - startedAt}ms: ${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}`);
     rl.close();
@@ -182,6 +293,7 @@ export function spawnEngineProcess(projectDir: string, extraEnv: Record<string, 
   child.on('error', (err) => {
     if (settled) return;
     settled = true;
+    processProvenance.finish(provenanceLaunchId, { spawnError: true });
     logLine(`[desktop] engine process error after ${Date.now() - startedAt}ms: ${err.message}`);
     rl.close();
     logStream.end();

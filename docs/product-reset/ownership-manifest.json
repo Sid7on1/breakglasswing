@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "status": "phase6-local-split-complete",
+  "sourceCommit": "715dda91",
+  "products": {
+    "terminal": {
+      "workingName": "Bimax Terminal",
+      "support": ["macos-arm64", "macos-x64"],
+      "owns": [
+        "bin/",
+        "src/ except Desktop capability paths extracted in Phase 4",
+        "tui/",
+        "src/protocol/",
+        "engine and TUI tests",
+        "coding-agent scripts and docs"
+      ],
+      "excludesAfterMigration": [
+        "Desktop app repository",
+        "Desktop native/BimaxComputerUseKit/",
+        "src/computer/",
+        "computer-use tools, prompts, commands, config, benchmarks and native embeds"
+      ]
+    },
+    "desktop": {
+      "workingName": "Bimax for Mac",
+      "support": ["macos-arm64", "macos-x64"],
+      "owns": [
+        "repository root (promoted from app/)",
+        "native/BimaxComputerUseKit/",
+        "src/capabilities/mac/",
+        "scripts/computer-use/",
+        "benchmarks/computer-use/",
+        "computer-use tools, prompts, policy, fixtures, benchmarks and docs",
+        "desktop packaging, installation and update infrastructure"
+      ],
+      "consumes": [
+        "pinned Bimax engine release binary",
+        "versioned Bimax client protocol schema and fixtures",
+        "engine release manifest and SHA-256 digest"
+      ]
+    }
+  },
+  "phase6": {
+    "method": "fresh snapshot clone plus git-filter-repo explicit path filters",
+    "terminalHistoryCommits": 208,
+    "desktopHistoryCommits": 34,
+    "terminalTrackedFiles": 2126,
+    "desktopTrackedFiles": 492,
+    "engineManifestSha256": "1ca60ac9554434749b65e35d1c9754ef1b635bb7570a003ce7d3b7c6520cb193",
+    "publicationStatus": "target-owner-confirmation-required"
+  },
+  "neverCopy": [
+    "full coding-engine source into Desktop",
+    "credentials or local runtime state",
+    "node_modules, build, release, out, dist or native .build directories",
+    "generated protocol clients without their source version and generator"
+  ]
+}

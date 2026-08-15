@@ -4,6 +4,8 @@ import { cliEvents } from '../cli/events';
 import { runPreHooks, runPostHooks } from './hooks';
 import { isTypedOutcome, outcomeBlocked, TypedOutcome } from './outcome';
 import { recordGuard } from './guard.timing';
+import { activeTaskGuard } from '../evidence/task.guard';
+import { noEffects } from '../evidence/schema';
 
 export interface ToolDef<TArgs = any> {
   name: string;
@@ -11,6 +13,8 @@ export interface ToolDef<TArgs = any> {
   schema: any;
   isDestructive?: boolean;
   isConcurrencySafe?: boolean;
+  /** The implementation performs a richer, resolved-target Governor check before mutation. */
+  approvalHandledInternally?: boolean;
   execute: (args: TArgs, context?: any) => Promise<any>;
 }
 
@@ -48,11 +52,7 @@ const TASK_TYPE_MAP: Record<string, string> = {
 export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
   const isDestructive = def.isDestructive ?? true;
   const isConcurrencySafe = def.isConcurrencySafe ?? false;
-  // Desktop-control MCP tools (the pinned open-computer-use companion) are COMPUTER_CONTROL, not
-  // generic TOOL_EXECUTION: they get the sensitive-app hard deny, per-app session grants, and the
-  // computer-control prompt label instead of an opaque "Run mcp__…".
-  const isDesktopControl = def.name.startsWith('mcp__open-computer-use__');
-  const taskType = TASK_TYPE_MAP[def.name] || (isDesktopControl ? 'COMPUTER_CONTROL' : 'TOOL_EXECUTION');
+  const taskType = TASK_TYPE_MAP[def.name] || 'TOOL_EXECUTION';
 
   return {
     name: def.name,
@@ -63,21 +63,33 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
     execute: async (args: any, context?: any) => {
       const payload = taskType === 'OS_COMMAND'
         ? { tool: def.name, command: args.command, context, isDestructive }
-        : isDesktopControl
-          ? {
-              tool: def.name,
-              action: def.name.slice('mcp__open-computer-use__'.length),
-              // The companion's tools address apps by name/bundle in one of these args; surface it
-              // for grant scoping and the sensitive-app deny. Absent → prompt without a scope.
-              app: args?.app || args?.application || args?.bundle_id || args?.window || undefined,
-              ...args, isDestructive,
-            }
-          : { tool: def.name, ...args, targetPath: args.path, isDestructive };
+        : { tool: def.name, ...args, targetPath: args.path, isDestructive };
 
       // WS5 step 3: time each guard phase so a slow guard is visible before it's blamed (see /perf).
-      const tApprove = Date.now();
-      await governor.approveTaskExecution(taskType, payload);
-      recordGuard('governor:approve', Date.now() - tApprove);
+      if (!def.approvalHandledInternally) {
+        const tApprove = Date.now();
+        await governor.approveTaskExecution(taskType, payload);
+        recordGuard('governor:approve', Date.now() - tApprove);
+      }
+
+      // Task Guard (owner section 28, tier S28-0): bind this call to the approved task boundary and
+      // record it as causal evidence. The guard is installed per session and absent by default, so
+      // an engine with no guard behaves exactly as it did before.
+      //
+      // It refuses only at `block` — the deterministic Layer A/B floors. `require-approval` is left
+      // to the Governor above, which already owns the user prompt; adding a second one here would
+      // ask the same question twice. Refusal stops the Bimax-owned operation and nothing else, which
+      // is the S28-A exit condition.
+      const guard = activeTaskGuard();
+      const tGuard = Date.now();
+      const verdict = guard?.review(def.name, args ?? {}, context?.cwd || process.cwd());
+      if (verdict) recordGuard('taskguard:review', Date.now() - tGuard);
+      if (verdict && verdict.decision.disposition === 'block') {
+        Logger.warn(`[Tool:${def.name}] ⛔ ${verdict.summary}`);
+        const text = `${def.name} was blocked before running — ${verdict.summary}`;
+        context?.reportOutcome?.(outcomeBlocked(text));
+        return text;
+      }
 
       // PreToolUse hooks (A2): may block the call, surfaced to the model like a veto.
       const tPre = Date.now();
@@ -91,6 +103,7 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
         return text;
       }
 
+      const restoreScope = verdict && guard ? guard.enter(verdict.operation.id) : null;
       try {
         // Show which tool is running, but do NOT emit 'idle' when it finishes — the TURN is still
         // active (more tools / more text may follow, and tools run in parallel). Only runTurn's
@@ -110,11 +123,24 @@ export function buildTool(def: ToolDef, governor: IGovernor): BuiltTool {
         const tPost = Date.now();
         const appended = await runPostHooks(def.name, args, result, context);
         recordGuard('hooks:post', Date.now() - tPost);
+        // The receipt half of tier S28-0. What a Terminal tool can honestly report is what it
+        // declared plus the fact that it completed; the observed-effects sensor that would tighten
+        // this is S28-D, and it is entitlement-gated. Recording the declared effects as observed
+        // would be a lie, so the receipt carries them unchanged and the observation keeps whatever
+        // completeness gap the proposal stage attached.
+        if (verdict && guard) {
+          guard.observe(verdict.operation.id, def.name, 'applied', verdict.operation.declared, 'the tool completed');
+        }
         if (appended && typeof result === 'string') return `${result}\n\n${appended}`;
         return result;
       } catch (error: any) {
+        if (verdict && guard) {
+          guard.observe(verdict.operation.id, def.name, 'failed', noEffects(), error?.message || 'the tool threw');
+        }
         Logger.error(`[Tool:${def.name}] ❌ ${error.message}`);
         throw error;
+      } finally {
+        restoreScope?.();
       }
     }
   };

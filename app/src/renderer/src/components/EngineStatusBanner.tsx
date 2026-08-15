@@ -4,14 +4,19 @@ import type { RecoveryActionName, SupervisorStatus } from '../global';
 
 /**
  * Human-facing recovery notice. Startup is intentionally silent: opening a project should feel
- * like opening a workspace, not watching infrastructure boot. Technical detail lives in Support.
+ * like opening a workspace, not watching infrastructure boot. Technical detail lives in the
+ * Trust Center.
+ *
+ * This component was written during Phase 2 but never rendered by anything — a crashed engine
+ * simply produced a task surface that had stopped responding, with no statement and no way back.
+ * Phase 5 wires it into the task column, which is the only place a crash is actually in the way.
  */
 export function EngineStatusBanner({
-  status, onAction, onOpenHealth,
+  status, onAction, onOpenSupport,
 }: {
   status: SupervisorStatus;
   onAction: (action: RecoveryActionName, sessionId?: string) => void;
-  onOpenHealth: () => void;
+  onOpenSupport: () => void;
 }): React.ReactElement | null {
   const failed = status.phase === 'exited' || status.phase === 'failed';
   const reduced = status.phase === 'degraded';
@@ -46,8 +51,8 @@ export function EngineStatusBanner({
               )}
             </>
           )}
-          <button onClick={onOpenHealth} className="flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] text-dim hover:bg-hover hover:text-ink">
-            Support <ArrowRight size={11} />
+          <button onClick={onOpenSupport} className="flex cursor-pointer items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] text-dim hover:bg-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-ember">
+            Trust Center <ArrowRight size={11} />
           </button>
         </div>
       </div>

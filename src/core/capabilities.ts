@@ -251,7 +251,7 @@ const RULES: CapabilityRule[] = [
     },
   },
   // --- StepFun 3.7: NVIDIA streams reasoning out-of-band in reasoning_content. It accepts image
-  //     input and advertises a 262K context window, so it can drive screenshot/computer-use turns. ---
+  //     input and advertises a 262K context window, so it can drive grounded image turns. ---
   {
     match: ['step-3.7'],
     caps: {

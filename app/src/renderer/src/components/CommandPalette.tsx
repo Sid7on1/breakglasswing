@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Search, FolderOpen, GitCompareArrows, Files, SquareTerminal, Users, Map,
-  BrainCircuit, LifeBuoy, Settings, SquarePen,
+  BrainCircuit, ShieldCheck, Settings, SquarePen, AppWindow, Receipt, Globe, Activity, FlaskConical, HardDrive,
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
-import { DockTab } from './Dock';
+import type { InspectorTabId } from '../inspector.model';
+import type { WorkspaceSheetTab } from './WorkspaceSheet';
 import { cn } from '../lib/cn';
 
 interface PaletteAction {
@@ -16,30 +17,43 @@ interface PaletteAction {
 }
 
 export function CommandPalette({
-  open, onClose, onOpenTab, onOpenSettings, onNewTask,
+  open, onClose, onOpenInspector, onOpenTerminal, onOpenTrust, onOpenWorkspace, onOpenSettings, onNewTask, onOpenGallery,
 }: {
   open: boolean;
   onClose: () => void;
-  onOpenTab: (t: DockTab) => void;
+  onOpenInspector: (tab: InspectorTabId) => void;
+  onOpenTerminal: () => void;
+  onOpenTrust: () => void;
+  onOpenWorkspace: (tab: WorkspaceSheetTab) => void;
   onOpenSettings: () => void;
   onNewTask: () => void;
+  onOpenGallery: () => void;
 }): React.ReactElement {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // The palette is now the home for everything that stopped being permanent chrome. Each entry
+  // names an outcome rather than a subsystem — no mode, driver or protocol vocabulary.
   const actions = useMemo<PaletteAction[]>(() => [
     { id: 'new', label: 'Start a new task', group: 'Task', icon: <SquarePen size={14} />, run: onNewTask },
     { id: 'project', label: 'Open another project', group: 'Project', icon: <FolderOpen size={14} />, run: () => { void window.bimax.pickFolder(); } },
-    { id: 'review', label: 'Review changes', group: 'Workspace', icon: <GitCompareArrows size={14} />, run: () => onOpenTab('review') },
-    { id: 'files', label: 'Browse files', group: 'Workspace', icon: <Files size={14} />, run: () => onOpenTab('files') },
-    { id: 'terminal', label: 'Open terminal', group: 'Workspace', icon: <SquareTerminal size={14} />, run: () => onOpenTab('terminal') },
-    { id: 'agents', label: 'View agent team', group: 'Intelligence', icon: <Users size={14} />, run: () => onOpenTab('agents') },
-    { id: 'map', label: 'Explore code map', group: 'Intelligence', icon: <Map size={14} />, run: () => onOpenTab('map') },
-    { id: 'mind', label: 'Open memory', group: 'Intelligence', icon: <BrainCircuit size={14} />, run: () => onOpenTab('mind') },
-    { id: 'support', label: 'Help and app status', group: 'App', icon: <LifeBuoy size={14} />, run: () => onOpenTab('health') },
+    { id: 'code', label: 'Review changes', group: 'Evidence', icon: <GitCompareArrows size={14} />, run: () => onOpenInspector('code') },
+    { id: 'mac', label: 'Show the Mac live target', group: 'Evidence', icon: <AppWindow size={14} />, run: () => onOpenInspector('mac') },
+    { id: 'browser', label: 'Show browser activity', group: 'Evidence', icon: <Globe size={14} />, run: () => onOpenInspector('browser') },
+    { id: 'receipt', label: 'Open the task receipt', group: 'Evidence', icon: <Receipt size={14} />, run: () => onOpenInspector('receipt') },
+    { id: 'team', label: 'Show parallel work', group: 'Evidence', icon: <Users size={14} />, run: () => onOpenInspector('team') },
+    { id: 'runtime', label: 'Inspect adaptive runtime', group: 'Evidence', icon: <Activity size={14} />, run: () => onOpenInspector('runtime') },
+    { id: 'environment', label: 'Inspect developer environment', group: 'Evidence', icon: <HardDrive size={14} />, run: () => onOpenInspector('environment') },
+    { id: 'alchemist', label: 'Open ML Alchemist', group: 'Evidence', icon: <FlaskConical size={14} />, run: () => onOpenInspector('alchemist') },
+    { id: 'files', label: 'Browse files', group: 'Workspace', icon: <Files size={14} />, run: () => onOpenInspector('files') },
+    { id: 'terminal', label: 'Open terminal', group: 'Workspace', icon: <SquareTerminal size={14} />, run: onOpenTerminal },
+    { id: 'map', label: 'Explore code map', group: 'Workspace', icon: <Map size={14} />, run: () => onOpenWorkspace('map') },
+    { id: 'memory', label: 'Open memory', group: 'Workspace', icon: <BrainCircuit size={14} />, run: () => onOpenWorkspace('memory') },
+    { id: 'chats', label: 'Browse all chats', group: 'Task', icon: <Files size={14} />, run: onOpenGallery },
+    { id: 'trust', label: 'Open Permissions', group: 'App', icon: <ShieldCheck size={14} />, run: onOpenTrust },
     { id: 'settings', label: 'Open settings', group: 'App', icon: <Settings size={14} />, run: onOpenSettings },
-  ], [onNewTask, onOpenSettings, onOpenTab]);
+  ], [onNewTask, onOpenGallery, onOpenInspector, onOpenSettings, onOpenTerminal, onOpenTrust, onOpenWorkspace]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -62,14 +76,19 @@ export function CommandPalette({
 
   return (
     <Dialog open={open} onOpenChange={(value) => { if (!value) onClose(); }}>
-      <DialogContent aria-describedby={undefined} className="top-[18%] max-h-[64vh] w-[min(560px,calc(100vw-64px))] -translate-y-0 p-0">
+      {/* Anchoring belongs to the shell, sizing to the box — see the two-box note in ui/dialog. */}
+      <DialogContent
+        aria-describedby={undefined}
+        positionClassName="top-[18%] -translate-y-0"
+        className="max-h-[64vh] w-[min(560px,calc(100vw-min(64px,40vw)))] p-0"
+      >
         <DialogTitle className="sr-only">Search and open</DialogTitle>
         <div className="flex items-center gap-2 border-b border-line px-4 py-3.5">
           <Search size={16} className="shrink-0 text-faint" />
           <input
             ref={inputRef}
             value={query}
-            placeholder="Search Bimax…"
+            placeholder="Search BiMAX…"
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'ArrowDown') { event.preventDefault(); setSelected((value) => Math.min(value + 1, filtered.length - 1)); }

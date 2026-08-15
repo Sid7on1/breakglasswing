@@ -140,33 +140,28 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.SetValue(m.searchSaved)
 			m.input.CursorEnd()
 			m.status = "Ready"
-			m.relayout()
 			return m, nil
 		case "enter", "down":
 			if len(matches) > 0 {
 				m.searchIdx = (m.searchIdx + 1) % len(matches)
 			}
-			m.relayout()
 			return m, nil
 		case "up":
 			if len(matches) > 0 {
 				m.searchIdx = (m.searchIdx - 1 + len(matches)) % len(matches)
 			}
-			m.relayout()
 			return m, nil
 		case "backspace", "ctrl+h":
 			if r := []rune(m.searchQuery); len(r) > 0 {
 				m.searchQuery = string(r[:len(r)-1])
 			}
 			m.searchIdx = 0
-			m.relayout()
 			return m, nil
 		default:
 			if len(msg.Runes) > 0 {
 				m.searchQuery += string(msg.Runes)
 				m.searchIdx = 0
 			}
-			m.relayout()
 			return m, nil
 		}
 	}
@@ -181,7 +176,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.menuOpen = false
 			m.menuFilter = ""
-			m.relayout()
 			return m, nil
 		case "up", "ctrl+p":
 			if len(filtered) > 0 {
@@ -198,20 +192,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.menuTabs) > 0 {
 				m.menuTab = (m.menuTab + 1) % (len(m.menuTabs) + 1)
 				m.menuIdx = 0
-				m.relayout()
 			}
 			return m, nil
 		case "left", "shift+tab":
 			if len(m.menuTabs) > 0 {
 				m.menuTab = (m.menuTab - 1 + len(m.menuTabs) + 1) % (len(m.menuTabs) + 1)
 				m.menuIdx = 0
-				m.relayout()
 			}
 			return m, nil
 		case "enter":
 			m.menuOpen = false
 			m.menuFilter = ""
-			m.relayout()
 			if len(filtered) > 0 {
 				if m.menuID != "" {
 					m.engine.Send(encodeMenuSelect(m.menuID, filtered[m.menuIdx].Value))
@@ -233,14 +224,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.menuFilter = string(r[:len(r)-1])
 			}
 			m.menuIdx = 0
-			m.relayout()
 			return m, nil
 		default:
 			if len(msg.Runes) > 0 {
 				m.menuFilter += string(msg.Runes)
 				m.menuIdx = 0
 			}
-			m.relayout()
 			return m, nil
 		}
 	}
@@ -250,7 +239,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			m.compOpen = false
-			m.relayout()
 			return m, nil
 		case "up", "ctrl+p":
 			m.compIdx = (m.compIdx - 1 + len(m.comps)) % len(m.comps)
@@ -270,13 +258,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.saSel > 0 {
 				m.saSel--
 			}
-			m.relayout()
 			return m, nil
 		case "down":
 			if m.saSel < len(m.subagents)-1 {
 				m.saSel++
 			}
-			m.relayout()
 			return m, nil
 		case "enter":
 			// Accordion: expanding a card collapses the others, so the panel is never a wall of
@@ -287,12 +273,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if open {
 				m.saExpanded[id] = true
 			}
-			m.relayout()
 			return m, nil
 		case "esc":
 			m.saFocus = false
 			m.status = "Sub-agent panel: focus released"
-			m.relayout()
 			return m, nil
 		}
 	}
@@ -305,7 +289,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		send := func(verb string) (model, tea.Cmd) {
 			m.engine.Send(encodeInput("/tasks " + verb + " " + t.ID))
 			m.status = "/tasks " + verb + " " + t.ID
-			m.relayout()
 			return m, nil
 		}
 		switch msg.String() {
@@ -313,13 +296,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.tkSel > 0 {
 				m.tkSel--
 			}
-			m.relayout()
 			return m, nil
 		case "down":
 			if m.tkSel < len(m.fTasks)-1 {
 				m.tkSel++
 			}
-			m.relayout()
 			return m, nil
 		case "enter":
 			return send("show")
@@ -354,7 +335,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.tkFocus = false
 			m.status = "Task panel: focus released"
-			m.relayout()
 			return m, nil
 		}
 	}
@@ -366,14 +346,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.input.Line() == 0 && len(m.history) > 0 {
 			m.histPrev()
 			m.syncInputHeight()
-			m.relayout()
 			return m, nil
 		}
 	case "down":
 		if m.input.Line() == m.input.LineCount()-1 && m.histIdx < len(m.history) {
 			m.histNext()
 			m.syncInputHeight()
-			m.relayout()
 			return m, nil
 		}
 	}
@@ -422,18 +400,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.searchIdx = 0
 		m.compOpen = false
 		m.status = "Search transcript & logs — ↑/↓ navigate, Esc exit"
-		m.relayout()
 		return m, nil
 	case "ctrl+o":
 		// Toggle the structured log view in place of the transcript.
 		m.showLogs = !m.showLogs
-		m.relayout()
 		return m, nil
 	case "ctrl+x":
 		// Toggle the mind HUD — the ◇ chip's explainable panel (weak spots, drives, habits).
 		m.showMind = !m.showMind
 		m.mindTab = 0 // always land on the overview
-		m.relayout()
 		return m, nil
 	case "ctrl+b":
 		// Toggle tool-call collapse: long runs of tool calls fold into category counts ("7 tools ·
@@ -444,7 +419,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Tool calls expanded (Ctrl+B to collapse)"
 		}
-		m.relayout()
 		return m, nil
 	case "ctrl+a":
 		// Focus the live sub-agent panel: ↑/↓ select an agent, enter expands its prompt/tools/output,
@@ -462,7 +436,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Sub-agent panel: focus released"
 		}
-		m.relayout()
 		return m, nil
 	case "ctrl+t":
 		// Cycle the routing through three states, keyed on the current PIN (not the last-routed
@@ -485,7 +458,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// While the mind HUD is open, Shift+Tab pages its sections backwards.
 		if m.showMind {
 			m.mindTab = (m.mindTab + mindTabCount - 1) % mindTabCount
-			m.relayout()
 			return m, nil
 		}
 		// Cycle the agent behavioral mode: general → explore → sketch → code → beast → general.
@@ -496,12 +468,10 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.showMind {
 			m.showMind = false
-			m.relayout()
 			return m, nil
 		}
 		if m.showFullMap {
 			m.showFullMap = false
-			m.relayout()
 			return m, nil
 		}
 		// While a turn is running (incl. the tool-call phase), esc cancels it.
@@ -517,7 +487,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 			m.input.SetHeight(1)
 			m.status = "Prompt stashed — Ctrl+R to resume"
-			m.relayout()
 		}
 		return m, nil
 	case "ctrl+r":
@@ -527,7 +496,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.stash = ""
 			m.status = "Stashed prompt resumed"
 			m.syncInputHeight()
-			m.relayout()
 		}
 		return m, nil
 	case "ctrl+p":
@@ -551,7 +519,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Task panel: focus released"
 		}
-		m.relayout()
 		return m, nil
 	case "ctrl+g":
 		// Command palette: prefill "/" and surface the slash-command dropdown (type to filter).
@@ -562,7 +529,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// While the mind HUD is open, Tab pages through its sections instead of completing.
 		if m.showMind {
 			m.mindTab = (m.mindTab + 1) % mindTabCount
-			m.relayout()
 			return m, nil
 		}
 		if m.compOpen {
@@ -592,14 +558,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.SetHeight(1)
 			m.clearPastes()
 			m.compOpen = false
-			m.relayout()
 			return m, nil
 		}
 		if text == "/map" {
 			m.showFullMap = !m.showFullMap
 			m.input.SetValue("")
 			m.input.SetHeight(1)
-			m.relayout()
 			return m, nil
 		}
 		if text != "" {
@@ -615,7 +579,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearPastes()
 		}
 		m.compOpen = false
-		m.relayout()
 		return m, nil
 	}
 
@@ -626,7 +589,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if runes := string(msg.Runes); strings.ContainsAny(runes, "\n\r") {
 		m.addPaste(runes)
 		m.syncInputHeight()
-		m.relayout()
 		return m, nil
 	}
 
@@ -638,6 +600,5 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearPastes()
 	}
 	ccmd := m.requestCompletions() // refresh candidates (debounced) for the new input
-	m.relayout()
 	return m, tea.Batch(cmd, ccmd)
 }

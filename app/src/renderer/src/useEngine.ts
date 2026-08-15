@@ -1,9 +1,14 @@
 import { useEffect, useReducer, useRef, useCallback } from 'react';
 import {
   Outbound, RequestMsg, CompletionItem, MessageEntry, ToolCallEntry, UiSnapshot, SubAgentClaim,
-  ReviewSnapshot, EngineConfig, PROTOCOL_VERSION,
+  ReviewSnapshot, EngineConfig, EngineCatalog,
   ControlsMsg,
 } from './protocol';
+import { supportsProtocolMajor } from '../../shared/protocol.compat.gen';
+import {
+  normalizeUiSnapshot, normalizeReviewSnapshot, normalizeSubAgents, normalizeTodos,
+} from './protocol.normalize';
+import { visibleComputerUsePrompt } from './computer.use.prompt';
 
 /**
  * The renderer's engine state machine: consumes protocol Outbound messages from the preload
@@ -102,8 +107,11 @@ function onEvent(state: EngineUiState, name: string, args: any[]): EngineUiState
       return { ...state, diagnostics: [...state.diagnostics, entry].slice(-100) };
     }
     case 'message': {
-      const msg = args[0] as MessageEntry;
-      if (!msg) return state;
+      const incoming = args[0] as MessageEntry;
+      if (!incoming) return state;
+      const msg = incoming.role === 'user'
+        ? { ...incoming, content: visibleComputerUsePrompt(incoming.content) }
+        : incoming;
       // The engine echoes the user's turn as its own `message` event (that echo is what the session
       // file persists). The composer already painted an instant local bubble — adopt the engine's
       // entry into it instead of appending a duplicate.
@@ -166,19 +174,27 @@ function onEvent(state: EngineUiState, name: string, args: any[]): EngineUiState
         } else if (e.role === 'user' || e.role === 'assistant' || e.role === 'system') {
           // Replayed menus are inert (their engine-side handlers died with the original process).
           // The sentinel must not equal any option's value — '' would light up "Skip"-style options.
-          items.push({ kind: 'msg', msg: e as MessageEntry, menuChosen: e.uiComponent === 'menu' ? '__replayed__' : undefined });
+          const replayed = e.role === 'user'
+            ? { ...e, content: visibleComputerUsePrompt(String(e.content ?? '')) }
+            : e;
+          items.push({ kind: 'msg', msg: replayed as MessageEntry, menuChosen: e.uiComponent === 'menu' ? '__replayed__' : undefined });
         }
       }
       return { ...state, items, streaming: '', thinking: '' };
     }
-    case 'ui_snapshot':
-      return { ...state, snapshot: args[0] as UiSnapshot };
+    // Every structured payload is normalized at the boundary rather than trusted downstream — see
+    // protocol.normalize.ts. A `ui_snapshot` missing `models` used to reach the composer as a
+    // truthy object and blank the window.
+    case 'ui_snapshot': {
+      const snapshot = normalizeUiSnapshot(args[0]);
+      return snapshot ? { ...state, snapshot } : state;
+    }
     case 'review_update':
-      return { ...state, review: (args[0] as ReviewSnapshot) ?? null };
+      return { ...state, review: normalizeReviewSnapshot(args[0]) };
     case 'todo_update':
-      return { ...state, todos: Array.isArray(args[0]) ? args[0] : [] };
+      return { ...state, todos: normalizeTodos(args[0]) };
     case 'subagent_update':
-      return { ...state, subagents: Array.isArray(args[0]) ? (args[0] as SubAgentClaim[]) : [] };
+      return { ...state, subagents: normalizeSubAgents(args[0]) };
     case 'mode_change':
       return { ...state, mode: String(args[0] ?? '') };
     case 'model_tier':
@@ -199,7 +215,7 @@ function reducer(state: EngineUiState, action: Action): EngineUiState {
           return {
             ...state,
             engine: { state: 'ready', detail: '' },
-            protocolMismatch: m.protocol !== PROTOCOL_VERSION ? m.protocol : null,
+            protocolMismatch: !supportsProtocolMajor(m.protocol) ? m.protocol : null,
           };
         case 'event':
           return onEvent(state, m.name, m.args);
@@ -270,12 +286,30 @@ export function useEngine() {
   // settings pages await them directly; nothing renders in the transcript.
   const configId = useRef(0);
   const configPending = useRef(new Map<number, (cfg: EngineConfig) => void>());
+  // Catalogue round-trips share the shape but not the map: a `catalogResult` and a `configResult`
+  // can be in flight at the same time (the model window opens both at once) and their ids are
+  // allocated from separate counters, so one keyed map would let a config reply resolve a catalogue
+  // promise with the wrong payload.
+  const catalogId = useRef(0);
+  const catalogPending = useRef(new Map<number, (result: EngineCatalog) => void>());
 
   useEffect(() => {
     const offMsg = window.bimax.onMessage((msg) => {
       if (msg.t === 'configResult') {
         const resolve = configPending.current.get(msg.id);
         if (resolve) { configPending.current.delete(msg.id); resolve(msg.config as EngineConfig); }
+        return;
+      }
+      if (msg.t === 'catalogResult') {
+        const resolve = catalogPending.current.get(msg.id);
+        if (resolve) {
+          catalogPending.current.delete(msg.id);
+          resolve({
+            providers: (msg as any).providers ?? [],
+            models: (msg as any).models ?? [],
+            error: (msg as any).error,
+          });
+        }
         return;
       }
       dispatch({ type: 'outbound', msg });
@@ -294,11 +328,12 @@ export function useEngine() {
     return () => clearTimeout(id);
   }, [state.status]);
 
-  const submit = useCallback((text: string) => {
+  const submit = useCallback((text: string, engineText = text) => {
     const trimmed = text.trim();
+    const engineTrimmed = engineText.trim();
     if (!trimmed) return;
     dispatch({ type: 'localUser', text: trimmed });
-    window.bimax.send({ t: 'input', text: trimmed });
+    window.bimax.send({ t: 'input', text: engineTrimmed || trimmed });
     dispatch({ type: 'clearCompletions' });
   }, []);
 
@@ -355,5 +390,43 @@ export function useEngine() {
     [configRoundTrip],
   );
 
-  return { state, submit, interrupt, setControls, sendCommand, query, reply, menuSelect, clearCompletions, configGet, configSet };
+  /**
+   * Catalogue round-trip. The timeout is far longer than config's 3s because this one can go out to
+   * the provider's `/models` endpoint over the network — cutting it off at 3s would report "this
+   * engine has no catalogue" for what is really a slow provider, and the model window would show an
+   * empty list on a perfectly healthy setup.
+   */
+  const catalogRoundTrip = useCallback((send: (id: number) => void): Promise<EngineCatalog> => {
+    const id = ++catalogId.current;
+    return new Promise<EngineCatalog>((resolve) => {
+      catalogPending.current.set(id, resolve);
+      send(id);
+      setTimeout(() => {
+        if (catalogPending.current.has(id)) {
+          catalogPending.current.delete(id);
+          resolve({
+            providers: [],
+            models: [],
+            error: 'The provider catalogue did not answer within 9 seconds. Check the provider key or endpoint, then retry.',
+          });
+        }
+      }, 9000);
+    });
+  }, []);
+
+  const catalogGet = useCallback(
+    (refresh = false) => catalogRoundTrip((id) => window.bimax.send({ t: 'catalogGet', id, refresh })),
+    [catalogRoundTrip],
+  );
+
+  const providerSet = useCallback(
+    (input: { name: string; baseURL?: string; apiKey?: string }) =>
+      catalogRoundTrip((id) => window.bimax.send({ t: 'providerSet', id, ...input })),
+    [catalogRoundTrip],
+  );
+
+  return {
+    state, submit, interrupt, setControls, sendCommand, query, reply, menuSelect, clearCompletions,
+    configGet, configSet, catalogGet, providerSet,
+  };
 }

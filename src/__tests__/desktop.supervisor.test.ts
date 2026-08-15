@@ -220,6 +220,41 @@ describe('healthy startup', () => {
     child.emit({ t: 'boot', phase: 'loading_storage', pid: child.pid }); // stale/dup
     expect(h.phase()).toBe('loading_tools');
   });
+
+  test('current rich hello negotiates identity/features before ready', () => {
+    const h = makeHarness();
+    h.sup.openProject('/proj');
+    const child = h.lastChild();
+    child.emit({
+      t: 'hello', engine: { version: '1.1.0', buildCommit: '01234567' },
+      protocolVersion: '3.1.0', protocolMajor: 3, minCompatibleMajor: 2,
+      maxCompatibleMajor: 3, features: ['resume', 'interrupt'],
+    });
+    child.ready(3);
+    expect(h.phase()).toBe('ready');
+    expect(h.notices.filter((n) => /incompatible/.test(n.text))).toHaveLength(0);
+  });
+
+  test('previous supported v2 engine reaches ready through the legacy handshake', () => {
+    const h = makeHarness();
+    h.sup.openProject('/proj');
+    h.lastChild().ready(2);
+    expect(h.phase()).toBe('ready');
+    expect(h.notices.filter((n) => /incompatible/.test(n.text))).toHaveLength(0);
+  });
+
+  test('an incompatible rich hello is refused before ready', () => {
+    const h = makeHarness();
+    h.sup.openProject('/proj');
+    const child = h.lastChild();
+    child.emit({
+      t: 'hello', engine: { version: '9.0.0', buildCommit: 'bad' },
+      protocolVersion: '9.0.0', protocolMajor: 9, minCompatibleMajor: 9,
+      maxCompatibleMajor: 9, features: [],
+    });
+    expect(child.killed).toContain('SIGTERM');
+    expect(h.notices.some((n) => /incompatible/.test(n.text))).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

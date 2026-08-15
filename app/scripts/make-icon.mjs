@@ -61,7 +61,7 @@ const html = `<!doctype html><html><head><style>
 </body></html>`;
 
 const browser = await puppeteer.launch({
-  executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  executablePath: process.env.BIMAX_UI_CHROME || puppeteer.executablePath(),
   headless: 'new',
   args: ['--no-sandbox', '--hide-scrollbars'],
 });

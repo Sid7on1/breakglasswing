@@ -38,7 +38,7 @@ func sparkline(history []int) string {
 	return b.String()
 }
 
-// mindTabBar renders the section names with the active one in phosphor.
+// mindTabBar renders the section names with the active one in bright silver.
 func (m model) mindTabBar() string {
 	parts := make([]string, 0, mindTabCount)
 	for i, name := range mindTabNames {

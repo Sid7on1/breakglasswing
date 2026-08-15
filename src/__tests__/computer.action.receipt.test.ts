@@ -24,6 +24,19 @@ describe('computer Action Receipts', () => {
     expect(receipt.reason).toMatch(/label contradicted/);
   });
 
+  it('does not mistake a private AX identifier for a contradictory visible label', () => {
+    const receipt = matchHitElement(
+      { role: 'AXTextField', label: 'alpha beta gamma', frame: { x: 100, y: 200, w: 180, h: 24 } },
+      [{
+        pid: 42, role: 'AXTextField', identifier: '_NS:123', editable: true,
+        frame: { x: 100, y: 200, w: 180, h: 24 }, enabled: true,
+      }],
+    );
+    expect(receipt).toEqual(expect.objectContaining({ matched: true, confidence: 'high' }));
+    expect(receipt.reason).toMatch(/role \+ frame/);
+    expect(receipt.reason).not.toMatch(/label contradicted/);
+  });
+
   it('can identify an unlabeled control from independent role and geometry evidence', () => {
     const receipt = matchHitElement(
       { role: 'AXButton', frame: { x: 100, y: 200, w: 30, h: 30 } },

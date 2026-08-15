@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "phase": 5,
+  "run_id": "2026-08-09T14-07-47-403Z",
+  "started_at": "2026-08-09T14:07:47.406Z",
+  "ended_at": "2026-08-09T14:07:49.993Z",
+  "product": "bimax-desktop-renderer",
+  "grader": {
+    "version": "1.0",
+    "mutation_pass_ran": false,
+    "mutant_checks_passed": null
+  },
+  "window_sizes": [
+    {
+      "name": "minimum",
+      "width": 720,
+      "height": 480
+    },
+    {
+      "name": "default",
+      "width": 1180,
+      "height": 800
+    },
+    {
+      "name": "large",
+      "width": 1680,
+      "height": 1050
+    }
+  ],
+  "journeys": [
+    {
+      "id": "J8",
+      "name": "Infer and correct the task lane",
+      "outcome": "pass",
+      "checks": [
+        {
+          "name": "the request is visibly inferred as Control Mac",
+          "pass": true,
+          "observed": "Control Mac"
+        },
+        {
+          "name": "the user can visibly correct it to Code",
+          "pass": true,
+          "observed": "Code"
+        },
+        {
+          "name": "the corrected lane is respected at execution",
+          "pass": true,
+          "observed": "[{\"name\":\"send\",\"payload\":{\"t\":\"input\",\"text\":\"Open System Settings and click the Privacy & Security section\"},\"at\":1786284469242}]"
+        },
+        {
+          "name": "a corrected Code task does not open the permission flow",
+          "pass": true,
+          "observed": "Trust Center stayed closed"
+        }
+      ],
+      "pageErrors": [],
+      "accessibilityFindings": [],
+      "error": null
+    }
+  ],
+  "mutations": [],
+  "screenshots": [],
+  "totals": {
+    "journeys": 1,
+    "passed": 1,
+    "failed": 0
+  }
+}

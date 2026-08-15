@@ -15,9 +15,7 @@ import (
 
 // hasEmbeddedEngine reports whether a real compiled engine was baked in (release build). The dev
 // build leaves embeddedEngine nil; we also guard against a stray tiny placeholder.
-func hasEmbeddedEngine() bool      { return len(embeddedEngine) > 1<<20 }
-func hasEmbeddedComputerUse() bool { return len(embeddedComputerUse) > 1<<20 }
-func hasEmbeddedLivePip() bool     { return len(embeddedLivePip) > 64<<10 }
+func hasEmbeddedEngine() bool { return len(embeddedEngine) > 1<<20 }
 
 func engineCacheRoots() []string {
 	roots := make([]string, 0, 3)
@@ -48,7 +46,7 @@ func pruneStaleSiblings(dir, prefix, keepBasename string) {
 	}
 }
 
-func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, error) {
+func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, bool, error) {
 	var lastErr error
 	seen := make(map[string]bool)
 	for _, root := range roots {
@@ -64,89 +62,23 @@ func extractEmbeddedEngineFromRoots(roots []string, suffix string) (string, erro
 		path := filepath.Join(dir, "bimax-engine-"+suffix)
 		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedEngine)) {
 			pruneStaleSiblings(dir, "bimax-engine-", "bimax-engine-"+suffix)
-			return path, nil
+			return path, false, nil
 		}
 		if err := os.WriteFile(path, embeddedEngine, 0o755); err != nil {
 			lastErr = err
 			continue
 		}
 		pruneStaleSiblings(dir, "bimax-engine-", "bimax-engine-"+suffix)
-		return path, nil
+		return path, true, nil
 	}
-	return "", fmt.Errorf("no writable engine cache directory: %w", lastErr)
+	return "", false, fmt.Errorf("no writable engine cache directory: %w", lastErr)
 }
 
 // extractEmbeddedEngine writes the baked-in engine to the user cache dir (once, content-addressed)
 // and returns its path. This is what makes the shipped binary self-contained — no Node on the host.
-func extractEmbeddedEngine() (string, error) {
+func extractEmbeddedEngine() (string, bool, error) {
 	sum := sha256.Sum256(embeddedEngine)
 	return extractEmbeddedEngineFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
-}
-
-func extractEmbeddedComputerUseFromRoots(roots []string, suffix string) (string, error) {
-	var lastErr error
-	seen := make(map[string]bool)
-	for _, root := range roots {
-		dir := filepath.Join(root, "bimax")
-		if seen[dir] {
-			continue
-		}
-		seen[dir] = true
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			lastErr = err
-			continue
-		}
-		path := filepath.Join(dir, "bimax-computer-use-"+suffix)
-		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedComputerUse)) {
-			pruneStaleSiblings(dir, "bimax-computer-use-", "bimax-computer-use-"+suffix)
-			return path, nil
-		}
-		if err := os.WriteFile(path, embeddedComputerUse, 0o755); err != nil {
-			lastErr = err
-			continue
-		}
-		pruneStaleSiblings(dir, "bimax-computer-use-", "bimax-computer-use-"+suffix)
-		return path, nil
-	}
-	return "", fmt.Errorf("no writable computer-use cache directory: %w", lastErr)
-}
-
-func extractEmbeddedComputerUse() (string, error) {
-	sum := sha256.Sum256(embeddedComputerUse)
-	return extractEmbeddedComputerUseFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
-}
-
-func extractEmbeddedLivePipFromRoots(roots []string, suffix string) (string, error) {
-	var lastErr error
-	seen := make(map[string]bool)
-	for _, root := range roots {
-		dir := filepath.Join(root, "bimax")
-		if seen[dir] {
-			continue
-		}
-		seen[dir] = true
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			lastErr = err
-			continue
-		}
-		path := filepath.Join(dir, "bimax-live-pip-"+suffix)
-		if fi, err := os.Stat(path); err == nil && fi.Size() == int64(len(embeddedLivePip)) {
-			pruneStaleSiblings(dir, "bimax-live-pip-", "bimax-live-pip-"+suffix)
-			return path, nil
-		}
-		if err := os.WriteFile(path, embeddedLivePip, 0o755); err != nil {
-			lastErr = err
-			continue
-		}
-		pruneStaleSiblings(dir, "bimax-live-pip-", "bimax-live-pip-"+suffix)
-		return path, nil
-	}
-	return "", fmt.Errorf("no writable live-pip cache directory: %w", lastErr)
-}
-
-func extractEmbeddedLivePip() (string, error) {
-	sum := sha256.Sum256(embeddedLivePip)
-	return extractEmbeddedLivePipFromRoots(engineCacheRoots(), hex.EncodeToString(sum[:6]))
 }
 
 // ResolveRoot picks the directory the engine subprocess STARTS in. For the shipped binary that's the
@@ -235,76 +167,84 @@ func appendEnvDefault(env []string, key, value string) []string {
 	return append(env, prefix+value)
 }
 
-// prewarmFile streams path into the OS page cache in the background. The extracted engine and
-// driver are ~85MB/~42MB ad-hoc-signed binaries: on a cold cache (fresh boot, memory pressure)
-// exec faults them in page-by-page, each fault paying code-signature verification against slow,
-// contended I/O — measured 15s+ stuck on "Starting engine…" on an 8GB machine. One sequential
-// read-ahead turns that into a single streaming read; when the cache is already warm it's a
-// near-free no-op, so this is safe to fire on every launch.
-func prewarmFile(path string) {
-	go func() {
-		f, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		_, _ = io.Copy(io.Discard, f)
-	}()
+var terminalBlockedEnv = map[string]struct{}{
+	"BIMAX_HOST_CAPABILITIES_JSON": {},
 }
 
-// StartEngine launches the engine rooted at repoRoot. Override the command via $BIMAX_ENGINE_CMD
-// (e.g. the compiled binary); defaults to the dev runner. Engine stderr (boot logs) is sent to
-// tui/engine.log so it never corrupts the alt-screen UI or the NDJSON stdout stream.
-func StartEngine(repoRoot string) (*Engine, error) {
+// terminalEngineEnv is the product boundary, not a convenience default. It removes inherited
+// embedding-host capability contracts so a stale shell environment cannot attach another
+// product's provider to the coding product.
+func terminalEngineEnv(base []string) []string {
+	env := make([]string, 0, len(base)+2)
+	for _, entry := range base {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, blocked := terminalBlockedEnv[key]; blocked {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	return append(env,
+		"BIMAX_HEADLESS=1",
+		"BIMAX_ENGINE_VERSION="+version, "BIMAX_ENGINE_COMMIT="+commit,
+	)
+}
+
+// prewarmFile streams path into the OS page cache before exec. The extracted engine is a
+// large ad-hoc-signed binary: on a cold cache (fresh boot, memory pressure) exec faults it in
+// page-by-page, each fault paying code-signature verification against slow,
+// contended I/O — measured 15s+ stuck on "Starting engine…" on an 8GB machine. A background read
+// raced exec and made x64/Rosetta cold starts vary across the 5s budget. Finishing one sequential
+// read-ahead first makes launch deterministic; after extraction or on a warm cache it is a near-free
+// memory copy.
+func prewarmFile(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = io.Copy(io.Discard, f)
+}
+
+// engineCommand resolves the same Terminal-profiled engine child for both the TUI and the public
+// non-interactive NDJSON mode. Keeping one constructor prevents the headless release path from
+// accidentally inheriting Desktop endpoints that the TUI strips.
+func engineCommand(repoRoot string) (*exec.Cmd, error) {
 	var c *exec.Cmd
 	switch {
 	case os.Getenv("BIMAX_ENGINE_CMD") != "":
 		parts := strings.Fields(os.Getenv("BIMAX_ENGINE_CMD"))
 		c = exec.Command(parts[0], parts[1:]...)
 	case hasEmbeddedEngine():
-		path, err := extractEmbeddedEngine()
+		path, freshlyExtracted, err := extractEmbeddedEngine()
 		if err != nil {
 			return nil, err
 		}
-		prewarmFile(path)
+		// Writing a new extraction already populated the page cache. Reading the same ~85 MB again
+		// only delays first launch; prewarm is for a retained file after a reboot/cache eviction.
+		if !freshlyExtracted {
+			prewarmFile(path)
+		}
 		c = exec.Command(path)
 	case distFresh(repoRoot):
 		// Dev with an up-to-date build: run the compiled engine directly — ~3× faster to `ready`
 		// than the tsx transpile-on-boot path (measured 0.8s vs 2.3s).
 		c = exec.Command("node", "dist/index.js")
 	default:
-		c = exec.Command("npx", "tsx", "src/index.ts") // dev: run engine from source
+		// Node's loader path is offline and does not create the private IPC listener used by the
+		// `tsx` CLI. That listener is forbidden by managed builders even when the source itself is
+		// allowed to run, which used to close the TUI engine channel before `ready`.
+		c = exec.Command("node", "--import", "tsx", "src/index.ts")
 	}
 	c.Dir = repoRoot
-	c.Env = append(os.Environ(), "BIMAX_HEADLESS=1")
+	c.Env = terminalEngineEnv(os.Environ())
 	// codebase-memory is an optional MCP enhancement over the native SQLite graph. In Bun's
 	// self-contained engine its failed stdio handshake can monopolize the event loop for the full
 	// five-minute MCP timeout, preventing the TUI from ever receiving `ready`. Packaged TUI sessions
 	// therefore keep it off by default; users who want to experiment can explicitly launch with
 	// BIMAX_DISABLE_CODEMEM=0. The native graph remains loaded and fully usable either way.
 	c.Env = appendEnvDefault(c.Env, "BIMAX_DISABLE_CODEMEM", "1")
-	// The native sidecar is an implementation detail: the engine only sees the Bimax-owned path and
-	// contract. Telemetry is disabled at the process boundary before the sidecar can ever start.
-	if override := os.Getenv("BIMAX_COMPUTER_USE_DRIVER"); override != "" {
-		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+override)
-	} else if hasEmbeddedComputerUse() {
-		driverPath, extractErr := extractEmbeddedComputerUse()
-		if extractErr != nil {
-			return nil, extractErr
-		}
-		prewarmFile(driverPath)
-		c.Env = append(c.Env, "BIMAX_COMPUTER_USE_DRIVER="+driverPath)
-	}
-	if override := os.Getenv("BIMAX_LIVE_PIP_HELPER"); override != "" {
-		c.Env = append(c.Env, "BIMAX_LIVE_PIP_HELPER="+override)
-	} else if hasEmbeddedLivePip() {
-		pipPath, extractErr := extractEmbeddedLivePip()
-		if extractErr != nil {
-			return nil, extractErr
-		}
-		c.Env = append(c.Env, "BIMAX_LIVE_PIP_HELPER="+pipPath)
-	}
-	c.Env = append(c.Env, "CUA_DRIVER_RS_TELEMETRY_ENABLED=0", "CUA_TELEMETRY_ENABLED=0")
 	// The engine must START in repoRoot so the dev runner (`tsx src/index.ts`) resolves, but the
 	// user's actual project is wherever they launched the TUI. Pass that through so the engine can
 	// chdir into it — otherwise the dev build always treats the repo as the project (e.g. the codebase
@@ -312,6 +252,31 @@ func StartEngine(repoRoot string) (*Engine, error) {
 	// already equals the launch dir, so this is a harmless no-op.
 	if wd, err := os.Getwd(); err == nil && wd != "" {
 		c.Env = append(c.Env, "BIMAX_CWD="+wd)
+	}
+	return c, nil
+}
+
+// RunHeadlessEngine exposes the shipped engine's NDJSON stream directly for scripts and editor
+// hosts. It remains the Terminal product profile: embedding-host providers are unavailable.
+// stdout is protocol-only; diagnostics stay on stderr.
+func RunHeadlessEngine(repoRoot string) error {
+	c, err := engineCommand(repoRoot)
+	if err != nil {
+		return err
+	}
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
+}
+
+// StartEngine launches the engine rooted at repoRoot. Override the command via $BIMAX_ENGINE_CMD
+// (e.g. the compiled binary); defaults to the dev runner. Engine stderr (boot logs) is sent to
+// tui/engine.log so it never corrupts the alt-screen UI or the NDJSON stdout stream.
+func StartEngine(repoRoot string) (*Engine, error) {
+	c, err := engineCommand(repoRoot)
+	if err != nil {
+		return nil, err
 	}
 
 	stdin, err := c.StdinPipe()

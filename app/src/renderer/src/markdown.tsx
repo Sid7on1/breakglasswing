@@ -6,7 +6,7 @@ import { Copy, Check } from 'lucide-react';
 /**
  * Full markdown for chat messages: marked's lexer produces tokens, and we render tokens straight
  * to React nodes — never raw HTML, so there is no injection surface (`html` tokens render as
- * plain text). Code fences get highlight.js with a copy button; the graphite hljs theme lives in
+ * plain text). Code fences get highlight.js with a copy button; the Moonlight hljs theme lives in
  * styles.css.
  */
 export function Markdown({ text }: { text: string }): React.ReactElement {

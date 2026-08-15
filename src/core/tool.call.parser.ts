@@ -20,6 +20,22 @@ export interface ParsedToolCall {
   args: string;
 }
 
+/** The one tool an operation turn already requires, used to recover a NAMELESS argument object. */
+export interface DefaultToolCandidate {
+  name: string;
+  /** JSON Schema of that tool's arguments; only `properties` and `required` are consulted. */
+  schema: unknown;
+}
+
+export interface TextToolCallOptions {
+  /**
+   * When the loop has already required one specific tool for this turn, a bare argument object with
+   * no `name` is still an unambiguous invocation of it. Supplying the tool here enables that
+   * recovery; omitting it keeps the strict name-gated behaviour.
+   */
+  defaultTool?: DefaultToolCandidate;
+}
+
 export interface TextToolCallExtraction {
   toolCalls: ParsedToolCall[];
   /** The content with every recognized tool-call JSON blob removed. */
@@ -66,13 +82,62 @@ function asToolCall(candidate: string, isRegisteredTool: (name: string) => boole
   return { name, args };
 }
 
+/** Everything that wraps a tool-call payload without being part of it. */
+function unwrapToolCallPayload(content: string): string {
+  return content
+    .replace(/<\/?tool_call>/gi, '')
+    .replace(/```(?:json|tool_code)?/gi, '```')
+    .replace(/```/g, '')
+    .trim();
+}
+
+/**
+ * A nameless argument object, recovered ONLY against the tool this turn already requires.
+ *
+ * The observed failure: on a required-tool turn the model stops emitting a name and writes
+ * just `{"action":"click","query":"mom","frameId":"…"}` into the content channel. That is a
+ * complete, unambiguous invocation of the one tool the turn is about, but the name-gated path
+ * cannot see it, so the operation silently ends one action short of sending the message.
+ *
+ * Kept safe by shape, not by trust: the payload must be the WHOLE message (bar fences/wrappers) —
+ * never a JSON example embedded in prose — every key must exist in that tool's schema, and every
+ * required key must be present. Arbitrary JSON a user asked the model to produce does not satisfy
+ * a real tool's schema, and outside a required-tool turn this path never runs at all.
+ */
+function asDefaultToolCall(content: string, defaultTool: DefaultToolCandidate): ParsedToolCall | null {
+  const payload = unwrapToolCallPayload(content);
+  if (!payload.startsWith('{') || matchBalancedObject(payload, 0) !== payload.length - 1) return null;
+
+  let value: any;
+  try { value = JSON.parse(payload); } catch { return null; }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  // A named object is the strict path's business; never let this one re-interpret a rejected name.
+  if (value.name != null || value.tool != null || value.function != null) return null;
+
+  const schema = defaultTool.schema as { properties?: Record<string, unknown>; required?: unknown } | undefined;
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== 'object') return null;
+  const keys = Object.keys(value);
+  if (keys.length === 0 || !keys.every(key => Object.prototype.hasOwnProperty.call(properties, key))) return null;
+  const required = Array.isArray(schema?.required) ? schema!.required as string[] : [];
+  if (!required.every(key => value[key] !== undefined)) return null;
+
+  return {
+    id: `text-call-default-${Date.now()}`,
+    name: defaultTool.name,
+    args: JSON.stringify(value),
+  };
+}
+
 /**
  * Scan `content` for tool calls written as JSON text and return them alongside the
- * content with those blobs stripped out. Only blobs naming a registered tool match.
+ * content with those blobs stripped out. Only blobs naming a registered tool match,
+ * unless `options.defaultTool` supplies the tool this turn already requires.
  */
 export function extractTextToolCalls(
   content: string,
-  isRegisteredTool: (name: string) => boolean
+  isRegisteredTool: (name: string) => boolean,
+  options?: TextToolCallOptions
 ): TextToolCallExtraction {
   const toolCalls: ParsedToolCall[] = [];
   const removals: Array<[number, number]> = [];
@@ -90,6 +155,12 @@ export function extractTextToolCalls(
       removals.push([i, end + 1]);
       i = end; // skip past this object
     }
+  }
+
+  if (toolCalls.length === 0 && options?.defaultTool) {
+    const recovered = asDefaultToolCall(content, options.defaultTool);
+    // The whole message WAS the call, so nothing user-facing survives it.
+    if (recovered) return { toolCalls: [recovered], cleanedText: '' };
   }
 
   let cleanedText = content;

@@ -148,6 +148,33 @@ export class LlmAdapter implements LLMProvider {
     return this.apiKeyManager.getStates();
   }
 
+  /**
+   * What this adapter will ACTUALLY send on the next request.
+   *
+   * A settings surface that reads the config file is reading the wrong thing: the file is what was
+   * requested, this is what is loaded. They diverge whenever a write lands somewhere that does not
+   * also reach the adapter — which is exactly how "I changed the model and it never changed" stayed
+   * invisible for so long (the desktop's silent `configSet` path saved the file, reported the file
+   * back, and left `userModel` pinned to whatever booted). Every read-back should compare against
+   * this, never against `getConfig()`.
+   */
+  public readEffective(): {
+    model: string; liteModel: string; visionModel: string; reasoningEffort: string;
+    temperature: number; topP: number; maxTokens: number; timeout: number; parallelToolCalls: boolean;
+  } {
+    return {
+      model: this.userModel || this.defaultModel || '',
+      liteModel: this.liteModel || '',
+      visionModel: this.visionModel || '',
+      reasoningEffort: this.reasoningEffort || '',
+      temperature: this.temperature,
+      topP: this.topP,
+      maxTokens: this.maxTokens,
+      timeout: this.requestTimeout,
+      parallelToolCalls: this.parallelToolCalls,
+    };
+  }
+
   public applyConfig(cfg: { model?: string; timeout?: number; temperature?: number; topP?: number; maxTokens?: number; reasoningEffort?: string; parallelToolCalls?: boolean; liteModel?: string; visionModel?: string }) {
     if (cfg.model) { this.defaultModel = cfg.model; this.userModel = cfg.model; }
     if (cfg.timeout) this.requestTimeout = cfg.timeout;
@@ -192,7 +219,13 @@ export class LlmAdapter implements LLMProvider {
       const keyResult = await this.apiKeyManager.getNextKey();
       if (!keyResult.keyStr) return [];
       const client = this.createClient(keyResult);
-      const page = await client.models.list();
+      // A catalogue is setup UI, not a model turn. It must fail quickly and explicitly when a
+      // provider is offline or an endpoint black-holes the request; otherwise the model window is
+      // stuck on “Fetching…” while the SDK waits on its much longer turn timeout.
+      const page = await client.models.list({
+        timeout: 7_000,
+        signal: AbortSignal.timeout(7_000),
+      });
       const ids = (page.data || []).map(m => m.id).filter(Boolean).sort();
       this.liveModelsCache = ids;
       return ids.filter(id => !this.unservable.has(id));
@@ -270,8 +303,8 @@ export class LlmAdapter implements LLMProvider {
       //   3. the provider serves it, but the catalog records it as unfit to be chosen automatically
       //      — it times out, 400s on the real workload, or cannot call tools.
       // Case 3 matters because these pins are almost always the residue of an EARLIER automatic
-      // pick, and leaving one in place is what kept computer use dead: the vision slot pointed at a
-      // model that 400s on every tools+image request, so every screenshot step failed. The switch
+      // pick, and leaving one in place can strand vision workflows: the vision slot may point at a
+      // model that 400s on every tools+image request, so every screenshot step fails. The switch
       // is announced with a /model pointer, so an explicit choice can always be re-pinned.
       const reason = !served.has(current) ? 'is not served by the provider'
         : this.unservable.has(current) ? 'was rejected by the provider at call time'
@@ -799,7 +832,7 @@ export class LlmAdapter implements LLMProvider {
             parameters: t.input_schema || t.parameters
           }
         }));
-        requestOptions.tool_choice = 'auto';
+        requestOptions.tool_choice = options.toolChoice || 'auto';
         // NVIDIA NIM and several other OpenAI-compatible backends reject any
         // assistant turn that emits more than one tool call ("This model only
         // supports single tool-calls at once!"), which hard-aborts the task.

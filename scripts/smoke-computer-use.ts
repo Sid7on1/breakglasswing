@@ -38,14 +38,29 @@ async function main() {
     const after = await runtime.run({ action: 'observe', maxElements: 500 });
     if (!after.ok) throw new Error(after.error || after.summary);
 
+    // Calculator publishes the running expression AND its result together, in the window's value:
+    // "1,271×170+104 — 216,174", padded with bidi marks. The old check stripped every non-digit from
+    // that whole string ("1271170104216174") and demanded exact equality with the result, which can
+    // never match — so this smoke printed `semantic: null` and PASSED, for however long it has been
+    // wrong. Its own docstring says it reads the result from a fresh accessibility observation; that
+    // claim was never actually asserted, only the presence of a screenshot was.
+    const readable = (element: any) => String(element?.value ?? element?.label ?? '')
+      .replace(/[‎‏]/g, '');
     const values = (after.elements || [])
       .map((element: any) => ({ label: element?.label, role: element?.role, value: element?.value }))
-      .filter((element: any) => /\d/.test(String(element.value || element.label || '')));
-    const displayed = values.find((element: any) =>
-      String(element.value || element.label || '').replace(/[^0-9-]/g, '') === '216174');
+      .filter((element: any) => /\d/.test(readable(element)));
+    // Accept the digits with or without the thousands separator, anywhere in the element's text.
+    const displayed = values.find((element: any) => /216,?174/.test(readable(element)));
     const screenshot = String(after.screenshot || '');
     const screenshotBytes = screenshot && fs.existsSync(screenshot) ? fs.statSync(screenshot).size : 0;
     if (!screenshotBytes) throw new Error('fresh Calculator observation produced no screenshot evidence');
+    // Assert the central claim. Without this the smoke reports a clean pass while the semantic read
+    // — the entire point of the exercise — returns nothing.
+    if (!displayed) {
+      throw new Error('Calculator computed 1271*170+104 but no observed element carried the result 216,174; '
+        + `semantic read failed over ${values.length} numeric element(s): `
+        + JSON.stringify(values.slice(0, 8)));
+    }
     console.log(JSON.stringify({
       driver: after.driver, pid: after.pid, windowId: after.windowId,
       semantic: displayed || null, degraded: !!after.degraded, screenshot, screenshotBytes,

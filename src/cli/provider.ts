@@ -16,12 +16,49 @@ const PROVIDERS: LlmProvider[] = [
   { name: 'google', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKeyEnv: 'GOOGLE_API_KEY', defaultModel: 'gemini-2.0-flash' },
 ];
 
-// Runtime override set by the /provider command; null means "follow BGW_PROVIDER". Resolved lazily
+// Runtime override set by the /provider command; null means "fall through". Resolved lazily
 // (not captured at module load) so the env var is read AFTER env files are loaded — otherwise import
 // hoisting could snapshot it before loadGlobalEnv() runs and silently fall back to 'nvidia'.
 let providerOverride: string | null = null;
+
+/**
+ * Precedence: a runtime `/provider` override, then the PERSISTED choice, then the env var, then
+ * nvidia.
+ *
+ * The config read is why a provider picked in the UI survives a restart. Before it, this function
+ * consulted only `providerOverride` and `BGW_PROVIDER`, so the choice lived in a module variable
+ * that died with the process — the user picked a provider, it worked for that session, and every
+ * later launch silently went back to nvidia while the settings screen still displayed their pick.
+ *
+ * Config is read lazily and defensively: this module is imported during startup, before
+ * `loadConfig()` has necessarily run, and provider resolution must never be the thing that throws.
+ */
 function activeProviderName(): string {
-  return providerOverride || process.env.BGW_PROVIDER || 'nvidia';
+  // Bimax for Mac owns Keychain-backed provider setup. Its launch-time override is intentionally
+  // first: a stale Terminal config must not make Desktop send a Keychain credential to a different
+  // provider namespace. Terminal never sets this variable.
+  if (process.env.BIMAX_DESKTOP_PROVIDER) return process.env.BIMAX_DESKTOP_PROVIDER;
+  if (providerOverride) return providerOverride;
+  let configured = '';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    configured = String((require('./config') as typeof import('./config')).getConfig().provider || '').trim();
+  } catch { /* config not loaded yet — env/default below still answers */ }
+  return configured || process.env.BGW_PROVIDER || 'nvidia';
+}
+
+/** The endpoint the active provider should use, honouring a configured/env override. */
+function activeBaseURL(provider: LlmProvider): string {
+  if (process.env.BIMAX_DESKTOP_PROVIDER_BASE_URL) return process.env.BIMAX_DESKTOP_PROVIDER_BASE_URL;
+  if (process.env.BGW_BASE_URL) return process.env.BGW_BASE_URL;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const configured = String((require('./config') as typeof import('./config')).getConfig().providerBaseURL || '').trim();
+    // Only honour an override for the provider it was saved against; carrying a custom endpoint
+    // across a provider switch points one provider's model namespace at another's server.
+    if (configured && activeProviderName() === provider.name) return configured;
+  } catch { /* config not loaded yet */ }
+  return provider.baseURL;
 }
 
 export function getProviders(): LlmProvider[] {
@@ -50,7 +87,7 @@ function keysForProvider(provider: LlmProvider): KeyConfig[] {
     model: process.env[`${provider.apiKeyEnv}_MODEL_${i + 1}`] || process.env[`${provider.apiKeyEnv}_MODEL`] || provider.defaultModel,
     // Escape hatch for local models, proxies, and test harnesses: point the ACTIVE provider's
     // OpenAI-compatible endpoint elsewhere without editing the provider table.
-    baseURL: process.env.BGW_BASE_URL || provider.baseURL,
+    baseURL: activeBaseURL(provider),
     provider: provider.name,
     label: `${provider.name} #${i + 1}`,
   }));
