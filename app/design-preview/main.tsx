@@ -6,6 +6,7 @@ import { ModelsPreview } from './models';
 import { PermissionsPreview } from './permissions';
 import { InspectorPreview } from './inspector';
 import { MotionPreview } from './motion';
+import { MotionLab } from './lab';
 import type { UiSnapshot, UiSnapshotSession } from '../src/renderer/src/protocol';
 import '@fontsource-variable/inter';
 import '../src/renderer/src/styles.css';
@@ -92,12 +93,12 @@ function Stage({
   );
 }
 
-type Page = 'motion' | 'shell' | 'models' | 'permissions' | 'inspector';
-const PAGES: Page[] = ['motion', 'shell', 'models', 'permissions', 'inspector'];
+type Page = 'lab' | 'motion' | 'shell' | 'models' | 'permissions' | 'inspector';
+const PAGES: Page[] = ['lab', 'motion', 'shell', 'models', 'permissions', 'inspector'];
 
 function Preview(): React.ReactElement {
   const [dark, setDark] = useState(true);
-  const [page, setPage] = useState<Page>('motion');
+  const [page, setPage] = useState<Page>('lab');
   // The real app puts the theme class on <html>; portalled surfaces (the brand dropdown) inherit
   // from there, so the page root has to carry it too or they would render unthemed.
   useEffect(() => {
@@ -127,7 +128,11 @@ function Preview(): React.ReactElement {
       >
         view: {page}
       </button>
-      {page === 'motion' ? (
+      {page === 'lab' ? (
+        <div className={dark ? 'theme-moonlight' : 'theme-starlight'} data-chrome="windowed">
+          <MotionLab />
+        </div>
+      ) : page === 'motion' ? (
         <div className={dark ? 'theme-moonlight' : 'theme-starlight'} data-chrome="windowed">
           <MotionPreview />
         </div>
