@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { WindowChromeState } from '../shared/window.chrome';
 
 /**
  * The renderer's only door to the engine. Mirrors the NDJSON protocol 1:1 — `send` takes a
@@ -42,9 +43,9 @@ const api = {
   // Window chrome (full screen / zoomed). Read-only: the renderer styles itself against the window
   // state, it never drives the window from here.
   windowChrome: {
-    get: (): Promise<{ fullScreen: boolean; maximized: boolean }> => ipcRenderer.invoke('window:chrome'),
-    onState: (cb: (state: { fullScreen: boolean; maximized: boolean }) => void): (() => void) => {
-      const h = (_e: unknown, state: { fullScreen: boolean; maximized: boolean }): void => cb(state);
+    get: (): Promise<WindowChromeState> => ipcRenderer.invoke('window:chrome'),
+    onState: (cb: (state: WindowChromeState) => void): (() => void) => {
+      const h = (_e: unknown, state: WindowChromeState): void => cb(state);
       ipcRenderer.on('window:chrome', h);
       return () => ipcRenderer.removeListener('window:chrome', h);
     },

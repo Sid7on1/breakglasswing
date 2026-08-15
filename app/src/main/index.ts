@@ -16,6 +16,7 @@ import { inspectExecutable } from './release.integrity';
 import { buildDiagnosticExport } from './diagnostic.export';
 import { DesktopEvidenceStore } from './evidence.store';
 import { buildEvidenceTimeline, retentionControls } from '../shared/evidence.timeline';
+import type { WindowChromeState } from '../shared/window.chrome';
 import { EngineSupervisor } from './supervisor/supervisor';
 import { CrashJournal } from './supervisor/journal';
 import { SupervisorStatus } from './supervisor/types';
@@ -180,9 +181,41 @@ function broadcast(channel: string, ...args: unknown[]): void {
  * reads as haze rather than depth — the effect costs a compositor pass and buys nothing. Main owns
  * this fact because only main sees the window's own state events; the renderer cannot observe them.
  */
-function windowChrome(): { fullScreen: boolean; maximized: boolean } {
-  if (!win || win.isDestroyed()) return { fullScreen: false, maximized: false };
-  return { fullScreen: win.isFullScreen(), maximized: win.isMaximized() };
+/**
+ * The user's accent colour, as `#rrggbb`.
+ *
+ * Prompt 2 §14 and §89: accent communicates hierarchy — selected navigation, the active workspace,
+ * meaningful state — and it has to be *the user's*, tested across all eight of them, rather than a
+ * brand blue that ignores what they chose. Electron reports it as `RRGGBBAA` with no `#`, and the
+ * alpha is always FF, so it is trimmed to the form CSS wants.
+ *
+ * Returns null rather than a fallback when the platform has no such concept: a null lets the CSS
+ * keep its own token, whereas a made-up hex would silently become the design.
+ */
+function accentColour(): string | null {
+  try {
+    const raw = systemPreferences.getAccentColor?.();
+    if (!raw || raw.length < 6) return null;
+    return `#${raw.slice(0, 6).toLowerCase()}`;
+  } catch {
+    // Not every platform has one, and `getAccentColor` throws rather than returning null there.
+    return null;
+  }
+}
+
+function windowChrome(): WindowChromeState {
+  if (!win || win.isDestroyed()) {
+    return { fullScreen: false, maximized: false, active: true, accent: null };
+  }
+  return {
+    fullScreen: win.isFullScreen(),
+    maximized: win.isMaximized(),
+    // AppKit's `appearsActive` (Prompt 2 §15). A Mac app that looks identical whether or not it is
+    // the key window is the tell that its chrome is drawn rather than native — but the correction
+    // is a subtle one, and lives in CSS, because "not focused" must never mean "hard to read".
+    active: win.isFocused(),
+    accent: accentColour(),
+  };
 }
 
 /**
@@ -478,6 +511,10 @@ function createWindow(): void {
   win.on('maximize', sendChrome);
   win.on('unmaximize', sendChrome);
   win.on('restore', sendChrome);
+  // Key-window state (Prompt 2 §15), and the moment the user is most likely to have just changed
+  // their accent colour in System Settings — they left, changed it, and came back.
+  win.on('focus', sendChrome);
+  win.on('blur', sendChrome);
 
   // External links open in the system browser, never inside the shell.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -936,7 +973,7 @@ app.whenReady().then(async () => {
   // Renderer signals it has mounted its listeners; only then spawn (so no early events are lost).
   // With a valid saved/override project we boot it; otherwise we broadcast an empty project so the
   // renderer shows the project-first welcome instead of an engine running in $HOME (P0.1).
-  secureHandle('window:chrome', { fullScreen: false, maximized: false }, () => windowChrome());
+  secureHandle('window:chrome', { fullScreen: false, maximized: false, active: true, accent: null }, () => windowChrome());
 
   // The vibrancy material follows `nativeTheme`, not our CSS. Without this, choosing Moonlight on a
   // Mac set to Light gives a dark panel over a light frosted material — the one surface in the app

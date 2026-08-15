@@ -51,7 +51,7 @@ export interface SessionMetaRecord {
 }
 
 /** Whether the window owns the whole screen — see `windowChrome()` in `main/index.ts`. */
-export interface WindowChromeState { fullScreen: boolean; maximized: boolean }
+export type { WindowChromeState } from '../../shared/window.chrome';
 
 export type PermissionDisposition = 'granted' | 'denied' | 'not-determined' | 'unavailable';
 
